@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg17
+    container_name: omni_v2_postgres
+    environment:
+      POSTGRES_DB: omni_v2
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d omni_v2"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.env
+_orchestrator/logs/
+_orchestrator/worktrees/
+.DS_Store
