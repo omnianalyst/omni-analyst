@@ -28,6 +28,19 @@ from omni.main import create_app
 
 NOW = datetime(2026, 7, 28, tzinfo=UTC)
 
+def _auth(user_id):
+    """A real bearer token. These tests used to pass X-User-Id, which the API
+    trusted; identity is now verified, so a leak test that names a user in a
+    header would prove nothing about the rule it is checking."""
+    import os
+
+    from neutron.auth.jwt import create_token
+
+    os.environ.setdefault("OMNI_JWT_SECRET", "t" * 48)
+    token = create_token({"sub": str(user_id)}, os.environ["OMNI_JWT_SECRET"])
+    return {"Authorization": f"Bearer {token}"}
+
+
 
 class _Lifespan:
     """Drive the ASGI lifespan protocol, which httpx's ASGITransport skips."""
@@ -197,10 +210,10 @@ async def test_a_private_finding_leaks_to_neither_another_user_nor_the_shared_fe
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
         r_a = await client.get(
-            "/briefing", headers={"X-User-Id": str(owner_a)}
+            "/briefing", headers=_auth(owner_a)
         )
         r_b = await client.get(
-            "/briefing", headers={"X-User-Id": str(owner_b)}
+            "/briefing", headers=_auth(owner_b)
         )
         r_shared = await client.get("/briefing")
 

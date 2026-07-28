@@ -20,6 +20,19 @@ from omni.main import create_app
 NOW = datetime(2026, 7, 27, tzinfo=UTC)
 DAWN = datetime(2000, 1, 1, tzinfo=UTC)
 
+def _auth(user_id):
+    """A real bearer token. These tests used to pass X-User-Id, which the API
+    trusted; identity is now verified, so a leak test that names a user in a
+    header would prove nothing about the rule it is checking."""
+    import os
+
+    from neutron.auth.jwt import create_token
+
+    os.environ.setdefault("OMNI_JWT_SECRET", "t" * 48)
+    token = create_token({"sub": str(user_id)}, os.environ["OMNI_JWT_SECRET"])
+    return {"Authorization": f"Bearer {token}"}
+
+
 
 async def _entity(db, symbol="AAPL", name=None):
     return await db.pool.fetchval(
@@ -192,23 +205,23 @@ async def test_a_byo_only_claim_is_not_visible_to_another_user(db, database_url)
     async with _Lifespan(app), TestClient(app) as client:
         # --- A sees its own private coverage ---
         r_a = await client.get(
-            f"/coverage/{entity_id}/claims", headers={"X-User-Id": str(owner_a)}
+            f"/coverage/{entity_id}/claims", headers=_auth(owner_a)
         )
         r_a_sum = await client.get(
-            f"/coverage/{entity_id}", headers={"X-User-Id": str(owner_a)}
+            f"/coverage/{entity_id}", headers=_auth(owner_a)
         )
         r_a_gaps = await client.get(
-            f"/gaps/{entity_id}", headers={"X-User-Id": str(owner_a)}
+            f"/gaps/{entity_id}", headers=_auth(owner_a)
         )
         # --- B must not see any of A's private data ---
         r_b = await client.get(
-            f"/coverage/{entity_id}/claims", headers={"X-User-Id": str(owner_b)}
+            f"/coverage/{entity_id}/claims", headers=_auth(owner_b)
         )
         r_b_sum = await client.get(
-            f"/coverage/{entity_id}", headers={"X-User-Id": str(owner_b)}
+            f"/coverage/{entity_id}", headers=_auth(owner_b)
         )
         r_b_gaps = await client.get(
-            f"/gaps/{entity_id}", headers={"X-User-Id": str(owner_b)}
+            f"/gaps/{entity_id}", headers=_auth(owner_b)
         )
         # --- anonymous sees only the shared network ---
         r_anon = await client.get(f"/coverage/{entity_id}/claims")

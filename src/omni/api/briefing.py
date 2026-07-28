@@ -24,22 +24,19 @@ from neutron import App, Router
 from neutron.error import bad_request
 from starlette.requests import Request
 
+from omni.auth import resolve_audience_from_request
 from omni.conviction.publish import briefing, refusal_counts, scorecard
 
 
 def _audience(request: Request) -> UUID | None:
-    """X-User-Id scopes the feed; absent means the shared network only.
+    """Who is asking, from a verified token — never from a header.
 
-    Trusted for nothing but audience scoping, same as the coverage API: there is
-    no auth here, so it is an access-control hint, not an identity.
+    This read X-User-Id, so any caller could name any user and read their
+    licensed claims. The store's constraints were sound and the identity
+    in front of them was a claim. An absent or invalid token is an
+    anonymous caller, which means shared coverage only.
     """
-    raw = request.headers.get("x-user-id")
-    if not raw:
-        return None
-    try:
-        return UUID(raw)
-    except ValueError:
-        raise bad_request("X-User-Id must be a valid UUID")
+    return resolve_audience_from_request(request)
 
 
 def _iso(value: Any) -> str | None:

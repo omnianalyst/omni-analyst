@@ -30,6 +30,7 @@ from neutron.error import bad_request, not_found
 from pydantic import BaseModel
 from starlette.requests import Request
 
+from omni.auth import resolve_audience_from_request
 from omni.credentials.catalog import redistribution_for
 from omni.orchestrator.planner import (
     Objective,
@@ -52,18 +53,14 @@ class ObjectiveRequest(BaseModel):
 
 
 def _audience(request: Request) -> UUID | None:
-    """X-User-Id scopes a private objective to its owner.
+    """Who is asking, from a verified token — never from a header.
 
-    Absent means the shared network. The header is an access-control hint, not
-    an identity: there is no auth here, same as the coverage API.
+    This read X-User-Id, so any caller could name any user and read their
+    licensed claims. The store's constraints were sound and the identity
+    in front of them was a claim. An absent or invalid token is an
+    anonymous caller, which means shared coverage only.
     """
-    raw = request.headers.get("x-user-id")
-    if not raw:
-        return None
-    try:
-        return UUID(raw)
-    except ValueError:
-        raise bad_request("X-User-Id must be a valid UUID")
+    return resolve_audience_from_request(request)
 
 
 def _step_tier(step: Step) -> str:
