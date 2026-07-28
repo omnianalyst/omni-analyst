@@ -11,6 +11,7 @@ must not have to filter a catalogue of things that merely exist.
 from __future__ import annotations
 
 from omni.capability.registry import Callability, Capability, Maturity, Registry
+from omni.config import settings as default_settings
 from omni.credentials.catalog import redistribution_for
 
 
@@ -28,9 +29,14 @@ def _adapter(
     factory,
     cost: float = 1.0,
     entity_kinds: tuple[str, ...] = (),
+    credentials: dict | None = None,
 ) -> Capability:
+    bound = dict(credentials or {})
+
     async def call(key: str, **kwargs):
-        return await factory(**kwargs).fetch(key)
+        # Caller kwargs win, so a test can still inject a fetch_fn and reach
+        # no network at all.
+        return await factory(**{**bound, **kwargs}).fetch(key)
 
     return Capability(
         name=name,
@@ -48,7 +54,7 @@ def _adapter(
     )
 
 
-def build_builtin_registry() -> Registry:
+def build_builtin_registry(settings=None) -> Registry:
     from omni.ingest.coingecko import CoinGeckoAdapter
     from omni.ingest.edgar import EdgarAdapter
     from omni.ingest.fred import FredAdapter
@@ -56,6 +62,7 @@ def build_builtin_registry() -> Registry:
     from omni.ingest.onchain import OnChainAdapter
     from omni.ingest.polygon import PolygonAdapter
 
+    cfg = settings if settings is not None else default_settings
     registry = Registry()
 
     for cap in (
@@ -66,6 +73,7 @@ def build_builtin_registry() -> Registry:
             provider_key="fred",
             produces=("macro_series_point",),
             factory=FredAdapter,
+            credentials={"api_key": cfg.fred_api_key} if cfg.fred_api_key else None,
         ),
         _adapter(
             "fred.perception",
@@ -75,6 +83,7 @@ def build_builtin_registry() -> Registry:
             provider_key="fred",
             produces=("perception_macro",),
             factory=MacroPerceptionAdapter,
+            credentials={"api_key": cfg.fred_api_key} if cfg.fred_api_key else None,
         ),
         _adapter(
             "edgar.companyfacts",
@@ -84,6 +93,7 @@ def build_builtin_registry() -> Registry:
             produces=("fundamental_metric",),
             entity_kinds=("company",),
             factory=EdgarAdapter,
+            credentials={"user_agent": cfg.sec_user_agent} if cfg.sec_user_agent else None,
             cost=2.0,
         ),
         _adapter(
@@ -95,6 +105,7 @@ def build_builtin_registry() -> Registry:
             produces=("onchain_flow", "onchain_tvl", "onchain_supply"),
             entity_kinds=("crypto_asset",),
             factory=OnChainAdapter,
+            credentials={"api_key": cfg.etherscan_api_key} if cfg.etherscan_api_key else None,
         ),
         _adapter(
             "polygon.aggregates",
@@ -104,6 +115,7 @@ def build_builtin_registry() -> Registry:
             produces=("price_snapshot",),
             entity_kinds=("company",),
             factory=PolygonAdapter,
+            credentials={"api_key": cfg.polygon_api_key} if cfg.polygon_api_key else None,
         ),
         _adapter(
             "coingecko.market_chart",
@@ -112,6 +124,7 @@ def build_builtin_registry() -> Registry:
             produces=("price_snapshot",),
             entity_kinds=("crypto_asset",),
             factory=CoinGeckoAdapter,
+            credentials={"api_key": cfg.coingecko_api_key} if cfg.coingecko_api_key else None,
         ),
     ):
         registry.add(cap)
