@@ -59,6 +59,7 @@ def build_builtin_registry(settings=None) -> Registry:
     from omni.ingest.edgar import EdgarAdapter
     from omni.ingest.fred import FredAdapter
     from omni.ingest.macro_perception import MacroPerceptionAdapter
+    from omni.ingest.news import NewsAdapter
     from omni.ingest.onchain import OnChainAdapter
     from omni.ingest.polygon import PolygonAdapter
 
@@ -129,6 +130,15 @@ def build_builtin_registry(settings=None) -> Registry:
     ):
         registry.add(cap)
 
+    registry.add(_adapter(
+        "rss.headlines",
+        "Market headlines from public financial feeds. Titles and links only, "
+        "never article text -- a headline and a URL are references, "
+        "reproducing the body is republishing someone else's work.",
+        provider_key="rss",
+        produces=("news_event",),
+        factory=NewsAdapter,
+    ))
     registry.add(_manipulation_capability())
     return registry
 

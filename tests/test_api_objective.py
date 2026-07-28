@@ -117,6 +117,14 @@ async def test_a_shareable_objective_needing_prices_is_refused(db, database_url)
 
 
 async def test_an_unanswerable_objective_produces_demand_rows(db, database_url):
+    """Uses a claim type nothing currently produces.
+
+    This previously used news_event, and broke the moment an adapter for it
+    landed — the test was asserting on a gap rather than on behaviour. If
+    perception_positioning ever gains a producer, pick another unproduced type
+    rather than deleting the test: the behaviour it covers is that an
+    unanswerable objective becomes demand, which is the loop's tightest edge.
+    """
     await _entity(db, symbol="AAPL")
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
@@ -124,9 +132,9 @@ async def test_an_unanswerable_objective_produces_demand_rows(db, database_url):
         r = await client.post(
             "/objective/run",
             json={
-                "text": "news for AAPL",
+                "text": "positioning for AAPL",
                 "target": "AAPL",
-                "needs": ["news_event"],
+                "needs": ["perception_positioning"],
             },
         )
         after = await db.pool.fetchval("SELECT count(*) FROM demand")
@@ -141,7 +149,7 @@ async def test_an_unanswerable_objective_produces_demand_rows(db, database_url):
     row = await db.pool.fetchrow(
         "SELECT claim_type::text AS claim_type, active FROM demand"
     )
-    assert row["claim_type"] == "news_event"
+    assert row["claim_type"] == "perception_positioning"
     assert row["active"]
 
 
