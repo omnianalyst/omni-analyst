@@ -27,9 +27,11 @@ def create_app(database_url: str | None = None) -> App:
         lifespan=lifespan,
     )
 
-    from omni.api.coverage import build_router
+    from omni.api.coverage import build_router as coverage_router
+    from omni.api.objective import build_router as objective_router
 
-    app.include_router(build_router(app))
+    app.include_router(coverage_router(app))
+    app.include_router(objective_router(app))
     return app
 
 
