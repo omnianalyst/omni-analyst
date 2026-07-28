@@ -87,20 +87,41 @@ def parse_observations(
     return drafts
 
 
-async def _fetch_alfred(series_id: str, *, api_key: str) -> list[dict]:
+async def _fetch_alfred(
+    series_id: str, *, api_key: str, vintages: bool = True
+) -> list[dict]:
+    """Fetch observations, optionally every vintage.
+
+    `vintages=False` asks for current values only. That is the right request
+    for a series that is never restated -- a volatility index or an exchange
+    rate has one true value per day, and FRED's daily snapshots of it are not
+    revisions. Asking for every vintage of such a series is both wrong and
+    over the API's 2,000-vintage ceiling.
+    """
     import httpx
 
     params = {
         "series_id": series_id,
         "api_key": api_key,
         "file_type": "json",
-        **ALL_VINTAGES,
     }
+    if vintages:
+        params.update(ALL_VINTAGES)
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(ALFRED_URL, params=params)
         if response.status_code != 200:
+            # Carry FRED's own explanation. A bare status code sends whoever
+            # reads the fill_attempt row back to the API docs; the message
+            # usually names the exact problem.
+            detail = ""
+            try:
+                detail = response.json().get("error_message", "")
+            except Exception:
+                detail = response.text[:200]
             raise Unavailable(
                 f"ALFRED returned HTTP {response.status_code} for {series_id}"
+                + (f": {detail}" if detail else "")
             )
         return response.json().get("observations", [])
 
@@ -115,10 +136,12 @@ class FredAdapter:
         api_key: str | None = None,
         fetch_fn: ObsFetcher | None = None,
         units: str | None = None,
+        vintages: bool = True,
     ) -> None:
         self._api_key = api_key
         self._fetch_fn = fetch_fn
         self._units = units
+        self._vintages = vintages
 
     async def fetch(self, key: str) -> list[ClaimDraft]:
         fetch_fn = self._fetch_fn
@@ -127,7 +150,9 @@ class FredAdapter:
                 raise Unavailable("no FRED API key configured")
 
             async def fetch_fn(series_id: str) -> list[dict]:
-                return await _fetch_alfred(series_id, api_key=self._api_key)
+                return await _fetch_alfred(
+                    series_id, api_key=self._api_key, vintages=self._vintages
+                )
 
         observations = await fetch_fn(key)
         return parse_observations(

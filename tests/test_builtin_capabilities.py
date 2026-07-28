@@ -6,9 +6,24 @@ from omni.capability.builtin import build_builtin_registry
 from omni.ingest.protocol import ClaimDraft, Unavailable
 
 
+class _NoCredentials:
+    """Settings with nothing configured.
+
+    Tests must not depend on whether this machine's .env happens to hold a
+    key; a suite that passes or fails on ambient credentials is telling you
+    about the machine, not the code.
+    """
+
+    fred_api_key = ""
+    polygon_api_key = ""
+    coingecko_api_key = ""
+    etherscan_api_key = ""
+    sec_user_agent = ""
+
+
 @pytest.fixture
 def registry():
-    return build_builtin_registry()
+    return build_builtin_registry(settings=_NoCredentials())
 
 
 def test_every_builtin_is_actually_invocable(registry):

@@ -74,7 +74,10 @@ class MacroPerceptionAdapter:
                 raise Unavailable("no FRED API key configured")
 
             async def fetch_fn(series_id: str) -> list[dict]:
-                return await _fetch_alfred(series_id, api_key=self._api_key)
+                # Market-implied measures are not restated; see fred._fetch_alfred.
+                return await _fetch_alfred(
+                    series_id, api_key=self._api_key, vintages=False
+                )
 
         measures = PERCEPTION_SERIES.get(key)
         if measures is None:
