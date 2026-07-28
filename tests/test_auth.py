@@ -84,7 +84,7 @@ def _secret(monkeypatch):
 
 @pytest.fixture(autouse=True)
 async def _clean(db):
-    await db.pool.execute("TRUNCATE users")
+    await db.pool.execute("TRUNCATE users CASCADE")
     yield
 
 
