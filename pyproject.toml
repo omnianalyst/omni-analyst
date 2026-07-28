@@ -9,6 +9,11 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "httpx>=0.27.0",
+    # Neutron's auth tier requires a password-hashing backend; neutron.auth
+    # .password raises ImportError without one. PyJWT[crypto] backs token
+    # signing for the same reason.
+    "argon2-cffi>=23.1",
+    "pyjwt[crypto]>=2.8",
     # Ceilinged at pandas 2.x deliberately. v1 pins numpy==2.2.6 / pandas==2.3.0
     # and its test suites are the acceptance oracle for every ported module. On
     # pandas 3 Copy-on-Write is the default, so the chained assignment those
