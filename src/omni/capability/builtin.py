@@ -59,6 +59,7 @@ def build_builtin_registry(settings=None) -> Registry:
     from omni.ingest.edgar import EdgarAdapter
     from omni.ingest.fred import FredAdapter
     from omni.ingest.macro_perception import MacroPerceptionAdapter
+    from omni.ingest.filings import FilingsAdapter
     from omni.ingest.news import NewsAdapter
     from omni.ingest.onchain import OnChainAdapter
     from omni.ingest.polygon import PolygonAdapter
@@ -130,6 +131,18 @@ def build_builtin_registry(settings=None) -> Registry:
     ):
         registry.add(cap)
 
+    registry.add(_adapter(
+        "edgar.filings",
+        "What a company has filed and when. Distinct from companyfacts, which "
+        "covers what the filings said: absence is informative here, and only a "
+        "record of filing events distinguishes a company that has not filed an "
+        "8-K in two years from one that files monthly.",
+        provider_key="sec_edgar",
+        produces=("filing_event",),
+        entity_kinds=("company",),
+        factory=FilingsAdapter,
+        credentials={"user_agent": cfg.sec_user_agent} if cfg.sec_user_agent else None,
+    ))
     registry.add(_adapter(
         "rss.headlines",
         "Market headlines from public financial feeds. Titles and links only, "
