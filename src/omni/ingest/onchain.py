@@ -154,17 +154,21 @@ def parse_flows(
 def parse_tvl(payload: dict[str, Any], *, slug: str) -> list[ClaimDraft]:
     """Flatten a DefiLlama `/protocol/{slug}` response into TVL drafts.
 
-    DefiLlama publishes daily protocol snapshots in `tvlHistory`, each a unix
-    timestamp plus the TVL in USD that day. The snapshot date is both
-    `event_date` (the on-chain state it aggregates) and `knowledge_date`
-    (public daily data). A point missing its date or TVL is skipped rather
-    than guessed.
+    DefiLlama publishes daily protocol snapshots under `tvl`, each a unix
+    `date` plus `totalLiquidityUSD`. The snapshot date is both `event_date`
+    (the on-chain state it aggregates) and `knowledge_date` (public daily
+    data). A point missing its date or value is skipped rather than guessed.
+
+    The field names here were originally `tvlHistory[].tvl`, taken from memory
+    rather than from the API, and the test fixture repeated the same guess --
+    so code and test agreed with each other and neither matched DefiLlama.
+    The fixture below is now copied from a real response.
     """
     drafts: list[ClaimDraft] = []
     name = payload.get("name")
-    for point in payload.get("tvlHistory") or []:
+    for point in payload.get("tvl") or []:
         when = _from_unix(point.get("date"))
-        tvl = point.get("tvl")
+        tvl = point.get("totalLiquidityUSD")
         if when is None or tvl is None:
             continue
         try:

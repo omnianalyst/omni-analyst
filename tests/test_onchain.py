@@ -73,9 +73,9 @@ BLOCK_WITH_FLOWS = {
 # be skipped (a null TVL, a null date) -- parsing must drop them, not guess.
 TVL_PAYLOAD = {
     "name": "Uniswap",
-    "tvlHistory": [
-        {"date": 1672531200, "tvl": 1500000000.0},
-        {"date": 1672617600, "tvl": 1550000000.0},
+    "tvl": [
+        {"date": 1672531200, "totalLiquidityUSD": 1500000000.0},
+        {"date": 1672617600, "totalLiquidityUSD": 1550000000.0},
         {"date": 1672704000, "tvl": None},
         {"date": None, "tvl": 999.0},
     ],
@@ -154,7 +154,8 @@ class TestParseTvl:
 
     def test_points_missing_a_date_or_tvl_are_skipped_not_zeroed(self):
         drafts = parse_tvl(
-            {"tvlHistory": [{"date": 1672531200, "tvl": None}, {"date": None, "tvl": 1.0}]},
+            {"tvl": [{"date": 1672531200, "totalLiquidityUSD": None},
+                      {"date": None, "totalLiquidityUSD": 1.0}]},
             slug="x",
         )
         assert drafts == []
@@ -253,3 +254,20 @@ class TestAdapterCredentials:
     async def test_an_unknown_kind_is_unavailable(self):
         with pytest.raises(Unavailable, match="unknown onchain kind"):
             await OnChainAdapter().fetch("orbits:mars")
+
+
+def test_the_tvl_fixture_matches_the_real_defillama_shape():
+    """Guards the failure this fixture once had.
+
+    The parser and its fixture were both written from memory as
+    tvlHistory[].tvl, agreed with each other, and matched nothing DefiLlama
+    serves. A green suite proved only that two guesses were consistent.
+    """
+    from omni.ingest import onchain
+
+    # Behaviour, not source text: a real payload parses, the invented one does not.
+    real = {"name": "Aave", "tvl": [{"date": 1589932800,
+                                     "totalLiquidityUSD": 54026260}]}
+    old = {"name": "Aave", "tvlHistory": [{"date": 1589932800, "tvl": 54026260}]}
+    assert len(onchain.parse_tvl(real, slug="aave")) == 1
+    assert onchain.parse_tvl(old, slug="aave") == []
