@@ -10,3 +10,4 @@ _orchestrator/worktrees/
 .DS_Store
 _orchestrator/worktrees/
 _orchestrator/logs/
+.opencode-session.db*
