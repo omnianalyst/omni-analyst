@@ -3,7 +3,9 @@ declare module "@neutron-build/core" {
   interface NeutronGeneratedRouteMap {
     paths:
     | "/"
+    | "/briefing"
     | `/entity/${string}`
+    | "/objective"
   }
 }
 
