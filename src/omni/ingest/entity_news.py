@@ -33,6 +33,7 @@ not a fabricated score.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -50,25 +51,37 @@ def _utc_day(dt: datetime) -> datetime:
     return dt.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def attribute(drafts: Iterable[ClaimDraft], ticker: str) -> list[ClaimDraft]:
-    """Return the drafts whose headline mentions ``ticker``.
-
-    ``extract_ticker_entities`` yields one entry per regex match, so a ticker
-    named twice in one title produces two entries; the set collapses them to a
-    single attribution decision per headline.
-    """
+def attribute(
+    drafts: Iterable[ClaimDraft], ticker: str, aliases: tuple[str, ...] = ()
+) -> list[ClaimDraft]:
+    """Return the drafts whose headline refers to this company."""
     wanted = ticker.strip().upper()
+    names = [a.strip() for a in (aliases or ()) if a and a.strip()]
     attributed: list[ClaimDraft] = []
     for d in drafts:
-        mentioned = {
-            entity["entity_value"]
-            for entity in extract_ticker_entities(
-                title=d.value.get("title", ""), summary="", content=""
-            )
-        }
-        if wanted in mentioned:
+        if _mentions(d.value.get("title", ""), wanted, names):
             attributed.append(d)
     return attributed
+
+
+def _mentions(title: str, ticker: str, aliases: list[str]) -> bool:
+    """Does this headline refer to the company we are asking about?
+
+    Deliberately not "extract every ticker, then filter". That approach reads
+    any 2-5 letter capitalised token as a ticker, so a headline about the FAA
+    or about GAAP earnings gets attributed to a company of that name, and
+    sentiment is recorded against an entity nobody mentioned. Asking a narrow
+    question instead of a broad one removes the whole class of false positive.
+
+    Aliases matter because financial headlines say "Apple", not "AAPL". Without
+    them this finds almost nothing, which is how it first behaved.
+    """
+    if re.search(rf"\b{re.escape(ticker)}\b", title):
+        return True
+    return any(
+        re.search(rf"\b{re.escape(name)}\b", title, re.IGNORECASE)
+        for name in aliases
+    )
 
 
 def _roll_up(attributed: list[ClaimDraft], ticker: str) -> list[ClaimDraft]:
@@ -103,7 +116,15 @@ class EntityNewsAdapter:
     provider_key = PROVIDER_KEY
     entity_kinds = ("company",)
 
-    def __init__(self, *, fetch_fn: FeedFetcher | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fetch_fn: FeedFetcher | None = None,
+        aliases: tuple[str, ...] = (),
+    ) -> None:
+        #: Names the company is called in headlines. Financial press writes
+        #: "Apple", not "AAPL"; without these this finds almost nothing.
+        self._aliases = aliases
         self._fetch_fn = fetch_fn
 
     async def fetch(self, key: str) -> list[ClaimDraft]:
@@ -124,7 +145,7 @@ class EntityNewsAdapter:
                 # already records how thin. Only an empty union is unfillable.
                 feed_failures.append(f"{feed_name}: {exc}")
                 continue
-            attributed.extend(attribute(drafts, ticker))
+            attributed.extend(attribute(drafts, ticker, self._aliases))
 
         if not attributed:
             tail = (

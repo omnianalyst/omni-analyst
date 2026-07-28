@@ -337,3 +337,48 @@ class TestNoScoreIsFabricated:
         draft = (await EntityNewsAdapter(fetch_fn=fetch_fn).fetch("AI"))[0]
         assert draft.unit is None
         assert draft.confidence == 1.0
+
+
+class TestAttributionIsNarrow:
+    """The extractor read any 2-5 letter capitalised token as a ticker, so a
+    headline about the FAA was attributed to a company called FAA. Asking
+    'does this mention the company I want' instead of 'what tickers are in
+    here' removes the whole class of false positive."""
+
+    def _draft(self, title):
+        from datetime import UTC, datetime
+
+        from omni.ingest.protocol import ClaimDraft
+
+        when = datetime(2026, 7, 28, tzinfo=UTC)
+        return ClaimDraft(
+            claim_type="news_event", key="k",
+            value={"title": title, "url": "u", "feed": "f"},
+            event_date=when, knowledge_date=when, confidence=1.0,
+        )
+
+    def test_an_unrelated_acronym_is_not_attributed(self):
+        from omni.ingest.entity_news import attribute
+
+        drafts = [self._draft("SpaceX could get quicker FAA launch approval")]
+        assert attribute(drafts, "AAPL", ("Apple",)) == []
+
+    def test_a_company_named_in_prose_is_attributed(self):
+        """Headlines say Apple, not AAPL. Without aliases this found nothing."""
+        from omni.ingest.entity_news import attribute
+
+        drafts = [self._draft("Apple raises guidance after a strong quarter")]
+        assert len(attribute(drafts, "AAPL", ("Apple",))) == 1
+
+    def test_the_exact_ticker_is_still_matched(self):
+        from omni.ingest.entity_news import attribute
+
+        drafts = [self._draft("AAPL climbs on earnings beat")]
+        assert len(attribute(drafts, "AAPL", ())) == 1
+
+    def test_a_substring_of_a_longer_word_is_not_a_mention(self):
+        """'Apple' must not match 'Applebee', and CAT must not match 'category'."""
+        from omni.ingest.entity_news import attribute
+
+        assert attribute([self._draft("Applebees opens 40 stores")], "AAPL", ("Apple",)) == []
+        assert attribute([self._draft("A new category of chip")], "CAT", ()) == []

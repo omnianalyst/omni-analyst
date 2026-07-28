@@ -59,6 +59,7 @@ def build_builtin_registry(settings=None) -> Registry:
     from omni.ingest.edgar import EdgarAdapter
     from omni.ingest.fred import FredAdapter
     from omni.ingest.macro_perception import MacroPerceptionAdapter
+    from omni.ingest.entity_news import EntityNewsAdapter
     from omni.ingest.filings import FilingsAdapter
     from omni.ingest.news import NewsAdapter
     from omni.ingest.onchain import OnChainAdapter
@@ -131,6 +132,17 @@ def build_builtin_registry(settings=None) -> Registry:
     ):
         registry.add(cap)
 
+    registry.add(_adapter(
+        "rss.entity_sentiment",
+        "Company-scoped perception: headlines attributed to a ticker and "
+        "scored per day. The second side the divergence finding needs — "
+        "market-wide perception cannot be compared against one company's "
+        "fundamentals.",
+        provider_key="rss",
+        produces=("perception_news",),
+        entity_kinds=("company",),
+        factory=EntityNewsAdapter,
+    ))
     registry.add(_adapter(
         "edgar.filings",
         "What a company has filed and when. Distinct from companyfacts, which "
