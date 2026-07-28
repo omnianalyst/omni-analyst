@@ -176,6 +176,18 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "key_required": True,
         "fallback": FALLBACK_BYO_ONLY,
     },
+    "rss": {
+        # Public RSS/Atom feeds. No credential exists. The adapter stores only
+        # the headline, the link and the feed name -- a citation, not a copy
+        # of the article -- so nothing the provider's copyright controls is
+        # republished. That makes it reference, not redistribution, the same
+        # boundary the byo_only rule enforces for licensed data.
+        "label": "RSS / Atom feeds",
+        "category": CATEGORY_NEWS,
+        "settings_field": "",
+        "key_required": False,
+        "fallback": FALLBACK_ALLOWED,
+    },
     # --- AI ---
     "fylun": {
         "label": "Fylun (unified AI gateway)",
