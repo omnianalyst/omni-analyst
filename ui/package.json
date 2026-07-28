@@ -1,0 +1,26 @@
+{
+  "name": "omni-analyst-ui",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "neutron-ts dev",
+    "build": "neutron-ts build",
+    "preview": "neutron-ts preview",
+    "start": "neutron-ts start",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@neutron-build/cli": "latest",
+    "@neutron-build/core": "latest",
+    "preact": "^10.25.4",
+    "preact-render-to-string": "^6.5.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.9.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}
