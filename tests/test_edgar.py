@@ -154,3 +154,16 @@ class TestAdapter:
         adapter = EdgarAdapter()
         assert adapter.source == "sec_edgar"
         assert adapter.provider_key == "sec_edgar"
+
+
+def test_a_fact_filed_before_its_period_is_skipped_not_fatal():
+    """One bad row must not abort a whole company's ingestion."""
+    facts = {
+        "cik": 320193,
+        "facts": {"us-gaap": {"Assets": {"units": {"USD": [
+            {"end": "2023-12-31", "filed": "2023-06-01", "val": 1, "form": "10-K"},
+            {"end": "2022-09-24", "filed": "2022-10-28", "val": 2, "form": "10-K"},
+        ]}}}},
+    }
+    drafts = parse_companyfacts(facts, cik="320193")
+    assert [d.value for d in drafts] == [{"value": 2}]

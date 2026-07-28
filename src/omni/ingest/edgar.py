@@ -99,6 +99,14 @@ def parse_companyfacts(
                 val = entry.get("val")
                 if event_date is None or knowledge_date is None or val is None:
                     continue
+                if knowledge_date < event_date:
+                    # A fact filed before the period it reports is bad data.
+                    # Skip it: ClaimDraft would raise, and one such row would
+                    # otherwise abort the whole company's ingestion. Unlike
+                    # ALFRED, where an early realtime_start is a known quirk
+                    # worth clamping, there is no defensible filing date to
+                    # infer here.
+                    continue
                 drafts.append(
                     ClaimDraft(
                         claim_type=CLAIM_TYPE,
