@@ -56,6 +56,11 @@ class Capability:
     consumes: tuple[str, ...] = ()
     produces: tuple[str, ...] = ()
 
+    # Which entity kinds this serves. Empty means any. Without it a planner
+    # will happily route an equity to a crypto price feed, because both
+    # produce price_snapshot and one is cheaper.
+    entity_kinds: tuple[str, ...] = ()
+
     # Licence. A capability reaching a byo_only provider can only ever produce
     # private coverage, whoever asked for it.
     provider_key: str | None = None
@@ -124,7 +129,8 @@ class Registry:
         return self._reliability.get(name)
 
     def producing(
-        self, claim_type: str, *, allow_byo: bool = True, invocable_only: bool = True
+        self, claim_type: str, *, allow_byo: bool = True,
+        invocable_only: bool = True, entity_kind: str | None = None,
     ) -> list[Capability]:
         """Capabilities that can produce this claim type, best first.
 
@@ -136,6 +142,8 @@ class Registry:
             if claim_type in c.produces
             and (allow_byo or not c.touches_byo)
             and (c.invocable if invocable_only else True)
+            and (entity_kind is None or not c.entity_kinds
+                 or entity_kind in c.entity_kinds)
         ]
         return sorted(out, key=self._rank)
 

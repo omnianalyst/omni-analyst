@@ -1,0 +1,151 @@
+"""v2's own capabilities — the ones that actually run today.
+
+`from_census` produces 428 descriptors from v1's surface, none of them bound to
+an implementation; that file is an inventory and a migration backlog. This one
+is the opposite: a small set, every entry executable, every entry tested.
+
+Keeping them apart matters. A planner asking "what can I actually do right now"
+must not have to filter a catalogue of things that merely exist.
+"""
+
+from __future__ import annotations
+
+from omni.capability.registry import Callability, Capability, Maturity, Registry
+from omni.credentials.catalog import redistribution_for
+
+
+def _byo(provider_key: str) -> bool:
+    """Whether this provider's output can only ever be private coverage."""
+    return redistribution_for(provider_key) != "allowed"
+
+
+def _adapter(
+    name: str,
+    description: str,
+    *,
+    provider_key: str,
+    produces: tuple[str, ...],
+    factory,
+    cost: float = 1.0,
+    entity_kinds: tuple[str, ...] = (),
+) -> Capability:
+    async def call(key: str, **kwargs):
+        return await factory(**kwargs).fetch(key)
+
+    return Capability(
+        name=name,
+        description=description,
+        produces=produces,
+        entity_kinds=entity_kinds,
+        provider_key=provider_key,
+        touches_byo=_byo(provider_key),
+        cost=cost,
+        maturity=Maturity.WIRED,
+        callability=Callability.YES,
+        origin=f"omni.ingest.{name.split('.')[0]}",
+        call=call,
+    )
+
+
+def build_builtin_registry() -> Registry:
+    from omni.ingest.coingecko import CoinGeckoAdapter
+    from omni.ingest.edgar import EdgarAdapter
+    from omni.ingest.fred import FredAdapter
+    from omni.ingest.macro_perception import MacroPerceptionAdapter
+    from omni.ingest.onchain import OnChainAdapter
+    from omni.ingest.polygon import PolygonAdapter
+
+    registry = Registry()
+
+    for cap in (
+        _adapter(
+            "fred.series",
+            "Point-in-time macro series from FRED/ALFRED, every vintage, so a "
+            "backtest sees the first print rather than a later revision.",
+            provider_key="fred",
+            produces=("macro_series_point",),
+            factory=FredAdapter,
+        ),
+        _adapter(
+            "fred.perception",
+            "Market-implied sentiment and stress indices published by FRED: "
+            "consumer sentiment, implied volatility, credit spreads, term "
+            "spread. The only perception coverage that is redistributable.",
+            provider_key="fred",
+            produces=("perception_macro",),
+            factory=MacroPerceptionAdapter,
+        ),
+        _adapter(
+            "edgar.companyfacts",
+            "As-reported fundamentals from SEC XBRL. A restatement is a second "
+            "claim sharing the period, not an overwrite.",
+            provider_key="sec_edgar",
+            produces=("fundamental_metric",),
+            entity_kinds=("company",),
+            factory=EdgarAdapter,
+            cost=2.0,
+        ),
+        _adapter(
+            "onchain.activity",
+            "Exchange flows, protocol TVL and supply from Etherscan and "
+            "DefiLlama. Crypto's redistributable layer, the counterpart to "
+            "EDGAR for equities.",
+            provider_key="etherscan",
+            produces=("onchain_flow", "onchain_tvl", "onchain_supply"),
+            entity_kinds=("crypto_asset",),
+            factory=OnChainAdapter,
+        ),
+        _adapter(
+            "polygon.aggregates",
+            "Equity price bars. Licensed per operator, so output is private to "
+            "the credential owner.",
+            provider_key="polygon",
+            produces=("price_snapshot",),
+            entity_kinds=("company",),
+            factory=PolygonAdapter,
+        ),
+        _adapter(
+            "coingecko.market_chart",
+            "Crypto price, market cap and volume. Licensed per operator.",
+            provider_key="coingecko",
+            produces=("price_snapshot",),
+            entity_kinds=("crypto_asset",),
+            factory=CoinGeckoAdapter,
+        ),
+    ):
+        registry.add(cap)
+
+    registry.add(_manipulation_capability())
+    return registry
+
+
+def _manipulation_capability() -> Capability:
+    async def call(ohlcv):
+        from omni.detect.manipulation import ManipulationAnalyzer
+
+        return ManipulationAnalyzer().analyze(ohlcv)
+
+    return Capability(
+        name="detect.manipulation",
+        description=(
+            "Volume-anomaly, wash-trading and pump-and-dump detection over an "
+            "OHLCV window. Confidences are percentile ranks against the "
+            "symbol's own history, never fixed thresholds, and patterns it "
+            "cannot compute report unsupported rather than a result."
+        ),
+        consumes=("price_snapshot",),
+        produces=("manipulation_signal",),
+        # Derived from price. Whether the result is shareable depends on the
+        # licence of the bars it consumed, which the claim writer resolves from
+        # the input claims -- not something this descriptor can know.
+        touches_byo=True,
+        provenance=(
+            "Necessary-conditions signal computed without order-flow data; "
+            "it cannot distinguish manipulation from legitimate volume shocks."
+        ),
+        cost=0.1,
+        maturity=Maturity.WIRED,
+        callability=Callability.YES,
+        origin="omni.detect.manipulation",
+        call=call,
+    )
