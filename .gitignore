@@ -8,3 +8,5 @@ __pycache__/
 _orchestrator/logs/
 _orchestrator/worktrees/
 .DS_Store
+_orchestrator/worktrees/
+_orchestrator/logs/
