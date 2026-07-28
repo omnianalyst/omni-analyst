@@ -6,7 +6,6 @@ Every entry point also has a test that its dependency being unavailable raises
 v1 returned.
 """
 
-import math
 
 import numpy as np
 import pytest

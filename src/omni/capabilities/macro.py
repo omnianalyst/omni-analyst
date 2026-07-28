@@ -20,7 +20,8 @@ leaf mathematical helpers are sync because they do no IO.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 

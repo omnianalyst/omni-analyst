@@ -258,20 +258,19 @@ async def persist_gaps(pool, gaps: list[dict]) -> int:
     """
 
     count = 0
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            for g in gaps:
-                await conn.execute(
-                    sql,
-                    g["entity_id"],
-                    g["claim_type"],
-                    g["key"],
-                    g["gap_class"],
-                    g["audience_user_id"],
-                    g["score"],
-                    json.dumps(g["detail"]),
-                )
-                count += 1
+    async with pool.acquire() as conn, conn.transaction():
+        for g in gaps:
+            await conn.execute(
+                sql,
+                g["entity_id"],
+                g["claim_type"],
+                g["key"],
+                g["gap_class"],
+                g["audience_user_id"],
+                g["score"],
+                json.dumps(g["detail"]),
+            )
+            count += 1
     return count
 
 

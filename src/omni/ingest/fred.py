@@ -12,8 +12,9 @@ later.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any
 
 from omni.ingest.protocol import ClaimDraft, Unavailable
 

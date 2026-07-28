@@ -4,7 +4,7 @@ Sentiment Dynamics Model
 Models the evolution and impact of market sentiment on prices
 """
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -23,8 +23,8 @@ class SentimentDynamicsModel:
         self,
         sentiment_data: pd.DataFrame,
         price_data: pd.DataFrame,
-        volume_data: Optional[pd.DataFrame] = None
-    ) -> Dict[str, Any]:
+        volume_data: pd.DataFrame | None = None
+    ) -> dict[str, Any]:
         """
         Analyze the dynamic relationship between sentiment and prices
 
@@ -91,7 +91,7 @@ class SentimentDynamicsModel:
         sentiment: pd.DataFrame,
         returns: pd.DataFrame,
         max_lag: int = 10
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Analyze lead-lag relationships between sentiment and returns"""
         lead_lag_corr = {}
 
@@ -149,7 +149,7 @@ class SentimentDynamicsModel:
         self,
         sentiment: pd.DataFrame,
         window: int = 20
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Calculate sentiment momentum indicators"""
         from scipy import stats
 
@@ -198,7 +198,7 @@ class SentimentDynamicsModel:
         sentiment: pd.DataFrame,
         prices: pd.DataFrame,
         window: int = 20
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Identify divergences between sentiment and price"""
         divergences = []
 
@@ -244,7 +244,7 @@ class SentimentDynamicsModel:
         self,
         sentiment: pd.DataFrame,
         n_regimes: int = 3
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Identify sentiment regimes using hidden Markov model approach"""
         # Use market-wide sentiment
         market_sentiment = sentiment.mean(axis=1)
@@ -334,9 +334,9 @@ class SentimentDynamicsModel:
 
     def _forecast_next_regime(
         self,
-        transitions: Dict[str, float],
+        transitions: dict[str, float],
         current_regime: str
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Forecast next regime based on transition probabilities"""
         regimes = ['bearish', 'neutral', 'bullish']
         forecast = {}
@@ -352,7 +352,7 @@ class SentimentDynamicsModel:
         sentiment: pd.DataFrame,
         returns: pd.DataFrame,
         volume: pd.DataFrame
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Analyze sentiment-price-volume feedback loops"""
         # Identify self-reinforcing patterns
         feedback_strength = {}
@@ -401,7 +401,7 @@ class SentimentDynamicsModel:
         self,
         sentiment: pd.DataFrame,
         window: int = 20
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Analyze how sentiment spreads across assets"""
         # Calculate rolling correlations
         rolling_corr = sentiment.rolling(window).corr()
@@ -458,8 +458,8 @@ class SentimentDynamicsModel:
         self,
         sentiment_history: pd.Series,
         horizon: int = 10,
-        exogenous: Optional[pd.DataFrame] = None
-    ) -> Dict[str, Any]:
+        exogenous: pd.DataFrame | None = None
+    ) -> dict[str, Any]:
         """
         Predict future sentiment evolution
 

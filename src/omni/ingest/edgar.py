@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any
 
 from omni.ingest.protocol import ClaimDraft, Unavailable
 

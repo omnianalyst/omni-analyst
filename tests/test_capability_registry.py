@@ -2,7 +2,7 @@
 
 import pytest
 
-from omni.capability.from_census import EXCLUDED_ROUTERS, build_registry
+from omni.capability.from_census import build_registry
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 
 

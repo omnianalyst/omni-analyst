@@ -14,19 +14,16 @@ thin pass-through). Honest-data rules they enforce:
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pandas as pd
 import pytest
 
 from omni.detect import (
+    MIN_BARS,
     FraudDataUnavailable,
     InsufficientData,
     ManipulationAnalyzer,
-    MIN_BARS,
 )
-
 
 # --------------------------------------------------------------------- fixtures
 

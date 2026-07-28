@@ -37,8 +37,8 @@ columns to ``Prediction`` without touching this file.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence
 
 from omni.calibration import Benchmark, Direction, Outcome
 
@@ -48,10 +48,10 @@ class BenchmarkCalibrationBucket:
     bucket_low: float
     bucket_high: float
     n: int
-    hit_rate: Optional[float]
-    mean_confidence: Optional[float]
+    hit_rate: float | None
+    mean_confidence: float | None
     benchmarked_n: int
-    market_mean_probability: Optional[float]
+    market_mean_probability: float | None
 
 
 def calibration_with_benchmark(
@@ -123,8 +123,8 @@ def calibration_with_benchmark(
             market_probs = [float(b.market_probability) for b in benchmarked]
 
             if n >= min_bucket_n:
-                hit_rate: Optional[float] = hits / n
-                mean_conf: Optional[float] = (
+                hit_rate: float | None = hits / n
+                mean_conf: float | None = (
                     sum(float(p.confidence) for p in in_bucket) / n
                 )
             else:
@@ -132,7 +132,7 @@ def calibration_with_benchmark(
                 mean_conf = None
 
             if benchmarked_n >= min_bucket_n:
-                market_mean: Optional[float] = sum(market_probs) / benchmarked_n
+                market_mean: float | None = sum(market_probs) / benchmarked_n
             else:
                 market_mean = None
 

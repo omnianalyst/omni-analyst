@@ -11,11 +11,11 @@ from uuid import uuid4
 
 import pytest
 
+from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.coverage.visibility import visible_claims
 from omni.demand.ledger import direct_attention
 from omni.fill.pipeline import claim_next_gap, drain, run_once
-from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.ingest.fred import FredAdapter
 from omni.ingest.protocol import ClaimDraft, Unavailable
 

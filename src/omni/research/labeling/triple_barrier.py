@@ -22,12 +22,11 @@ All functions are pure (numpy/pandas), causal, and deterministic.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
-
 
 # --------------------------------------------------------------------------- #
 # Volatility estimate
@@ -123,9 +122,9 @@ def triple_barrier_labels(
     max_holding: int,
     upper_mult: float = 1.0,
     lower_mult: float = 1.0,
-    volatility: Optional[pd.Series] = None,
+    volatility: pd.Series | None = None,
     vol_span: int = 100,
-    side: Optional[pd.Series] = None,
+    side: pd.Series | None = None,
     zero_on_vertical: bool = True,
     min_ret: float = 0.0,
 ) -> TripleBarrierLabels:

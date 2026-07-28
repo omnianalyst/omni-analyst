@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 
 from omni.capability.registry import Callability, Capability, Maturity, Registry
-from omni.credentials.catalog import PROVIDER_CATALOG, redistribution_for
 
 CENSUS = Path(__file__).resolve().parents[3] / "_orchestrator/census/recensus.json"
 

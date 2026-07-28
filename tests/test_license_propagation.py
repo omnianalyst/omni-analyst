@@ -75,22 +75,21 @@ class TestPropagation:
         private = await _claim(
             db, entity_id, key="bars", audience_user_id=user, **BYO
         )
-        async with db.pool.acquire() as conn:
-            async with conn.transaction():
-                signal = await _claim(
-                    db,
-                    entity_id,
-                    key="manipulation",
-                    conn=conn,
-                    claim_type="manipulation_signal",
-                    source="internal",
-                    redistributable="allowed",
-                    derivation="derived",
+        async with db.pool.acquire() as conn, conn.transaction():
+            signal = await _claim(
+                db,
+                entity_id,
+                key="manipulation",
+                conn=conn,
+                claim_type="manipulation_signal",
+                source="internal",
+                redistributable="allowed",
+                derivation="derived",
+            )
+            with pytest.raises(asyncpg.CheckViolationError, match="byo_only"):
+                await conn.execute(
+                    "INSERT INTO claim_input VALUES ($1, $2)", signal, private
                 )
-                with pytest.raises(asyncpg.CheckViolationError, match="byo_only"):
-                    await conn.execute(
-                        "INSERT INTO claim_input VALUES ($1, $2)", signal, private
-                    )
 
     async def test_a_derived_claim_inherits_the_private_audience(self, db):
         entity_id = await _entity(db)
@@ -98,23 +97,22 @@ class TestPropagation:
         private = await _claim(
             db, entity_id, key="bars", audience_user_id=owner, **BYO
         )
-        async with db.pool.acquire() as conn:
-            async with conn.transaction():
-                wrong = await _claim(
-                    db,
-                    entity_id,
-                    key="signal",
-                    conn=conn,
-                    claim_type="manipulation_signal",
-                    source="internal",
-                    redistributable="byo_only",
-                    audience_user_id=other,
-                    derivation="derived",
+        async with db.pool.acquire() as conn, conn.transaction():
+            wrong = await _claim(
+                db,
+                entity_id,
+                key="signal",
+                conn=conn,
+                claim_type="manipulation_signal",
+                source="internal",
+                redistributable="byo_only",
+                audience_user_id=other,
+                derivation="derived",
+            )
+            with pytest.raises(asyncpg.CheckViolationError, match="private to"):
+                await conn.execute(
+                    "INSERT INTO claim_input VALUES ($1, $2)", wrong, private
                 )
-                with pytest.raises(asyncpg.CheckViolationError, match="private to"):
-                    await conn.execute(
-                        "INSERT INTO claim_input VALUES ($1, $2)", wrong, private
-                    )
 
     async def test_the_correctly_scoped_derivation_is_accepted(self, db):
         entity_id = await _entity(db)
@@ -122,36 +120,34 @@ class TestPropagation:
         private = await _claim(
             db, entity_id, key="bars", audience_user_id=owner, **BYO
         )
-        async with db.pool.acquire() as conn:
-            async with conn.transaction():
-                signal = await _claim(
-                    db,
-                    entity_id,
-                    key="signal",
-                    conn=conn,
-                    claim_type="manipulation_signal",
-                    source="internal",
-                    redistributable="byo_only",
-                    audience_user_id=owner,
-                    derivation="derived",
-                )
-                await conn.execute(
-                    "INSERT INTO claim_input VALUES ($1, $2)", signal, private
-                )
+        async with db.pool.acquire() as conn, conn.transaction():
+            signal = await _claim(
+                db,
+                entity_id,
+                key="signal",
+                conn=conn,
+                claim_type="manipulation_signal",
+                source="internal",
+                redistributable="byo_only",
+                audience_user_id=owner,
+                derivation="derived",
+            )
+            await conn.execute(
+                "INSERT INTO claim_input VALUES ($1, $2)", signal, private
+            )
         assert await db.pool.fetchval("SELECT count(*) FROM claim_input") == 1
 
     async def test_a_derivation_from_public_inputs_stays_shareable(self, db):
         entity_id = await _entity(db)
-        async with db.pool.acquire() as conn:
-            async with conn.transaction():
-                revenue = await _claim(db, entity_id, key="Revenues", conn=conn)
-                growth = await _claim(
-                    db, entity_id, key="RevenueGrowth", conn=conn,
-                    source="internal", derivation="derived",
-                )
-                await conn.execute(
-                    "INSERT INTO claim_input VALUES ($1, $2)", growth, revenue
-                )
+        async with db.pool.acquire() as conn, conn.transaction():
+            revenue = await _claim(db, entity_id, key="Revenues", conn=conn)
+            growth = await _claim(
+                db, entity_id, key="RevenueGrowth", conn=conn,
+                source="internal", derivation="derived",
+            )
+            await conn.execute(
+                "INSERT INTO claim_input VALUES ($1, $2)", growth, revenue
+            )
         assert await db.pool.fetchval(
             "SELECT count(*) FROM shared_coverage"
         ) == 2
@@ -164,19 +160,18 @@ class TestPropagation:
         private = await _claim(
             db, entity_id, key="bars", audience_user_id=owner, **BYO
         )
-        async with db.pool.acquire() as conn:
-            async with conn.transaction():
-                blended = await _claim(
-                    db, entity_id, key="blend", conn=conn,
-                    source="internal", derivation="derived",
-                )
+        async with db.pool.acquire() as conn, conn.transaction():
+            blended = await _claim(
+                db, entity_id, key="blend", conn=conn,
+                source="internal", derivation="derived",
+            )
+            await conn.execute(
+                "INSERT INTO claim_input VALUES ($1, $2)", blended, public
+            )
+            with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute(
-                    "INSERT INTO claim_input VALUES ($1, $2)", blended, public
+                    "INSERT INTO claim_input VALUES ($1, $2)", blended, private
                 )
-                with pytest.raises(asyncpg.CheckViolationError):
-                    await conn.execute(
-                        "INSERT INTO claim_input VALUES ($1, $2)", blended, private
-                    )
 
 
 class TestUndeclaredProvenance:

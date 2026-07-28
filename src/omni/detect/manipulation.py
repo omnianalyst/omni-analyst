@@ -39,8 +39,9 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, Optional, Sequence
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -74,10 +75,10 @@ class Finding:
     pattern: str
     detected: bool
     confidence: float
-    evidence: Dict[str, Any] = field(default_factory=dict)
-    note: Optional[str] = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+    note: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -106,7 +107,7 @@ def _zscore(value: float, sample: Sequence[float]) -> float:
     return float((value - mu) / sd)
 
 
-def _round_or_none(x: float) -> Optional[float]:
+def _round_or_none(x: float) -> float | None:
     if x is None or math.isnan(x):
         return None
     return round(float(x), 4)
@@ -308,7 +309,7 @@ class ManipulationAnalyzer:
 
         ratios = []
         n = len(df)
-        for start in range(0, n - window + 1):
+        for start in range(n - window + 1):
             block = df.iloc[start : start + window]
             r = block_ratio(block)
             if np.isfinite(r):
@@ -354,7 +355,7 @@ class ManipulationAnalyzer:
         # event-sized window. Each window's pump return is close at the
         # last pump-phase bar divided by close at the first pump-phase bar.
         baseline_returns = []
-        for start in range(0, len(closes) - event):
+        for start in range(len(closes) - event):
             e0 = float(closes[start])
             e1 = float(closes[start + pump_len - 1])
             if e0 > 0:
@@ -424,7 +425,7 @@ class ManipulationAnalyzer:
 
     # ----------------------------------------------------------- composite
 
-    def analyze(self, ohlcv: pd.DataFrame) -> Dict[str, Any]:
+    def analyze(self, ohlcv: pd.DataFrame) -> dict[str, Any]:
         """Run every supported detector plus the named-unsupported ones.
 
         Spoofing and layering cannot be run (no level-2 feed). They are
@@ -454,7 +455,7 @@ class ManipulationAnalyzer:
         }
 
     @staticmethod
-    def _unsupported_level2(pattern: str) -> Dict[str, Any]:
+    def _unsupported_level2(pattern: str) -> dict[str, Any]:
         return {
             "pattern": pattern,
             "status_code": 501,

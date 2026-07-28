@@ -4,7 +4,7 @@ FOMO (Fear of Missing Out) Detection
 Identifies and quantifies FOMO behavior in market data
 """
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -25,7 +25,7 @@ class FOMODetector:
         self,
         price_data: pd.DataFrame,
         volume_data: pd.DataFrame,
-        social_sentiment: Optional[pd.DataFrame] = None,
+        social_sentiment: pd.DataFrame | None = None,
         window: int = 20
     ) -> pd.DataFrame:
         """
@@ -223,7 +223,7 @@ class FOMODetector:
         self,
         fomo_scores: pd.DataFrame,
         threshold: float = None
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Detect specific FOMO events from scores
 
@@ -274,7 +274,7 @@ class FOMODetector:
         price_data: pd.DataFrame,
         volume_data: pd.DataFrame,
         lookback_days: int = 90
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Comprehensive FOMO pattern analysis
 
@@ -355,7 +355,7 @@ class FOMODetector:
         symbol: str,
         current_fomo_score: float,
         historical_data: pd.DataFrame
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Predict likely outcomes based on current FOMO levels
 

@@ -24,7 +24,7 @@ to surface, and that number is the only reason to believe the next one.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from uuid import UUID
 

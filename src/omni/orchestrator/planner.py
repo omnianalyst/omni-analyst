@@ -27,11 +27,11 @@ re-derived and audited rather than trusted.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from uuid import UUID
 
-from omni.capability.registry import Capability, Registry
+from omni.capability.registry import Registry
 
 
 class Unsatisfiable(str, Enum):

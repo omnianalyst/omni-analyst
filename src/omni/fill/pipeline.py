@@ -16,8 +16,8 @@ worker picks the gap up, the same mechanism the Neutron job queue uses.
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Sequence
 from uuid import UUID
 
 from omni.capability.registry import Registry

@@ -34,6 +34,8 @@ try:
     from alpaca.trading.client import TradingClient
     from alpaca.trading.enums import (
         OrderSide as AlpacaOrderSide,
+    )
+    from alpaca.trading.enums import (
         TimeInForce as AlpacaTimeInForce,
     )
     from alpaca.trading.requests import (

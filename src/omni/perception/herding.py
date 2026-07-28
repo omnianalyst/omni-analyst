@@ -4,7 +4,7 @@ Herding Behavior Analysis
 Detects and analyzes herding behavior in financial markets
 """
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -69,7 +69,7 @@ class HerdingAnalyzer:
         self,
         returns: pd.DataFrame,
         market_returns: pd.Series
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Calculate Cross-Sectional Absolute Deviation (CSAD)
         Tests for non-linear relationship indicating herding
@@ -138,7 +138,7 @@ class HerdingAnalyzer:
         self,
         returns: pd.DataFrame,
         window: int = 60
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Detect clustering in correlation networks indicating herding
 
@@ -286,8 +286,8 @@ class HerdingAnalyzer:
         self,
         returns: pd.DataFrame,
         volume: pd.DataFrame,
-        news_counts: Optional[pd.DataFrame] = None
-    ) -> List[Dict[str, Any]]:
+        news_counts: pd.DataFrame | None = None
+    ) -> list[dict[str, Any]]:
         """
         Detect information cascades that lead to herding
 
@@ -356,7 +356,7 @@ class HerdingAnalyzer:
         returns: pd.DataFrame,
         market_returns: pd.Series,
         method: str = 'all'
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Calculate overall herding intensity using multiple methods
 
@@ -470,7 +470,7 @@ class HerdingAnalyzer:
         returns: pd.DataFrame,
         current_herding_score: float,
         horizon_days: int = 20
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Predict how long herding behavior will persist
 

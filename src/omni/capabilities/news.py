@@ -30,8 +30,8 @@ enters the store.
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -98,9 +98,17 @@ def calculate_signal_strength(scores: list[tuple[str, float]]) -> str:
 
 
 def parse_feed_date(date_tuple) -> datetime:
+    """Feed timestamps are UTC; attach that rather than leaving them naive.
+
+    A naive datetime written to a TIMESTAMPTZ column is read as local time, so
+    an article published at 14:00 UTC lands as 14:00 in whatever zone the
+    process happens to run in. In a store whose whole premise is knowing when
+    something became knowable, that is a silent offset, not a formatting
+    detail.
+    """
     if not date_tuple:
         raise Unavailable("feed entry has no published date")
-    return datetime(*date_tuple[:6])
+    return datetime(*date_tuple[:6], tzinfo=UTC)
 
 
 def extract_ticker_entities(

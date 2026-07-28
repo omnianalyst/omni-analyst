@@ -19,7 +19,7 @@ licence terms.
 from __future__ import annotations
 
 import json
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from uuid import UUID
 
 from omni.credentials.catalog import redistribution_for
@@ -97,26 +97,25 @@ async def write_claims(
     owner_label = None if audience is None else "user"
 
     written: list[UUID] = []
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            for draft in drafts:
-                claim_id = await conn.fetchval(
-                    _INSERT,
-                    entity_id,
-                    draft.claim_type,
-                    draft.key,
-                    json.dumps(draft.value),
-                    draft.unit,
-                    json.dumps(draft.evidence) if draft.evidence else None,
-                    source,
-                    draft.event_date,
-                    draft.knowledge_date,
-                    draft.confidence,
-                    owner_label,
-                    redistributable,
-                    audience,
-                    "ingested",
-                )
-                if claim_id is not None:
-                    written.append(claim_id)
+    async with pool.acquire() as conn, conn.transaction():
+        for draft in drafts:
+            claim_id = await conn.fetchval(
+                _INSERT,
+                entity_id,
+                draft.claim_type,
+                draft.key,
+                json.dumps(draft.value),
+                draft.unit,
+                json.dumps(draft.evidence) if draft.evidence else None,
+                source,
+                draft.event_date,
+                draft.knowledge_date,
+                draft.confidence,
+                owner_label,
+                redistributable,
+                audience,
+                "ingested",
+            )
+            if claim_id is not None:
+                written.append(claim_id)
     return written

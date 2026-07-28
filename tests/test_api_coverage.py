@@ -356,10 +356,9 @@ async def test_claims_can_be_filtered_to_one_series(db, database_url):
     await _claim(db, entity_id, key="UNRATE", claim_type="macro_series_point")
 
     app = _make_app(database_url)
-    async with _Lifespan(app):
-        async with TestClient(app) as client:
-            both = await client.get(f"/coverage/{entity_id}/claims")
-            one = await client.get(f"/coverage/{entity_id}/claims?key=GDP")
+    async with _Lifespan(app), TestClient(app) as client:
+        both = await client.get(f"/coverage/{entity_id}/claims")
+        one = await client.get(f"/coverage/{entity_id}/claims?key=GDP")
 
     assert {c["key"] for c in both.json()["claims"]} == {"GDP", "UNRATE"}
     assert {c["key"] for c in one.json()["claims"]} == {"GDP"}

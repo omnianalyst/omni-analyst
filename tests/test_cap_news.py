@@ -5,7 +5,7 @@ function also has a case where its input is unavailable and it must raise
 rather than return a fabricated default.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -92,10 +92,14 @@ class TestCalculateSignalStrength:
 
 class TestParseFeedDate:
     def test_known_tuple(self):
-        assert parse_feed_date((2024, 1, 15, 9, 30, 0)) == datetime(2024, 1, 15, 9, 30, 0)
+        assert parse_feed_date((2024, 1, 15, 9, 30, 0)) == datetime(
+            2024, 1, 15, 9, 30, 0, tzinfo=UTC
+        )
 
     def test_only_first_six_elements_used(self):
-        assert parse_feed_date((2024, 1, 15, 9, 30, 0, 0, 0, 0)) == datetime(2024, 1, 15, 9, 30, 0)
+        assert parse_feed_date((2024, 1, 15, 9, 30, 0, 0, 0, 0)) == datetime(
+            2024, 1, 15, 9, 30, 0, tzinfo=UTC
+        )
 
     def test_missing_date_raises_rather_than_inventing_now(self):
         with pytest.raises(Unavailable, match="no published date"):
@@ -269,3 +273,11 @@ class TestStocktwitsSentiment:
 
         with pytest.raises(Unavailable, match="no messages"):
             await stocktwits_sentiment("AAPL", fetch_fn=empty)
+
+
+def test_a_feed_date_is_timezone_aware():
+    """Feed timestamps are UTC. A naive datetime written to a TIMESTAMPTZ
+    column is read as local time, so an article published at 14:00 UTC would
+    land shifted by the process's offset — a silent error in a store whose
+    premise is knowing when something became knowable."""
+    assert parse_feed_date((2024, 1, 15, 9, 30, 0)).tzinfo is not None
