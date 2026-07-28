@@ -1,0 +1,164 @@
+"""The background loops. Without these the system only works when asked."""
+
+import asyncio
+
+import pytest
+
+from omni.capability.registry import Callability, Capability, Maturity, Registry
+from omni.coverage.visibility import visible_claims
+from omni.demand.ledger import direct_attention
+from omni.ingest.fred import FredAdapter
+from omni.scheduler.worker import (
+    Scheduler,
+    SchedulerConfig,
+    default_registry,
+    fill_once,
+    sweep_once,
+)
+
+VINTAGES = [
+    {"date": "2007-10-01", "realtime_start": "2008-01-30", "value": "0.6"},
+    {"date": "2007-10-01", "realtime_start": "2008-03-27", "value": "-0.2"},
+]
+
+
+def _fill_registry() -> Registry:
+    async def fake(series_id):
+        return VINTAGES
+
+    r = Registry()
+    r.add(Capability(
+        name="fred.series", description="FRED series",
+        produces=("macro_series_point",), provider_key="fred", source="fred",
+        touches_byo=False, maturity=Maturity.WIRED,
+        callability=Callability.YES, call=FredAdapter(fetch_fn=fake).fetch,
+    ))
+    return r
+
+
+async def _entity(db, symbol="AAPL"):
+    return await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('company',$1,$1) RETURNING id",
+        symbol,
+    )
+
+
+@pytest.fixture(autouse=True)
+async def _clean(db):
+    await db.pool.execute("TRUNCATE entity, demand CASCADE")
+    yield
+
+
+class TestSweep:
+    async def test_a_sweep_records_gaps_for_unmet_demand(self, db):
+        entity_id = await _entity(db)
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="macro_series_point", key="GDP"
+        )
+        assert await sweep_once(db.pool) > 0
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM gap WHERE resolved_at IS NULL"
+        ) > 0
+
+    async def test_sweeping_twice_does_not_duplicate_a_gap(self, db):
+        entity_id = await _entity(db)
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="macro_series_point", key="GDP"
+        )
+        await sweep_once(db.pool)
+        await sweep_once(db.pool)
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM gap WHERE resolved_at IS NULL "
+            "AND claim_type='macro_series_point'"
+        ) == 1
+
+    async def test_a_sweep_with_no_demand_records_nothing(self, db):
+        assert await sweep_once(db.pool) == 0
+
+
+class TestFillCycle:
+    async def test_a_cycle_closes_gaps_and_writes_coverage(self, db):
+        entity_id = await _entity(db)
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="macro_series_point", key="GDP"
+        )
+        await sweep_once(db.pool)
+
+        results = await fill_once(db.pool, _fill_registry(), SchedulerConfig())
+        assert any(r.outcome == "filled" for r in results)
+        assert await visible_claims(db.pool, audience=None) != []
+
+    async def test_the_cycle_ceiling_is_enforced(self, db):
+        """An unbounded drain against a gap engine that reopens gaps is how an
+        API budget disappears in one loop iteration."""
+        for i in range(8):
+            e = await _entity(db, f"SYM{i}")
+            await direct_attention(
+                db.pool, entity_id=e, claim_type="macro_series_point", key=f"S{i}"
+            )
+        await sweep_once(db.pool)
+
+        config = SchedulerConfig(max_gaps_per_cycle=3)
+        results = await fill_once(db.pool, _fill_registry(), config)
+        assert len(results) == 3
+
+    async def test_an_empty_queue_returns_immediately(self, db):
+        assert await fill_once(db.pool, _fill_registry(), SchedulerConfig()) == []
+
+
+class TestSchedulerLoops:
+    async def test_the_loops_close_the_whole_cycle_unattended(self, db):
+        """The point of the module: nobody calls anything, coverage appears."""
+        entity_id = await _entity(db)
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="macro_series_point", key="GDP"
+        )
+
+        scheduler = Scheduler(
+            db.pool, _fill_registry(),
+            SchedulerConfig(sweep_interval=0.05, fill_interval=0.05, fill_workers=1),
+        )
+        await scheduler.start()
+        try:
+            for _ in range(100):
+                if await visible_claims(db.pool, audience=None):
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            await scheduler.stop()
+
+        assert await visible_claims(db.pool, audience=None), "no coverage appeared"
+        assert scheduler.stats.filled >= 1
+
+    async def test_a_failing_sweep_does_not_kill_the_loop(self, db):
+        """Stopping silently would leave the system looking healthy while
+        coverage quietly stopped updating."""
+        class Broken:
+            async def fetch(self, *a, **k):
+                raise RuntimeError("db gone")
+            def __getattr__(self, n):
+                raise RuntimeError("db gone")
+
+        scheduler = Scheduler(
+            Broken(), _fill_registry(),
+            SchedulerConfig(sweep_interval=0.02, fill_interval=0.02, fill_workers=1),
+        )
+        await scheduler.start()
+        await asyncio.sleep(0.15)
+        running = [t for t in scheduler._tasks if not t.done()]
+        await scheduler.stop()
+        assert running, "the loops died on an error instead of retrying"
+
+    async def test_stop_is_clean_and_idempotent(self, db):
+        scheduler = Scheduler(db.pool, _fill_registry(), SchedulerConfig())
+        await scheduler.start()
+        await scheduler.stop()
+        await scheduler.stop()
+        assert scheduler._tasks == []
+
+
+class TestDefaultRegistry:
+    def test_the_default_registry_is_everything_runnable(self):
+        r = default_registry()
+        assert len(r) == r.summary()["invocable"]
+        assert len(r) >= 30

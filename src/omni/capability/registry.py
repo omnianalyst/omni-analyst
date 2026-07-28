@@ -64,6 +64,10 @@ class Capability:
     # Licence. A capability reaching a byo_only provider can only ever produce
     # private coverage, whoever asked for it.
     provider_key: str | None = None
+    #: What lands in a claim's provenance. Usually the same as provider_key,
+    #: but they are different things: one indexes the licence catalog, the
+    #: other names the origin of the data.
+    source: str = ""
     touches_byo: bool = False
 
     # Honesty about what the output actually is.

@@ -14,7 +14,8 @@ import pytest
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.coverage.visibility import visible_claims
 from omni.demand.ledger import direct_attention
-from omni.fill.pipeline import CapabilityRegistry, claim_next_gap, drain, run_once
+from omni.fill.pipeline import claim_next_gap, drain, run_once
+from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.ingest.fred import FredAdapter
 from omni.ingest.protocol import ClaimDraft, Unavailable
 
@@ -33,20 +34,23 @@ async def _entity(db, symbol="AAPL"):
     )
 
 
-def _fred_registry() -> CapabilityRegistry:
+def _fred_registry():
     async def fake_fetch(series_id: str) -> list[dict]:
         return GDP_VINTAGES
 
-    adapter = FredAdapter(fetch_fn=fake_fetch)
-    registry = CapabilityRegistry()
-    registry.register(
-        "macro_series_point",
-        name="fred.series",
-        source="fred",
-        provider_key="fred",
-        call=adapter.fetch,
-    )
-    return registry
+    return _fred_capability(fake_fetch)
+
+def _fred_capability(fetch_fn):
+    """One real capability, built the way the scheduler builds them."""
+    r = Registry()
+    r.add(Capability(
+        name="fred.series", description="FRED series",
+        produces=("macro_series_point",), provider_key="fred", source="fred",
+        touches_byo=False, maturity=Maturity.WIRED,
+        callability=Callability.YES, call=FredAdapter(fetch_fn=fetch_fn).fetch,
+    ))
+    return r
+
 
 
 @pytest.fixture(autouse=True)
@@ -125,14 +129,7 @@ class TestHonestRefusal:
         async def broken(series_id: str) -> list[dict]:
             raise Unavailable("ALFRED returned HTTP 429")
 
-        registry = CapabilityRegistry()
-        registry.register(
-            "macro_series_point",
-            name="fred.series",
-            source="fred",
-            provider_key="fred",
-            call=FredAdapter(fetch_fn=broken).fetch,
-        )
+        registry = _fred_capability(broken)
 
         result = await run_once(db.pool, registry=registry, worker_id="w1")
         assert result.outcome == "unfillable"
@@ -156,11 +153,7 @@ class TestHonestRefusal:
         async def broken(series_id: str) -> list[dict]:
             raise Unavailable("temporary outage")
 
-        registry = CapabilityRegistry()
-        registry.register(
-            "macro_series_point", name="fred.series", source="fred",
-            provider_key="fred", call=FredAdapter(fetch_fn=broken).fetch,
-        )
+        registry = _fred_capability(broken)
         await run_once(db.pool, registry=registry, worker_id="w1")
 
         row = await db.pool.fetchrow("SELECT resolved_at, lease_owner FROM gap")
@@ -175,7 +168,7 @@ class TestHonestRefusal:
         await persist_gaps(db.pool, await detect_gaps(db.pool))
 
         result = await run_once(
-            db.pool, registry=CapabilityRegistry(), worker_id="w1"
+            db.pool, registry=Registry(), worker_id="w1"
         )
         assert result.outcome == "unfillable"
         assert "no capability registered" in result.reason
@@ -191,11 +184,7 @@ class TestHonestRefusal:
         async def empty(series_id: str) -> list[dict]:
             return []
 
-        registry = CapabilityRegistry()
-        registry.register(
-            "macro_series_point", name="fred.series", source="fred",
-            provider_key="fred", call=FredAdapter(fetch_fn=empty).fetch,
-        )
+        registry = _fred_capability(empty)
         result = await run_once(db.pool, registry=registry, worker_id="w1")
         assert result.outcome == "unfillable"
         assert await db.pool.fetchval("SELECT resolved_at FROM gap") is not None
@@ -279,11 +268,14 @@ class TestLicenceThroughTheLoop:
                 )
             ]
 
-        registry = CapabilityRegistry()
-        registry.register(
-            "price_snapshot", name="polygon.aggregates", source="polygon",
-            provider_key="polygon", call=prices,
-        )
+        from omni.capability.registry import Callability, Capability, Maturity, Registry
+        registry = Registry()
+        registry.add(Capability(
+            name="polygon.aggregates", description="prices",
+            produces=("price_snapshot",), provider_key="polygon", source="polygon",
+            touches_byo=True, maturity=Maturity.WIRED,
+            callability=Callability.YES, call=prices,
+        ))
 
         result = await run_once(db.pool, registry=registry, worker_id="w1")
         assert result.outcome == "filled", result.reason
@@ -291,3 +283,65 @@ class TestLicenceThroughTheLoop:
         assert await visible_claims(db.pool, audience=owner) != []
         assert await visible_claims(db.pool, audience=uuid4()) == []
         assert await visible_claims(db.pool, audience=None) == []
+
+
+class TestRetryBackoff:
+    """Found by running the scheduler: 3 gaps produced 14,900 attempts in 20
+    seconds, because a transiently-failed gap was re-leased immediately."""
+
+    async def _seed(self, db):
+        entity_id = await _entity(db)
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="macro_series_point", key="GDP"
+        )
+        await persist_gaps(db.pool, await detect_gaps(db.pool))
+
+    async def _broken_registry(self):
+        async def broken(series_id):
+            raise Unavailable("source down")
+        return _fred_capability(broken)
+
+    async def test_a_failed_gap_is_not_immediately_reclaimable(self, db):
+        await self._seed(db)
+        registry = await self._broken_registry()
+        assert await run_once(db.pool, registry=registry, worker_id="w1") is not None
+        # The hot loop: without backoff this returns the same gap instantly.
+        assert await run_once(db.pool, registry=registry, worker_id="w1") is None
+
+    async def test_the_backoff_window_is_recorded_and_grows(self, db):
+        await self._seed(db)
+        registry = await self._broken_registry()
+        await run_once(db.pool, registry=registry, worker_id="w1")
+        first = await db.pool.fetchrow(
+            "SELECT attempts, next_attempt_at FROM gap"
+        )
+        assert first["attempts"] == 1
+        assert first["next_attempt_at"] is not None
+
+        await db.pool.execute("UPDATE gap SET next_attempt_at = now()")
+        await run_once(db.pool, registry=registry, worker_id="w1")
+        second = await db.pool.fetchrow("SELECT attempts FROM gap")
+        assert second["attempts"] == 2
+
+    async def test_a_permanently_dead_source_stops_being_retried(self, db):
+        """An unreachable source is a fact about the world; the fill_attempt
+        rows record why, and the gap stops costing money."""
+        await self._seed(db)
+        registry = await self._broken_registry()
+        for _ in range(8):
+            await db.pool.execute(
+                "UPDATE gap SET next_attempt_at = now() WHERE resolved_at IS NULL"
+            )
+            if await run_once(db.pool, registry=registry, worker_id="w1") is None:
+                break
+        row = await db.pool.fetchrow("SELECT attempts, resolved_at FROM gap")
+        assert row["resolved_at"] is not None, "gap retried past MAX_ATTEMPTS"
+        assert row["attempts"] <= 6
+
+    async def test_a_bounded_number_of_attempts_is_recorded(self, db):
+        """The regression proper: attempts must be single digits, not 14,900."""
+        await self._seed(db)
+        registry = await self._broken_registry()
+        for _ in range(20):
+            await run_once(db.pool, registry=registry, worker_id="w1")
+        assert await db.pool.fetchval("SELECT count(*) FROM fill_attempt") <= 6

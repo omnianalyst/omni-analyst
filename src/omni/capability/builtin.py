@@ -38,6 +38,7 @@ def _adapter(
         produces=produces,
         entity_kinds=entity_kinds,
         provider_key=provider_key,
+        source=provider_key,
         touches_byo=_byo(provider_key),
         cost=cost,
         maturity=Maturity.WIRED,

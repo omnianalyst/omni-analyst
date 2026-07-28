@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Sequence
 from uuid import UUID
 
+from omni.capability.registry import Registry
 from omni.coverage.writer import (
     MissingCredentialOwner,
     ProhibitedSource,
@@ -29,48 +30,17 @@ from omni.ingest.protocol import ClaimDraft, Unavailable
 
 DEFAULT_LEASE_SECONDS = 300
 
+#: A gap whose source keeps failing backs off exponentially rather than being
+#: retried as fast as the loop turns. Without this, one unreachable provider
+#: burns an API budget in seconds.
+RETRY_BASE_SECONDS = 30
+MAX_ATTEMPTS = 6
+
 # A capability takes the gap's target and returns drafts. Anything that cannot
 # answer raises Unavailable with a reason a human can act on.
 Capability = Callable[..., Awaitable[Sequence[ClaimDraft]]]
 
 
-@dataclass(frozen=True)
-class Registration:
-    """A capability bound to the source it speaks for."""
-
-    name: str
-    source: str
-    provider_key: str
-    call: Capability
-
-
-class CapabilityRegistry:
-    """What the scheduler is allowed to call to close a gap.
-
-    Keyed by claim type: a gap in `macro_series_point` is answerable by
-    whatever is registered for that type. Several capabilities may serve one
-    type — corroboration from a second source is what clears an `unverified`
-    gap — so registration appends rather than replaces.
-    """
-
-    def __init__(self) -> None:
-        self._by_claim_type: dict[str, list[Registration]] = {}
-
-    def register(
-        self,
-        claim_type: str,
-        *,
-        name: str,
-        source: str,
-        provider_key: str,
-        call: Capability,
-    ) -> None:
-        self._by_claim_type.setdefault(claim_type, []).append(
-            Registration(name=name, source=source, provider_key=provider_key, call=call)
-        )
-
-    def for_claim_type(self, claim_type: str) -> list[Registration]:
-        return list(self._by_claim_type.get(claim_type, []))
 
 
 _CLAIM_GAP = """
@@ -79,6 +49,7 @@ WHERE id = (
     SELECT id FROM gap
     WHERE resolved_at IS NULL
       AND (lease_expires_at IS NULL OR lease_expires_at < now())
+      AND (next_attempt_at IS NULL OR next_attempt_at <= now())
     ORDER BY score DESC, detected_at
     FOR UPDATE SKIP LOCKED
     LIMIT 1
@@ -97,8 +68,21 @@ UPDATE gap SET resolved_at = now(), lease_owner = NULL, lease_expires_at = NULL
 WHERE id = $1
 """
 
+# Release with backoff. attempts is incremented so repeated failures wait
+# longer, and a gap that has exhausted MAX_ATTEMPTS is resolved rather than
+# retried forever -- an unreachable source is a fact about the world, and the
+# fill_attempt rows record why.
 _RELEASE = """
-UPDATE gap SET lease_owner = NULL, lease_expires_at = NULL WHERE id = $1
+UPDATE gap SET
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    attempts = attempts + 1,
+    next_attempt_at = CASE
+        WHEN attempts + 1 >= $2 THEN NULL
+        ELSE now() + ($3 * power(2, attempts)) * interval '1 second'
+    END,
+    resolved_at = CASE WHEN attempts + 1 >= $2 THEN now() ELSE NULL END
+WHERE id = $1
 """
 
 
@@ -123,18 +107,18 @@ async def fill_gap(
     pool,
     gap: dict,
     *,
-    registry: CapabilityRegistry,
+    registry: Registry,
     credential_owner: UUID | None = None,
     licensed: Sequence[str] = (),
 ) -> FillResult:
     """Attempt one gap. Always records an attempt; never fabricates."""
     gap_id = gap["id"]
-    candidates = registry.for_claim_type(gap["claim_type"])
+    candidates = registry.producing(gap["claim_type"])
 
     if not candidates:
         reason = f"no capability registered for claim type {gap['claim_type']}"
         await _record(pool, gap_id, None, "unfillable", None, reason)
-        await pool.execute(_RELEASE, gap_id)
+        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
         return FillResult(gap_id, "unfillable", None, [], reason)
 
     failures: list[str] = []
@@ -150,7 +134,7 @@ async def fill_gap(
         except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
             reason = f"{registration.name} raised {type(exc).__name__}: {exc}"
             await _record(pool, gap_id, registration.name, "error", None, reason)
-            await pool.execute(_RELEASE, gap_id)
+            await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
             return FillResult(gap_id, "error", registration.name, [], reason)
 
         if not drafts:
@@ -166,7 +150,7 @@ async def fill_gap(
                 pool,
                 drafts,
                 entity_id=gap["entity_id"],
-                source=registration.source,
+                source=(registration.source or registration.provider_key),
                 provider_key=registration.provider_key,
                 credential_owner=credential_owner or gap["audience_user_id"],
                 licensed=licensed,
@@ -182,7 +166,7 @@ async def fill_gap(
 
     reason = "; ".join(failures)
     await _record(pool, gap_id, candidates[0].name, "unfillable", None, reason)
-    await pool.execute(_RELEASE, gap_id)
+    await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
     return FillResult(gap_id, "unfillable", candidates[0].name, [], reason)
 
 
@@ -202,7 +186,7 @@ async def _record(
 async def run_once(
     pool,
     *,
-    registry: CapabilityRegistry,
+    registry: Registry,
     worker_id: str,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
     licensed: Sequence[str] = (),
@@ -217,7 +201,7 @@ async def run_once(
 async def drain(
     pool,
     *,
-    registry: CapabilityRegistry,
+    registry: Registry,
     worker_id: str,
     max_gaps: int = 100,
     licensed: Sequence[str] = (),
