@@ -17,6 +17,13 @@ dependencies = [
     # clean; the fixtures are not. Raising this ceiling means auditing them.
     "numpy>=2.2,<3",
     "pandas>=2.3,<3",
+    # Required by the ported perception engines: LedoitWolf shrinkage and
+    # graph clustering in herding, SARIMAX/VAR in dynamics. W2 correctly
+    # skipped four tests rather than adding these itself.
+    "scipy>=1.15,<2",
+    "scikit-learn>=1.5,<2",
+    "statsmodels>=0.14,<1",
+    "networkx>=3.0,<4",
 ]
 
 [project.optional-dependencies]
