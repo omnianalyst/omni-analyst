@@ -343,3 +343,23 @@ async def test_entities_search_by_symbol_or_name(db, database_url):
     assert syms == {"AAPL"}
     names = {e["symbol"] for e in r_name.json()["entities"]}
     assert names == {"MSFT"}
+
+
+async def test_claims_can_be_filtered_to_one_series(db, database_url):
+    """Without this, a point-in-time question pages through everything else.
+
+    The revision of GDP Q1-1994 knowable in 2000 sat at rank 210 of a
+    100-row page, so the honest answer was unreachable through the API.
+    """
+    entity_id = await _entity(db, symbol="US", name="United States")
+    await _claim(db, entity_id, key="GDP", claim_type="macro_series_point")
+    await _claim(db, entity_id, key="UNRATE", claim_type="macro_series_point")
+
+    app = _make_app(database_url)
+    async with _Lifespan(app):
+        async with TestClient(app) as client:
+            both = await client.get(f"/coverage/{entity_id}/claims")
+            one = await client.get(f"/coverage/{entity_id}/claims?key=GDP")
+
+    assert {c["key"] for c in both.json()["claims"]} == {"GDP", "UNRATE"}
+    assert {c["key"] for c in one.json()["claims"]} == {"GDP"}

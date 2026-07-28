@@ -39,6 +39,10 @@ PAGE_SIZE_MAX = 1000
 
 class ClaimsQuery(BaseModel):
     claim_type: str | None = None
+    #: The series or concept, e.g. "GDP" or "Revenues". Without it, asking
+    #: "what was GDP for Q1 1994 as of 1996" means paging through every other
+    #: claim the entity holds — the answer sat at rank 210 of a 100-row page.
+    key: str | None = None
     as_of: datetime | None = None
     limit: int = PAGE_SIZE_DEFAULT
     # Keyset cursor: the (knowledge_date, id) of the last row of the previous
@@ -164,6 +168,9 @@ def build_router(app: App) -> Router:
             if claim_type is not None:
                 conditions.append(f"v.claim_type = ${len(params) + 1}::claim_type")
                 params.append(claim_type)
+            if query.key is not None:
+                conditions.append(f"v.key = ${len(params) + 1}")
+                params.append(query.key)
             sql = f"""
                 WITH ranked AS (
                     SELECT {cols}, ROW_NUMBER() OVER (
@@ -184,6 +191,9 @@ def build_router(app: App) -> Router:
             if claim_type is not None:
                 conditions.append(f"v.claim_type = ${len(params) + 1}::claim_type")
                 params.append(claim_type)
+            if query.key is not None:
+                conditions.append(f"v.key = ${len(params) + 1}")
+                params.append(query.key)
             if before_kd is not None:
                 conditions.append(
                     f"(v.knowledge_date, v.id) < (${len(params) + 1},"
