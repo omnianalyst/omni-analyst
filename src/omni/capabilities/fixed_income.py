@@ -360,8 +360,22 @@ def calculate_z_spread(bond: Bond, risk_free_curve: YieldCurve) -> float:
 
 
 def calculate_credit_metrics(
-    bond: Bond, risk_free_curve: YieldCurve, recovery_rate: float = 0.4
+    bond: Bond, risk_free_curve: YieldCurve, recovery_rate: float
 ) -> dict[str, float]:
+    """Credit metrics derived from the z-spread.
+
+    ``recovery_rate`` is a required argument: there is no universal recovery
+    assumption, so the caller must own it. v1 defaulted it to 0.4 (40%); that
+    was a source-less number presented as data, and a credit-loss figure is
+    only as honest as the recovery it assumes.
+
+    ``implied_default_probability`` is ``z_spread / (1 - recovery_rate) * ttm``.
+    ``spread / (1 - R)`` is a *hazard rate* (an annual PD); multiplying by
+    ``ttm`` turns it into a *cumulative* probability. For long tenors this can
+    exceed 1.0. That is faithful to v1 (``:306``) and not a porting bug, but
+    consumers should treat the field as a raw cumulative figure, not a clamped
+    probability.
+    """
     z_spread = calculate_z_spread(bond, risk_free_curve)
 
     settle = _settle(bond)
@@ -496,6 +510,12 @@ def analyze_credit_migration(
         raise Unavailable("bond has no credit rating; cannot run migration")
 
     current_rating = bond.rating
+    if current_rating not in rating_spreads:
+        raise Unavailable(
+            "rating_spreads has no entry for the bond's current rating "
+            f"{current_rating!r}; cannot compute spread change"
+        )
+
     migration_impact: dict[str, Any] = {}
 
     if current_rating in transition_matrix.index:
@@ -503,7 +523,7 @@ def analyze_credit_migration(
         for new_rating, prob in transitions.items():
             if prob > 0 and new_rating in rating_spreads:
                 new_spread = rating_spreads[new_rating]
-                current_spread = rating_spreads.get(current_rating, 0)
+                current_spread = rating_spreads[current_rating]
                 spread_change = new_spread - current_spread
                 duration = calculate_duration(bond)["modified_duration"]
                 price_change_pct = -duration * spread_change
