@@ -192,7 +192,12 @@ def implied_volatility(
         return (black_scholes(S, K, T, r, vol, q, option_type)["price"] - market_price) ** 2
 
     result = minimize_scalar(objective, bounds=_IV_BOUNDS, method="bounded")
-    if abs(result.fun) < _TOL:
+    # objective returns the SQUARED residual, so gate on _TOL**2: this makes the
+    # Brent fallback accept on the same LINEAR residual (sqrt(_TOL**2) == _TOL)
+    # that Newton uses at :184. The old `abs(result.fun) < _TOL` gate accepted a
+    # linear residual of sqrt(_TOL) = 1e-3 -- 1000x looser -- and returned the
+    # 5.0 bound for prices no in-bound vol can produce.
+    if result.fun < _TOL**2:
         return float(result.x)
     return None
 
@@ -378,7 +383,14 @@ def max_pain(contracts: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 pain += (k - candidate) * oi
         pain_by_strike[candidate] = pain
 
-    if sum(pain_by_strike.values()) == 0.0:
+    # Max pain is undefined only when there is no open interest anywhere. The
+    # previous guard summed the PAIN values and raised when that was 0.0 -- but a
+    # single-strike chain with real OI has zero cross-strike pain at its only
+    # candidate, so the guard refused a well-defined answer (and the message
+    # "no open interest" was false). Summing integer OI is also exact, avoiding
+    # the float-noise-on-pain-sum defect (Q1 F6).
+    total_oi = sum(c.get("open_interest", 0) for c in contracts)
+    if total_oi == 0:
         raise Unavailable("no open interest on any contract; max pain undefined")
 
     max_pain_strike = min(pain_by_strike, key=pain_by_strike.get)
