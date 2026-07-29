@@ -21,6 +21,7 @@ from omni.capabilities.signal_fusion import (
     convergence,
     conviction,
     cross_correlation_at_lag,
+    direction,
     independence_votes,
     lead_lag,
     normalize,
@@ -302,6 +303,24 @@ class TestFailurePaths:
     def test_convergence_zero_total_weight_raises(self):
         with pytest.raises(Unavailable, match="sum to zero"):
             convergence({"a": 0.5, "b": -0.5}, weights={"a": 0.0, "b": 0.0})
+
+    def test_convergence_negative_weights_raise(self):
+        # F4: a negative weight is an inverted signal in disguise; it produced a
+        # weighted mean outside the [-1, +1] band (1.5) instead of a refusal.
+        with pytest.raises(Unavailable, match="negative weights"):
+            convergence({"a": 0.5, "b": -0.5}, weights={"a": 2.0, "b": -1.0})
+
+    def test_direction_negative_weights_raise(self):
+        # F4: the exported helper must refuse negative weights, not return an
+        # out-of-band value like 1.5.
+        with pytest.raises(Unavailable, match="negative weights"):
+            direction([0.5, -0.5], weights=[2.0, -1.0])
+
+    def test_direction_zero_sum_weights_raise_unavailable(self):
+        # F4: zero-total weights are undefined; the exported helper raised
+        # numpy's ZeroDivisionError, not the module's Unavailable.
+        with pytest.raises(Unavailable, match="sum to zero"):
+            direction([0.5, -0.5], weights=[0.0, 0.0])
 
     def test_leadlag_mismatched_length_raises(self):
         with pytest.raises(Unavailable, match="mismatched lengths"):

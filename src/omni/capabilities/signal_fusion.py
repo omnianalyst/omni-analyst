@@ -266,12 +266,33 @@ def alignment(values: Sequence[float]) -> float:
 
 
 def direction(values: Sequence[float], weights: Sequence[float] | None = None) -> float:
-    """Weighted mean of signal values. Equal weights when `weights` is None."""
+    """Weighted mean of signal values. Equal weights when `weights` is None.
+
+    Weights express relative *importance* of each signal, not a sign. A negative
+    weight drives the mean outside the `[-1, +1]` band normalisation puts signals
+    on -- it is an inverted signal wearing a weight's clothes. Inverting a signal
+    is what `normalize(..., inverted=True)` is for, so a negative weight is
+    refused here rather than redefined. A zero-total weight vector is undefined
+    and raises `Unavailable`, the same type every other undefined path in this
+    module raises, not numpy's `ZeroDivisionError`.
+
+    Negative weights are checked before the zero-total check: with negatives
+    excluded the sum of non-negative floats is zero only when every weight is,
+    so `sum <= 0` cannot trip on cancellation noise.
+    """
     arr = np.asarray(values, dtype=float)
     _require_nonempty(arr)
     if weights is None:
         return float(np.mean(arr))
-    return float(np.average(arr, weights=np.asarray(weights, dtype=float)))
+    w = np.asarray(weights, dtype=float)
+    if np.any(w < 0.0):
+        raise Unavailable(
+            "negative weights are not a weighting; invert the signal via "
+            "normalize(..., inverted=True) instead"
+        )
+    if float(w.sum()) <= 0.0:
+        raise Unavailable("weights sum to zero; no signal carries weight")
+    return float(np.average(arr, weights=w))
 
 
 def _find_divergences(
@@ -344,8 +365,9 @@ def convergence(
     once -- no absent signal is invented.
 
     Raises `Unavailable` when fewer than two signals are present (agreement is
-    undefined for one) or when the supplied weights sum to zero (v1 silently
-    fell back to uniform weights here, treating dead signals as equally live).
+    undefined for one) or when the supplied weights are negative or sum to zero:
+    `direction` owns both refusals (v1 silently fell back to uniform weights on
+    a zero total, treating dead signals as equally live).
     """
     if len(signal_values) < 2:
         raise Unavailable(f"convergence undefined for {len(signal_values)} signal(s); need >= 2")
@@ -356,8 +378,6 @@ def convergence(
     weight_arr: list[float] | None = None
     if weights is not None:
         weight_arr = [float(weights[s]) for s in sids]
-        if sum(weight_arr) <= 0.0:
-            raise Unavailable("weights sum to zero; no signal carries weight")
 
     d = direction(vals, weight_arr)
     al = alignment(vals)
