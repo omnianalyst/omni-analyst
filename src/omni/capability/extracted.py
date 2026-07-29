@@ -120,6 +120,7 @@ def build_extracted_registry() -> Registry:
         portfolio,
         portfolio_risk,
         regime,
+        risk,
         signal_fusion,
         volatility,
     )
@@ -1326,6 +1327,189 @@ def build_extracted_registry() -> Registry:
                 "point correlation is noise, not an edge). Significance is "
                 "reported, not used to silently drop an adequately-sampled "
                 "lag."
+            ),
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Market / macro / systemic risk (capabilities/risk.py) -------------
+    # v1's integrated_risk_analyzer: breadth, concentration, options skew,
+    # growth, credit, correlation breakdown and geopolitical risk, plus the
+    # weighted overall composite. Prefix is `market_risk.` -- NOT `risk.`
+    # (which shares the "risk" token with portfolio_risk and a planner could
+    # read as a superset of it) and not `portfolio_risk.` (taken: that module
+    # scores a POSITION book -- VaR/CVaR/beta/stress). market_risk scores the
+    # MARKET environment, the standard finance counterpart to position risk.
+    #
+    # Licence split. The macro inputs (growth) come from FRED (allowed) and are
+    # shareable; everything else derives from prices (quotes, market caps,
+    # option IVs, breadth, return series) or from news whose producer could be
+    # byo, so each entry is classified individually below. No output has a home
+    # in the closed claim_type enum, so produces is empty for all: these are
+    # analysis steps, not claim writers.
+    #
+    # Four overlaps with already-registered capabilities were deliberately left
+    # UNREGISTERED rather than entered as peers -- registering a second entry
+    # that computes the same quantity differently is the two-incompatible-
+    # registries failure this project shipped once. They are spelled out, with
+    # the divergence, in _orchestrator/reports/N6.md:
+    # estimate_recession_probability (vs macro.recession_probability),
+    # analyze_volatility_regime (vs regime.classify_volatility / volatility.*),
+    # analyze_yield_curve_risk (vs macro.yield_curve_inversion) and
+    # analyze_inflation_risk (vs macro.inflation_*). The single-chain / single-
+    # step leaf helpers (calculate_put_call_skew, calculate_depth_score,
+    # calculate_top_concentration, classify_risk_level, find_extreme_skew,
+    # calculate_correlation_stability, identify_correlation_clusters,
+    # identify_geopolitical_hotspots, identify_scenario_triggers,
+    # identify_concentrated_sectors) are sub-computations or static catalogs,
+    # not orchestrator entry points, and are likewise left out.
+    for cap in (
+        _bind(
+            "market_risk.liquidity_risk",
+            "Wide-spread ratio across a set of (bid, ask) quotes, scaled to a "
+            "0-100 liquidity-stress score.",
+            fn=risk.analyze_liquidity_risk,
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("liquidity",),
+            provenance=(
+                "Quotes are bid/ask market data (price_snapshot-derived, "
+                "byo_only feeds). The wide-spread ratio is a PROXY for "
+                "liquidity stress, not a direct depth measurement. A zero bid "
+                "or no quotes raises Unavailable rather than v1's neutral score."
+            ),
+        ),
+        _bind(
+            "market_risk.concentration_risk",
+            "Herfindahl-Hirschman market concentration from supplied market "
+            "caps, scaled to 0-100, with the top-5 share.",
+            fn=risk.analyze_concentration_risk,
+            touches_byo=True,
+            provenance=(
+                "Market caps are price_snapshot-derived (byo_only feeds); the "
+                "HHI is a deterministic transform of them. No market caps "
+                "raises Unavailable rather than v1's neutral 50."
+            ),
+        ),
+        _bind(
+            "market_risk.options_skew",
+            "Average put-call skew across supplied skew observations, mapped "
+            "to a 0-100 fear/complacency score.",
+            fn=risk.analyze_options_skew,
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("positioning",),
+            provenance=(
+                "Consumes already-computed skew values -- each the OTM-put "
+                "minus OTM-call IV of one chain, derived from option prices "
+                "(byo_only). A planner must assemble the skews first (the "
+                "single-chain calculate_put_call_skew helper is deliberately "
+                "unregistered), so consumes is empty: a skew float is not a "
+                "claim. None observations are dropped; all-None raises."
+            ),
+        ),
+        _bind(
+            "market_risk.breadth",
+            "Market-breadth score from advance/decline ratio, percent above "
+            "the 50/200-day MAs and new highs/lows.",
+            fn=risk.analyze_market_breadth,
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("participation",),
+            provenance=(
+                "Every input is a breadth statistic derived from cross-section "
+                "price series (byo_only); a planner must assemble them first, "
+                "so consumes is empty. The score is a PROXY for market "
+                "participation, not a direct measurement. All inputs are "
+                "required -- v1 defaulted each to a neutral value."
+            ),
+        ),
+        _bind(
+            "market_risk.growth_risk",
+            "Growth risk from a GDP nowcast and employment, with an embedded "
+            "recession-probability heuristic.",
+            fn=risk.analyze_growth_risk,
+            consumes=("macro_series_point",),
+            provenance=(
+                "Inputs (gdp_growth, unemployment, job_growth) are "
+                "macro_series_point series sourced from FRED (allowed), with no "
+                "price input, so the result is shareable. NB the embedded "
+                "recession_probability uses risk.py's GDP/unemployment heuristic "
+                "(0.15 base plus band adds), which DIVERGES from the already-"
+                "registered macro.recession_probability (a yield-curve/Sahm/LEI "
+                "composite) -- see N6; do not treat the two as interchangeable. "
+                "Score thresholds are policy-fixed, not calibrated."
+            ),
+        ),
+        _bind(
+            "market_risk.credit_risk",
+            "Credit-spread risk against historical-average anchors (IG 120, "
+            "HY 450 bps): tight / widening / stressed bands.",
+            fn=risk.analyze_credit_risk,
+            touches_byo=True,
+            provenance=(
+                "IG/HY spreads are caller-supplied; their source is opaque to "
+                "the descriptor (FRED publishes some spread series, allowed, "
+                "but the same spreads are commonly observed from bond prices -- "
+                "byo_only). Safe direction is touches_byo: over-exclude from "
+                "shared plans rather than leak. The 120/450 anchors and 1.2x/"
+                "1.5x bands are calibration constants, not input defaults."
+            ),
+        ),
+        _bind(
+            "market_risk.correlation_risks",
+            "Mean pairwise correlation, its 60-day rolling stability, a "
+            "breakdown flag and single-link correlation clusters across "
+            "supplied per-symbol return series.",
+            fn=risk.analyze_correlation_risks,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Returns are price_snapshot-derived (byo_only); the caller owns "
+                "the price->return conversion. Distinct from "
+                "portfolio_risk.calculate_correlation_matrix, which returns the "
+                "matrix and high-corr pairs: this adds the rolling STABILITY "
+                "and the breakdown/cluster risk view over time. Fewer than two "
+                "symbols raises rather than v1's neutral 50; stability is 0.0 "
+                "(not fabricated) when fewer than one 60-day window is "
+                "observable."
+            ),
+        ),
+        _bind(
+            "market_risk.geopolitical_risks",
+            "Geopolitical risk score from risk-keyword density in article "
+            "titles, plus the matched regional hotspots.",
+            fn=risk.analyze_geopolitical_risks,
+            consumes=("news_event",),
+            touches_byo=True,
+            provenance=(
+                "Articles are news_event claims; the only wired producer today "
+                "is rss (allowed), but a byo_only news provider (news_api) "
+                "exists in the catalog, so the safe direction is touches_byo -- "
+                "matching news.aggregate_market_sentiment. A keyword-labelling "
+                "step over titles, not a measurement; at least one article is "
+                "required."
+            ),
+        ),
+        _bind(
+            "market_risk.overall_risk_score",
+            "Weighted overall risk score and black-swan probability from five "
+            "sibling risk scores (market / economic / sentiment / correlation / "
+            "geopolitical).",
+            fn=risk.calculate_overall_risk_score,
+            touches_byo=True,
+            provenance=(
+                "A COMPOSITE of five sibling-capability outputs, not claims: a "
+                "planner needs an inter-step value-passing layer to assemble "
+                "them, so consumes is empty (the same shape as the macro "
+                "composites L1 corrected -- never point consumes at a claim the "
+                "planner cannot satisfy). Weights are policy-fixed "
+                "(0.30/0.25/0.15/0.15/0.15), NOT calibrated, so the conviction "
+                "gate must not treat the output as a calibrated probability. "
+                "touches_byo because the market/sentiment/correlation/"
+                "geopolitical sub-scores are themselves byo, so the blend "
+                "inherits the most restrictive licence of its inputs. "
+                "black_swan_prob is a policy formula, not an estimate."
             ),
         ),
     ):

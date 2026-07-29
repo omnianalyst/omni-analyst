@@ -1113,6 +1113,83 @@ def _cases():
             and r.correlation == pytest.approx(1.0)
             and r.significance == pytest.approx(1.0),
         ),
+        # --- market risk (capabilities/risk.py) ---
+        "market_risk.liquidity_risk": (
+            {"quotes": [(100.0, 100.5), (100.0, 101.0)]},
+            # (100,100.5) spread 0.5 not wide; (100,101) spread 1.0 wide -> 1/2
+            lambda r: r["score"] == 100 and r["wide_spread_ratio"] == 0.5,
+        ),
+        "market_risk.concentration_risk": (
+            {"market_caps": [100.0, 100.0, 100.0, 100.0, 100.0]},
+            # 5 equal -> HHI 5*(0.2**2)*10000 = 2000 -> score 20; top5 = 1.0
+            lambda r: r["herfindahl_index"] == pytest.approx(2000.0)
+            and r["score"] == pytest.approx(20.0)
+            and r["top_5_concentration"] == 1.0,
+        ),
+        "market_risk.options_skew": (
+            {"skews": [10.0, None, 10.0]},
+            # avg 10 -> score (10 + 20) * 2.5 = 75; None dropped
+            lambda r: r["score"] == 75.0 and r["average_skew"] == 10.0,
+        ),
+        "market_risk.breadth": (
+            {
+                "advance_decline_ratio": 0.4,
+                "percent_above_50ma": 80,
+                "percent_above_200ma": 80,
+                "new_highs": 10,
+                "new_lows": 5,
+            },
+            # A/D 0.4 < 0.5 -> stressed branch -> score 80
+            lambda r: r["score"] == 80.0 and r["advance_decline_ratio"] == 0.4,
+        ),
+        "market_risk.growth_risk": (
+            {"gdp_growth": -0.5, "unemployment": 6.0, "job_growth": 40000},
+            # gdp<0 -> 90; unemp>5 -> +20 = 100; recession 0.15+0.5+0.2 = 0.85
+            lambda r: r["score"] == 100
+            and r["recession_probability"] == pytest.approx(0.85),
+        ),
+        "market_risk.credit_risk": (
+            {"ig_spread": 200.0, "hy_spread": 700.0},
+            # ig 200 > 120*1.5 -> stressed band 80; spread_widening True
+            lambda r: r["score"] == 80 and r["spread_widening"] is True,
+        ),
+        "market_risk.correlation_risks": (
+            {
+                "returns_data": {
+                    "A": [0.01, 0.02, -0.01, 0.0],
+                    "B": [0.01, 0.02, -0.01, 0.0],
+                }
+            },
+            # two identical series -> avg corr 1.0 -> score 80; cluster [[A, B]]
+            lambda r: r["score"] == 80
+            and r["average_correlation"] == pytest.approx(1.0)
+            and r["correlation_clusters"] == [["A", "B"]],
+        ),
+        "market_risk.geopolitical_risks": (
+            {
+                "articles": [
+                    {"title": "Trade war tariffs escalate", "summary": ""},
+                    {"title": "Markets rally", "summary": ""},
+                ]
+            },
+            # 1 of 2 titles carries a risk keyword -> ratio 0.5 -> score 100
+            lambda r: r["score"] == 100.0
+            and r["risk_mentions"] == 1
+            and r["hotspots"] == ["Trade War"],
+        ),
+        "market_risk.overall_risk_score": (
+            {
+                "market_score": 50.0,
+                "economic_score": 50.0,
+                "sentiment_score": 50.0,
+                "correlation_score": 50.0,
+                "geopolitical_score": 50.0,
+            },
+            # weights sum to 1.0 -> overall 50; 40<=50<60 -> moderate
+            lambda r: r["score"] == pytest.approx(50.0)
+            and r["risk_level"] == "moderate"
+            and r["black_swan_prob"] == pytest.approx(50.0 / 3000.0),
+        ),
     }
 
 
@@ -1142,6 +1219,27 @@ class TestRegistryShape:
             "news.aggregate_market_sentiment",
             "news.score_stocktwits_messages",
             "news.stocktwits_sentiment",
+        }
+
+    def test_the_market_risk_block_registers_without_a_name_collision(
+        self, registry
+    ):
+        # build_extracted_registry() raises ValueError on a duplicate name, so
+        # merely reaching here proves no collision; this asserts the intended
+        # set landed intact (guards a merge that drops or duplicates an entry,
+        # and a prefix that drifts away from `market_risk.`).
+        assert {
+            n for n in registry._by_name if n.startswith("market_risk.")
+        } == {
+            "market_risk.liquidity_risk",
+            "market_risk.concentration_risk",
+            "market_risk.options_skew",
+            "market_risk.breadth",
+            "market_risk.growth_risk",
+            "market_risk.credit_risk",
+            "market_risk.correlation_risks",
+            "market_risk.geopolitical_risks",
+            "market_risk.overall_risk_score",
         }
 
 
@@ -1308,6 +1406,44 @@ class TestLicenceClassification:
         # are downstream of price or byo_only perception claims. All twelve
         # default to private until the claim writer proves otherwise.
         assert registry.get(name).touches_byo is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "market_risk.liquidity_risk",
+            "market_risk.concentration_risk",
+            "market_risk.options_skew",
+            "market_risk.breadth",
+            "market_risk.credit_risk",
+            "market_risk.correlation_risks",
+            "market_risk.geopolitical_risks",
+            "market_risk.overall_risk_score",
+        ],
+    )
+    def test_market_risk_caps_over_market_data_inherit_the_input_licence(
+        self, registry, name
+    ):
+        # Quotes / market caps / option IVs / breadth / returns are all
+        # price_snapshot-derived (the only producers are the byo_only polygon
+        # and coingecko feeds); news articles' producer could be byo (news_api
+        # is in the catalog though unwired); credit spreads are commonly bond-
+        # price-derived; and the overall composite blends these byo sub-scores.
+        # Every one inherits its input's licence, exactly like
+        # detect.manipulation -- over-excluded from shared plans rather than
+        # risking a leak.
+        assert registry.get(name).touches_byo is True
+
+    def test_market_risk_growth_score_is_shareable_because_it_runs_on_fred_macro(
+        self, registry
+    ):
+        # analyze_growth_risk takes gdp_growth / unemployment / job_growth --
+        # macro_series_point series sourced from FRED (allowed), with no price
+        # input -- so it is the one market_risk cap safe to fold into shared
+        # coverage. Proven by the closed producer set: the only
+        # macro_series_point producer is fred.series (FALLBACK_ALLOWED). Its
+        # embedded recession_probability diverges from macro.recession_probability
+        # -- that is a divergence in the NUMBER, not a licence issue; see N6.
+        assert registry.get("market_risk.growth_risk").touches_byo is False
 
     def test_a_shareable_query_excludes_every_licensed_producer(self, registry):
         """How a planner avoids tainting an answer it intends to share."""
