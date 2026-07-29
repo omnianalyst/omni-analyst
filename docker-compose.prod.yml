@@ -1,0 +1,103 @@
+# Production-ish stack for Omni Analyst v2.
+#
+# Three services with genuinely different lifecycles:
+#
+#   postgres  Timescale, matching the dev compose image. The single source of
+#             truth; claims, gaps, the ledger and the migration table all live
+#             here.
+#
+#   api       Stateless uvicorn. Scales horizontally - BUT see the note on
+#             first boot below: run a single replica until the initial
+#             migrations are applied, then scale out.
+#
+#   scheduler Exactly ONE. The fill workers lease gaps with SKIP LOCKED, so a
+#             second scheduler would not corrupt anything - it would just double
+#             the provider API spend for the same coverage. Hard-capped at
+#             replicas: 1 on purpose; do not raise it.
+#
+# Build prerequisite (run once before `compose build`, see DEPLOY.md):
+#
+#   uv build --wheel --project ../../Neutron/python --out-dir vendor
+#
+# Secrets come from the operator's environment or a .env file in this directory
+# (compose loads it automatically). POSTGRES_PASSWORD and OMNI_JWT_SECRET are
+# required; compose will refuse to start without them.
+
+services:
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg17
+    container_name: omni_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-omni_v2}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-omni_v2}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: omni-api:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # The app default points at the dev compose port (localhost:5434); in a
+      # container that is the container itself, so override it explicitly.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omni_v2}
+      DEBUG: ${DEBUG:-false}
+      # Required to issue tokens. No default on purpose - see DEPLOY.md.
+      OMNI_JWT_SECRET: ${OMNI_JWT_SECRET:?OMNI_JWT_SECRET is required}
+      # Optional ingestion credentials. Absent ones degrade to honest refusals.
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      POLYGON_API_KEY: ${POLYGON_API_KEY:-}
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY:-}
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-}
+      LICENSED_REDISTRIBUTION_PROVIDERS: ${LICENSED_REDISTRIBUTION_PROVIDERS:-}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    # No healthcheck override: the image's HEALTHCHECK (see Dockerfile) is what
+    # the scheduler's `depends_on: service_healthy` keys off.
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+    image: omni-scheduler:latest
+    # Depends on a HEALTHY api, not just a started one. /health answers only
+    # after the api lifespan has run migrations, so by the time this starts the
+    # schema is in place and the scheduler's own migrate() is a no-op - the two
+    # migrators never race. (The migrator uses _neutron_migrations.version
+    # PRIMARY KEY rather than an advisory lock, so two concurrent first-boot
+    # migrators would clash; this ordering removes that window.)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omni_v2}
+      DEBUG: ${DEBUG:-false}
+      OMNI_JWT_SECRET: ${OMNI_JWT_SECRET:?OMNI_JWT_SECRET is required}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      POLYGON_API_KEY: ${POLYGON_API_KEY:-}
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY:-}
+      SEC_USER_AGENT: ${SEC_USER_AGENT:-}
+      LICENSED_REDISTRIBUTION_PROVIDERS: ${LICENSED_REDISTRIBUTION_PROVIDERS:-}
+    # Exactly one. Do not scale.
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

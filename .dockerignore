@@ -1,0 +1,41 @@
+# Keep the build context small and secrets out of the image.
+#
+# The build context is the repository root. The runtime needs only:
+#   src/  migrations/  pyproject.toml  uv.lock
+# plus the operator-provided neutron wheel under vendor/ (see DEPLOY.md).
+#
+# Everything excluded here is therefore either dev-only, a secret, or a
+# build artefact that must never reach the runtime image.
+
+# --- Secrets (never in the image, never in the context upload) ---
+.env
+.env.*
+!.env.example
+
+# --- Version control / metadata ---
+.git/
+.gitignore
+.gitattributes
+
+# --- Python build / cache artefacts ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Not needed inside the image ---
+# ui/ is the marketing front end; the API serves JSON only.
+ui/
+# tests/ are the dev acceptance suite; the runtime image must not ship them.
+tests/
+
+# --- Orchestrator / agent scratch (work orders, reports, logs, session DBs) ---
+_orchestrator/
+
+# --- OS / editor noise ---
+.DS_Store
+*.swp
