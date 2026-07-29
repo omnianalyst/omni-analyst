@@ -72,7 +72,7 @@ class TestCloseToClose:
         # Construct prices with known log returns so std is exact.
         returns = np.array([0.01, -0.02, 0.015, 0.005, -0.01, 0.02, -0.005, 0.01])
         prices = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(returns)]))
-        window = len(prices)  # use every return
+        window = len(returns)  # use every return (window is a return count)
         expected = float(np.std(returns, ddof=0)) * math.sqrt(252)
         assert close_to_close(
             prices, window=window, annualisation=252
@@ -81,7 +81,7 @@ class TestCloseToClose:
     def test_sample_std_via_ddof_one_differs(self):
         returns = np.array([0.01, -0.02, 0.015, 0.005, -0.01, 0.02, -0.005, 0.01])
         prices = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(returns)]))
-        window = len(prices)
+        window = len(returns)
         pop = close_to_close(prices, window=window, annualisation=1, ddof=0)
         samp = close_to_close(prices, window=window, annualisation=1, ddof=1)
         assert pop != pytest.approx(samp)
@@ -106,8 +106,8 @@ class TestAnnualisationInvariance:
         daily_px = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(daily_ret)]))
         weekly_px = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(weekly_ret)]))
 
-        vol_d = close_to_close(daily_px, window=len(daily_px), annualisation=252)
-        vol_w = close_to_close(weekly_px, window=len(weekly_px), annualisation=52)
+        vol_d = close_to_close(daily_px, window=len(daily_ret), annualisation=252)
+        vol_w = close_to_close(weekly_px, window=len(weekly_ret), annualisation=52)
         assert vol_d == pytest.approx(vol_w, rel=1e-12)
 
 
@@ -118,7 +118,7 @@ class TestAnnualisationInvariance:
 class TestEwma:
     def test_lambda_near_one_approaches_population_std(self):
         prices = _noisy_prices(200, seed=3, sigma=0.02)
-        window = len(prices)
+        window = len(prices) - 1
         # lambda very close to 1 -> weights nearly uniform over the window ->
         # sigma^2 -> mean(r^2), the population variance of zero-mean returns.
         ewma_hi = ewma(prices, window=window, annualisation=1, lambda_=0.99999)
@@ -132,7 +132,7 @@ class TestEwma:
         # approaches the last squared return.
         prices = _noisy_prices(50, seed=4, sigma=0.02)
         last_ret = float(np.log(prices[-1] / prices[-2]))
-        out = ewma(prices, window=len(prices), annualisation=1, lambda_=1e-6)
+        out = ewma(prices, window=len(prices) - 1, annualisation=1, lambda_=1e-6)
         assert out == pytest.approx(abs(last_ret), rel=1e-3)
 
     def test_default_lambda_is_riskmetrics(self):
@@ -141,9 +141,9 @@ class TestEwma:
     def test_lambda_out_of_range_raises(self):
         prices = _noisy_prices(40, seed=5)
         with pytest.raises(Unavailable, match="lambda_"):
-            ewma(prices, window=len(prices), annualisation=252, lambda_=1.0)
+            ewma(prices, window=len(prices) - 1, annualisation=252, lambda_=1.0)
         with pytest.raises(Unavailable, match="lambda_"):
-            ewma(prices, window=len(prices), annualisation=252, lambda_=0.0)
+            ewma(prices, window=len(prices) - 1, annualisation=252, lambda_=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -243,44 +243,33 @@ class TestVolatilityOfVolatility:
 
 class TestRegimeAgreement:
     def test_close_to_close_ddof0_equals_regime_realised_vol(self):
-        # Both modules, given the same return series, must produce the same
-        # trailing-window population std. regime.realised_volatility operates
-        # on returns and reports the rolling series; its last value is the
-        # trailing population std. close_to_close operates on prices (log
-        # returns) with ddof=0. Feeding matching inputs, they agree.
+        # Both modules, given the same return series at the SAME window integer,
+        # must produce the same trailing population std. regime.realised_
+        # volatility operates on returns and reports the rolling series; its
+        # last value is the trailing population std. close_to_close operates on
+        # prices (log returns) with ddof=0. window is a return count in both,
+        # so the same integer spans the same returns.
         rng = np.random.RandomState(21)
         returns = rng.normal(0.0, 0.02, size=60)
         prices = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(returns)]))
 
         regime_path = regime.realised_volatility(returns.tolist(), window=len(returns))
         regime_vol = float(regime_path[-1])
-        vol = close_to_close(prices, window=len(prices), annualisation=1, ddof=0)
+        vol = close_to_close(prices, window=len(returns), annualisation=1, ddof=0)
         assert vol == pytest.approx(regime_vol, rel=1e-12)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "regime.py:99 slices returns[max(0,i-window):i+1] -- window+1 points "
-            "for interior i, not window. The full-series test above masks this: "
-            "max(0,...) clamps to 0 so the slice grows from the start and the "
-            "off-by-one is invisible. On a trailing window it is exposed: regime "
-            "window=W uses W+1 returns, close_to_close window=W+1 uses W returns, "
-            "so they disagree. Fix regime.realised_volatility to slice "
-            "returns[i-window+1:i+1] and remove this xfail (it will then xpass)."
-        ),
-    )
     def test_close_to_close_trailing_window_matches_regime(self):
-        # Same offset convention as the full-series test above (close_to_close
-        # counts prices, so its window is one larger than the return count
-        # regime sees), but on a trailing window shorter than the series -- the
-        # case the full-series test cannot reach. Out of band: patching
-        # regime.py:99 to [i-window+1:i+1] makes this assertion hold exactly.
+        # The same integer passed to both modules spans the same returns and
+        # produces the same number -- on a trailing window shorter than the
+        # series, the case the full-series test above cannot reach. This is the
+        # assertion the off-by-one in v1's inline endpoint (regime used
+        # window+1 returns) broke; it xfailed strict until S8 fixed the slice.
         rng = np.random.RandomState(21)
         returns = rng.normal(0.0, 0.02, size=100)
         prices = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(returns)]))
 
         regime_vol = float(regime.realised_volatility(returns.tolist(), window=20)[-1])
-        vol = close_to_close(prices, window=21, annualisation=1, ddof=0)
+        vol = close_to_close(prices, window=20, annualisation=1, ddof=0)
         assert vol == pytest.approx(regime_vol, rel=1e-12)
 
 

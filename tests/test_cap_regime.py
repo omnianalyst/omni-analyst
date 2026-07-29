@@ -21,20 +21,31 @@ from omni.capabilities.regime import (
 from omni.ingest.protocol import Unavailable
 
 # ---------------------------------------------------------------------------
-# realised_volatility -- bit-for-bit against the inline endpoint's formula
+# realised_volatility -- trailing population std over exactly `window` returns
 # ---------------------------------------------------------------------------
 
 class TestRealisedVolatility:
-    def test_trailing_population_std_matches_inline_formula(self):
-        # inline: rolling_vol[i] = np.std(returns[max(0, i - window) : i + 1])
-        # window=2 -> slice grows to window+1 = 3 once i >= window
-        r = [1.0, 2.0, 3.0, 4.0, 5.0]
+    def test_trailing_population_std_uses_window_returns(self):
+        # window is the number of returns each statistic spans: the interior
+        # slice is returns[i-window+1:i+1] -- exactly window points. (v1's
+        # inline endpoint sliced [max(0,i-window):i+1], window+1 points; fixing
+        # that is the deliberate deviation recorded in regime.py.)
+        #
+        # Hand-derived (population std, ddof=0):
+        #   std([1.0])        = 0.0
+        #   std([1.0, 2.0])   = 0.5      (mean 1.5, var 0.25)
+        #   std([2.0, 3.0])   = 0.5      (mean 2.5, var 0.25)
+        #   std([3.0, 9.0])   = 3.0      (mean 6.0, var 9.0)
+        #   std([9.0, 20.0])  = 5.5      (mean 14.5, var 30.25)
+        # The last two pin the trailing window: v1's window+1 slice would give
+        # std([2,3,9])=3.091 and std([3,9,20])=7.040, neither of which matches.
+        r = [1.0, 2.0, 3.0, 9.0, 20.0]
         vol = realised_volatility(r, window=2)
-        assert vol[0] == pytest.approx(0.0)            # std([1])
-        assert vol[1] == pytest.approx(0.5)            # std([1, 2])
-        assert vol[2] == pytest.approx(np.std([1.0, 2.0, 3.0]))   # slice [0:3]
-        assert vol[3] == pytest.approx(np.std([2.0, 3.0, 4.0]))   # slice [1:4]
-        assert vol[4] == pytest.approx(np.std([3.0, 4.0, 5.0]))   # slice [2:5]
+        assert vol[0] == pytest.approx(0.0)                       # std([1.0])
+        assert vol[1] == pytest.approx(0.5)                       # std([1, 2])
+        assert vol[2] == pytest.approx(0.5)                       # std([2, 3])
+        assert vol[3] == pytest.approx(np.std([3.0, 9.0]))        # std([3, 9]) = 3.0
+        assert vol[4] == pytest.approx(np.std([9.0, 20.0]))       # std([9, 20]) = 5.5
 
     def test_uses_population_std_not_sample_std(self):
         # np.std is ddof=0; sample std (ddof=1) would differ for n=2.
@@ -64,13 +75,13 @@ class TestClassifyVolatility:
         assert out["current_volatility"] > out["median_volatility"] * 2.0
         assert out["window"] == 20
         # F3: pin the absolute magnitude, not just the label/relative comparison.
-        # The last bar's vol is the population std of its trailing window+1 bars
-        # (inline formula rolling_vol[i] = std(returns[max(0,i-window):i+1]]);
-        # the slice is window+1, not window. A wrong magnitude -- variance,
-        # wrong ddof, percent-vs-decimal -- still labels "volatile" but cannot
-        # match this value.
+        # The last bar's vol is the population std of its trailing window bars
+        # (rolling_vol[i] = std(returns[max(0,i-window+1):i+1])); the slice is
+        # exactly window, not window+1. A wrong magnitude -- variance,
+        # wrong ddof, percent-vs-decimal, or the v1 window+1 off-by-one --
+        # still labels "volatile" but cannot match this value.
         last = len(rising) - 1
-        expected_current = float(np.std(rising[max(0, last - 20): last + 1]))
+        expected_current = float(np.std(rising[max(0, last - 20 + 1): last + 1]))
         assert out["current_volatility"] == pytest.approx(expected_current)
 
     def test_lower_variance_counterpart_is_quiet(self):

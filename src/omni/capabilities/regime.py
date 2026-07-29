@@ -42,6 +42,15 @@ return when fewer than 20 bars were available -- this module raises
 classifier that silently shrinks its window is how a stale-looking-but-covered
 network enters the store.
 
+Window convention (and a deliberate deviation from v1). Throughout this module
+and ``capabilities/volatility.py``, ``window`` is the number of observations
+the statistic is computed over. For ``realised_volatility`` that is returns, so
+the interior slice is ``returns[i - window + 1 : i + 1]``. v1's inline endpoint
+sliced ``returns[max(0, i - window) : i + 1]`` -- ``window + 1`` points -- which
+disagreed with both its own ">= window" contract and the volatility
+estimators; ``realised_volatility`` corrects it and therefore differs from v1
+by one observation per window. See the function docstring and report S8.
+
 Thresholds v1 hardcoded (the 1.3 / 2.0 vol multipliers and the 20 / 60 trend
 windows) are named module constants below, exactly as `capabilities/risk.py`
 treated its credit-spread anchors. None are tuned and none are invented.
@@ -86,17 +95,27 @@ def realised_volatility(
 ) -> np.ndarray:
     """Trailing rolling population std of returns.
 
-    Ported verbatim from the inline endpoint:
-    ``rolling_vol[i] = np.std(returns[max(0, i - window) : i + 1])``. Uses
-    population std (ddof=0), matching the inline; the volatility calculator's
-    `_simple_volatility` uses sample std (pandas ddof=1) -- a disagreement noted
-    in the report, not reconciled here.
+    ``window`` is the number of returns each statistic is computed over: the
+    interior slice is ``returns[i - window + 1 : i + 1]`` -- exactly ``window``
+    points. Uses population std (ddof=0), matching the inline; the volatility
+    calculator's ``_simple_volatility`` uses sample std (pandas ddof=1) -- a
+    disagreement noted in the report, not reconciled here. This is the one
+    window convention shared with ``capabilities/volatility.close_to_close``
+    and ``ewma``: the same integer passed to all three spans the same returns.
+
+    DEVIATION FROM v1 (deliberate; see PORTING.md). The inline endpoint ported
+    here sliced ``returns[max(0, i - window) : i + 1]`` -- ``window + 1`` points
+    for an interior ``i`` -- which is faithful to v1 but wrong relative to the
+    docstring's ">= window observations" contract and out of step with the
+    volatility estimators. Fixing it makes this module disagree with v1's inline
+    endpoint by one observation per window. That is a considered exception to
+    bit-for-bit fidelity, recorded here, not an oversight.
     """
     returns = np.asarray(returns, dtype=float)
     _validate(returns, window)
     out = np.empty(len(returns), dtype=float)
     for i in range(len(returns)):
-        out[i] = np.std(returns[max(0, i - window): i + 1])
+        out[i] = np.std(returns[max(0, i - window + 1): i + 1])
     return out
 
 

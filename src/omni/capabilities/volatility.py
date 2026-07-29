@@ -7,6 +7,22 @@ and matches ``capabilities/regime.py`` so the two v2 modules never report
 different volatilities for the same series -- the exact v1 defect this rebuild
 exists to remove.
 
+Window convention
+-----------------
+``window`` is the number of observations the statistic is computed over,
+everywhere in this module and in ``capabilities/regime.py``:
+
+- ``close_to_close`` / ``ewma`` -- the statistic is a std / weighted variance
+  of log returns, so ``window`` is a *return* count. ``window`` returns require
+  ``window + 1`` prices; the trailing slice is ``returns[-window:]``. Passing
+  the same integer to ``regime.realised_volatility`` and ``close_to_close``
+  therefore spans the same returns and yields the same number (pinned in
+  ``tests/test_cap_volatility.py``).
+- ``parkinson`` / ``garman_klass`` / ``rogers_satchell`` -- the statistic is a
+  mean of per-bar variance terms, so ``window`` is a *bar* count.
+- ``volatility_of_volatility`` -- the statistic is a std of readings, so
+  ``window`` is a *reading* count.
+
 Estimators
 ----------
 - ``close_to_close`` -- log-return std over a trailing window. v1's
@@ -51,9 +67,10 @@ v1 is self-inconsistent about the standard deviation's degrees of freedom:
 
 This module defaults to **ddof=0** (population) everywhere a std of a sample
 is taken, exposed as an explicit ``ddof`` argument on ``close_to_close`` and
-``volatility_of_volatility``. With that default, ``volatility.py`` and
-``regime.py`` produce identical volatility for the same return series (a
-cross-check is pinned in ``tests/test_cap_volatility.py``). The OHLC
+``volatility_of_volatility``. With that default, and with the shared
+return-count window convention above, ``volatility.py`` and ``regime.py``
+produce identical volatility for the same return series at the same window
+integer (a cross-check is pinned in ``tests/test_cap_volatility.py``). The OHLC
 estimators carry no ``ddof`` choice: their per-bar variance contributions are
 summed and divided by the bar count (a population mean), exactly as the
 closed forms require. EWMA carries no ``ddof`` choice; it is a weighted recursion on squared
@@ -136,16 +153,24 @@ def close_to_close(
 ) -> float:
     """Annualised close-to-close volatility from a price series.
 
-    Log returns over the trailing ``window`` prices; population std by default
-    (``ddof=0``), matching ``capabilities/regime.realised_volatility``. A
-    series with zero return variance (constant log return) raises rather than
-    returning 0.0 -- the zero-variance rule shared with regime.
+    ``window`` is a *return* count (the shared convention): the std is taken
+    over the trailing ``window`` log returns, which come from ``window + 1``
+    prices. Population std by default (``ddof=0``), matching
+    ``capabilities/regime.realised_volatility`` -- the same integer passed to
+    both spans the same returns. A series with zero return variance (constant
+    log return) raises rather than returning 0.0 -- the zero-variance rule
+    shared with regime.
     """
     prices = np.asarray(prices, dtype=float)
     _check_window(len(prices), window)
     _check_annualisation(annualisation)
     returns = _log_returns(prices)
-    recent = returns[-(window - 1):]
+    if len(returns) < window:
+        raise Unavailable(
+            f"need >= {window} returns for window={window} "
+            f"(>= {window + 1} prices), got {len(returns)}"
+        )
+    recent = returns[-window:]
     if _is_effectively_constant(recent):
         raise Unavailable("zero variance in returns; volatility undefined")
     return float(np.std(recent, ddof=ddof)) * np.sqrt(annualisation)
@@ -159,6 +184,11 @@ def ewma(
     lambda_: float = DEFAULT_LAMBDA,
 ) -> float:
     """Annualised EWMA volatility over the trailing window.
+
+    ``window`` is a *return* count (the shared convention): the weighted
+    variance is taken over the trailing ``window`` log returns, which come from
+    ``window + 1`` prices. The same integer passed to ``close_to_close`` and to
+    ``regime.realised_volatility`` therefore spans the same returns.
 
     Normalised exponential weights on squared log returns (zero-mean)::
 
@@ -186,7 +216,12 @@ def ewma(
     _check_window(len(prices), window)
     _check_annualisation(annualisation)
     returns = _log_returns(prices)
-    recent = returns[-(window - 1):]
+    if len(returns) < window:
+        raise Unavailable(
+            f"need >= {window} returns for window={window} "
+            f"(>= {window + 1} prices), got {len(returns)}"
+        )
+    recent = returns[-window:]
     r2 = recent ** 2
     n = len(r2)
     weights = lambda_ ** np.arange(n - 1, -1, -1, dtype=float)
