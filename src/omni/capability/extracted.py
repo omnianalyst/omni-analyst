@@ -109,15 +109,18 @@ def _bind(
 def build_extracted_registry() -> Registry:
     from omni.capabilities import (
         attribution,
+        execution_analytics,
         fixed_income,
         fundamentals,
         indicators,
         macro,
+        microstructure,
         news,
         options,
         portfolio,
         portfolio_risk,
         regime,
+        signal_fusion,
         volatility,
     )
 
@@ -1072,6 +1075,203 @@ def build_extracted_registry() -> Registry:
             fn=indicators.obv,
             consumes=("price_snapshot",),
             touches_byo=True,
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Market microstructure (capabilities/microstructure.py) ----------
+    # All three compute over trade prints and quotes (price / volume market
+    # data), so all inherit the price-feed licence and are touches_byo exactly
+    # like detect.manipulation. The closed enum has no claim type for an
+    # effective spread, a Kyle lambda or a VPIN reading, so produces is empty.
+    for cap in (
+        _bind(
+            "microstructure.effective_spread",
+            "Effective, realised and price-improvement spreads over the last "
+            "100 trades matched to their prevailing quotes, at a configurable "
+            "realised-spread horizon.",
+            fn=microstructure.effective_spread,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Means over the trades that contributed each measure, so "
+                "realised_spread may reflect a subset. Fewer than 5 trades or "
+                "quotes, or no derivable realised observation, raises rather "
+                "than returning v1's fabricated 0.0."
+            ),
+        ),
+        _bind(
+            "microstructure.kyle_lambda",
+            "Kyle's lambda: the OLS slope of price-change on tick-rule signed "
+            "order flow, scaled by 1e4.",
+            fn=microstructure.kyle_lambda,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "A regression-derived price-impact coefficient, not a "
+                "measurement; signed by the tick rule (the first trade is "
+                "treated as a buy). Fewer than 10 trades, a flat price series, "
+                "or zero-variance signed volume raises rather than returning "
+                "0.0."
+            ),
+        ),
+        _bind(
+            "microstructure.order_flow_toxicity",
+            "Volume-synchronised probability of informed trading (VPIN): the "
+            "mean absolute buy/sell volume imbalance across volume buckets.",
+            fn=microstructure.order_flow_toxicity,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "A [0, 1] imbalance ratio over volume buckets; trade direction "
+                "uses the VPIN tick rule (a non-decreasing tick is a buy). "
+                "Fewer than 50 trades or 5 completed buckets raises rather "
+                "than returning 0.0."
+            ),
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Execution analytics / post-trade TCA (capabilities/execution_analytics.py) ---
+    # These measure executions that have already happened. The slippage and
+    # shortfall caps consume fill prices and benchmark price/volume bars, all
+    # price-derived, so they are touches_byo exactly like detect.manipulation.
+    # slippage_summary / identify_outliers take already-computed scalar series
+    # whose licence the descriptor cannot see, so they are touches_byo too --
+    # their output is audience-scoped to whoever owned the underlying fills.
+    # The closed enum has no claim type for a slippage, shortfall or impact
+    # figure, so produces is empty for all.
+    for cap in (
+        _bind(
+            "execution.implementation_shortfall",
+            "Perold/Wagner implementation shortfall decomposed into delay, "
+            "trading and opportunity cost in bps, exactly additive in the "
+            "decision price as the single numeraire.",
+            fn=execution_analytics.implementation_shortfall,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "decision_price is a required argument independent of the "
+                "fills; shortfall against the first fill's own price is "
+                "definitionally zero and is the classic fake. The three "
+                "components sum to the total to floating tolerance "
+                "(check_additivity runs inside the call)."
+            ),
+        ),
+        _bind(
+            "execution.benchmark_slippage",
+            "Fill VWAP versus a supplied benchmark price (arrival / decision / "
+            "close), in bps, signed for side.",
+            fn=execution_analytics.benchmark_slippage_bps,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "execution.vwap_slippage",
+            "Fill VWAP versus the interval VWAP built from a benchmark "
+            "price/volume window, in bps.",
+            fn=execution_analytics.vwap_slippage_bps,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "The benchmark VWAP is computed from the supplied bars; a "
+                "zero-volume window raises rather than dividing by a smuggled-"
+                "in scalar. Fills outside the window raise."
+            ),
+        ),
+        _bind(
+            "execution.slippage_summary",
+            "Mean, median and standard deviation of a slippage series in bps.",
+            fn=execution_analytics.slippage_summary,
+            touches_byo=True,
+            provenance=(
+                "A descriptive statistic over caller-supplied slippage "
+                "values; the values inherit the licence of the executions "
+                "they were computed from. An empty series raises."
+            ),
+        ),
+        _bind(
+            "execution.identify_outliers",
+            "Indices whose value exceeds z_threshold standard deviations from "
+            "the mean (default |z| > 2).",
+            fn=execution_analytics.identify_outliers,
+            touches_byo=True,
+            provenance=(
+                "z-score flagging over a caller-supplied series; a constant "
+                "series returns [] via the exact np.ptp == 0 guard rather "
+                "than fabricating z-scores from floating-point residue."
+            ),
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Signal fusion: normalisation, convergence, lead-lag --------------
+    # (capabilities/signal_fusion.py)
+    # These run over already-collected signal / return scalars the caller
+    # supplies. Those values are downstream of perception_* claims (news and
+    # social are byo_only) or of price-derived return series, and the fusion
+    # arithmetic cannot see which, so every one is touches_byo -- a fused or
+    # normalised reading must never be assumed shareable. The closed enum has
+    # no claim type for a normalised signal, a convergence reading, a
+    # conviction score or a lead-lag result, so produces is empty. None of the
+    # inputs is a typed claim (the functions are signal-vector agnostic), so
+    # consumes is empty too.
+    for cap in (
+        _bind(
+            "signal_fusion.normalize",
+            "Put a signal series on a common [-1, +1] scale: one of identity "
+            "/ sign / z-score / percentile / min-max / tanh / rank, with "
+            "optional inversion.",
+            fn=signal_fusion.normalize,
+            touches_byo=True,
+            provenance=(
+                "A deterministic transform, not a measurement. The rolling "
+                "z-score is a z-score against a stated reference window, "
+                "clipped to [-1, 1]; a globally constant input raises rather "
+                "than yielding v1's fabricated zeros."
+            ),
+        ),
+        _bind(
+            "signal_fusion.convergence",
+            "Fuse one date's already-normalised signal vector into a "
+            "directional reading: weighted direction, alignment, bull / bear "
+            "/ neutral counts and the largest pairwise divergences.",
+            fn=signal_fusion.convergence,
+            touches_byo=True,
+            provenance=(
+                "Weighted mean and 1-std agreement over the supplied signals; "
+                "fewer than two signals, or weights summing to zero, raise "
+                "rather than falling back to uniform weights. No absent "
+                "signal is invented."
+            ),
+        ),
+        _bind(
+            "signal_fusion.conviction",
+            "Assemble a conviction score from alignment, direction and a "
+            "caller-supplied participation (coverage) fraction: "
+            "0.6*alignment + 0.2*participation + 0.2*|direction|.",
+            fn=signal_fusion.conviction,
+            touches_byo=True,
+            provenance=(
+                "v1's fixed-weight assembly; the weights are declared "
+                "constants, not calibrated. participation is a required "
+                "coverage input -- inventing a breadth number is the "
+                "substitution this port exists to remove."
+            ),
+        ),
+        _bind(
+            "signal_fusion.lead_lag",
+            "Find the shift maximising |correlation| between two series over "
+            "[-max_lag, max_lag], with v1's t-stat significance.",
+            fn=signal_fusion.lead_lag,
+            touches_byo=True,
+            provenance=(
+                "Cross-correlation scan; the best lag is refused when its "
+                "effective overlap falls below the sample-size floor (a two-"
+                "point correlation is noise, not an edge). Significance is "
+                "reported, not used to silently drop an adequately-sampled "
+                "lag."
+            ),
         ),
     ):
         registry.add(cap)

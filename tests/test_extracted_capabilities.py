@@ -13,7 +13,9 @@ from omni.capabilities.fixed_income import (
     YieldCurve,
     nelson_siegel,
 )
+from omni.capabilities.execution_analytics import BenchmarkBar, Fill
 from omni.capabilities.portfolio_risk import Scenario
+from omni.capabilities.signal_fusion import NormalizationMethod
 from omni.capabilities.volatility import Bar
 from omni.capability.builtin import build_builtin_registry
 from omni.capability.extracted import CLAIM_TYPES, build_extracted_registry
@@ -232,6 +234,83 @@ def _ohlc_bars():
 
 def _returns(n=50, seed=7):
     return list(np.random.default_rng(seed).normal(0, 0.01, n))
+
+
+# --- Microstructure / execution / signal-fusion fixtures ----------------
+
+# A flat quote book (bid 99.99 / ask 100.01, mid 100.00) and 10 buys at the
+# ask, so effective_spread = 2 * |100.01 - 100.00| = 0.02 and a buy at 100.01
+# whose future mid reverts to 100.00 gives realised_spread = -0.02.
+def _effective_spread_inputs():
+    from datetime import datetime, timedelta
+
+    base = datetime(2024, 1, 1, 9, 30)
+    quotes = [
+        {"timestamp": base + timedelta(minutes=i), "bid": 99.99, "ask": 100.01}
+        for i in range(25)
+    ]
+    trades = [
+        {
+            "timestamp": base + timedelta(minutes=i, seconds=30),
+            "price": 100.01,
+            "side": "buy",
+            "volume": 100.0,
+        }
+        for i in range(1, 11)
+    ]
+    return {"trades": trades, "quotes": quotes, "horizon": timedelta(minutes=5)}
+
+
+# 11 upticks where price_change == 1e-4 * signed_volume exactly, so the OLS
+# slope is 1e-4 and lambda = slope * 1e4 == 1.0.
+def _kyle_lambda_inputs():
+    volumes = [(i + 1) * 10.0 for i in range(11)]
+    prices = [100.0]
+    for i in range(1, 11):
+        prices.append(prices[-1] + 1e-4 * volumes[i])
+    trades = [{"price": p, "volume": v} for p, v in zip(prices, volumes)]
+    return {"trades": trades}
+
+
+# 50 strictly-increasing-price trades at constant volume: every volume bucket
+# is one-sided (all buys), so VPIN == 1.0.
+def _vpin_inputs():
+    trades = [
+        {"price": 100.0 + i * 0.001, "volume": 10.0} for i in range(50)
+    ]
+    return {"trades": trades}
+
+
+# 40 of 100 ordered, filled at 100 vs decision 100, market 101, close 104:
+# delay = 0.4*1/100 = 40 bps, trading = 0.4*(100-101)/100 = -40 bps,
+# opportunity = 0.6*4/100 = 240 bps, total = 240 bps (additive).
+def _implementation_shortfall_inputs():
+    from datetime import datetime
+
+    return {
+        "fills": [Fill(price=100.0, size=40.0, timestamp=datetime(2024, 1, 1, 10, 0))],
+        "decision_price": 100.0,
+        "market_price_at_execution": 101.0,
+        "close_price": 104.0,
+        "order_quantity": 100.0,
+        "side": "buy",
+    }
+
+
+def _fill(price=101.0, size=100.0):
+    from datetime import datetime
+
+    return Fill(price=price, size=size, timestamp=datetime(2024, 1, 1, 10, 0))
+
+
+def _flat_window_bars(price=100.0):
+    from datetime import datetime, timedelta
+
+    base = datetime(2024, 1, 1, 10, 0)
+    return [
+        BenchmarkBar(timestamp=base, price=price, volume=50.0),
+        BenchmarkBar(timestamp=base + timedelta(minutes=1), price=price, volume=50.0),
+    ]
 
 
 def _cases():
@@ -957,6 +1036,83 @@ def _cases():
             },
             lambda r: r == [0.0, 200.0, 50.0, 350.0, 100.0],
         ),
+        # --- microstructure ---
+        "microstructure.effective_spread": (
+            _effective_spread_inputs(),
+            lambda r: r["effective_spread"] == pytest.approx(0.02)
+            and r["realized_spread"] == pytest.approx(-0.02)
+            and r["price_improvement"] == pytest.approx(-0.01),
+        ),
+        "microstructure.kyle_lambda": (
+            _kyle_lambda_inputs(),
+            # price_change == 1e-4 * signed_volume, so the slope is 1e-4. The
+            # function mixes np.cov (ddof=1) with np.var (ddof=0), adding an
+            # n/(n-1) factor (n=10 price-changes): lambda = 1e-4 * 1e4 * 10/9.
+            lambda r: r == pytest.approx(10.0 / 9.0),
+        ),
+        "microstructure.order_flow_toxicity": (
+            _vpin_inputs(),
+            lambda r: r == pytest.approx(1.0),
+        ),
+        # --- execution analytics ---
+        "execution.implementation_shortfall": (
+            _implementation_shortfall_inputs(),
+            lambda r: r.total_bps == pytest.approx(240.0)
+            and r.delay_cost_bps == pytest.approx(40.0)
+            and r.trading_cost_bps == pytest.approx(-40.0)
+            and r.opportunity_cost_bps == pytest.approx(240.0)
+            and r.fill_rate == pytest.approx(0.4),
+        ),
+        "execution.benchmark_slippage": (
+            {"fills": [_fill(101.0)], "benchmark_price": 100.0, "side": "buy"},
+            lambda r: r == pytest.approx(100.0),
+        ),
+        "execution.vwap_slippage": (
+            {"fills": [_fill(101.0)], "bars": _flat_window_bars(100.0), "side": "buy"},
+            lambda r: r == pytest.approx(100.0),
+        ),
+        "execution.slippage_summary": (
+            {"slippage_bps": [10.0, 20.0, 30.0]},
+            lambda r: r["mean_bps"] == pytest.approx(20.0)
+            and r["median_bps"] == pytest.approx(20.0)
+            and r["n"] == 3,
+        ),
+        "execution.identify_outliers": (
+            {"values": [0.0] * 9 + [100.0]},
+            lambda r: len(r) == 1
+            and r[0]["index"] == 9
+            and r[0]["z_score"] == pytest.approx(3.0),
+        ),
+        # --- signal fusion ---
+        "signal_fusion.normalize": (
+            {
+                "values": [1.0, 2.0, 3.0],
+                "method": NormalizationMethod.MIN_MAX,
+                "native_range": (1.0, 3.0),
+            },
+            lambda r: r.tolist() == pytest.approx([-1.0, 0.0, 1.0]),
+        ),
+        "signal_fusion.convergence": (
+            {"signal_values": {"a": 0.5, "b": 0.5}},
+            lambda r: r.direction == pytest.approx(0.5)
+            and r.alignment == pytest.approx(1.0)
+            and r.bullish == 2
+            and r.bearish == 0,
+        ),
+        "signal_fusion.conviction": (
+            {"alignment_value": 0.8, "direction_value": 0.5, "participation": 0.5},
+            lambda r: r == pytest.approx(0.68),
+        ),
+        "signal_fusion.lead_lag": (
+            {
+                "a": [float(i) for i in range(40)],
+                "b": [0.0, 0.0] + [float(i) for i in range(38)],
+                "max_lag": 5,
+            },
+            lambda r: r.lag == 2
+            and r.correlation == pytest.approx(1.0)
+            and r.significance == pytest.approx(1.0),
+        ),
     }
 
 
@@ -1118,6 +1274,31 @@ class TestLicenceClassification:
     def test_market_analytics_over_prices_inherit_the_price_licence(
         self, registry, name
     ):
+        assert registry.get(name).touches_byo is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "microstructure.effective_spread",
+            "microstructure.kyle_lambda",
+            "microstructure.order_flow_toxicity",
+            "execution.implementation_shortfall",
+            "execution.benchmark_slippage",
+            "execution.vwap_slippage",
+            "execution.slippage_summary",
+            "execution.identify_outliers",
+            "signal_fusion.normalize",
+            "signal_fusion.convergence",
+            "signal_fusion.conviction",
+            "signal_fusion.lead_lag",
+        ],
+    )
+    def test_batch_n3_caps_inherit_their_input_licence(self, registry, name):
+        # Microstructure and the fill/bar execution caps compute over price-
+        # derived market data; the slippage-summary / outlier / signal-fusion
+        # caps take scalars whose licence the descriptor cannot see but which
+        # are downstream of price or byo_only perception claims. All twelve
+        # default to private until the claim writer proves otherwise.
         assert registry.get(name).touches_byo is True
 
     def test_a_shareable_query_excludes_every_licensed_producer(self, registry):
