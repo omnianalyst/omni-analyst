@@ -27,6 +27,7 @@ def create_app(database_url: str | None = None) -> App:
         lifespan=lifespan,
     )
 
+    from omni.api.alerts import build_router as alerts_router
     from omni.api.auth import build_router as auth_router
     from omni.api.watchlist import build_router as watchlist_router
     from omni.api.briefing import build_router as briefing_router
@@ -38,6 +39,7 @@ def create_app(database_url: str | None = None) -> App:
     app.include_router(briefing_router(app))
     app.include_router(auth_router(app))
     app.include_router(watchlist_router(app))
+    app.include_router(alerts_router(app))
     return app
 
 
