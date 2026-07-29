@@ -452,3 +452,106 @@ class TestFailurePaths:
     def test_monte_carlo_zero_vol_raises(self):
         with pytest.raises(Unavailable):
             monte_carlo(S, K, T, R, 0.0, 0.0, "call", seed=1)
+
+
+# ---------------------------------------------------------------------------
+# Option-type validation -- an unrecognised side must raise, not silently
+# price the other side. v1 typed the side as an OptionType enum; the port
+# took a bare str and branched on `option_type == "call"`, so every value
+# that was not exactly "call" priced a put: "Call", "CALL", "c", "put ",
+# "", None, a typo. No exception, no warning, a plausible number.
+# ---------------------------------------------------------------------------
+
+
+_BAD_SIDES = ["Call", "CALL", "c", "put ", "", None, "typo"]
+
+
+class TestOptionTypeValidation:
+    def test_black_scholes_rejects_unknown_side(self):
+        for bad in _BAD_SIDES:
+            with pytest.raises(Unavailable):
+                black_scholes(S, K, T, R, SIGMA, 0.0, bad)
+
+    def test_black_scholes_rejects_unknown_side_even_at_expiry(self):
+        # The expired branch returns intrinsic; a bad side must still raise
+        # before it is reached, otherwise an expired "Call" silently prices a
+        # put payoff.
+        for bad in _BAD_SIDES:
+            with pytest.raises(Unavailable):
+                black_scholes(S, K, 0.0, R, SIGMA, 0.0, bad)
+
+    def test_implied_volatility_rejects_unknown_side(self):
+        for bad in _BAD_SIDES:
+            with pytest.raises(Unavailable):
+                implied_volatility(5.0, S, K, T, R, 0.0, bad)
+
+    def test_implied_volatility_rejects_unknown_side_even_when_expired(self):
+        # T <= 0 would otherwise return None before the side is read; the side
+        # must be validated first so an expired option with a bad side raises
+        # rather than silently yielding "no IV".
+        for bad in _BAD_SIDES:
+            with pytest.raises(Unavailable):
+                implied_volatility(5.0, S, K, 0.0, R, 0.0, bad)
+
+    def test_monte_carlo_rejects_unknown_side(self):
+        for bad in _BAD_SIDES:
+            with pytest.raises(Unavailable):
+                monte_carlo(S, K, T, R, SIGMA, 0.0, bad, seed=1)
+
+    def test_build_volatility_surface_rejects_unknown_side(self):
+        strikes = np.array([100.0])
+        expiries = np.array([0.5])
+        grid = np.array([[5.0]])
+        for bad in _BAD_SIDES:
+            with pytest.raises(Unavailable):
+                build_volatility_surface(S, R, 0.0, strikes, expiries, grid, bad)
+
+    def test_put_call_ratio_rejects_chain_with_unknown_side(self):
+        # A "Call" among the calls must not be counted as a put; the whole
+        # chain is unanalysable.
+        chain = [
+            _contract(100, "call", volume=100),
+            _contract(100, "Call", volume=100),
+        ]
+        with pytest.raises(Unavailable):
+            put_call_ratio(chain)
+
+    def test_put_call_ratio_rejects_chain_with_missing_side(self):
+        chain = [
+            {"strike": 100, "volume": 100},
+            _contract(100, "put", volume=100),
+        ]
+        with pytest.raises(Unavailable):
+            put_call_ratio(chain)
+
+    def test_max_pain_rejects_chain_with_unknown_side(self):
+        chain = [
+            _contract(95, "call", oi=50),
+            _contract(105, "Put", oi=50),
+        ]
+        with pytest.raises(Unavailable):
+            max_pain(chain)
+
+    def test_detect_unusual_activity_rejects_chain_with_unknown_side(self):
+        chain = [
+            _contract(100, "call", volume=300, oi=100),
+            _contract(100, "", volume=300, oi=100),
+        ]
+        with pytest.raises(Unavailable):
+            detect_unusual_activity(chain)
+
+    def test_parity_errors_rejects_chain_with_unknown_side(self):
+        # Previously the malformed contract was silently dropped from pairing
+        # and the chain was analysed one leg short.
+        call_price = black_scholes(S, K, T, R, SIGMA, 0.0, "call")["price"]
+        chain = [
+            _contract(K, "call", bid=call_price - 0.01, ask=call_price + 0.01),
+            _contract(K, "Call", bid=call_price - 0.01, ask=call_price + 0.01),
+        ]
+        with pytest.raises(Unavailable):
+            put_call_parity_errors(chain, S, R)
+
+    def test_message_names_the_offending_value(self):
+        # The work order requires the exception to name the value it received.
+        with pytest.raises(Unavailable, match="Call"):
+            black_scholes(S, K, T, R, SIGMA, 0.0, "Call")

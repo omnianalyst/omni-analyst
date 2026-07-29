@@ -59,6 +59,11 @@ _IV_MAX_ITER = 100
 _IV_BOUNDS = (0.001, 5.0)
 
 
+def _validate_option_type(option_type: Any) -> None:
+    if option_type not in ("call", "put"):
+        raise Unavailable(f"unrecognised option_type: {option_type!r}")
+
+
 def _check_inputs(T: float, sigma: float) -> None:
     if T < 0.0:
         raise Unavailable(f"negative time to expiry: T={T}")
@@ -83,6 +88,7 @@ def black_scholes(
     theta is per calendar day (``/365``), vega and rho are per 1% change
     (``/100``).
     """
+    _validate_option_type(option_type)
     _check_inputs(T, sigma)
     is_call = option_type == "call"
 
@@ -156,6 +162,7 @@ def implied_volatility(
     * the market price is below intrinsic (no positive vol can produce it),
     * neither solver reaches ``_TOL`` on the residual.
     """
+    _validate_option_type(option_type)
     if T <= 0.0:
         return None
     is_call = option_type == "call"
@@ -216,6 +223,7 @@ def monte_carlo(
     numpy's global state untouched, and passing an int makes the draw
     reproducible via an isolated generator.
     """
+    _validate_option_type(option_type)
     _check_inputs(T, sigma)
     if T == 0.0:
         payoff = max((S - K) if option_type == "call" else (K - S), 0.0)
@@ -278,6 +286,7 @@ def build_volatility_surface(
     :func:`implied_volatility` cannot converge, are ``NaN``. v1 logged and
     swallowed the failure; NaN propagates honestly here.
     """
+    _validate_option_type(option_type)
     market_prices = np.asarray(market_prices, dtype=float)
     implied_vols = np.full_like(market_prices, np.nan, dtype=float)
     for i, strike in enumerate(strikes):
@@ -303,6 +312,8 @@ def build_volatility_surface(
 def _require(contracts: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     if not contracts:
         raise Unavailable("empty options chain; no contracts to analyse")
+    for c in contracts:
+        _validate_option_type(c.get("option_type"))
     return list(contracts)
 
 
