@@ -64,6 +64,7 @@ def build_builtin_registry(settings=None) -> Registry:
     from omni.ingest.news import NewsAdapter
     from omni.ingest.onchain import OnChainAdapter
     from omni.ingest.polygon import PolygonAdapter
+    from omni.ingest.positioning import PositioningAdapter
 
     cfg = settings if settings is not None else default_settings
     registry = Registry()
@@ -163,6 +164,16 @@ def build_builtin_registry(settings=None) -> Registry:
         provider_key="rss",
         produces=("news_event",),
         factory=NewsAdapter,
+    ))
+    registry.add(_adapter(
+        "polygon.positioning",
+        "What market participants are doing rather than saying: options skew, "
+        "short interest and flow. Licensed per operator, so private-tier.",
+        provider_key="polygon",
+        produces=("perception_positioning",),
+        entity_kinds=("company",),
+        factory=PositioningAdapter,
+        credentials={"api_key": cfg.polygon_api_key} if cfg.polygon_api_key else None,
     ))
     registry.add(_manipulation_capability())
     return registry
