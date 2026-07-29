@@ -159,7 +159,23 @@ async def fill_gap(
             failures.append(f"{registration.name}: {exc}")
             continue
 
-        first = claim_ids[0] if claim_ids else None
+        if not claim_ids:
+            # The source answered, but every draft was already held -- a
+            # correct source re-queried. Not 'filled' (nothing was written, so
+            # coverage did not improve) and not a failure (the source worked).
+            # Resolved, not released: the demand is met by claims already in
+            # the store, and re-querying reproduces the same already-held data,
+            # so a retry buys nothing. The reason distinguishes nothing-new
+            # from the failure path below.
+            reason = (
+                f"{registration.name} returned no new observations "
+                f"(all {len(drafts)} already held)"
+            )
+            await _record(pool, gap_id, registration.name, "unfillable", None, reason)
+            await pool.execute(_RESOLVE, gap_id)
+            return FillResult(gap_id, "unfillable", registration.name, [], reason)
+
+        first = claim_ids[0]
         await _record(pool, gap_id, registration.name, "filled", first, None)
         await pool.execute(_RESOLVE, gap_id)
         return FillResult(gap_id, "filled", registration.name, claim_ids, None)
