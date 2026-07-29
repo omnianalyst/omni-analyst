@@ -363,6 +363,23 @@ class TestCalculateConvexity:
         zero_10y = _zero_bond(ytm=0.05, maturity=date(2030, 1, 15))
         assert calculate_convexity(zero_10y) > calculate_convexity(zero_5y)
 
+    def test_convexity_matches_hand_derived_closed_form(self):
+        # Magnitude test for the 5y annual par bond, 30/360 (times exactly
+        # 1..5), ytm 5%, price 100, ppy 1. The value below is hand-derived
+        # from the closed form the audit names --
+        #   sum(t*(t+1)*cf/(1+y)^t) / (price*(1+y)^2) / ppy^2
+        # -- NOT obtained by calling calculate_convexity. An independent
+        # finite-difference check on the price function
+        #   (P(+dy) + P(-dy) - 2P) / (P * dy^2)
+        # gives 23.935988508583247 at dy=1e-4, agreeing to ~1e-6 (the expected
+        # truncation error), which is why the constant is trustworthy. A wrong
+        # implementation that returns time-to-maturity (5.0) fails this by
+        # ~19; see the R4 report for the stub-and-restore proof.
+        bond = _par_coupon_bond(coupon_rate=0.05, ytm=0.05)
+        assert calculate_convexity(bond) == pytest.approx(
+            23.935987497907238, abs=1e-9
+        )
+
 
 # ---------------------------------------------------------------------------
 # Z-spread
@@ -655,6 +672,21 @@ class TestAnalyzeCreditMigration:
         assert aa["spread_change_bps"] == pytest.approx(50.0)
         # Downgrade probability must include the AA scenario.
         assert out["downgrade_probability"] == pytest.approx(0.1)
+
+    def test_missing_current_rating_in_spreads_raises(self):
+        # The bond's current rating is absent from rating_spreads. v1 (and the
+        # original port) silently treated the current spread as 0, producing a
+        # wrong migration number for a legal input -- the auditor showed 50bp
+        # where the correct answer is 40bp. A missing current spread is
+        # unanalysable, so the call must refuse rather than fabricate.
+        import pandas as pd
+
+        bond = _par_coupon_bond(coupon_rate=0.05, ytm=0.05)
+        bond.rating = "AAA"
+        tm = pd.DataFrame({"AA": [0.1], "AAA": [0.9]}, index=["AAA"])
+        spreads = {"AA": 0.005}  # AAA omitted -- easy caller mistake
+        with pytest.raises(Unavailable, match="AAA"):
+            analyze_credit_migration(bond, tm, spreads)
 
     def test_upgrade_does_not_count_as_downgrade(self):
         import pandas as pd
