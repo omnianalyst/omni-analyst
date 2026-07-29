@@ -63,6 +63,15 @@ class TestClassifyVolatility:
         assert out["regime"] == "volatile"
         assert out["current_volatility"] > out["median_volatility"] * 2.0
         assert out["window"] == 20
+        # F3: pin the absolute magnitude, not just the label/relative comparison.
+        # The last bar's vol is the population std of its trailing window+1 bars
+        # (inline formula rolling_vol[i] = std(returns[max(0,i-window):i+1]]);
+        # the slice is window+1, not window. A wrong magnitude -- variance,
+        # wrong ddof, percent-vs-decimal -- still labels "volatile" but cannot
+        # match this value.
+        last = len(rising) - 1
+        expected_current = float(np.std(rising[max(0, last - 20): last + 1]))
+        assert out["current_volatility"] == pytest.approx(expected_current)
 
     def test_lower_variance_counterpart_is_quiet(self):
         # Uniformly low variance: current vol == median vol -> quiet.
@@ -166,6 +175,20 @@ class TestFailurePaths:
         with pytest.raises(Unavailable, match="NaN"):
             classify_volatility(series, window=20)
 
+    def test_inf_in_input_raises(self):
+        # F1: +inf must be refused. np.isnan(inf) is False, so the old NaN-only
+        # guard passed it; np.std then returned NaN and the bar was labelled
+        # "quiet". inf is a realistic return (zero price -> inf return).
+        series = [0.01] * 30 + [float("inf")]
+        with pytest.raises(Unavailable, match="non-finite"):
+            classify_volatility(series, window=20)
+
+    def test_neg_inf_in_input_raises(self):
+        # F1: -inf must be refused for the same reason.
+        series = [0.01] * 30 + [float("-inf")]
+        with pytest.raises(Unavailable, match="non-finite"):
+            classify_volatility(series, window=20)
+
     def test_window_zero_raises(self):
         with pytest.raises(Unavailable, match="window must be >= 2"):
             classify_volatility([0.01] * 40, window=0)
@@ -190,3 +213,26 @@ class TestFailurePaths:
         series = [0.01] * 79 + [float("nan")]
         with pytest.raises(Unavailable, match="NaN"):
             classify_trend(series)
+
+    def test_trend_inf_raises(self):
+        # F1: classify_trend shares _validate, so inf must be refused here too.
+        series = [0.01] * 79 + [float("inf")]
+        with pytest.raises(Unavailable, match="non-finite"):
+            classify_trend(series)
+
+    def test_trend_short_window_exceeds_series_raises(self):
+        # F2: short_window > len(series) >= long_window. The old code validated
+        # only against long_window, so rolling(short_window).mean().iloc[-1] was
+        # NaN; both ma_short > ma_long and < were False, so the branch fell
+        # through to "neutral" -- a regime label emitted with a NaN MA. Must
+        # refuse instead.
+        with pytest.raises(Unavailable, match="need >= 60"):
+            classify_trend(
+                np.linspace(0.001, 0.01, 50), short_window=60, long_window=20
+            )
+
+    def test_volatility_regime_path_refuses_zero_variance(self):
+        # F4: the zero-variance refusal was covered only transitively via
+        # classify_volatility. Exercise the path function directly.
+        with pytest.raises(Unavailable, match="zero variance"):
+            volatility_regime_path([5.0] * 40, window=20)
