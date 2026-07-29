@@ -501,9 +501,13 @@ def identify_outliers(
     """Indices whose value is more than ``z_threshold`` std from the mean.
 
     Ported from v1 ``_identify_outlier_executions`` (which flagged IS-bps
-    outliers at |z| > 2). v1 required ``len > 3`` before computing; the port
-    requires enough points for a nonzero std and raises on an empty series.
-    With zero std every z is 0, so nothing is flagged -- matching v1.
+    outliers at |z| > 2). Raises on an empty series. A constant series has no
+    spread and returns ``[]``; the check is ``np.ptp(arr) == 0`` (exact
+    regardless of magnitude) rather than ``np.std == 0``, because ``np.std``
+    of a constant non-integer series is a tiny nonzero float and dividing by
+    it fabricates z-scores from floating-point residue. v1's ``len > 3`` floor
+    is not retained: ``n == 1`` returns ``[]`` and ``n == 2`` distinct values
+    computes z-scores.
     """
     values = list(values)
     if len(values) == 0:
@@ -511,7 +515,7 @@ def identify_outliers(
     arr = np.asarray(values, dtype=float)
     mean = float(np.mean(arr))
     std = float(np.std(arr))
-    if std == 0.0:
+    if np.ptp(arr) == 0.0:
         return []
     outliers: list[dict] = []
     for i, v in enumerate(arr):

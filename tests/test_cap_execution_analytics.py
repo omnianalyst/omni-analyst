@@ -226,6 +226,29 @@ class TestImplementationShortfall:
         # Sell at 95 vs decision 100 -> costly. sign=-1, total_rel = -1*(100*(95-100))/100 = +5%
         assert is_.total_bps == pytest.approx(500.0, abs=1e-9)
 
+    def test_sell_side_partial_fill_opportunity_is_negative(self):
+        # Sell only 60 of 100 into a market that closed UP (close 108 > decision
+        # 100). The unfilled 40% is marked to a risen market -- a paper gain for
+        # the seller under Perold -- so the opportunity component is negative and
+        # subtracts from cost. Perold (sell):
+        #   IS_rel = [f*(d - Pfill) + (1-f)*(d - close)] / d
+        #          = [0.6*(100-95) + 0.4*(100-108)] / 100 = (3.0 - 3.2)/100
+        # total -20 bps, delay 120, trading 180, opportunity -320.
+        fills = [Fill(price=95.0, size=60.0, timestamp=_T1)]
+        is_ = implementation_shortfall(
+            fills,
+            decision_price=100.0,
+            market_price_at_execution=98.0,
+            close_price=108.0,
+            order_quantity=100.0,
+            side="sell",
+        )
+        assert is_.total_bps == pytest.approx(-20.0, abs=1e-9)
+        assert is_.delay_cost_bps == pytest.approx(120.0, abs=1e-9)
+        assert is_.trading_cost_bps == pytest.approx(180.0, abs=1e-9)
+        assert is_.opportunity_cost_bps == pytest.approx(-320.0, abs=1e-9)
+        is_.check_additivity(atol=1e-12)
+
     def test_opportunity_cost_zero_when_fully_filled(self):
         fills = [Fill(price=105.0, size=100.0, timestamp=_T1)]
         is_ = implementation_shortfall(
@@ -327,8 +350,15 @@ class TestAggregation:
         assert out[0]["z_score"] > 2.0
 
     def test_identify_outliers_zero_std_returns_empty(self):
-        # All identical -> std 0 -> nothing flagged (matches v1's guard).
+        # A constant series has no outliers by definition. [5.0]*N gives std
+        # exactly 0.0; a constant NON-INTEGER series gives np.std ~1e-17, which
+        # an exact `std == 0.0` guard misses -- dividing by ~1e-17 fabricates
+        # z-scores of magnitude ~1.0 from pure floating-point residue. Both
+        # must return empty. Pinning the non-integer case at a sub-default
+        # z_threshold (< 1.0) closes the fabrication path: |z|~1 > 0.5 would
+        # otherwise flag every element.
         assert identify_outliers([5.0, 5.0, 5.0, 5.0]) == []
+        assert identify_outliers([0.05, 0.05, 0.05], z_threshold=0.5) == []
 
 
 # ---------------------------------------------------------------------------
