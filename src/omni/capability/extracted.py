@@ -127,9 +127,13 @@ def build_extracted_registry() -> Registry:
     registry = Registry()
 
     # --- Macro (FRED-sourced; redistributable) ---
-    # Macro analytics consume macro_series_point claims and emit derived
-    # indicators. None of the derived outputs has a home in the closed enum, so
-    # every one is an analysis step with produces empty.
+    # The raw-series macros (sahm_rule, yield_curve_inversion, inflation_*) run
+    # over macro_series_point claims and emit derived indicators. The composites
+    # (recession_probability, assess_policy_implications, assess_scenario_impact,
+    # taylor_rule_variant) take already-computed sub-indicators or caller-built
+    # structures instead, so their consumes is empty -- see their notes. None of
+    # the derived outputs has a home in the closed enum, so every one is an
+    # analysis step with produces empty.
     for cap in (
         _bind(
             "macro.sahm_rule",
@@ -154,11 +158,15 @@ def build_extracted_registry() -> Registry:
             "Composite recession probability from yield-curve inversion, the "
             "Sahm signal and LEI direction. Fixed 0.3/0.4/0.3 weighting.",
             fn=macro.recession_probability,
-            consumes=("macro_series_point",),
+            consumes=(),
             provenance=(
-                "Weights are policy-fixed, not calibrated. A deterministic "
-                "composite; the conviction gate must not treat its output as a "
-                "calibrated probability without resolved history."
+                "Consumes the OUTPUTS of sibling capabilities (a yield-curve "
+                "inversion flag, a Sahm trigger, LEI labels), not "
+                "macro_series_point claims; a planner needs an inter-step "
+                "value-passing layer to assemble them. Weights are policy-"
+                "fixed, not calibrated. A deterministic composite; the "
+                "conviction gate must not treat its output as a calibrated "
+                "probability without resolved history."
             ),
         ),
         _bind(
@@ -209,30 +217,52 @@ def build_extracted_registry() -> Registry:
             "Fully-parameterised Taylor Rule variant: caller supplies target, "
             "r*, alpha and beta.",
             fn=macro.taylor_rule_variant,
-            consumes=("macro_series_point",),
+            consumes=(),
+            provenance=(
+                "Six caller-supplied scalars; four (target, r_star, alpha, "
+                "beta) are policy constants with no claim source. Consumes no "
+                "macro_series_point claims, so a planner cannot assemble the "
+                "args from the claim store alone."
+            ),
         ),
         _bind(
             "macro.assess_policy_implications",
             "Policy read from a Taylor rate versus the current rate: stance, "
             "the rate adjustment implied and the risks that arise.",
             fn=macro.assess_policy_implications,
-            consumes=("macro_series_point",),
+            consumes=(),
+            provenance=(
+                "taylor_rate is the output of macro.taylor_rule and stance is "
+                "a caller-supplied label, not macro_series_point claims; a "
+                "planner needs an inter-step value-passing layer to assemble "
+                "them."
+            ),
         ),
         _bind(
             "macro.assess_scenario_impact",
             "Average and peak per-variable impact of a scenario forecast "
             "against a baseline forecast.",
             fn=macro.assess_scenario_impact,
-            consumes=("macro_series_point",),
+            consumes=(),
+            provenance=(
+                "Takes two caller-built nested forecast dicts (baseline and "
+                "scenario), not macro_series_point claims; nothing in the "
+                "claim store yields these structures, so a planner cannot "
+                "assemble the args from claims alone."
+            ),
         ),
     ):
         registry.add(cap)
 
     # --- Fundamentals and portfolio analytics ---
-    # financial_ratios / dcf_valuation / peer_comparison consume
-    # fundamental_metric claims (EDGAR-sourced, redistributable). The portfolio
-    # analytics consume price/return series, whose licence the descriptor
-    # cannot see, so they carry touches_byo exactly like detect.manipulation.
+    # financial_ratios and dcf_valuation take a required current_price (a
+    # price_snapshot, produced only by the byo_only polygon/coingecko feeds)
+    # alongside EDGAR fundamentals, so both inherit the price licence.
+    # peer_comparison ranks price-derived ratios (pe/pb/peg) carried in
+    # comparison_data, so it inherits the price licence too. stress_tests
+    # scales a bar-derived NAV. The remaining portfolio analytics consume
+    # price/return series whose licence the descriptor cannot see, so every
+    # one carries touches_byo exactly like detect.manipulation.
     for cap in (
         _bind(
             "fundamentals.financial_ratios",
@@ -240,11 +270,14 @@ def build_extracted_registry() -> Registry:
             "debt-to-equity, current/quick, free cash flow, dividend yield) "
             "from an as-reported fundamentals snapshot.",
             fn=fundamentals.financial_ratios,
-            consumes=("fundamental_metric",),
+            consumes=("fundamental_metric", "price_snapshot"),
             entity_kinds=("company",),
+            touches_byo=True,
             provenance=(
-                "Derived from as-reported fundamentals; a computed ratio, not "
-                "a primary data point, so it is left out of the "
+                "pe/pb ratios and dividend yield divide by current_price, a "
+                "price_snapshot produced only by the byo_only polygon/coingecko "
+                "feeds, so the output inherits that licence. A computed ratio, "
+                "not a primary data point, so it is left out of the "
                 "fundamental_metric producers rather than conflated with them."
             ),
         ),
@@ -253,11 +286,16 @@ def build_extracted_registry() -> Registry:
             "Discounted-cash-flow fair value: projected FCFs, terminal value "
             "and the equity bridge to per-share value and upside.",
             fn=fundamentals.dcf_valuation,
-            consumes=("fundamental_metric",),
+            consumes=("fundamental_metric", "price_snapshot"),
             entity_kinds=("company",),
+            touches_byo=True,
             provenance=(
-                "Model output, not a measured value; depends on declared "
-                "assumptions (growth, discount, terminal rate)."
+                "upside_percentage is a function of current_price and the "
+                "output returns it; current_price is a price_snapshot produced "
+                "only by the byo_only polygon/coingecko feeds, so the result "
+                "inherits that licence. Model output, not a measured value; "
+                "depends on declared assumptions (growth, discount, terminal "
+                "rate)."
             ),
         ),
         _bind(
@@ -265,8 +303,16 @@ def build_extracted_registry() -> Registry:
             "Rank a company's metrics against supplied peers: peer averages, "
             "per-metric percentile rank and relative valuation versus peers.",
             fn=fundamentals.peer_comparison,
-            consumes=("fundamental_metric",),
+            consumes=("fundamental_metric", "price_snapshot"),
             entity_kinds=("company",),
+            touches_byo=True,
+            provenance=(
+                "comparison_data carries price-derived ratios (pe/pb/peg/"
+                "dividend_yield) and relative_valuation is computed from them. "
+                "Their provenance is opaque to the descriptor, so the output "
+                "inherits the price licence -- the same convention as "
+                "portfolio.atr_position_size."
+            ),
         ),
         _bind(
             "fundamentals.portfolio_returns",
@@ -300,10 +346,14 @@ def build_extracted_registry() -> Registry:
             "Scenario impact on a portfolio value: market crash, rate rise and "
             "currency depreciation.",
             fn=fundamentals.stress_tests,
+            touches_byo=True,
             provenance=(
-                "Declared stress assumptions (-20/-5/-3%), not measured "
-                "outcomes; hypothetical, so never aggregate into shared "
-                "coverage as if observed."
+                "total_value is a bar-derived NAV (positions marked at market "
+                "prices), so the dollar P&L inherits the price licence -- the "
+                "same convention as portfolio.atr_position_size. Declared "
+                "stress assumptions (-20/-5/-3%), not measured outcomes; "
+                "hypothetical, so never aggregate into shared coverage as if "
+                "observed."
             ),
         ),
         _bind(
@@ -331,10 +381,15 @@ def build_extracted_registry() -> Registry:
         registry.add(cap)
 
     # --- News and sentiment ---
-    # News/sentiment comes from commercial APIs, so these are touches_byo.
-    # aggregate_market_sentiment and the StockTwits scorer yield sentiment
-    # readings that map to the perception_* claim types already in the enum, so
-    # they are producers; the rest are analysis steps.
+    # aggregate_market_sentiment / score_portfolio_impact take sentiment inputs
+    # whose provenance the descriptor cannot see. The only news_event producer
+    # wired today is rss (allowed), but a byo_only news provider (news_api)
+    # exists in the catalog, so the safe direction is touches_byo=True: over-
+    # exclude from shared plans rather than risk leaking a commercial feed once
+    # one is wired. The StockTwits scorers are genuinely byo -- StockTwits is
+    # commercial and perception_social has no shareable producer.
+    # aggregate_market_sentiment and the StockTwits scorers yield perception_*
+    # readings, so they produce; score_portfolio_impact is an analysis step.
     for cap in (
         _bind(
             "news.aggregate_market_sentiment",

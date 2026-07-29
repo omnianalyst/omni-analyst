@@ -1205,14 +1205,6 @@ class TestLicenceClassification:
             "fundamentals.dcf_valuation",
             "fundamentals.peer_comparison",
             "fundamentals.stress_tests",
-        ],
-    )
-    def test_edgar_sourced_fundamentals_are_shareable(self, registry, name):
-        assert registry.get(name).touches_byo is False
-
-    @pytest.mark.parametrize(
-        "name",
-        [
             "fundamentals.portfolio_returns",
             "fundamentals.risk_metrics",
             "fundamentals.correlation_matrix",
@@ -1224,6 +1216,22 @@ class TestLicenceClassification:
     ):
         assert registry.get(name).touches_byo is True
 
+    def test_no_fundamentals_cap_consuming_a_price_is_marked_shareable(
+        self, registry
+    ):
+        # Corrected from test_edgar_sourced_fundamentals_are_shareable, which
+        # encoded the leak: the "EDGAR-sourced => shareable" premise ignored the
+        # byo_only price these blend. Any fundamentals capability that declares
+        # a price_snapshot input must carry the price licence -- flipping one
+        # back to shareable must fail here. stress_tests (bar-derived NAV, no
+        # declared consume) is covered by its membership in the parametrized
+        # ..._inherit_the_price_licence list above.
+        for name, cap in registry._by_name.items():
+            if name.startswith("fundamentals.") and "price_snapshot" in cap.consumes:
+                assert cap.touches_byo is True, (
+                    f"{name} consumes a byo_only price but is marked shareable"
+                )
+
     @pytest.mark.parametrize(
         "name",
         [
@@ -1233,7 +1241,7 @@ class TestLicenceClassification:
             "news.stocktwits_sentiment",
         ],
     )
-    def test_news_and_sentiment_from_commercial_apis_are_private(
+    def test_news_and_sentiment_caps_default_to_private(
         self, registry, name
     ):
         assert registry.get(name).touches_byo is True
