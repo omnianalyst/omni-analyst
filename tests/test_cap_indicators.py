@@ -120,6 +120,31 @@ class TestRsi:
         out = rsi(prices, period=14)
         assert out[14] == pytest.approx(50.0)
 
+    def test_wilder_smoothing_recursion_pinned(self):
+        # Mixed gain/loss series where post-seed values depend on the Wilder
+        # update avg := (avg*(period-1) + gain) / period.  Every existing RSI
+        # test only exercises seed-determined paths (all-rising, all-falling,
+        # all-flat, or the seed index alone); a frozen-smoothing impl passes
+        # all four.  This test fails against frozen smoothing from out[15] on.
+        #
+        # prices step +2 then -1 alternately; period 14.
+        # seed: 7 gains of 2, 7 losses of 1 -> avg_gain=1.0, avg_loss=0.5.
+        # Subsequent updates fold gains[14..] = [2,0,2,0,2,0] and
+        # losses[14..] = [0,1,0,1,0,1] into the running averages.
+        prices = [
+            100.0, 102.0, 101.0, 103.0, 102.0, 104.0, 103.0, 105.0,
+            104.0, 106.0, 105.0, 107.0, 106.0, 108.0, 107.0, 109.0,
+            108.0, 110.0, 109.0, 111.0,
+        ]
+        out = rsi(prices, period=14)
+        assert out[:14] == [None] * 14
+        assert out[14] == pytest.approx(66.6667, abs=1e-4)
+        assert out[15] == pytest.approx(69.7674, abs=1e-4)
+        assert out[16] == pytest.approx(66.4395, abs=1e-4)
+        assert out[17] == pytest.approx(69.5663, abs=1e-4)
+        assert out[18] == pytest.approx(66.2430, abs=1e-4)
+        assert out[19] == pytest.approx(69.3923, abs=1e-4)
+
 
 # ---------------------------------------------------------------------------
 # MACD
@@ -217,6 +242,23 @@ class TestStochastic:
         close = [50.0] * 20
         out = stochastic(high, low, close, k_period=14, d_period=3)
         assert out["d"][16] == pytest.approx(50.0)
+
+    def test_d_is_index_windowed_not_filter_aligned(self):
+        # Mid-series zero-range gap at bar 5 produces a None %K.  %D must be
+        # a trailing-window SMA *by index*; a window containing the gap None
+        # yields None.  The old filter-then-realign code averaged bars 3,4,6
+        # (skipping the gap) and returned 40.0 at index 6.
+        high = [100.0, 100.0, 100.0, 50.0, 50.0, 50.0, 100.0]
+        low = [0.0, 0.0, 0.0, 50.0, 50.0, 50.0, 0.0]
+        close = [80.0, 60.0, 90.0, 50.0, 50.0, 50.0, 20.0]
+        out = stochastic(high, low, close, k_period=3, d_period=3)
+        assert out["k"] == [None, None, 90.0, 50.0, 50.0, None, 20.0]
+        # bar 4: contiguous window [90, 50, 50] -> 190/3
+        assert out["d"][4] == pytest.approx(190.0 / 3.0)
+        # bar 5: window [50, 50, None] -> None
+        assert out["d"][5] is None
+        # bar 6: window [50, None, 20] -> None (was 40.0 with the bug)
+        assert out["d"][6] is None
 
 
 # ---------------------------------------------------------------------------

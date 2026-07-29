@@ -264,6 +264,12 @@ def stochastic(
     %K is ``(close - low) / (high - low) * 100`` over the trailing
     ``k_period`` bars. A zero-range window (``high == low``) is 0/0; v1
     returns a neutral 50 there, this module returns ``None``.
+
+    %D is the SMA of the trailing ``d_period`` %K values taken **by index**.
+    A %D window that contains any ``None`` — warmup prefix or a mid-series
+    zero-range gap — yields ``None`` at that index. The earlier
+    filter-then-realign approach silently averaged non-contiguous %K values
+    across gaps; the index-based window does not.
     """
     hi = _as_float_array(high)
     lo = _as_float_array(low)
@@ -286,21 +292,12 @@ def stochastic(
             k_values.append(
                 ((float(cl[i]) - window_lo) / (window_hi - window_lo)) * 100.0
             )
-    k_non_none = [v for v in k_values if v is not None]
-    if len(k_non_none) >= d_period:
-        d_calc = sma(k_non_none, period=d_period)
-        d_values: list[float | None] = []
-        d_idx = 0
-        for v in k_values:
-            if v is None:
-                d_values.append(None)
-            elif d_idx < len(d_calc):
-                d_values.append(d_calc[d_idx])
-                d_idx += 1
-            else:
-                d_values.append(None)
-    else:
-        d_values = [None] * len(cl)
+    d_values: list[float | None] = [None] * len(cl)
+    for i in range(d_period - 1, len(cl)):
+        window = k_values[i - d_period + 1 : i + 1]
+        if any(v is None for v in window):
+            continue
+        d_values[i] = sum(window) / d_period
     return {"k": k_values, "d": d_values}
 
 
