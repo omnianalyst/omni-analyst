@@ -105,6 +105,22 @@ def test_factor_regression_factor_equals_returns_gives_beta_one_rsquared_one():
     assert reg.r_squared == pytest.approx(1.0, abs=1e-9)
 
 
+def test_factor_regression_constant_asset_series_raises():
+    # V5/F1: a constant asset series (e.g. a halted stock / pegged rate) has
+    # zero variance and R-squared is 0/0 -- undefined. The series is built from
+    # 0.005, which is not exactly representable in binary64, so naive summation
+    # leaves ss_tot at ~1e-34 rather than exactly 0. An exact ``== 0`` guard
+    # misses that and returns a fabricated negative R-squared; the fix detects
+    # degeneracy via std and raises.
+    fr = _make_factor_returns()
+    const = pd.Series(np.full(100, 0.005), index=fr.index)
+    with pytest.raises(Unavailable, match="zero variance"):
+        regress_factor_exposures(const, fr)
+    # attribute_returns delegates to the regression and must raise too.
+    with pytest.raises(Unavailable, match="zero variance"):
+        attribute_returns(const, fr)
+
+
 def test_factor_regression_r_squared_decreases_with_noise():
     fr = _make_factor_returns()
     clean = _make_portfolio_returns(fr, noise_sd=0.0)
@@ -157,6 +173,31 @@ def test_attribute_returns_no_overlap_raises():
         attribute_returns(pr, fr)
 
 
+def test_attribute_returns_total_return_is_overlap_period_sum():
+    # V5/F3: total_return is the sum over the portfolio/factor overlap, NOT
+    # sum(portfolio_returns) over the full series. Factors are required for
+    # attribution, so portfolio-only dates are excluded. With a partial overlap
+    # the two can differ -- and the sign can flip -- so the distinction is
+    # load-bearing for any caller comparing to a precomputed full-series sum.
+    rng = np.random.default_rng(51)
+    full_idx = DATES[:100]
+    overlap_idx = DATES[:60]
+    fr = pd.DataFrame(
+        {"MKT": rng.normal(0, 0.01, 60), "SMB": rng.normal(0, 0.01, 60)},
+        index=overlap_idx,
+    )
+    pr = pd.Series(rng.normal(0.001, 0.01, 100), index=full_idx)
+    attr = attribute_returns(pr, fr)
+    # total_return is the overlap-period sum, not the full-series sum.
+    assert attr.total_return == pytest.approx(float(pr.loc[overlap_idx].sum()), abs=1e-12)
+    assert attr.total_return != pytest.approx(float(pr.sum()), abs=1e-12)
+    # n_observations reflects the aligned overlap, not the portfolio length.
+    assert attr.n_observations == 60
+    # Additivity still holds against the overlap total (not the full total).
+    reconstructed = attr.specific_return + sum(attr.factor_contributions.values())
+    assert reconstructed == pytest.approx(attr.total_return, abs=1e-12)
+
+
 # --------------------------------------------------------------------------- #
 # Single-factor (market-model) attribution
 # --------------------------------------------------------------------------- #
@@ -178,6 +219,9 @@ def test_market_model_attribution_basic_shape_and_additivity():
     assert res.beta == pytest.approx(1.3, abs=1e-2)
     assert res.alpha == pytest.approx(alpha_daily * 252, abs=0.5)
     assert 0.95 < res.r_squared <= 1.0
+    # V5/F4: the defined-path IR value must be asserted. Without this, a
+    # regression to v1's ``information_ratio = 0`` fabrication passes the suite.
+    assert res.information_ratio == pytest.approx(res.alpha / res.tracking_error, rel=1e-9)
     # Annualized additivity: total = factor + specific (residuals mean-zero).
     assert res.factor_return + res.specific_return == pytest.approx(res.total_return, abs=1e-9)
     # n_observations reported.
@@ -240,12 +284,18 @@ def test_market_model_single_observation_raises():
 
 
 def test_sharpe_basic_known_value():
-    # mean=0.001, sd=0.01 -> per-period sharpe = 0.1, annualized ~= 0.1*sqrt(252).
+    # V5/F6: recompute the expected value with an explicit ddof=1 std and a
+    # tight tolerance. The prior version compared to the theoretical
+    # (0.001/0.01)*sqrt(252) at rel=0.02; at n=100000 the ddof=0 vs ddof=1
+    # difference (~5e-6 relative) is 1400x smaller than 2%, so a wrong ddof=0
+    # implementation passed. Recomputing from the sample with ddof=1 and
+    # rel=1e-9 makes a ddof regression fail by sqrt(n/(n-1)).
     rng = np.random.default_rng(0)
     r = rng.normal(0.001, 0.01, 100000)
     sr = annualized_sharpe(r)
-    expected = (0.001 / 0.01) * np.sqrt(252)
-    assert sr == pytest.approx(expected, rel=0.02)
+    r_arr = np.asarray(r, dtype=float)
+    expected = r_arr.mean() / r_arr.std(ddof=1) * np.sqrt(252)
+    assert sr == pytest.approx(expected, rel=1e-9)
 
 
 def test_sharpe_constant_returns_raises():
@@ -271,12 +321,22 @@ def test_sharpe_periods_per_year_scales_result():
 
 def test_sortino_penalizes_downside_more_than_sharpe():
     # Asymmetric series: large upside, small downside -> Sortino > Sharpe.
+    # V5/F8: the direction alone does not pin the formula -- three different
+    # downside-deviation definitions all clear the ``Sortino > Sharpe`` bar for
+    # an upside-heavy series. Assert the exact value against the module's
+    # convention (target = 0, flooring via ``np.minimum(r, 0)``) so a refactor
+    # that switches to filtering or changes the target fails.
     rng = np.random.default_rng(4)
     upside = np.abs(rng.normal(0, 0.02, 500))
     downside = -np.abs(rng.normal(0, 0.005, 500))
     r = np.concatenate([upside, downside])
     np.random.default_rng(99).shuffle(r)
-    assert annualized_sortino(r) > annualized_sharpe(r)
+    sor = annualized_sortino(r)
+    sr = annualized_sharpe(r)
+    assert sor > sr
+    downside_dev = np.sqrt(np.mean(np.minimum(r, 0.0) ** 2))
+    expected_sortino = r.mean() / downside_dev * np.sqrt(252)
+    assert sor == pytest.approx(float(expected_sortino), rel=1e-9)
 
 
 def test_sortino_no_downside_raises():
@@ -331,13 +391,19 @@ def test_information_ratio_basic():
 def test_information_ratio_zero_alpha_returns_zero_not_raises():
     # Work order: mean-active = 0 with nonzero variance is a legitimate IR = 0,
     # not undefined. The undefined case is std = 0 (covered by the next test).
+    # V5/F7: the prior body only asserted ``isinstance(ir, float)`` and
+    # ``np.isfinite(ir)`` -- any finite float (e.g. a hardcoded 42.0) passed.
+    # Recompute the expected IR from the active returns and assert equality at
+    # tight tolerance so the value, not just finiteness, is pinned.
     rng = np.random.default_rng(15)
     bench = pd.Series(rng.normal(0, 0.01, 1000), index=DATES[:1000])
     port = pd.Series(rng.normal(0, 0.01, 1000), index=DATES[:1000])
     # Independent samples, large N -> mean(active) ~ 0; assert it's small but
     # the call does not raise.
     ir = annualized_information_ratio(port, bench)
-    assert isinstance(ir, float)
+    active = (port - bench).to_numpy(dtype=float)
+    expected = active.mean() / active.std(ddof=1) * np.sqrt(252)
+    assert ir == pytest.approx(float(expected), rel=1e-9)
     assert np.isfinite(ir)
 
 
@@ -425,6 +491,26 @@ def test_factor_regression_singular_design_matrix_raises():
     pr = pd.Series(rng.normal(0, 0.01, 100), index=idx(100))
     with pytest.raises(Unavailable, match="rank-deficient"):
         regress_factor_exposures(pr, fr)
+
+
+def test_factor_regression_near_collinear_factors_raise():
+    # V5/F2: factors that agree to ~1e-10 (not exactly identical) report as
+    # full rank under matrix_rank, so the singular-design guard misses them.
+    # lstsq then returns huge cancelling coefficients (+thousands / -thousands)
+    # that pass the additivity identity while being individually meaningless.
+    # A condition-number guard catches the numerically unstable case.
+    rng = np.random.default_rng(99)
+    f1 = rng.normal(0, 0.01, 200)
+    f2 = f1 + rng.normal(0, 1e-10, 200)  # near-collinear, not identical
+    fr = pd.DataFrame({"F1": f1, "F2": f2}, index=DATES[:200])
+    pr = pd.Series(0.0003 + 1.1 * f1 + rng.normal(0, 0.001, 200), index=DATES[:200])
+    # matrix_rank reports full rank here -- the cond guard is what fires.
+    design = np.column_stack([np.ones(200), fr.to_numpy()])
+    assert int(np.linalg.matrix_rank(design)) == 3
+    with pytest.raises(Unavailable, match="ill-conditioned"):
+        regress_factor_exposures(pr, fr)
+    with pytest.raises(Unavailable, match="ill-conditioned"):
+        attribute_returns(pr, fr)
 
 
 def test_factor_regression_constant_factor_column_raises():

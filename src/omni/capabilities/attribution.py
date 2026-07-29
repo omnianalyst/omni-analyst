@@ -64,13 +64,24 @@ from omni.ingest.protocol import Unavailable
 # non-daily data.
 TRADING_DAYS_PER_YEAR = 252
 
-# Tolerances for "is this degenerate?" checks. Floating-point summation can
-# leave a mathematically-zero variance at ~1e-36 and a mathematically-zero
-# residual std at ~1e-17; real daily-equity values sit orders of magnitude
-# above these floors. Using a tolerance instead of == 0 keeps the degeneracy
-# detection reliable across floating-point noise without masking real signal.
-_ZERO_VARIANCE_ATOL = 1e-20
-_ZERO_RESIDUAL_STD_ATOL = 1e-12
+# Tolerance for "is this degenerate?" checks, applied uniformly to the sample
+# standard deviation (ddof=1) of a series. Floating-point summation can leave a
+# mathematically-zero std at ~1e-18; real daily-equity values sit orders of
+# magnitude above this floor. Using a single tolerance on a single quantity
+# (std) -- instead of one tolerance on sum-of-squared-deviations and another on
+# std -- keeps degeneracy detection consistent across every function in the
+# module. Two functions disagreeing on what counts as constant is exactly the
+# v1 defect this rebuild exists to remove.
+_ZERO_STD_ATOL = 1e-12
+
+# Above this condition number the factor design matrix is treated as
+# ill-conditioned (near-collinear factors). ``matrix_rank`` only fires on exact
+# collinearity; a cond check catches factors that agree to ~1e-10, where lstsq
+# returns huge cancelling coefficients that pass the additivity identity while
+# being individually meaningless. 1e10 sits between well-conditioned random
+# designs (~1e2) and the near-collinear case (~1e10+); ~10 digits of precision
+# lost is the standard "do not trust the result" line.
+_MAX_CONDITION_NUMBER = 1e10
 
 
 # --------------------------------------------------------------------------- #
@@ -155,6 +166,11 @@ def regress_factor_exposures(
             f"factor design matrix is rank-deficient (rank {rank} < {needed}); "
             "factors are perfectly collinear or constant"
         )
+    if np.linalg.cond(design) > _MAX_CONDITION_NUMBER:
+        raise Unavailable(
+            "factor design matrix is ill-conditioned (near-collinear factors); "
+            "attribution would be numerically unstable"
+        )
 
     coef, *_ = np.linalg.lstsq(design, y, rcond=None)
     intercept = float(coef[0])
@@ -163,12 +179,16 @@ def regress_factor_exposures(
     residuals = y - predicted
     ss_res = float(np.sum(residuals**2))
     ss_tot = float(np.sum((y - y.mean()) ** 2))
-    if ss_tot == 0:
-        # Constant asset series: variance is zero, R-squared is undefined.
-        # Report 1.0 only when the fit is also perfect (ss_res == 0), else 0.
-        r_squared = 1.0 if ss_res == 0 else 0.0
-    else:
-        r_squared = 1.0 - ss_res / ss_tot
+    # Zero-variance asset series: R-squared is 0/0 and undefined. The check is
+    # on std (ddof=1), not on ss_tot == 0: a constant series built from a value
+    # not exactly representable in binary64 (e.g. 0.005) leaves ss_tot at
+    # ~1e-34 after summation, so an exact comparison misses it and the function
+    # returns a fabricated negative R-squared from dividing two noise quantities.
+    if np.isclose(np.sqrt(ss_tot / (n - 1)), 0.0, atol=_ZERO_STD_ATOL):
+        raise Unavailable(
+            "asset_returns has zero variance over the window; R-squared is undefined"
+        )
+    r_squared = 1.0 - ss_res / ss_tot
 
     return FactorRegression(
         factor_names=list(factor_returns.columns),
@@ -217,7 +237,7 @@ def attribute_returns(
     *,
     min_observations: int | None = None,
 ) -> Attribution:
-    """Decompose ``sum(portfolio_returns)`` into factor contributions + specific.
+    """Decompose portfolio returns into factor contributions + specific.
 
     The decomposition is regression-based: regress portfolio returns on the
     factor returns with an intercept, then
@@ -226,8 +246,18 @@ def attribute_returns(
         specific_return        = n * intercept
                                == sum(portfolio_returns) - sum(contributions)
 
+    ``total_return`` is the sum of portfolio returns over the dates where
+    ``portfolio_returns`` and ``factor_returns`` overlap (the alignment used
+    internally for the regression). Factors are required for attribution, so
+    portfolio-only dates -- those absent from ``factor_returns`` -- cannot be
+    decomposed and are excluded from both the regression and the total. When
+    the two indices are coextensive this equals ``sum(portfolio_returns)``;
+    when they partially overlap it does not, and the discrepancy can flip the
+    sign versus the full-series sum. Callers comparing ``total_return`` to a
+    precomputed full-series sum must align first.
+
     Because OLS with an intercept yields zero-mean residuals, the contributions
-    plus the specific return equal the total portfolio return to floating
+    plus the specific return equal ``total_return`` to floating
     tolerance. This is the additive property the work order requires; v1's
     mean-exposure heuristic (``avg_exposure * sum(factor)``) did not satisfy it
     and is not reproduced. ``check_additivity`` is asserted before returning.
@@ -341,13 +371,13 @@ def market_model_attribution(
         raise Unavailable(f"need at least 2 overlapping observations to compute variance, got {n}")
 
     b_var = float(np.sum((b - b.mean()) ** 2))
-    if np.isclose(b_var, 0.0, atol=_ZERO_VARIANCE_ATOL):
+    if np.isclose(np.sqrt(b_var / (n - 1)), 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable(
             "benchmark_returns has zero variance over the window; "
             "single-factor regression is undefined"
         )
     p_var = float(np.sum((p - p.mean()) ** 2))
-    if np.isclose(p_var, 0.0, atol=_ZERO_VARIANCE_ATOL):
+    if np.isclose(np.sqrt(p_var / (n - 1)), 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable(
             "portfolio_returns has zero variance over the window; "
             "single-factor regression is undefined"
@@ -379,7 +409,7 @@ def market_model_attribution(
     # and ddof=1 is the standard finance convention, so this function deviates
     # from v1 here -- see report.
     resid_std = float(residuals.std(ddof=1))
-    if np.isclose(resid_std, 0.0, atol=_ZERO_RESIDUAL_STD_ATOL):
+    if np.isclose(resid_std, 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable(
             "tracking error is zero (portfolio is a linear function of the "
             "benchmark over the window); information ratio is undefined"
@@ -425,7 +455,7 @@ def annualized_sharpe(
     if r.size < 2:
         raise Unavailable(f"sharpe requires >=2 observations, got {r.size}")
     sd = float(r.std(ddof=1))
-    if np.isclose(sd, 0.0, atol=_ZERO_RESIDUAL_STD_ATOL):
+    if np.isclose(sd, 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable("sharpe ratio is undefined: return series has zero variance")
     return float(r.mean() / sd * np.sqrt(periods_per_year))
 
@@ -449,7 +479,7 @@ def annualized_sortino(
         raise Unavailable(f"sortino requires >=2 observations, got {r.size}")
     downside = np.minimum(r, 0.0)
     downside_dev = float(np.sqrt(np.mean(downside**2)))
-    if np.isclose(downside_dev, 0.0, atol=_ZERO_RESIDUAL_STD_ATOL):
+    if np.isclose(downside_dev, 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable(
             "sortino ratio is undefined: no observations below target (downside deviation is zero)"
         )
@@ -498,7 +528,7 @@ def annualized_tracking_error(
     """
     active = active_returns(portfolio_returns, benchmark_returns)
     sd = float(active.to_numpy(dtype=float).std(ddof=1))
-    if np.isclose(sd, 0.0, atol=_ZERO_RESIDUAL_STD_ATOL):
+    if np.isclose(sd, 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable(
             "tracking error is undefined: active returns have zero variance "
             "(portfolio tracks benchmark exactly)"
@@ -524,7 +554,7 @@ def annualized_information_ratio(
     active = active_returns(portfolio_returns, benchmark_returns)
     a = active.to_numpy(dtype=float)
     sd = float(a.std(ddof=1))
-    if np.isclose(sd, 0.0, atol=_ZERO_RESIDUAL_STD_ATOL):
+    if np.isclose(sd, 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable(
             "information ratio is undefined: tracking error is zero (portfolio == benchmark)"
         )
