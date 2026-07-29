@@ -111,10 +111,14 @@ def build_extracted_registry() -> Registry:
         attribution,
         fixed_income,
         fundamentals,
+        indicators,
         macro,
         news,
+        options,
         portfolio,
         portfolio_risk,
+        regime,
+        volatility,
     )
 
     registry = Registry()
@@ -751,6 +755,323 @@ def build_extracted_registry() -> Registry:
                 "A parametric (Nelson-Siegel) curve, not a bootstrapped "
                 "piecewise curve; only zero-coupon bonds contribute."
             ),
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Options pricing and chain analytics (capabilities/options.py) ---
+    # Every function inherits the licence of the price / quote data it
+    # consumes (spot prices, option market prices, volumes, OI), so all are
+    # touches_byo exactly like detect.manipulation. The closed enum has no
+    # claim type for an option price, Greek, implied vol or chain metric, so
+    # produces is empty for all of them.
+    for cap in (
+        _bind(
+            "options.black_scholes",
+            "Black-Scholes-Merton price and Greeks for a European option. "
+            "All inputs are required positional arguments.",
+            fn=options.black_scholes,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Model output, not a measurement: assumes European exercise, "
+                "continuous trading, and constant r/sigma/q. T == 0 returns "
+                "intrinsic (the correct limit); T < 0 or sigma <= 0 raises."
+            ),
+        ),
+        _bind(
+            "options.implied_volatility",
+            "Implied volatility from a market price by Newton-Raphson with "
+            "Brent fallback, or None on non-convergence.",
+            fn=options.implied_volatility,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Model-derived: the constant vol that reprices BSM to the "
+                "observed price. Returns None -- never the last iterate -- "
+                "when the solver fails, the price is below intrinsic, or "
+                "T <= 0."
+            ),
+        ),
+        _bind(
+            "options.monte_carlo",
+            "Monte Carlo option price under geometric Brownian motion with "
+            "an explicit seed for reproducibility.",
+            fn=options.monte_carlo,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Model output, not a measurement: the discounted expectation "
+                "of terminal payoff under risk-neutral GBM, estimated by "
+                "Monte Carlo. Carries sampling noise quantified by std_error "
+                "and the 95% confidence interval."
+            ),
+        ),
+        _bind(
+            "options.build_volatility_surface",
+            "Implied-volatility grid for market_prices at strikes x "
+            "expiries, via the BSM IV solver. Non-convergent cells are NaN.",
+            fn=options.build_volatility_surface,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Model-derived surface: each cell is the IV that reprices "
+                "BSM to the observed market price. Cells where the solver "
+                "cannot converge or the price is non-positive are NaN, "
+                "never a fabricated number."
+            ),
+        ),
+        _bind(
+            "options.put_call_ratio",
+            "Volume put/call ratio over an option chain, with sentiment "
+            "band.",
+            fn=options.put_call_ratio,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "options.max_pain",
+            "Max-pain strike -- the strike at which total option-holder "
+            "payoff is minimised -- from open interest across the chain.",
+            fn=options.max_pain,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "options.detect_unusual_activity",
+            "Flag contracts whose volume exceeds twice their open interest.",
+            fn=options.detect_unusual_activity,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "options.put_call_parity_errors",
+            "Put-call parity violations across paired call/put contracts "
+            "with complete bid/ask quotes.",
+            fn=options.put_call_parity_errors,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Realised volatility estimators (capabilities/volatility.py) ---
+    # All consume price or OHLC bar data and inherit the price feed
+    # licence, so all are touches_byo. No estimator output has a home in
+    # the closed claim_type enum, so produces is empty for all.
+    for cap in (
+        _bind(
+            "volatility.close_to_close",
+            "Annualised close-to-close volatility: log-return population "
+            "std over a trailing window.",
+            fn=volatility.close_to_close,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Deterministic estimator, not a forecast. Uses log returns "
+                "(not simple) so the sqrt(T) annualisation invariance holds. "
+                "Zero-variance windows raise rather than returning 0."
+            ),
+        ),
+        _bind(
+            "volatility.ewma",
+            "Annualised EWMA (RiskMetrics) volatility over a trailing "
+            "window.",
+            fn=volatility.ewma,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Normalised exponential weights on squared zero-mean log "
+                "returns. The lambda decay (default 0.94) is a declared "
+                "constant, not calibrated."
+            ),
+        ),
+        _bind(
+            "volatility.parkinson",
+            "Annualised Parkinson (1980) high-low volatility from OHLC "
+            "bars.",
+            fn=volatility.parkinson,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Intraday-range estimator; more efficient than close-to-"
+                "close but assumes zero drift. An addition from the "
+                "standard closed form, not a v1 port."
+            ),
+        ),
+        _bind(
+            "volatility.garman_klass",
+            "Annualised Garman-Klass (1980) OHLC volatility.",
+            fn=volatility.garman_klass,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "OHLC estimator using close-open in addition to high-low. "
+                "Negative per-bar variance (corrupt OHLC) raises rather "
+                "than being swallowed."
+            ),
+        ),
+        _bind(
+            "volatility.rogers_satchell",
+            "Annualised Rogers-Satchell (1991) OHLC volatility.",
+            fn=volatility.rogers_satchell,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "OHLC estimator bias-corrected for drift; does not assume "
+                "zero mean, unlike Parkinson."
+            ),
+        ),
+        _bind(
+            "volatility.volatility_of_volatility",
+            "Annualised population std of a series of volatility readings.",
+            fn=volatility.volatility_of_volatility,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Second-order statistic over caller-supplied vol readings; "
+                "the readings inherit the licence of whatever produced them."
+            ),
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Market regime detection (capabilities/regime.py) ---
+    # All consume return series (derived from prices) so all are
+    # touches_byo. The closed enum has no claim type for a regime label or
+    # rolling-vol series, so produces is empty. detect_regime_changes is the
+    # exception on consumes: it takes a label sequence, not price claims.
+    for cap in (
+        _bind(
+            "regime.realised_volatility",
+            "Trailing rolling population std of returns over the full "
+            "series.",
+            fn=regime.realised_volatility,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "regime.volatility_regime_path",
+            "Per-bar volatility regime label (quiet / transition / "
+            "volatile) banded against the rolling-vol median.",
+            fn=regime.volatility_regime_path,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "The 1.3x / 2.0x median multipliers are declared constants, "
+                "not calibrated thresholds. A deterministic classifier with "
+                "no uncertainty band."
+            ),
+        ),
+        _bind(
+            "regime.classify_volatility",
+            "Classify the current bar's volatility regime against the "
+            "rolling-vol median.",
+            fn=regime.classify_volatility,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Threshold-classified against the series median; the 1.3x / "
+                "2.0x multipliers are declared constants, not calibrated."
+            ),
+        ),
+        _bind(
+            "regime.classify_trend",
+            "Classify the current trend regime via MA crossover on "
+            "returns: uptrend / downtrend / neutral.",
+            fn=regime.classify_trend,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "The 20 / 60 MA windows are declared constants, not "
+                "optimised. A deterministic crossover rule."
+            ),
+        ),
+        _bind(
+            "regime.detect_regime_changes",
+            "Indices where consecutive regime labels differ.",
+            fn=regime.detect_regime_changes,
+            touches_byo=True,
+            provenance=(
+                "Pure structural transform on a label sequence; introduces "
+                "no lag of its own. The output inherits the licence of the "
+                "regime labels it processes."
+            ),
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Technical indicators (capabilities/indicators.py) ---
+    # All consume price and/or volume series, so all are touches_byo. The
+    # closed enum has no claim type for a moving average, oscillator or
+    # cumulative-volume reading, so produces is empty.
+    for cap in (
+        _bind(
+            "indicators.sma",
+            "Simple moving average; None in the first period - 1 positions.",
+            fn=indicators.sma,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "indicators.ema",
+            "Exponential moving average seeded with the SMA of the first "
+            "period values.",
+            fn=indicators.ema,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "indicators.rsi",
+            "Relative Strength Index via Wilder's smoothing.",
+            fn=indicators.rsi,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "indicators.macd",
+            "MACD line, signal line and histogram from fast / slow / "
+            "signal EMA periods.",
+            fn=indicators.macd,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "indicators.bollinger_bands",
+            "Bollinger bands with population std; zero-variance windows "
+            "collapse to a zero-width band.",
+            fn=indicators.bollinger_bands,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "indicators.stochastic",
+            "Stochastic oscillator %K and %D (SMA of %K).",
+            fn=indicators.stochastic,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "indicators.atr",
+            "Average True Range via Wilder's smoothing.",
+            fn=indicators.atr,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "indicators.vwap",
+            "Cumulative volume-weighted average price using typical price.",
+            fn=indicators.vwap,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+        ),
+        _bind(
+            "indicators.obv",
+            "On-balance volume: cumulative signed volume by price "
+            "direction.",
+            fn=indicators.obv,
+            consumes=("price_snapshot",),
+            touches_byo=True,
         ),
     ):
         registry.add(cap)
