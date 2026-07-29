@@ -88,6 +88,38 @@ audience-scoped, it is not — make it explicit.
   `assert x == 42` to `assert x is not None` is a failure, not a fix.
 - Never delete a test. Skipping with a named dependency is acceptable.
 - Run only your own test files unless asked otherwise.
+- **Prove your test discriminates.** Before claiming a test covers something,
+  ask what else would satisfy it. `assert x > 0`, `assert x is not None` and
+  `assert weights.sum() == 1` almost never discriminate. The check that settles
+  it: stub the implementation to something deliberately wrong, confirm the test
+  fails, restore it, confirm it passes. Audits here have found an optimiser no
+  test could tell apart from equal weight, a convexity function replaceable by
+  `return time_to_maturity(...)`, vega tests passing for `vega = sigma`, and
+  Monte Carlo tests passing for a fake that runs no simulation.
+
+## Never compare a float to zero with ==
+
+This has produced fabricated output in five separate modules, written by five
+different agents, each of whom knew the general rule and applied it correctly
+somewhere else in the same file.
+
+`np.std` of a constant `0.05` series returns ~1e-17, not `0.0`, because `0.05`
+is not exactly representable in binary64. `ss_tot` for that series lands at
+~1e-34. So `if variance == 0: raise` never fires, execution falls into the
+branch that divides noise by noise, and the function returns a confident number
+that means nothing — a negative R-squared, a 1e-15 volatility, a perfect
+correlation from pure noise.
+
+- Guard with a tolerance: `np.isclose(x, 0.0, atol=...)`. For the exactly-equal
+  case `np.ptp(series) == 0` is exact regardless of magnitude.
+- Put the tolerance on a **scale-consistent** quantity. A tolerance on a
+  variance is scale-squared and does not mean the same thing across series;
+  prefer the standard deviation.
+- Use **one** tolerance and one idiom per module. Two functions in the same file
+  disagreeing about what counts as constant is its own defect.
+- `NaN` and `inf` need their own refusal. Every comparison against `NaN` is
+  false, so a validity check written as a comparison silently passes it through
+  and the caller gets a labelled, confident result computed from `NaN`.
 
 ## Layout
 
