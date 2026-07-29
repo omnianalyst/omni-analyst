@@ -177,3 +177,24 @@ For a **multi-tenant** deployment: do not set a single shared
 `byo_only`-class key unless you hold a redistribution licence for it. Without
 one, each user must supply their own key, and the claims they fetch stay private
 to them.
+
+
+## Verified
+
+Built and run on 2026-07-28, podman 5.x on macOS.
+
+    podman build -f Dockerfile -t omni-v2-api:test .   ->  677 MB
+    GET /health  ->  {"status":"ok","nucleus":"connected","version":"0.1.0"}
+
+Confirmed in the running container: non-root (`omni`), no `ui/`, no `tests/`.
+
+Two things this build surfaced that inspection had not:
+
+**HEALTHCHECK is dropped under podman.** The Dockerfile declares one and podman
+warns `HEALTHCHECK is not supported for OCI image format and will be ignored.
+Must use docker format`. Build with `--format docker` if you want it honoured,
+or rely on the orchestrator's own probe against `/health`. Do not assume the
+container self-reports health.
+
+**On macOS, `--network host` shares the VM's network, not the Mac's.** Publish
+a port instead, and reach host services at `host.containers.internal`.

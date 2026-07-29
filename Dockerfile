@@ -46,8 +46,11 @@ RUN uv export --frozen --no-dev --no-emit-project --no-annotate \
 # Now the local framework, from the operator-built wheel. Placed after the heavy
 # registry install so a Neutron rebuild invalidates only this thin layer.
 ARG NEUTRON_WHEEL=vendor/neutron_py-0.1.0-py3-none-any.whl
-COPY ${NEUTRON_WHEEL} /tmp/neutron.whl
-RUN uv pip install --python /app/.venv/bin/python /tmp/neutron.whl
+# Copy into a directory rather than to a fixed filename. A wheel renamed to
+# neutron.whl loses its version, and uv rejects it: PEP 427 filenames carry the
+# version and installers parse it rather than reading metadata first.
+COPY ${NEUTRON_WHEEL} /tmp/wheels/
+RUN uv pip install --python /app/.venv/bin/python /tmp/wheels/*.whl
 
 # Application source and migrations. We do NOT pip-install the project: the
 # migrations loader (omni.db) finds migrations/ by walking up from this file
