@@ -151,9 +151,11 @@ class OrderBook:
     @property
     def book_pressure(self) -> float:
         # Distance-weighted imbalance over the top 10 levels per side. The
-        # weight is `1 / (1 + |price - mid| / mid)` -- a level twice as far
-        # from mid as another carries half its weight. Same sign convention as
-        # order_imbalance.
+        # weight is `1 / (1 + |price - mid| / mid)`, so depth farther from
+        # the mid is discounted, with the discount steepening as the
+        # distance grows relative to the mid (e.g. at mid=100 a level 1
+        # tick away carries weight ~0.990, 10 ticks away ~0.909 -- a mild
+        # decay, not a halving). Same sign convention as order_imbalance.
         self._validate_two_sided()
         mid = self.mid_price
         if mid <= 0:
@@ -214,10 +216,12 @@ async def effective_spread(
     - `price_improvement`: signed difference vs mid. Positive is good for the
       trader (a buy filled below mid, a sell filled above).
     - `realised_spread`: the temporary-vs-permanent decomposition, using the
-      mid `horizon` (default 5m) after the trade. If no quote is prevailing
-      at `trade_time + horizon` the trade contributes no realised observation
-      (this is rare: the prevailing quote at trade time is usually still
-      prevailing `horizon` later, so in practice every trade contributes).
+      mid `horizon` (default 5m) after the trade. For a non-negative
+      `horizon` every trade that resolved a present quote also resolves a
+      future quote, so each trade contributes a realised observation. If no
+      realised observation can be derived at all (e.g. a negative `horizon`
+      whose future timestamp predates every quote) the call raises
+      `Unavailable` rather than fabricating a zero mean.
 
     `side` must be present on every trade and equal ``"buy"`` or ``"sell"``;
     it determines the sign of price_improvement and realised_spread.
@@ -264,11 +268,15 @@ async def effective_spread(
         else:
             realized_spreads.append(2 * (trade["price"] - future_mid))
 
+    if not realized_spreads:
+        raise Unavailable(
+            "no realised-spread observations derived; every future-quote "
+            "lookup failed (check horizon vs the quote span)"
+        )
+
     return {
         "effective_spread": float(np.mean(effective_spreads)),
-        "realized_spread": (
-            float(np.mean(realized_spreads)) if realized_spreads else 0.0
-        ),
+        "realized_spread": float(np.mean(realized_spreads)),
         "price_improvement": float(np.mean(price_improvements)),
     }
 
@@ -323,7 +331,7 @@ async def kyle_lambda(trades: Sequence[dict]) -> float:
         )
 
     x = np.asarray(signed_volumes, dtype=float)
-    if float(np.std(x)) == 0.0:
+    if np.ptp(x) == 0.0:
         raise Unavailable(
             "signed order flow has zero variance; lambda regression undefined"
         )
