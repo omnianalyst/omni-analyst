@@ -14,6 +14,7 @@ from omni.capabilities.fixed_income import (
     nelson_siegel,
 )
 from omni.capabilities.portfolio_risk import Scenario
+from omni.capabilities.volatility import Bar
 from omni.capability.builtin import build_builtin_registry
 from omni.capability.extracted import CLAIM_TYPES, build_extracted_registry
 from omni.capability.registry import Registry
@@ -186,6 +187,51 @@ def _zero_curve_bonds():
             )
         )
     return bonds
+
+
+# --- Options / volatility / regime / indicators fixtures -----------------
+
+def _vol_surface_inputs():
+    """Market prices at a flat 20% vol so the surface should recover ~0.20."""
+    from omni.capabilities.options import black_scholes as _bs
+
+    strikes = [90.0, 100.0, 110.0]
+    expiries = [0.25, 0.5, 1.0]
+    prices = np.array(
+        [
+            [_bs(100.0, k, t, 0.05, 0.20, 0.0, "call")["price"] for t in expiries]
+            for k in strikes
+        ]
+    )
+    return {
+        "spot": 100.0,
+        "r": 0.05,
+        "q": 0.0,
+        "strikes": strikes,
+        "expiries": expiries,
+        "market_prices": prices,
+        "option_type": "call",
+    }
+
+
+def _ohlc_bars():
+    """15 synthetic OHLC bars with non-trivial intraday range."""
+    rng = np.random.default_rng(11)
+    bars = []
+    price = 100.0
+    for _ in range(15):
+        ret = rng.normal(0, 0.01)
+        open_ = price
+        close = price * (1 + ret)
+        high = max(open_, close) * (1 + abs(rng.normal(0, 0.005)))
+        low = min(open_, close) * (1 - abs(rng.normal(0, 0.005)))
+        bars.append(Bar(open=open_, high=high, low=low, close=close))
+        price = close
+    return bars
+
+
+def _returns(n=50, seed=7):
+    return list(np.random.default_rng(seed).normal(0, 0.01, n))
 
 
 def _cases():
@@ -659,6 +705,258 @@ def _cases():
             {"bonds": _zero_curve_bonds(), "curve_date": date(2020, 1, 1)},
             lambda r: r.interpolate(5.0) == pytest.approx(0.045, abs=0.005),
         ),
+        # --- options ---
+        "options.black_scholes": (
+            {
+                "S": 100.0,
+                "K": 100.0,
+                "T": 1.0,
+                "r": 0.05,
+                "sigma": 0.2,
+                "q": 0.0,
+                "option_type": "call",
+            },
+            lambda r: r["price"] == pytest.approx(10.45, abs=0.05)
+            and 0.0 < r["delta"] < 1.0,
+        ),
+        "options.implied_volatility": (
+            {
+                "market_price": 10.45,
+                "S": 100.0,
+                "K": 100.0,
+                "T": 1.0,
+                "r": 0.05,
+                "q": 0.0,
+                "option_type": "call",
+            },
+            lambda r: r is not None and abs(r - 0.2) < 0.01,
+        ),
+        "options.monte_carlo": (
+            {
+                "S": 100.0,
+                "K": 100.0,
+                "T": 1.0,
+                "r": 0.05,
+                "sigma": 0.2,
+                "q": 0.0,
+                "option_type": "call",
+                "simulations": 20000,
+                "seed": 42,
+            },
+            lambda r: r["price"] == pytest.approx(10.45, abs=1.0)
+            and r["std_error"] > 0,
+        ),
+        "options.build_volatility_surface": (
+            _vol_surface_inputs(),
+            lambda r: isinstance(r, np.ndarray)
+            and r.shape == (3, 3)
+            and abs(float(r[1, 1]) - 0.20) < 0.01,
+        ),
+        "options.put_call_ratio": (
+            {
+                "contracts": [
+                    {"option_type": "call", "volume": 100, "strike": 100.0},
+                    {"option_type": "put", "volume": 50, "strike": 100.0},
+                ]
+            },
+            lambda r: r["ratio"] == pytest.approx(0.5)
+            and r["call_volume"] == 100,
+        ),
+        "options.max_pain": (
+            {
+                "contracts": [
+                    {"option_type": "call", "strike": 100.0, "open_interest": 100},
+                    {"option_type": "put", "strike": 100.0, "open_interest": 100},
+                    {"option_type": "call", "strike": 110.0, "open_interest": 50},
+                    {"option_type": "put", "strike": 110.0, "open_interest": 50},
+                ]
+            },
+            lambda r: r["strike"] == 100.0,
+        ),
+        "options.detect_unusual_activity": (
+            {
+                "contracts": [
+                    {"option_type": "call", "strike": 100.0, "volume": 300, "open_interest": 100},
+                    {"option_type": "put", "strike": 100.0, "volume": 10, "open_interest": 200},
+                ]
+            },
+            lambda r: len(r) == 1
+            and r[0]["strike"] == 100.0
+            and r[0]["vol_oi_ratio"] == pytest.approx(3.0),
+        ),
+        "options.put_call_parity_errors": (
+            {
+                "contracts": [
+                    {"option_type": "call", "strike": 100.0, "expiry": "2024-12-20", "bid": 14.0, "ask": 16.0},
+                    {"option_type": "put", "strike": 100.0, "expiry": "2024-12-20", "bid": 5.0, "ask": 7.0},
+                ],
+                "underlying_price": 100.0,
+                "risk_free_rate": 0.05,
+                "time_to_expiry": 1.0,
+            },
+            lambda r: len(r) == 1 and r[0]["parity_error"] > 0.10,
+        ),
+        # --- volatility ---
+        "volatility.close_to_close": (
+            {
+                "prices": [100, 101, 99, 102, 100, 103, 98, 101, 100, 102, 99, 101],
+                "window": 10,
+                "annualisation": 252,
+            },
+            lambda r: r > 0,
+        ),
+        "volatility.ewma": (
+            {
+                "prices": [100, 101, 99, 102, 100, 103, 98, 101, 100, 102, 99, 101],
+                "window": 10,
+                "annualisation": 252,
+            },
+            lambda r: r > 0,
+        ),
+        "volatility.parkinson": (
+            {"bars": _ohlc_bars(), "window": 10, "annualisation": 252},
+            lambda r: r > 0,
+        ),
+        "volatility.garman_klass": (
+            {"bars": _ohlc_bars(), "window": 10, "annualisation": 252},
+            lambda r: r > 0,
+        ),
+        "volatility.rogers_satchell": (
+            {"bars": _ohlc_bars(), "window": 10, "annualisation": 252},
+            lambda r: r > 0,
+        ),
+        "volatility.volatility_of_volatility": (
+            {
+                "volatilities": [0.15, 0.18, 0.20, 0.17, 0.22, 0.19, 0.21,
+                                 0.16, 0.20, 0.18, 0.19, 0.21],
+                "window": 10,
+                "annualisation": 252,
+            },
+            lambda r: r > 0,
+        ),
+        # --- regime ---
+        "regime.realised_volatility": (
+            {"returns": _returns(50)},
+            lambda r: isinstance(r, np.ndarray)
+            and len(r) == 50
+            and np.all(r >= 0),
+        ),
+        "regime.volatility_regime_path": (
+            {"returns": _returns(50)},
+            lambda r: isinstance(r, list)
+            and len(r) == 50
+            and all(l in ("quiet", "transition", "volatile") for l in r),
+        ),
+        "regime.classify_volatility": (
+            {"returns": _returns(50)},
+            lambda r: r["regime"] in ("quiet", "transition", "volatile")
+            and r["current_volatility"] >= 0,
+        ),
+        "regime.classify_trend": (
+            {"returns": _returns(80)},
+            lambda r: r["regime"] in ("uptrend", "downtrend", "neutral")
+            and "ma_short" in r
+            and "ma_long" in r,
+        ),
+        "regime.detect_regime_changes": (
+            {
+                "regimes": [
+                    "quiet", "quiet", "volatile", "volatile",
+                    "quiet", "transition",
+                ]
+            },
+            lambda r: len(r) == 3
+            and r[0]["index"] == 2
+            and r[0]["from_regime"] == "quiet"
+            and r[0]["to_regime"] == "volatile",
+        ),
+        # --- indicators ---
+        "indicators.sma": (
+            {
+                "prices": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+                "period": 5,
+            },
+            lambda r: r[0] is None
+            and r[4] == pytest.approx(12.0)
+            and r[-1] == pytest.approx(18.0),
+        ),
+        "indicators.ema": (
+            {
+                "prices": [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+                "period": 5,
+            },
+            lambda r: r[0] is None
+            and r[4] == pytest.approx(12.0)
+            and r[-1] is not None,
+        ),
+        "indicators.rsi": (
+            {
+                "prices": [44, 44.34, 44.09, 43.61, 44.33, 44.83,
+                           45.10, 45.42, 45.84, 46.36, 46.84, 47.01],
+                "period": 7,
+            },
+            lambda r: all(v is None for v in r[:7])
+            and all(v is not None and 0 <= v <= 100 for v in r[7:]),
+        ),
+        "indicators.macd": (
+            {
+                "prices": list(range(1, 40)),
+                "fast_period": 5,
+                "slow_period": 10,
+                "signal_period": 3,
+            },
+            lambda r: "macd" in r and "signal" in r and "histogram" in r
+            and len(r["macd"]) == 39,
+        ),
+        "indicators.bollinger_bands": (
+            {
+                "prices": [10, 12, 11, 13, 14, 12, 15, 13, 16, 14, 17, 15],
+                "period": 5,
+                "num_std": 2.0,
+            },
+            lambda r: r["upper"][0] is None
+            and r["middle"][4] == pytest.approx(12.0)
+            and r["upper"][4] >= r["middle"][4] >= r["lower"][4],
+        ),
+        "indicators.stochastic": (
+            {
+                "high": [10, 11, 12, 11, 13, 14, 13, 15, 16, 15, 17, 18],
+                "low": [9, 10, 11, 10, 12, 13, 12, 14, 15, 14, 16, 17],
+                "close": [10, 10.5, 11.5, 10.5, 12.5, 13.5,
+                          12.5, 14.5, 15.5, 14.5, 16.5, 17.5],
+                "k_period": 5,
+                "d_period": 3,
+            },
+            lambda r: "k" in r and "d" in r
+            and r["k"][0] is None
+            and any(v is not None for v in r["k"]),
+        ),
+        "indicators.atr": (
+            {
+                "high": [10, 11, 12, 11, 13, 14, 13, 15, 16, 15, 17, 18],
+                "low": [9, 10, 11, 10, 12, 13, 12, 14, 15, 14, 16, 17],
+                "close": [10, 10.5, 11.5, 10.5, 12.5, 13.5,
+                          12.5, 14.5, 15.5, 14.5, 16.5, 17.5],
+                "period": 5,
+            },
+            lambda r: len(r) == 12 and r[0] is None and r[5] is not None,
+        ),
+        "indicators.vwap": (
+            {
+                "prices": [10, 11, 12, 11, 13],
+                "volumes": [100, 200, 150, 300, 250],
+            },
+            lambda r: len(r) == 5
+            and r[0] == pytest.approx(10.0)
+            and all(v is not None for v in r),
+        ),
+        "indicators.obv": (
+            {
+                "prices": [10, 11, 10, 12, 11],
+                "volumes": [100, 200, 150, 300, 250],
+            },
+            lambda r: r == [0.0, 200.0, 50.0, 350.0, 100.0],
+        ),
     }
 
 
@@ -780,6 +1078,44 @@ class TestLicenceClassification:
         ],
     )
     def test_news_and_sentiment_from_commercial_apis_are_private(
+        self, registry, name
+    ):
+        assert registry.get(name).touches_byo is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "options.black_scholes",
+            "options.implied_volatility",
+            "options.monte_carlo",
+            "options.build_volatility_surface",
+            "options.put_call_ratio",
+            "options.max_pain",
+            "options.detect_unusual_activity",
+            "options.put_call_parity_errors",
+            "volatility.close_to_close",
+            "volatility.ewma",
+            "volatility.parkinson",
+            "volatility.garman_klass",
+            "volatility.rogers_satchell",
+            "volatility.volatility_of_volatility",
+            "regime.realised_volatility",
+            "regime.volatility_regime_path",
+            "regime.classify_volatility",
+            "regime.classify_trend",
+            "regime.detect_regime_changes",
+            "indicators.sma",
+            "indicators.ema",
+            "indicators.rsi",
+            "indicators.macd",
+            "indicators.bollinger_bands",
+            "indicators.stochastic",
+            "indicators.atr",
+            "indicators.vwap",
+            "indicators.obv",
+        ],
+    )
+    def test_market_analytics_over_prices_inherit_the_price_licence(
         self, registry, name
     ):
         assert registry.get(name).touches_byo is True
