@@ -54,10 +54,13 @@ Defaults removed (raise `Unavailable` instead, per the work order):
 - v1's MIN_MAX returned zeros when `native_range` was ~0. Raises.
 - v1's convergence returned `None` for fewer than 3 signals (silent), and fell
   back to uniform weights when total weight was 0 (a default). Both raise.
-- v1's lead-lag returned `None` for `<30` overlapping points or low
+- v1's lead-lag returned `None` for `<30` overlapping points, for an effective
+  overlap `n_eff < 10` at the best lag (a sample-size floor), or for low
   significance, and substituted `corr = 0.0` whenever a lag exceeded the series
-  or a slice was constant. The structural failures raise; significance is
-  reported, not used to silently drop an edge.
+  or a slice was constant. The structural failures raise; the `n_eff < 10`
+  sample-size floor is restored as a raise (a two-point correlation of +/-1 is
+  noise, not a measured edge); significance is reported, not used to silently
+  drop an adequately-sampled edge.
 
 `edge_gate.py` and `pattern_miner.py` were read and judged rather than ported.
 See `_orchestrator/reports/J4.md` for that comparison; it is worth more than
@@ -94,6 +97,7 @@ _BEAR_THRESHOLD = -0.15
 _DIVERGENCE_THRESHOLD = 1.0  # v1 reports a pair when |va - vb| > 1.0
 _MAX_DIVERGENCES = 5
 _MIN_OVERLAP = 30  # v1 drops a lead-lag pair below 30 shared observations
+_MIN_EFFECTIVE_OVERLAP = 10  # v1's n_eff floor at the best lag (sample-size gate)
 _SIGNIFICANCE_SCALE = 2.5  # v1: significance = min(1, |t| / 2.5)
 
 
@@ -215,7 +219,7 @@ def normalize(
             raise Unavailable("min_max requires native_range")
         lo, hi = native_range
         span = hi - lo
-        if abs(span) < _STD_EPS:
+        if span < _STD_EPS:
             raise Unavailable("min_max native_range has zero span; transform is undefined")
         out = ((arr - lo) / span) * 2.0 - 1.0
     else:  # pragma: no cover - exhaustive enum
@@ -457,11 +461,16 @@ def lead_lag(a: Sequence[float], b: Sequence[float], *, max_lag: int) -> LeadLag
     (`min(1, |t| / 2.5)` with `t = r * sqrt(n_eff - 2) / sqrt(1 - r^2)`).
 
     Raises `Unavailable` on mismatched lengths, `max_lag >= series length` (the
-    scan would query lags the series cannot support), a constant series, or
+    scan would query lags the series cannot support), `max_lag > n - 2` (the
+    extreme lags would overlap fewer than two points), a constant series, or
     fewer than `_MIN_OVERLAP` points. v1 returned `None` for the last two and
     substituted `0.0` for uncomputable lags; both fed silence into the graph.
-    Significance is reported, not used to silently drop an edge -- deciding
-    whether a weak edge is worth keeping is the caller's job.
+    The best lag is also refused when its effective overlap `n - abs(lag)` is
+    below `_MIN_EFFECTIVE_OVERLAP` (v1's `n_eff < 10` sample-size floor): a
+    correlation on a handful of points is what pure noise looks like, not a
+    measured edge. Significance is reported, not used to silently drop an edge
+    -- deciding whether a weak (but adequately sampled) edge is worth keeping
+    is the caller's job.
     """
     arr_a = np.asarray(a, dtype=float)
     arr_b = np.asarray(b, dtype=float)
@@ -470,6 +479,11 @@ def lead_lag(a: Sequence[float], b: Sequence[float], *, max_lag: int) -> LeadLag
     n = arr_a.shape[0]
     if max_lag >= n:
         raise Unavailable(f"max_lag {max_lag} >= series length {n}")
+    if max_lag > n - 2:
+        raise Unavailable(
+            f"max_lag {max_lag} leaves fewer than 2 overlapping points at the "
+            f"extremes of series length {n}; need max_lag <= {n - 2}"
+        )
     if n < 2:
         raise Unavailable(f"need >= 2 points, got {n}")
     if n < _MIN_OVERLAP:
@@ -486,6 +500,11 @@ def lead_lag(a: Sequence[float], b: Sequence[float], *, max_lag: int) -> LeadLag
             best_lag = lag
 
     n_eff = n - abs(best_lag)
+    if n_eff < _MIN_EFFECTIVE_OVERLAP:
+        raise Unavailable(
+            f"best lag {best_lag} leaves only {n_eff} overlapping points; "
+            f"need >= {_MIN_EFFECTIVE_OVERLAP} for a meaningful correlation"
+        )
     if n_eff >= 3:
         t_stat = best_corr * (n_eff - 2) ** 0.5 / (1 - best_corr**2 + 1e-10) ** 0.5
         significance = min(1.0, abs(t_stat) / _SIGNIFICANCE_SCALE)
