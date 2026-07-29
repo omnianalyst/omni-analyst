@@ -106,6 +106,12 @@ class TestNormalize:
         # First point: only itself in the window -> percentile 1.0 -> +1.0.
         assert out[0] == pytest.approx(1.0)
         assert out[-1] == pytest.approx(1.0)
+        # Non-monotonic input discriminates from a constant +1 stub: in [3,1,2]
+        # the middle point is the window min (percentile 0.5 -> 0.0) and the
+        # last is below the max (2 of 3 -> 1/3).
+        nm = normalize([3.0, 1.0, 2.0], NormalizationMethod.PERCENTILE, window=3)
+        assert nm[1] == pytest.approx(0.0)
+        assert nm[2] == pytest.approx(1.0 / 3.0)
 
     def test_rank_of_monotonic_series(self):
         x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
@@ -113,6 +119,12 @@ class TestNormalize:
         # Final point is the largest in a full window of 5 -> rank index 4 ->
         # 4 / (5-1) * 2 - 1 = 1.0.
         assert out[-1] == pytest.approx(1.0)
+        # Non-monotonic input discriminates from a constant +1 stub: in [3,1,2]
+        # with an expanding window, index 1 is the min of [3,1] (rank 0 -> -1.0)
+        # and index 2 is the median of [3,1,2] (rank 1 of 3 -> 0.0).
+        nm = normalize([3.0, 1.0, 2.0], NormalizationMethod.RANK, window=3)
+        assert nm[2] == pytest.approx(0.0)
+        assert nm[1] == pytest.approx(-1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +280,13 @@ class TestFailurePaths:
         with pytest.raises(Unavailable, match="zero span"):
             normalize([1.0, 2.0, 3.0], NormalizationMethod.MIN_MAX, native_range=(5.0, 5.0))
 
+    def test_normalize_min_max_inverted_range_raises(self):
+        # F3: v1's bare `span < 1e-8` (no abs) treated an inverted native_range
+        # (max < min) as invalid; the port's abs() let it through and silently
+        # sign-flipped the mapping. Refuse, matching v1.
+        with pytest.raises(Unavailable, match="zero span"):
+            normalize([0.0, 50.0, 100.0], NormalizationMethod.MIN_MAX, native_range=(100.0, 0.0))
+
     def test_normalize_empty_raises(self):
         with pytest.raises(Unavailable, match="nothing to normalise"):
             normalize([], NormalizationMethod.IDENTITY)
@@ -303,6 +322,27 @@ class TestFailurePaths:
         b = [3.0, 2.0, 1.0]
         with pytest.raises(Unavailable, match="overlapping points"):
             lead_lag(a, b, max_lag=2)
+
+    def test_leadlag_pure_noise_near_n_refuses_not_fabricated_edge(self):
+        # F1: with max_lag near n, the extreme lags overlap 2-3 points, where a
+        # Pearson correlation is always ~+-1.0. v1 had an n_eff < 10 sample-size
+        # floor that refused such edges; the port dropped it and returned
+        # |correlation| = 1.0 fabricated from pure noise. The floor must refuse.
+        rng = np.random.RandomState(7)
+        a = rng.normal(size=40)
+        b = rng.normal(size=40)
+        with pytest.raises(Unavailable, match="overlapping points"):
+            lead_lag(a, b, max_lag=38)
+
+    def test_leadlag_max_lag_n_minus_one_raises_at_guard_not_mid_scan(self):
+        # F2: max_lag = n - 1 used to slip the `max_lag >= n` guard and crash
+        # mid-scan with a misleading "constant slice" message (1-point slices at
+        # the extreme lag). It must raise at the guard, blaming max_lag.
+        rng = np.random.RandomState(5)
+        a = rng.normal(size=40)
+        b = rng.normal(size=40)
+        with pytest.raises(Unavailable, match="max_lag"):
+            lead_lag(a, b, max_lag=39)
 
     def test_cross_correlation_mismatched_length_raises(self):
         with pytest.raises(Unavailable, match="mismatched lengths"):
