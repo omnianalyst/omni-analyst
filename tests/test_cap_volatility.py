@@ -42,13 +42,27 @@ def _noisy_prices(n: int, seed: int = 0, sigma: float = 0.02) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 class TestCloseToClose:
-    def test_constant_log_return_raises_zero_variance(self):
-        # Powers of 2: every consecutive ratio is exactly 2.0, so every log
-        # return is exactly ln(2) -- bit-identical, ptp == 0. (exp-based growth
-        # does not round-trip: log(exp(r)) is not bit-equal to r.)
-        prices = 100.0 * (2.0 ** np.arange(40))
+    @pytest.mark.parametrize(
+        "construct",
+        [
+            pytest.param(100.0 * (1.05 ** np.arange(40)), id="pow-growth-1.05"),
+            pytest.param(
+                100.0 * np.exp(np.cumsum(np.full(39, math.log(1.05)))),
+                id="exp-cumsum",
+            ),
+            pytest.param(100.0 * np.cumprod(np.full(40, 1.001)), id="cumprod"),
+        ],
+    )
+    def test_constant_log_return_raises_zero_variance(self, construct):
+        # A constant-growth series built any normal way -- p*g**i,
+        # exp(cumsum(c)), cumprod(...) -- produces log returns that differ only
+        # at the last few ULPs (~1e-16). The pre-fix guard `np.ptp == 0.0`
+        # catches bit-identical values alone (powers of 2 -> exact ln 2), so it
+        # let every realistic constant-growth series through and returned
+        # ~1e-15 of float noise labelled as a volatility. These three are the
+        # audit's F1 reproductions; all must raise.
         with pytest.raises(Unavailable, match="zero variance"):
-            close_to_close(prices, window=20, annualisation=252)
+            close_to_close(construct, window=20, annualisation=252)
 
     def test_flat_price_is_constant_zero_return_and_raises(self):
         with pytest.raises(Unavailable, match="zero variance"):
@@ -197,9 +211,23 @@ class TestRogersSatchell:
 # ---------------------------------------------------------------------------
 
 class TestVolatilityOfVolatility:
-    def test_constant_vol_series_raises(self):
+    @pytest.mark.parametrize(
+        "vols",
+        [
+            pytest.param([0.2] * 30, id="bit-identical"),
+            pytest.param(
+                [0.20 * (1 + 1e-16 * i) for i in range(30)], id="float-noise"
+            ),
+        ],
+    )
+    def test_constant_vol_series_raises(self, vols):
+        # The float-noise construction is the audit's F1 vol-of-vol
+        # reproduction: readings spaced at 1e-16 (ptp ~ 6e-16) that the pre-fix
+        # `np.ptp == 0.0` guard let through, returning ~1e-15 as a vol-of-vol.
+        # The bit-identical case is the trivial exact-zero path the old guard
+        # already caught; both must raise.
         with pytest.raises(Unavailable, match="zero variance"):
-            volatility_of_volatility([0.2] * 30, window=20, annualisation=252)
+            volatility_of_volatility(vols, window=20, annualisation=252)
 
     def test_known_answer(self):
         vols = np.array([0.1, 0.2, 0.15, 0.3, 0.25, 0.2, 0.1, 0.05])
@@ -227,6 +255,32 @@ class TestRegimeAgreement:
         regime_path = regime.realised_volatility(returns.tolist(), window=len(returns))
         regime_vol = float(regime_path[-1])
         vol = close_to_close(prices, window=len(prices), annualisation=1, ddof=0)
+        assert vol == pytest.approx(regime_vol, rel=1e-12)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "regime.py:99 slices returns[max(0,i-window):i+1] -- window+1 points "
+            "for interior i, not window. The full-series test above masks this: "
+            "max(0,...) clamps to 0 so the slice grows from the start and the "
+            "off-by-one is invisible. On a trailing window it is exposed: regime "
+            "window=W uses W+1 returns, close_to_close window=W+1 uses W returns, "
+            "so they disagree. Fix regime.realised_volatility to slice "
+            "returns[i-window+1:i+1] and remove this xfail (it will then xpass)."
+        ),
+    )
+    def test_close_to_close_trailing_window_matches_regime(self):
+        # Same offset convention as the full-series test above (close_to_close
+        # counts prices, so its window is one larger than the return count
+        # regime sees), but on a trailing window shorter than the series -- the
+        # case the full-series test cannot reach. Out of band: patching
+        # regime.py:99 to [i-window+1:i+1] makes this assertion hold exactly.
+        rng = np.random.RandomState(21)
+        returns = rng.normal(0.0, 0.02, size=100)
+        prices = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(returns)]))
+
+        regime_vol = float(regime.realised_volatility(returns.tolist(), window=20)[-1])
+        vol = close_to_close(prices, window=21, annualisation=1, ddof=0)
         assert vol == pytest.approx(regime_vol, rel=1e-12)
 
 

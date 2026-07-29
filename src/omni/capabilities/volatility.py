@@ -73,6 +73,18 @@ from omni.ingest.protocol import Unavailable
 # inline, matching how capabilities/regime.py treats its thresholds.
 DEFAULT_LAMBDA = 0.94
 
+# A constant-growth series built the normal way (p*g**i, exp(cumsum(c)),
+# cumprod(...)) rounds to values that differ at the last few ULPs, so its spread
+# is ~1e-16 * |value| -- numerically nonzero, economically zero. Feeding that
+# into np.std yields ~1e-15 of pure rounding noise labelled as a volatility. The
+# guard below treats such a spread as zero when it sits at float-rounding scale
+# relative to the readings' magnitude. One relative tolerance for the whole
+# module: log returns and vol-of-vol readings differ in scale by orders of
+# magnitude, so an absolute tolerance would not mean the same thing in both
+# callers. Measured noise ratio is ~1e-14; real return/vol spreads are O(0.1),
+# so 1e-12 leaves ~2 orders above the noise and ~10 below any real spread.
+_ZERO_VARIANCE_REL_TOL = 1e-12
+
 
 @dataclass(frozen=True)
 class Bar:
@@ -96,6 +108,15 @@ def _check_annualisation(annualisation: float) -> None:
         raise Unavailable(
             f"annualisation must be > 0 (variance scales by sqrt(n)); got {annualisation}"
         )
+
+
+def _is_effectively_constant(series: np.ndarray) -> bool:
+    # `np.ptp(series) == 0.0` is exact but fires only on bit-identical values;
+    # see _ZERO_VARIANCE_REL_TOL for why that is insufficient.
+    magnitude = float(np.max(np.abs(series)))
+    if magnitude == 0.0:
+        return True
+    return float(np.ptp(series)) <= magnitude * _ZERO_VARIANCE_REL_TOL
 
 
 def _log_returns(prices: np.ndarray) -> np.ndarray:
@@ -125,7 +146,7 @@ def close_to_close(
     _check_annualisation(annualisation)
     returns = _log_returns(prices)
     recent = returns[-(window - 1):]
-    if np.ptp(recent) == 0.0:
+    if _is_effectively_constant(recent):
         raise Unavailable("zero variance in returns; volatility undefined")
     return float(np.std(recent, ddof=ddof)) * np.sqrt(annualisation)
 
@@ -263,6 +284,6 @@ def volatility_of_volatility(
     if (series < 0).any():
         raise Unavailable("negative volatility reading")
     recent = series[-window:]
-    if np.ptp(recent) == 0.0:
+    if _is_effectively_constant(recent):
         raise Unavailable("zero variance in volatilities; vol-of-vol undefined")
     return float(np.std(recent, ddof=ddof) * np.sqrt(annualisation))
