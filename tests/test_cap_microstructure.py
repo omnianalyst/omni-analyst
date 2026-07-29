@@ -57,12 +57,20 @@ class TestOrderBook:
         assert book.order_imbalance == -1.0
 
     def test_imbalance_uses_top_five_levels_only(self):
-        # Levels beyond index 4 must not contribute.
+        # The top five bid levels sum to 600 and the top five ask levels to
+        # 500, so the top-5 imbalance is (600-500)/1100 = 1/11. Levels beyond
+        # index 4 are deliberately asymmetric (a huge ask tail, a tiny bid
+        # tail) so summing the whole book lands on a different number, and
+        # the fifth bid level (size 200) is distinct from the first four so a
+        # [:4] slice also fails this assertion. An implementation that summed
+        # all levels would return (601-10499)/11100 = -0.8917.
         book = OrderBook(
-            bids=[(99, 100)] * 5 + [(95, 9999)],
-            asks=[(101, 100)] * 5 + [(105, 9999)],
+            bids=[(99, 100), (98, 100), (97, 100), (96, 100), (95, 200)]
+            + [(94, 1)],
+            asks=[(101, 100), (102, 100), (103, 100), (104, 100), (105, 100)]
+            + [(106, 9999)],
         )
-        assert book.order_imbalance == 0.0
+        assert book.order_imbalance == pytest.approx(1 / 11)
 
     def test_mid_and_spread_arithmetic(self):
         book = OrderBook(bids=[(99, 100)], asks=[(101, 100)])
@@ -94,6 +102,23 @@ class TestOrderBook:
         book = OrderBook(bids=[(99, 200)], asks=[(101, 50)])
         assert book.book_pressure > 0.0
         assert book.order_imbalance > 0.0
+
+    def test_book_pressure_weighted_by_distance_profile(self):
+        # Total size is identical on each side (200 bid / 200 ask), so a
+        # plain unweighted top-10 imbalance is exactly 0.0. The distance
+        # weighting the function exists to apply discounts the far ask level
+        # (price 111, ~11% from mid) more than the far bid level (price 97,
+        # ~3% from mid), so pressure is positive. Hand-derived independently
+        # of the function:
+        #   bid_pressure = 100/1.01 + 100/1.03 = 196.09727963...
+        #   ask_pressure = 100/1.01 + 100/1.11 = 189.09999108...
+        #   pressure     = (bp-ap)/(bp+ap)     = 0.0181654676...
+        # An implementation that drops the weight loop returns 0.0.
+        book = OrderBook(
+            bids=[(99, 100), (97, 100)],
+            asks=[(101, 100), (111, 100)],
+        )
+        assert book.book_pressure == pytest.approx(0.018165467625899233)
 
     def test_crossed_book_raises(self):
         book = OrderBook(bids=[(101, 10)], asks=[(100, 10)])
@@ -229,6 +254,20 @@ class TestEffectiveSpread:
         with pytest.raises(Unavailable, match="predates the first quote"):
             await effective_spread(trades, quotes)
 
+    async def test_no_realised_observations_raises_not_zero(self):
+        # A negative horizon pushes every `trade_time + horizon` before the
+        # first quote, so no realised observation is derived. v1/old-port
+        # fabricated realized_spread = 0.0 here (Q4 Finding 5); the module
+        # now raises instead.
+        t0 = datetime(2026, 1, 1, 9, 30, tzinfo=UTC)
+        quotes = [_quote(t0 + timedelta(seconds=i)) for i in range(10)]
+        trades = [
+            _trade(t0 + timedelta(seconds=i) + timedelta(milliseconds=500), 101.0, "buy")
+            for i in range(5)
+        ]
+        with pytest.raises(Unavailable, match="no realised-spread observations"):
+            await effective_spread(trades, quotes, horizon=timedelta(seconds=-100))
+
 
 # ---------------------------------------------------------------------------
 # Kyle's lambda
@@ -284,9 +323,12 @@ class TestKyleLambda:
 
     async def test_zero_variance_signed_volume_raises(self):
         # Constant volume with strictly increasing prices -> signed_volumes
-        # are all +V (zero variance), even though price does move.
+        # are all +V (zero variance), even though price does move. The volume
+        # is deliberately not exactly representable (3.14159): np.std of the
+        # constant series is ~4.4e-16, not 0.0, which is the exact input that
+        # defeated the old `float(np.std(x)) == 0.0` guard (Q4 Finding 1).
         trades = _kyle_trades(
-            [100.0 + 0.01 * i for i in range(12)], [100.0] * 12
+            [100.0 + 0.01 * i for i in range(12)], [3.14159] * 12
         )
         with pytest.raises(Unavailable, match="zero variance"):
             await kyle_lambda(trades)
