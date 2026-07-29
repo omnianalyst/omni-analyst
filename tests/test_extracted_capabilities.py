@@ -1,7 +1,19 @@
 """The extracted-capability registry: bound, honest, and planner-discoverable."""
 
+from datetime import date
+
+import numpy as np
+import pandas as pd
 import pytest
 
+from omni.capabilities.fixed_income import (
+    Bond,
+    CouponFrequency,
+    DayCountConvention,
+    YieldCurve,
+    nelson_siegel,
+)
+from omni.capabilities.portfolio_risk import Scenario
 from omni.capability.builtin import build_builtin_registry
 from omni.capability.extracted import CLAIM_TYPES, build_extracted_registry
 from omni.capability.registry import Registry
@@ -53,6 +65,127 @@ async def _stocktwits_fetcher(symbol):
         ],
         "symbol": {"watchlist_count": 5000},
     }
+
+
+def _factor_model_inputs():
+    """Two assets that are exact linear functions of one factor (no noise).
+
+    Gives recoverable exposures (1.0, 0.5) and R-squared of 1.0, with enough
+    observations to clear fit_factor_risk_model's min_obs gate.
+    """
+    idx = pd.date_range("2024-01-01", periods=60, freq="D")
+    mkt = pd.Series(np.linspace(-0.01, 0.01, 60), index=idx)
+    factor = pd.DataFrame({"MKT": mkt})
+    asset = pd.DataFrame({"A": 1.0 * mkt.to_numpy(), "B": 0.5 * mkt.to_numpy()}, index=idx)
+    return {"asset_returns": asset, "factor_returns": factor}
+
+
+def _stress_scenario():
+    # 100 exposure to MKT + 200 at 1.5 beta = 400 dollar exposure; * -0.5 = -200.
+    return Scenario("crash", factor_shocks={"MKT": -0.5})
+
+
+def _regress_inputs():
+    # Asset returns identical to the single factor -> beta 1, R-squared 1.
+    idx = pd.date_range("2024-01-01", periods=80, freq="D")
+    r = pd.Series(np.random.default_rng(3).normal(0.001, 0.01, 80), index=idx)
+    return {
+        "asset_returns": r,
+        "factor_returns": pd.DataFrame({"F": r}, index=r.index),
+    }
+
+
+def _attribute_inputs():
+    # Portfolio = 2 * factor exactly -> beta 2, specific ~0, additive split.
+    idx = pd.date_range("2024-01-01", periods=80, freq="D")
+    f = pd.Series(np.random.default_rng(5).normal(0.001, 0.01, 80), index=idx)
+    factor = pd.DataFrame({"F": f}, index=idx)
+    port = pd.Series(2.0 * f.to_numpy(), index=idx)
+    return {"portfolio_returns": port, "factor_returns": factor}
+
+
+def _market_model_inputs():
+    # Portfolio = 1.3 * benchmark + small noise so beta recovers tightly.
+    idx = pd.date_range("2024-01-01", periods=500, freq="D")
+    rng = np.random.default_rng(5)
+    bench = pd.Series(rng.normal(0.0005, 0.01, 500), index=idx)
+    port = pd.Series(1.3 * bench.to_numpy() + rng.normal(0, 0.0005, 500), index=idx)
+    return {"portfolio_returns": port, "benchmark_returns": bench}
+
+
+# Fixed-income fixtures: a 5y annual par bond on 30/360 so day-count is exact.
+_FI_ISSUE = date(2020, 1, 15)
+_FI_MATURITY = date(2025, 1, 15)
+
+
+def _par_bond(*, coupon_rate=0.05, ytm=0.05, price=100.0):
+    return Bond(
+        cusip="000AAA0A",
+        isin="US000AAA0000",
+        issuer="Test",
+        issue_date=_FI_ISSUE,
+        maturity_date=_FI_MATURITY,
+        coupon_rate=coupon_rate,
+        coupon_frequency=CouponFrequency.ANNUAL,
+        face_value=100.0,
+        price=price,
+        yield_to_maturity=ytm,
+        settlement_date=_FI_ISSUE,
+        day_count=DayCountConvention.THIRTY_360,
+    )
+
+
+def _par_bond_with_rating(rating):
+    bond = _par_bond(coupon_rate=0.05, ytm=0.05)
+    bond.rating = rating
+    return bond
+
+
+def _flat_curve(rate):
+    return YieldCurve(
+        curve_date=_FI_ISSUE,
+        currency="USD",
+        tenors=[1.0, 2.0, 3.0, 4.0, 5.0],
+        yields=[rate] * 5,
+    )
+
+
+def _nelson_siegel_inputs():
+    true = (0.05, -0.01, 0.02, 1.5)
+    tenors = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0]
+    yields = [nelson_siegel(t, *true) for t in tenors]
+    return {"tenors": tenors, "yields": yields}
+
+
+def _zero_curve_bonds():
+    # Zero-coupon bonds at known yields; the 5y input is 4.5%.
+    bonds = []
+    tenors_yields = [
+        (1.0, 0.03), (2.0, 0.035), (3.0, 0.04),
+        (5.0, 0.045), (10.0, 0.05),
+    ]
+    for years, ytm in tenors_yields:
+        maturity = date(2020, 1, 1)
+        for _ in range(int(years * 365)):
+            from datetime import timedelta as _td
+            maturity = maturity + _td(days=1)
+        bonds.append(
+            Bond(
+                cusip=f"Z{years}",
+                isin=f"Z{years}",
+                issuer="T",
+                issue_date=date(2020, 1, 1),
+                maturity_date=maturity,
+                coupon_rate=0.0,
+                coupon_frequency=CouponFrequency.ZERO,
+                face_value=100.0,
+                price=100.0 / (1 + ytm) ** years,
+                yield_to_maturity=ytm,
+                settlement_date=date(2020, 1, 1),
+                day_count=DayCountConvention.ACTUAL_ACTUAL,
+            )
+        )
+    return bonds
 
 
 def _cases():
@@ -295,6 +428,236 @@ def _cases():
                 "fetch_fn": _stocktwits_fetcher,
             },
             lambda r: r["sentiment_score"] == 1.0 and r["watchers"] == 5000,
+        ),
+        "portfolio.optimize_weights": (
+            {
+                "cov": pd.DataFrame(
+                    [[0.04, 0.01], [0.01, 0.09]],
+                    index=["A", "B"],
+                    columns=["A", "B"],
+                ),
+            },
+            lambda r: isinstance(r, pd.Series)
+            and abs(float(r.sum()) - 1.0) < 1e-9
+            and (r.to_numpy() >= -1e-12).all(),
+        ),
+        "portfolio.vol_target_weights": (
+            {
+                "asset_vols": pd.Series([0.10, 0.20], index=["A", "B"]),
+                "target_vol": 0.10,
+                "max_leverage": 5.0,
+            },
+            lambda r: isinstance(r, pd.Series)
+            and abs(
+                float(np.sqrt(np.sum((r.to_numpy() * np.array([0.10, 0.20])) ** 2)))
+                - 0.10
+            )
+            < 1e-9,
+        ),
+        "portfolio.risk_contributions": (
+            {
+                "cov": pd.DataFrame(
+                    [[0.04, 0.01], [0.01, 0.09]],
+                    index=["A", "B"],
+                    columns=["A", "B"],
+                ),
+                "weights": [0.5, 0.5],
+            },
+            lambda r: abs(float(r.sum()) - 1.0) < 1e-9
+            and float(r["B"]) > float(r["A"]),
+        ),
+        "portfolio.fit_factor_risk_model": (
+            _factor_model_inputs(),
+            lambda r: list(r.assets) == ["A", "B"]
+            and abs(r.exposures[0, 0] - 1.0) < 1e-6
+            and abs(r.exposures[1, 0] - 0.5) < 1e-6
+            and r.r_squared.min() > 0.999,
+        ),
+        "portfolio.atr_position_size": (
+            {
+                "equity": 100000.0,
+                "atr_value": 2.0,
+                "price": 50.0,
+                "risk_fraction": 0.0015,
+            },
+            lambda r: r == pytest.approx(75.0),
+        ),
+        "portfolio.fractional_kelly": (
+            {"edge": 0.10, "odds": 2.0, "fraction": 0.5, "cap": 1.0},
+            lambda r: r == pytest.approx(0.025),
+        ),
+        "portfolio.meta_label_size": (
+            {"probability": 0.75, "threshold": 0.5, "max_size": 1.0},
+            lambda r: r == pytest.approx(0.5),
+        ),
+        "portfolio.drawdown_breaker": (
+            {
+                "equity_curve": [100, 90, 100, 95, 80],
+                "threshold": 0.15,
+                "size": 1.0,
+            },
+            lambda r: r == 0.0,
+        ),
+        "portfolio_risk.calculate_var": (
+            {
+                "returns": [-0.10, 0.00] + [0.01] * 18,
+                "confidence_level": 0.95,
+                "seed": 42,
+            },
+            lambda r: r["historical"]["daily_var_pct"] == pytest.approx(-0.5)
+            and r["confidence_level"] == 0.95
+            and "monte_carlo" in r
+            and "parametric" in r,
+        ),
+        "portfolio_risk.calculate_cvar": (
+            {
+                "returns": [-0.10, 0.00] + [0.01] * 18,
+                "confidence_level": 0.95,
+            },
+            lambda r: r["daily_cvar_pct"] == pytest.approx(-10.0)
+            and r["confidence_level"] == 0.95,
+        ),
+        "portfolio_risk.calculate_beta": (
+            {
+                "asset_returns": [0.01, 0.02, -0.01, 0.005, -0.02, 0.015,
+                                  -0.005, 0.025, -0.015, 0.03],
+                "benchmark_returns": [0.01, 0.02, -0.01, 0.005, -0.02, 0.015,
+                                      -0.005, 0.025, -0.015, 0.03],
+            },
+            lambda r: r == pytest.approx(1.0),
+        ),
+        "portfolio_risk.calculate_correlation_matrix": (
+            {
+                "returns_by_symbol": {
+                    "A": [0.01, 0.02, -0.01, 0.005, -0.02, 0.015,
+                          -0.005, 0.025, -0.015, 0.03],
+                    "B": [0.01, 0.02, -0.01, 0.005, -0.02, 0.015,
+                          -0.005, 0.025, -0.015, 0.03],
+                }
+            },
+            lambda r: r["matrix"]["A"]["B"] == pytest.approx(1.0)
+            and r["average_correlation"] == pytest.approx(1.0),
+        ),
+        "portfolio_risk.stress_book": (
+            {
+                "assets": ["A", "B"],
+                "factors": ["MKT"],
+                "exposures": [[1.0], [1.5]],
+                "positions": {"A": 100.0, "B": 200.0},
+                "scenario": _stress_scenario(),
+            },
+            lambda r: r.scenario == "crash"
+            and r.factor_pnl == pytest.approx(-200.0)
+            and r.specific_pnl == pytest.approx(0.0)
+            and r.total_pnl == pytest.approx(-200.0),
+        ),
+        "attribution.regress_factor_exposures": (
+            _regress_inputs(),
+            lambda r: r.betas[0] == pytest.approx(1.0, abs=1e-9)
+            and r.r_squared == pytest.approx(1.0, abs=1e-9)
+            and list(r.factor_names) == ["F"],
+        ),
+        "attribution.attribute_returns": (
+            _attribute_inputs(),
+            lambda r: abs(r.specific_return) < 1e-9
+            and abs(
+                sum(r.factor_contributions.values()) + r.specific_return
+                - r.total_return
+            )
+            < 1e-9,
+        ),
+        "attribution.market_model_attribution": (
+            _market_model_inputs(),
+            lambda r: r.beta == pytest.approx(1.3, abs=1e-2)
+            and r.factor_return + r.specific_return
+            == pytest.approx(r.total_return, abs=1e-9),
+        ),
+        "attribution.holding_contributions": (
+            {
+                "holdings_returns": pd.DataFrame(
+                    {"AAA": [0.01, 0.02], "BBB": [0.02, 0.03]}
+                ),
+                "weights": {"AAA": 0.5, "BBB": 0.5},
+            },
+            lambda r: r["AAA"] == pytest.approx(0.015)
+            and r["BBB"] == pytest.approx(0.025),
+        ),
+        "fixed_income.calculate_price": (
+            {"bond": _par_bond(coupon_rate=0.05, ytm=0.05)},
+            lambda r: r == pytest.approx(100.0, abs=1e-9),
+        ),
+        "fixed_income.calculate_yield": (
+            {
+                "bond": _par_bond(coupon_rate=0.05, ytm=None, price=100.0),
+                "price": 100.0,
+            },
+            lambda r: r == pytest.approx(0.05, abs=1e-9),
+        ),
+        "fixed_income.calculate_duration": (
+            {"bond": _par_bond()},
+            lambda r: r["modified_duration"] > 0
+            and r["macaulay_duration"] > 0
+            and r["modified_duration"] < r["macaulay_duration"],
+        ),
+        "fixed_income.calculate_convexity": (
+            {"bond": _par_bond()},
+            lambda r: r > 0,
+        ),
+        "fixed_income.calculate_z_spread": (
+            {
+                "bond": _par_bond(coupon_rate=0.05, ytm=None, price=100.0),
+                "risk_free_curve": _flat_curve(0.03),
+            },
+            lambda r: r > 0,
+        ),
+        "fixed_income.calculate_spread_duration": (
+            {
+                "bond": _par_bond(coupon_rate=0.05, ytm=None, price=100.0),
+                "risk_free_curve": _flat_curve(0.03),
+            },
+            lambda r: r > 0,
+        ),
+        "fixed_income.calculate_credit_metrics": (
+            {
+                "bond": _par_bond(coupon_rate=0.05, ytm=None, price=100.0),
+                "risk_free_curve": _flat_curve(0.03),
+                "recovery_rate": 0.4,
+            },
+            lambda r: r["z_spread"] > 0
+            and r["recovery_rate"] == 0.4
+            and r["z_spread_bps"] == pytest.approx(r["z_spread"] * 10000)
+            and "implied_default_probability" in r,
+        ),
+        "fixed_income.calculate_total_return": (
+            {
+                "bond": _par_bond(coupon_rate=0.05, ytm=0.05),
+                "holding_period_days": 366,
+                "ending_yield": 0.05,
+                "reinvestment_rate": 0.05,
+            },
+            lambda r: r["coupon_income"] == pytest.approx(5.0, abs=1e-9)
+            and r["total_return"] == pytest.approx(5.0, abs=1e-9),
+        ),
+        "fixed_income.analyze_credit_migration": (
+            {
+                "bond": _par_bond_with_rating("AAA"),
+                "transition_matrix": pd.DataFrame(
+                    {"AA": [0.1], "AAA": [0.9]}, index=["AAA"]
+                ),
+                "rating_spreads": {"AAA": 0.0, "AA": 0.005},
+            },
+            lambda r: r["migration_scenarios"]["AA"]["spread_change_bps"]
+            == pytest.approx(50.0)
+            and r["downgrade_probability"] == pytest.approx(0.1),
+        ),
+        "fixed_income.fit_nelson_siegel": (
+            _nelson_siegel_inputs(),
+            lambda r: len(r) == 4
+            and all(np.isfinite(v) for v in r),
+        ),
+        "fixed_income.build_yield_curve": (
+            {"bonds": _zero_curve_bonds(), "curve_date": date(2020, 1, 1)},
+            lambda r: r.interpolate(5.0) == pytest.approx(0.045, abs=0.005),
         ),
     }
 
