@@ -103,6 +103,23 @@ def test_hrp_more_diversified_than_naive_ivp():
     assert hrp_cluster < 0.85
 
 
+def test_hrp_cluster_weight_matches_independently_derived_value():
+    # The expected cluster weight (0.784) comes from a from-scratch
+    # reimplementation of the HRP algorithm (Lopez de Prado 2016) run on this
+    # fixture's covariance -- NOT from the module under test. Equal weight gives
+    # 8/12 = 0.667 for the cluster; inverse-variance gives 0.930. The tight band
+    # [0.774, 0.794] admits neither, so a stub that returns equal weight fails.
+    cov = _ill_conditioned_cov()
+    w = hrp_weights(cov).to_numpy()
+    cluster_weight = float(w[_CLUSTER].sum())
+    assert abs(cluster_weight - 0.784) < 0.01, (
+        f"HRP cluster weight {cluster_weight:.4f} outside [0.774, 0.794]; "
+        "equal weight would give 0.667"
+    )
+    eq = np.full(len(w), 1.0 / len(w))
+    assert float(np.abs(w - eq).sum()) > 0.05
+
+
 def test_risk_parity_equal_risk_contributions():
     cov = _ill_conditioned_cov()
     w = risk_parity_weights(cov)
@@ -481,6 +498,24 @@ def test_fit_factor_risk_model_handles_scatter_nan_via_masking():
     assert np.isfinite(model.exposures).all()
     assert np.isfinite(model.specific_var).all()
     assert model.r_squared.min() > 0.5
+
+
+def test_fit_factor_risk_model_raises_on_asset_with_no_observations():
+    """An asset with 0 or 1 finite observations has no estimable variance.
+    The global aligned-row check passes (the panel is long enough overall), but
+    this one asset is unestimable. It must raise Unavailable, not report the
+    1e-12 floor as a variance estimate (the fabrication V1 flagged)."""
+    asset_returns, factor_returns, _, _ = _build_dataset()
+    ar = asset_returns.copy()
+    ar["A0"] = np.nan  # zero finite observations
+    with pytest.raises(Unavailable, match="finite observation"):
+        fit_factor_risk_model(ar, factor_returns)
+
+    ar2 = asset_returns.copy()
+    ar2.iloc[0, 0] = 0.01
+    ar2.iloc[1:, 0] = np.nan  # exactly one finite observation
+    with pytest.raises(Unavailable, match="finite observation"):
+        fit_factor_risk_model(ar2, factor_returns)
 
 
 def test_ewma_volatility_raises_on_all_nan():

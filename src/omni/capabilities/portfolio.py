@@ -545,9 +545,12 @@ def fit_factor_risk_model(
     """Fit a multi-factor risk model by per-asset time-series regression.
 
     OLS with an intercept, solved via least squares on the rows where the asset
-    and all factors are jointly observed. Assets without enough overlap get zero
-    exposures and a specific variance equal to their sample return variance
-    (treated as fully idiosyncratic).
+    and all factors are jointly observed. Assets without enough overlap to
+    regress (but with >= 2 finite returns) get zero exposures and a specific
+    variance equal to their sample return variance (treated as fully
+    idiosyncratic). An asset with fewer than 2 finite returns has no estimable
+    variance at all; it raises ``Unavailable`` rather than report a floor
+    constant as an estimate.
 
     Empty panels, or panels too short for even one asset's regression
     (``aligned rows < max(min_obs, n_factors + 2)``), raise ``Unavailable``: a
@@ -585,7 +588,12 @@ def fit_factor_risk_model(
         n = int(mask.sum())
         if n < max(min_obs, n_factors + 2):
             y_obs = y_full[np.isfinite(y_full)]
-            specific_var[i] = float(np.var(y_obs, ddof=1)) if y_obs.size > 1 else specific_var_floor
+            if y_obs.size < 2:
+                raise Unavailable(
+                    f"asset '{asset}' has {y_obs.size} finite observation(s); "
+                    "cannot estimate specific variance"
+                )
+            specific_var[i] = float(np.var(y_obs, ddof=1))
             specific_var[i] = max(specific_var[i], specific_var_floor)
             continue
 
