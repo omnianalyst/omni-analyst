@@ -75,8 +75,8 @@ def _validate(series: np.ndarray, window: int) -> None:
         raise Unavailable(
             f"need >= {window} observations for window={window}, got {len(series)}"
         )
-    if np.isnan(series).any():
-        raise Unavailable("input contains NaN")
+    if not np.isfinite(series).all():
+        raise Unavailable("input contains NaN or non-finite value")
     if np.ptp(series) == 0.0:
         raise Unavailable("input has zero variance; regime is undefined")
 
@@ -162,7 +162,7 @@ def classify_trend(
     returns_arr = np.asarray(returns, dtype=float)
     if short_window < 2:
         raise Unavailable(f"short_window must be >= 2, got {short_window}")
-    _validate(returns_arr, long_window)
+    _validate(returns_arr, max(short_window, long_window))
 
     s = pd.Series(returns_arr)
     ma_short = float(s.rolling(short_window).mean().iloc[-1])
