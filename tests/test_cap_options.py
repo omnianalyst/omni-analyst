@@ -108,6 +108,30 @@ class TestVegaPositive:
         assert vc == pytest.approx(vp, abs=1e-12)
 
 
+class TestVegaValue:
+    # Q1 F3: the sign/symmetry assertions above pass for `vega = sigma` (a
+    # constant with no relationship to the BSM vega). These pin the value at
+    # two strikes, computed independently from S*exp(-qT)*pdf(d1)*sqrt(T)/100.
+    # `vega = sigma = 0.20` is off by 0.074 (ATM) and 0.123 (OTM) and fails.
+
+    def test_atm_vega_value(self):
+        v = black_scholes(S, K, T, R, SIGMA, 0.0, "call")["vega"]
+        assert v == pytest.approx(0.2736, abs=1e-3)
+
+    def test_otm_vega_value(self):
+        v = black_scholes(S, 130.0, T, R, SIGMA, 0.0, "call")["vega"]
+        assert v == pytest.approx(0.0775, abs=1e-3)
+
+    def test_vega_peaks_near_atm(self):
+        # A constant fake gives equal vega everywhere; real BSM vega peaks near
+        # the money and falls off on both sides.
+        v_itm = black_scholes(S, 80.0, T, R, SIGMA, 0.0, "call")["vega"]
+        v_atm = black_scholes(S, K, T, R, SIGMA, 0.0, "call")["vega"]
+        v_otm = black_scholes(S, 130.0, T, R, SIGMA, 0.0, "call")["vega"]
+        assert v_atm > v_itm
+        assert v_atm > v_otm
+
+
 class TestExpiryIntrinsic:
     def test_call_at_expiry_is_intrinsic(self):
         itm = black_scholes(120.0, K, 0.0, R, SIGMA, 0.0, "call")
@@ -172,6 +196,17 @@ class TestImpliedVolatility:
         iv = implied_volatility(ceiling * 5.0, S, K, T, R, 0.0, "call")
         assert iv is None
 
+    def test_unreachable_far_otm_returns_none(self):
+        # Q1 F1: a far-OTM short-dated call whose maximum in-bound price (at
+        # vol=_IV_BOUNDS[1]=5.0) is sub-penny. 5x that ceiling is a price no
+        # in-bound vol can produce, but the squared residual (ceiling*4)**2
+        # sits under the old `abs(result.fun) < _TOL` gate and the solver
+        # returned the 5.0 bound instead of None. The effective linear residual
+        # there is ~2.5e-4 -- far above _TOL.
+        ceiling = black_scholes(100.0, 1000.0, 0.01, R, 5.0, 0.0, "call")["price"]
+        iv = implied_volatility(ceiling * 5.0, 100.0, 1000.0, 0.01, R, 0.0, "call")
+        assert iv is None
+
     def test_below_intrinsic_returns_none(self):
         intrinsic = max(S - K, 0.0)
         iv = implied_volatility(intrinsic - 1.0, S, K, T, R, 0.0, "call")
@@ -202,7 +237,16 @@ class TestMonteCarlo:
         assert a["price"] != b["price"]
 
     def test_within_bs_confidence(self):
-        # Seeded MC must bracket the closed-form BSM price inside its 95% CI.
+        # Q1 F4/F7: the previous form (a flat abs=0.15 plus a hard CI bracket
+        # `ci_lower <= bs <= ci_upper`) passed for a no-simulation fake that
+        # echoed the BSM price and fabricated std_error=1.0. A real Monte Carlo
+        # must (a) carry a positive, CI-consistent standard error that shrinks
+        # as 1/sqrt(simulations) -- proving a draw actually happened -- and
+        # (b) land its point estimate within a few standard errors of the
+        # closed-form price (a law-of-large-numbers bound), not within a flat
+        # absolute band. The hard CI bracket is dropped: by construction a 95%
+        # CI excludes the truth ~5% of the time, so it is seed-fragile and adds
+        # no discriminating power over a wrong-but-wide-CI implementation.
         bs = black_scholes(S, K, T, R, SIGMA, 0.0, "call")["price"]
         mc = monte_carlo(
             S,
@@ -216,12 +260,29 @@ class TestMonteCarlo:
             time_steps=100,
             seed=42,
         )
-        assert mc["confidence_interval_lower"] <= bs + 1e-9
-        assert bs - 1e-9 <= mc["confidence_interval_upper"]
-        # And the point estimate should be close for a healthy sample count.
-        assert mc["price"] == pytest.approx(bs, abs=0.15)
+        se = mc["std_error"]
+        assert se > 0.0
+        assert mc["confidence_interval_upper"] - mc["confidence_interval_lower"] == pytest.approx(
+            2 * 1.96 * se, abs=1e-12
+        )
+        mc_quad = monte_carlo(
+            S,
+            K,
+            T,
+            R,
+            SIGMA,
+            0.0,
+            "call",
+            simulations=80000,
+            time_steps=100,
+            seed=42,
+        )
+        assert mc["std_error"] / mc_quad["std_error"] == pytest.approx(2.0, rel=0.05)
+        assert abs(mc["price"] - bs) < 5.0 * se
 
     def test_put_within_bs_confidence(self):
+        # Q1 F4: the previous `abs=0.15` point check passed for the no-simulation
+        # fake on the put side too. Apply the same structural checks as the call.
         bs = black_scholes(S, K, T, R, SIGMA, 0.02, "put")["price"]
         mc = monte_carlo(
             S,
@@ -235,7 +296,12 @@ class TestMonteCarlo:
             time_steps=100,
             seed=42,
         )
-        assert mc["price"] == pytest.approx(bs, abs=0.15)
+        se = mc["std_error"]
+        assert se > 0.0
+        assert mc["confidence_interval_upper"] - mc["confidence_interval_lower"] == pytest.approx(
+            2 * 1.96 * se, abs=1e-12
+        )
+        assert abs(mc["price"] - bs) < 5.0 * se
 
     def test_expiry_returns_intrinsic(self):
         mc = monte_carlo(120.0, K, 0.0, R, SIGMA, 0.0, "call", seed=1)
@@ -344,6 +410,20 @@ class TestMaxPain:
         # At 105: calls below -> (105-95)*50 = 500; puts above none.
         # Both tie at 500; min() returns the first.
         assert out["total_pain"] == 500.0
+
+    def test_single_strike_with_oi_is_well_defined(self):
+        # Q1 F2: a single-strike chain with real open interest has zero
+        # cross-strike pain at its only candidate (no option is ever ITM against
+        # itself), so the sum of pain is 0.0. Max pain is still well-defined --
+        # that strike, where writers pay nothing -- but the old guard summed the
+        # pain, saw 0.0, and refused with a false "no open interest" message.
+        chain = [
+            _contract(100.0, "call", oi=50),
+            _contract(100.0, "put", oi=50),
+        ]
+        out = max_pain(chain)
+        assert out["strike"] == 100.0
+        assert out["total_pain"] == 0.0
 
     def test_empty_chain_raises(self):
         with pytest.raises(Unavailable):
