@@ -110,6 +110,7 @@ def build_extracted_registry() -> Registry:
     from omni.capabilities import (
         attribution,
         backtest,
+        crossasset,
         execution_analytics,
         fixed_income,
         fundamentals,
@@ -1623,6 +1624,226 @@ def build_extracted_registry() -> Registry:
                 "leak_prevented is True iff the causal total is dramatically "
                 "below the perfect-foresight total -- a backtest that can see "
                 "the future is worse than none."
+            ),
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Cross-asset relationships and signal edge (capabilities/crossasset.py) -
+    # Two families lifted from v1: the cross-asset engine (correlations, RORO,
+    # sector rotation, cycle phase, intermarket divergences) and the edge-metric
+    # statistics (information coefficient, quantile spread, hit rate). Every one
+    # runs over price-derived series (returns, sector prices) or over an
+    # already-computed structure built from them (a correlation dict, a set of
+    # leader labels, a signal/forward-return panel) whose licence the descriptor
+    # cannot see, so every one is touches_byo -- the same convention as
+    # detect.manipulation and regime.detect_regime_changes. The closed
+    # claim_type enum has no home for an IC, a quantile spread, a RORO score, a
+    # cycle label or a correlation-regime divergence, so produces is empty for
+    # all: these are analysis steps, not claim writers.
+    #
+    # NB detect_divergences is NOT a perception_divergence producer.
+    # perception_divergence (migration 004: "derived; only as fresh as its
+    # inputs") already has a dedicated producer -- perception.divergence in
+    # capability/derived.py, CONSUMES (perception_macro, fundamental_metric) --
+    # which derives a perception-vs-fundamentals split on one entity. That is a
+    # contradictory-source finding. detect_divergences instead flags asset-pair
+    # correlations breaking hardcoded historical norms (SPY/VIX -0.7, GLD/TLT
+    # 0.3, SPY/HYG 0.6): a market-structure regime signal over many assets. The
+    # shared word "divergence" must not conflate them; mapping one to the other
+    # would be the two-incompatible-registries failure. See _orchestrator/
+    # reports/N5.md.
+    #
+    # Matrix overlap: cross_asset_correlations computes its correlation matrix
+    # with np.corrcoef over aligned return series -- the same estimator as
+    # fundamentals.correlation_matrix and portfolio_risk.calculate_correlation_
+    # matrix. It is not a second matrix-only entry; its value is the divergence
+    # read (vs fixed intermarket norms) and the short-vs-long correlation_shifts,
+    # neither available elsewhere. Divergence vs fundamentals: a min-observations
+    # guard (>=4 symbols and >=20 returns per symbol here, vs no such guard in
+    # fundamentals) plus the cross-asset-specific post-processing. See N5.
+    for cap in (
+        _bind(
+            "crossasset.infer_cycle_phase",
+            "Economic cycle phase (early / mid / late / recession / unknown) "
+            "from the set of leading sector names, via fixed sector buckets.",
+            fn=crossasset.infer_cycle_phase,
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("economic_cycle",),
+            provenance=(
+                "Deterministic set-intersection classifier; the four sector "
+                "buckets and the priority tie-break are declared constants, "
+                "not estimates. consumes is empty because `leaders` is a set "
+                "of sector-name labels -- the output of a ranking step over "
+                "sector prices -- not a claim the store can supply; a planner "
+                "needs an inter-step value-passing layer (e.g. "
+                "sector_rotation's ranking) to assemble it. touches_byo "
+                "because those labels inherit the price licence of the sector "
+                "series they were ranked from. A cycle label is a PROXY for "
+                "the economic regime, not a measurement of it."
+            ),
+        ),
+        _bind(
+            "crossasset.detect_divergences",
+            "Flag asset pairs whose current correlation breaks a hardcoded "
+            "historical norm (SPY/VIX -0.7, GLD/TLT 0.3, SPY/HYG 0.6) by more "
+            "than 0.3, with a high/moderate significance band.",
+            fn=crossasset.detect_divergences,
+            touches_byo=True,
+            provenance=(
+                "consumes is empty: the input is an already-computed "
+                "{symbol: {symbol: corr}} dict, not a claim; a planner must "
+                "assemble it from a correlation matrix (e.g. "
+                "crossasset.cross_asset_correlations or "
+                "fundamentals.correlation_matrix output). The norms and the "
+                "0.3 / 0.5 thresholds are declared constants. touches_byo "
+                "because the corr dict is built from return series (price-"
+                "derived, byo_only). NOT a perception_divergence producer -- "
+                "see the section note above and N5; that claim type is a "
+                "derived perception-vs-fundamentals finding with its own "
+                "producer."
+            ),
+        ),
+        _bind(
+            "crossasset.cross_asset_correlations",
+            "Rolling correlation matrix across asset classes, plus intermarket "
+            "divergences (vs fixed norms) and short-vs-long correlation shifts "
+            "(breakdown / spike). Needs >=4 symbols and >=20 returns per symbol.",
+            fn=crossasset.cross_asset_correlations,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "The matrix is np.corrcoef over aligned return series -- the "
+                "same estimator as fundamentals.correlation_matrix and "
+                "portfolio_risk.calculate_correlation_matrix; this entry's "
+                "distinct value is the divergence read and the "
+                "correlation_shifts (see N5 for the overlap). Returns are "
+                "price_snapshot-derived (byo_only). <4 symbols or <20 returns "
+                "per symbol raises Unavailable rather than the empty matrix v1 "
+                "returned. The norms and the 0.25 shift threshold are declared "
+                "constants."
+            ),
+        ),
+        _bind(
+            "crossasset.roro_indicator",
+            "Risk-On/Risk-Off composite in [-1, +1] from VIX direction (30%), "
+            "credit-spread proxy HYG-vs-TLT (25%), dollar strength UUP (20%) "
+            "and small-cap breadth IWM-vs-SPY (25%), with a 5-band "
+            "classification.",
+            fn=crossasset.roro_indicator,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("risk_appetite",),
+            provenance=(
+                "Fixed-weight composite; the 0.30/0.25/0.20/0.25 weights and "
+                "the classification bands are declared constants, not "
+                "calibrated. Each component contributes only when every symbol "
+                "it needs has enough history -- a short series is skipped, not "
+                "fabricated as 0 (v1's defect, fixed). The composite is a PROXY "
+                "for latent market risk appetite, not a measurement of it."
+            ),
+        ),
+        _bind(
+            "crossasset.sector_rotation",
+            "Sector rotation: per-sector 5d/20d momentum, top-3 / bottom-3 "
+            "ranked sectors and the inferred economic cycle phase. Needs >=20 "
+            "positive prices per sector.",
+            fn=crossasset.sector_rotation,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Momentum is 0.6*ret_20d + 0.4*ret_5d (declared weights); "
+                "cycle phase delegates to infer_cycle_phase's fixed sector "
+                "buckets. Sector prices are price_snapshot-derived (byo_only). "
+                "A sector with <20 positive prices is skipped; none qualifying "
+                "raises Unavailable rather than v1's 'unknown' phase."
+            ),
+        ),
+        _bind(
+            "crossasset.information_coefficient",
+            "Cross-sectional information coefficient: per-date Spearman/Pearson "
+            "correlation of a signal with forward returns across assets, "
+            "summarized into mean IC, its IR, t-stat and significance.",
+            fn=crossasset.information_coefficient,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("predictive_power",),
+            provenance=(
+                "A correlation of the signal against a chosen forward-return "
+                "horizon under a stated method (Spearman default) -- the "
+                "horizon and method are assumptions, not measurements. Dates "
+                "with <5 assets (min_cross_section) are dropped; is_significant "
+                "needs >=12 periods. forward_return is price_snapshot-derived "
+                "(byo_only); the signal column's provenance is opaque to the "
+                "descriptor. An IC is a PROXY for predictive power, not a "
+                "measurement of it. (The pure-noise-looks-significant defect "
+                "is handled by the n/overlap correction in time_series_ic; "
+                "cross-sectional ICs are independent across dates, so it does "
+                "not apply here.)"
+            ),
+        ),
+        _bind(
+            "crossasset.time_series_ic",
+            "Time-series information coefficient for a single signal series "
+            "against an aligned forward-return series, with optional rolling "
+            "window and an overlap-corrected significance test.",
+            fn=crossasset.time_series_ic,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("predictive_power",),
+            provenance=(
+                "Single-series IC; the forward horizon and method are "
+                "assumptions. When overlap > 1 (overlapping forward returns) "
+                "the t-stat uses an effective sample size n/overlap so "
+                "autocorrelated returns cannot manufacture significance -- the "
+                "pure-noise-looks-significant defect. forward_return is "
+                "price_snapshot-derived (byo_only). <3 paired observations "
+                "yields an empty IC (NaN), never a fabricated number. An IC is "
+                "a PROXY for predictive power, not a measurement of it."
+            ),
+        ),
+        _bind(
+            "crossasset.quantile_analysis",
+            "Quantile (decile) spread of a cross-sectional signal: per-quantile "
+            "mean forward returns, top-minus-bottom spread, monotonicity and "
+            "the annualized long/short Sharpe.",
+            fn=crossasset.quantile_analysis,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("predictive_power",),
+            provenance=(
+                "Sorts assets into n_quantiles by signal rank each date. "
+                "Monotonicity (Spearman of quantile rank vs mean return) is "
+                "the signal-quality check a top-minus-bottom gap alone misses. "
+                "forward_return is price_snapshot-derived (byo_only). A sub-"
+                "computation of evaluate_signal, exposed separately for a "
+                "planner that wants only the quantile lens. An edge proxy, not "
+                "a measurement of predictive power."
+            ),
+        ),
+        _bind(
+            "crossasset.evaluate_signal",
+            "Full edge report for one cross-sectional signal: IC, quantile "
+            "spread, directional hit rate and a plain-language verdict "
+            "(INSUFFICIENT DATA / NO MEASURABLE EDGE / WEAK..STRONG EDGE).",
+            fn=crossasset.evaluate_signal,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("predictive_power",),
+            provenance=(
+                "Composite of information_coefficient, quantile_analysis and "
+                "hit_rate; quantiles are skipped automatically when the cross-"
+                "section is too thin to bucket. The verdict's WEAK/MODERATE/"
+                "STRONG bands (<0.02 / <0.05 / else) are declared constants, "
+                "not calibrated. forward_return is price_snapshot-derived "
+                "(byo_only). A PROXY for predictive power; the verdict is a "
+                "policy-banded read of the IC, not a calibrated probability."
             ),
         ),
     ):
