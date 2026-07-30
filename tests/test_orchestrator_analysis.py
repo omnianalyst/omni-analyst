@@ -28,7 +28,7 @@ from neutron.error import AppError
 from omni.capability.derived import DERIVED
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.fill.derived import DerivedCapability
-from omni.orchestrator.analysis import run_analysis
+from omni.orchestrator.analysis import DeclaredAnalysis, run_analysis
 from omni.scheduler.worker import default_registry
 
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
@@ -391,3 +391,175 @@ class TestLicenceVerdict:
         assert not result.abstained
         assert result.redistributable == "byo_only"
         assert result.audience_user_id == owner
+
+
+# ----------------------------------------- credit_risk shareable resolution
+#
+# QF1: market_risk.credit_risk is registered touches_byo=True (the safe
+# direction QM left in extracted.py) because its bare-float signature hides the
+# source. Declaring its two spreads as ArgumentSpecs lets run_analysis resolve
+# the licence from the materialized claims -- so a FRED-sourced (allowed) call
+# returns "allowed" even though the static descriptor still says byo. The static
+# entry is left exactly as QM left it; this path overrides the per-call verdict.
+
+
+class TestCreditRiskShareable:
+    async def test_fred_sourced_spreads_resolve_allowed(self, db):
+        """The finding, fixed: both spreads sourced from FRED-tagged (allowed)
+        claims resolve redistributable="allowed", even though the static
+        extracted.py entry still says touches_byo=True."""
+        entity_id = await _entity(db, symbol="US")
+        await _insert_series(
+            db, entity_id, [(BASE, 200.0)],
+            claim_type="macro_series_point", key="BAMLC0A0CM",
+            source="fred", redistributable="allowed", audience_user_id=None,
+        )
+        await _insert_series(
+            db, entity_id, [(BASE, 500.0)],
+            claim_type="macro_series_point", key="BAMLH0A0HYM2",
+            source="fred", redistributable="allowed", audience_user_id=None,
+        )
+
+        registry = default_registry()
+        result = await run_analysis(
+            registry,
+            db.pool,
+            name="market_risk.credit_risk",
+            entity_id=entity_id,
+            audience=None,
+        )
+
+        assert not result.abstained, result.shortfalls
+        assert result.redistributable == "allowed"
+        assert result.audience_user_id is None
+        # analyze_credit_risk ran on the materialized scalars: ig=200 > 180
+        # (1.5 * _IG_AVG) -> score 80, proving the inputs reached compute.
+        assert result.result["score"] == 80
+        assert result.result["ig_spread"] == 200.0
+        assert result.result["hy_spread"] == 500.0
+        # The static registry entry is unchanged -- still the safe direction.
+        assert registry.get("market_risk.credit_risk").touches_byo is True
+
+
+class TestCreditRiskAbstention:
+    async def test_one_spread_absent_abstains_and_compute_not_called(
+        self, db, monkeypatch
+    ):
+        """With the HY spread absent (below min_obs) the call abstains naming
+        hy_spread, and analyze_credit_risk is never invoked -- proven by a spy,
+        not an assumption."""
+        entity_id = await _entity(db, symbol="US")
+        await _insert_series(
+            db, entity_id, [(BASE, 200.0)],
+            claim_type="macro_series_point", key="BAMLC0A0CM",
+            source="fred", redistributable="allowed", audience_user_id=None,
+        )
+        # No BAMLH0A0HYM2 claim -- hy_spread cannot be materialized.
+
+        from omni.orchestrator import analysis as analysis_module
+
+        called: list = []
+
+        async def spy_compute(**kwargs):
+            called.append(kwargs)
+            return {}
+
+        spy = DeclaredAnalysis(
+            name="market_risk.credit_risk",
+            arguments=analysis_module._CREDIT_RISK_ARGUMENTS,
+            compute=spy_compute,
+        )
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "market_risk.credit_risk",
+            spy,
+        )
+
+        result = await run_analysis(
+            default_registry(),
+            db.pool,
+            name="market_risk.credit_risk",
+            entity_id=entity_id,
+            audience=None,
+        )
+
+        assert result.abstained
+        assert called == [], "compute was called despite an argument abstention"
+        reasons = {s.argument: s.reason for s in result.shortfalls}
+        assert "hy_spread" in reasons
+        assert "ig_spread" not in reasons
+
+
+class TestCreditRiskAudienceIsolation:
+    async def test_byo_spread_resolves_to_owner_not_allowed(self, db):
+        """The most important test in the order. A spread sourced from a
+        byo_only/audience-scoped claim must resolve to that audience, not
+        allowed -- the fix must not make every call shareable regardless of its
+        real inputs. Mirrors D8's audience-isolation test."""
+        entity_id = await _entity(db, symbol="US")
+        owner, other = uuid4(), uuid4()
+
+        # IG spread from a byo source, private to owner.
+        await _insert_series(
+            db, entity_id, [(BASE, 200.0)],
+            claim_type="macro_series_point", key="BAMLC0A0CM",
+            source="bloomberg", redistributable="byo_only",
+            audience_user_id=owner,
+        )
+        # HY spread shareable (fred).
+        await _insert_series(
+            db, entity_id, [(BASE, 500.0)],
+            claim_type="macro_series_point", key="BAMLH0A0HYM2",
+            source="fred", redistributable="allowed", audience_user_id=None,
+        )
+
+        registry = default_registry()
+
+        owner_result = await run_analysis(
+            registry,
+            db.pool,
+            name="market_risk.credit_risk",
+            entity_id=entity_id,
+            audience=owner,
+        )
+        assert not owner_result.abstained, owner_result.shortfalls
+        assert owner_result.redistributable == "byo_only"
+        assert owner_result.audience_user_id == owner
+
+        # The byo IG spread is invisible to another user, so their call
+        # abstains on ig_spread rather than computing from the owner's data.
+        other_result = await run_analysis(
+            registry,
+            db.pool,
+            name="market_risk.credit_risk",
+            entity_id=entity_id,
+            audience=other,
+        )
+        assert other_result.abstained
+        shortfall_args = {s.argument for s in other_result.shortfalls}
+        assert "ig_spread" in shortfall_args
+        assert "hy_spread" not in shortfall_args
+
+
+class TestCreditRiskScope:
+    async def test_other_market_risk_still_refused(self, db):
+        """A capability not in the new non-claim registry (any other
+        market_risk.* entry) continues to be refused exactly as before -- this
+        order must not widen what is callable beyond credit_risk."""
+        entity_id = await _entity(db, symbol="US")
+        registry = default_registry()
+        name = "market_risk.liquidity_risk"
+        cap = registry.get(name)
+        assert cap is not None, "expected this capability to exist in the registry"
+        assert cap.invocable
+
+        with pytest.raises(AppError) as exc_info:
+            await run_analysis(
+                registry,
+                db.pool,
+                name=name,
+                entity_id=entity_id,
+                audience=None,
+            )
+        assert exc_info.value.status == 400
+        assert "declares no arguments" in exc_info.value.detail
