@@ -27,7 +27,7 @@ from omni.perception.divergence import (
     DivergenceInput,
     compute_divergence,
     resolve_derived_licence,
-    write_divergence,
+    write_derived,
 )
 
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
@@ -294,7 +294,7 @@ class TestByoOnlyPropagation:
         assert redistributable == "byo_only"
         assert audience == owner
 
-        claim_id = await write_divergence(
+        claim_id = await write_derived(
             db.pool,
             draft,
             entity_id=entity_id,
@@ -344,7 +344,7 @@ class TestSharedAllowed:
         )
         assert (redistributable, audience) == ("allowed", None)
 
-        claim_id = await write_divergence(
+        claim_id = await write_derived(
             db.pool,
             draft,
             entity_id=entity_id,
@@ -362,7 +362,7 @@ class TestSharedAllowed:
 
 class TestDerivedClaimRequiresInputs:
     async def test_commit_fails_without_claim_input_edges(self, db):
-        """The deferred trigger is load-bearing: bypass write_divergence and
+        """The deferred trigger is load-bearing: bypass write_derived and
         insert a derived claim with no edges; commit must reject it."""
         entity_id = await _entity(db)
         with pytest.raises(asyncpg.CheckViolationError, match="declares no inputs"):
@@ -388,7 +388,7 @@ class TestDerivedClaimRequiresInputs:
             "SELECT count(*) FROM claim WHERE derivation = 'derived'"
         ) == 0
 
-    async def test_write_divergence_persists_edges(self, db):
+    async def test_write_derived_persists_edges(self, db):
         """The happy path: edges are written and the claim commits."""
         entity_id = await _entity(db)
 
@@ -407,7 +407,7 @@ class TestDerivedClaimRequiresInputs:
         )
 
         draft = compute_divergence(perc_inputs, fact_inputs)
-        claim_id = await write_divergence(
+        claim_id = await write_derived(
             db.pool,
             draft,
             entity_id=entity_id,

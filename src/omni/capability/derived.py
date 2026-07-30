@@ -1,16 +1,21 @@
 """The derived capabilities that actually run today.
 
 Sibling of ``builtin``: where that module binds ingestion adapters, this one
-binds derivations -- claims computed from claims already in the store. Each
-derivation names its inputs (so the planner can route a gap to it) and carries
-``touches_byo=True``, because whether the output is shareable depends on the
-licences of inputs a static descriptor cannot see. Over-restricting is the
-safe direction; the actual decision is made per-fill by ``resolve_derived_licence``.
+binds derivations -- claims computed from claims already in the store.
+``perception.divergence`` is restated here as a **declaration**: two
+``ArgumentSpec``s (``perception_macro`` and ``fundamental_metric``) plus the
+existing ``compute_divergence``. ``fill_analysis`` materializes the arguments
+through ``visible_claims`` (audience-scoped), abstains if either is short,
+and calls the compute adapter.
 
-The bound ``gather`` reads inputs only through ``visible_claims`` scoped to
-the gap's audience, never the claim table directly -- reading a private input
-another user cannot see into a derivation would be the redistribution leak the
-licence rule exists to prevent.
+The adapter (``compute_divergence_declared``) bridges the shape mismatch
+between ``materialize``'s output (``Materialized``: values + claim_ids) and
+``compute_divergence``'s input (``list[DivergenceInput]``: values + dates +
+licence). See its docstring for where and why.
+
+``touches_byo=True`` is the safe-direction planning hint; the actual decision
+is made per-fill by ``resolve_derived_licence`` over the materialized inputs.
+``consumes`` is derived from the spec claim types, not hand-written.
 """
 
 from __future__ import annotations
@@ -18,14 +23,38 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from omni.capability.arguments import ArgumentSpec, Materialized
 from omni.capability.registry import Callability, Capability, Maturity, Registry
-from omni.coverage.visibility import visible_claims
-from omni.fill.derived import fill_derived
-from omni.perception.divergence import DivergenceInput, compute_divergence
+from omni.coverage.visibility import visible_claims, visible_claims_cte
+from omni.fill.derived import DerivedCapability, fill_analysis
+from omni.perception.divergence import (
+    DEFAULT_WINDOW,
+    MIN_HISTORY,
+    DivergenceInput,
+    compute_divergence,
+)
 
 NAME = "perception.divergence"
 PRODUCES = "perception_divergence"
-CONSUMES = ("perception_macro", "fundamental_metric")
+
+ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="perception_macro",
+        claim_type="perception_macro",
+        shape="series",
+        transform="level",
+        min_obs=MIN_HISTORY,
+    ),
+    ArgumentSpec(
+        name="fundamental_metric",
+        claim_type="fundamental_metric",
+        shape="series",
+        transform="level",
+        min_obs=MIN_HISTORY,
+    ),
+)
+
+CONSUMES = tuple(spec.claim_type for spec in ARGUMENTS)
 
 
 def _scalar(raw) -> float | None:
@@ -73,16 +102,73 @@ def _to_inputs(rows) -> list[DivergenceInput]:
     return out
 
 
+_INPUTS_BY_IDS = f"""
+SELECT c.id, c.event_date, c.knowledge_date, c.value,
+       c.redistributable, c.audience_user_id
+FROM ({visible_claims_cte()}) c
+WHERE c.id = ANY($2::uuid[])
+"""
+
+
+async def _to_inputs_by_ids(
+    pool, audience, claim_ids
+) -> list[DivergenceInput]:
+    """Re-read claims by id through ``visible_claims`` as ``DivergenceInput``s.
+
+    Audience scoping is preserved: a private claim of another user that
+    ``materialize`` correctly excluded is not present here either.
+    """
+    if not claim_ids:
+        return []
+    rows = await pool.fetch(_INPUTS_BY_IDS, audience, list(claim_ids))
+    return _to_inputs(rows)
+
+
+async def compute_divergence_declared(
+    pool,
+    gap,
+    *,
+    perception_macro: Materialized,
+    fundamental_metric: Materialized,
+):
+    """Declared-path compute: adapt ``Materialized`` to ``DivergenceInput`` lists.
+
+    **The shape mismatch** (D5's specific risk): ``materialize`` (D4) returns
+    ``Materialized(value=list[float], claim_ids=tuple[UUID, ...])`` -- the
+    levels and their provenance, but not the ``event_date`` /
+    ``knowledge_date`` each claim carries. ``compute_divergence`` expects
+    ``list[DivergenceInput]`` (id, event_date, knowledge_date, value,
+    redistributable, audience_user_id) because the rolling-z engine indexes
+    on ``event_date`` and the bitemporal rule sets ``knowledge_date`` to the
+    newest input's. Those date fields are not in ``Materialized`` and cannot
+    be added without changing ``arguments.py`` (D4, forbidden here).
+
+    The adapter therefore re-reads the claims by id through ``visible_claims``
+    (audience-scoped, the sanctioned reader) and builds the
+    ``DivergenceInput`` lists ``compute_divergence`` validates. This is the
+    single place where the ``Materialized``-to-``DivergenceInput`` conversion
+    happens, so a future analysis that hits the same mismatch knows where to
+    look.
+    """
+    audience = gap["audience_user_id"]
+    perc = await _to_inputs_by_ids(
+        pool, audience, perception_macro.claim_ids
+    )
+    facts = await _to_inputs_by_ids(
+        pool, audience, fundamental_metric.claim_ids
+    )
+    return compute_divergence(perc, facts)
+
+
 async def gather_divergence_inputs(
     pool, gap
 ) -> tuple[list[DivergenceInput], list[DivergenceInput]]:
     """Load perception_macro and fundamental_metric claims visible to the gap's
     audience, as DivergenceInputs.
 
-    Two streams, in the order ``compute_divergence`` expects them: perception
-    first, facts second. Each is read through ``visible_claims`` scoped to the
-    gap's ``audience_user_id``, so an input private to another user is never
-    gathered and therefore never reaches a derivation it must not feed.
+    The injected-gather escape hatch: kept as the template for a capability
+    whose inputs the declaration cannot describe (multi-entity panels,
+    caller-built structures). Divergence itself now uses the declared path.
     """
     audience: UUID | None = gap["audience_user_id"]
     entity_id = gap["entity_id"]
@@ -99,12 +185,19 @@ async def gather_divergence_inputs(
 def compute_divergence_claim(
     perception: list[DivergenceInput], facts: list[DivergenceInput]
 ):
-    """Adapt ``compute_divergence`` to the fill path's ``(draft, ids) | None``
-    contract, declaring every input as an edge."""
+    """Adapt ``compute_divergence`` to the escape-hatch fill path's
+    ``(draft, ids) | None`` contract, declaring every input as an edge."""
     draft = compute_divergence(perception, facts)
     if draft is None:
         return None
     return draft, [c.id for c in (*perception, *facts)]
+
+
+DERIVED = DerivedCapability(
+    name=NAME,
+    arguments=ARGUMENTS,
+    compute=compute_divergence_declared,
+)
 
 
 def build_derived_registry() -> Registry:
@@ -112,10 +205,7 @@ def build_derived_registry() -> Registry:
     registry = Registry()
 
     async def call(pool, gap):
-        return await fill_derived(
-            pool, gap, compute=compute_divergence_claim,
-            gather=gather_divergence_inputs,
-        )
+        return await fill_analysis(pool, gap, capability=DERIVED)
 
     registry.add(
         Capability(

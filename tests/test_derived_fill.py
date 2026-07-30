@@ -1,6 +1,7 @@
-"""A1 -- the derived-claim fill path.
+"""A1/D5 -- the derived-claim fill path, driven through fill_analysis.
 
-Covers the behaviour the work order names:
+Covers the behaviour the work order names, now through the **declared**
+path (``ArgumentSpec`` + ``materialize``) rather than an injected gather:
 
 - a perception_divergence gap filled from two shared inputs, producing a claim
   and its claim_input edges in one commit
@@ -9,7 +10,9 @@ Covers the behaviour the work order names:
 - insufficient history producing unfillable with a reason and no claim
 - the gap's attempts incrementing and next_attempt_at set on an unfillable,
   matching the ingested path's backoff
-- inputs read audience-scoped: a private input of another user is not gathered
+- inputs read audience-scoped: a private input of another user is not
+  materialized (Abstention), so the derivation cannot proceed
+- the claim_input edges written equal the ids materialization reported
 """
 
 from __future__ import annotations
@@ -21,12 +24,14 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
-from omni.capability.derived import (
-    compute_divergence_claim,
-    gather_divergence_inputs,
+from omni.capability.arguments import (
+    Abstention,
+    Materialized,
+    materialize,
 )
+from omni.capability.derived import ARGUMENTS, DERIVED
 from omni.coverage.visibility import visible_claims
-from omni.fill.derived import fill_derived
+from omni.fill.derived import fill_analysis
 
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
 N = 100
@@ -135,10 +140,7 @@ class TestFilledFromSharedInputs:
         perc_ids, fact_ids = await _seed_shared(db, entity_id)
         gap = await _gap(db, entity_id, audience_user_id=None)
 
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
-        )
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
 
         assert result.outcome == "filled", result.reason
         assert result.capability == "perception.divergence"
@@ -203,10 +205,7 @@ class TestByoOnlyLeak:
         # The gap belongs to the owner: only they can see the byo input.
         gap = await _gap(db, entity_id, audience_user_id=owner)
 
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
-        )
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
         assert result.outcome == "filled", result.reason
         claim_id = result.claim_ids[0]
 
@@ -265,10 +264,7 @@ class TestInsufficientHistory:
         )
         gap = await _gap(db, entity_id, audience_user_id=None)
 
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
-        )
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
 
         assert result.outcome == "unfillable"
         assert result.reason is not None
@@ -316,10 +312,7 @@ class TestBackoffMatchesIngestedPath:
         assert before["attempts"] == 0
         assert before["next_attempt_at"] is None
 
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
-        )
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
         assert result.outcome == "unfillable"
 
         after = await db.pool.fetchrow(
@@ -337,8 +330,8 @@ class TestBackoffMatchesIngestedPath:
 # ------------------------------------------------------- audience-scoped gather
 
 
-class TestAudienceScopedGather:
-    async def test_a_private_input_of_another_user_is_not_gathered(self, db):
+class TestAudienceScopedMaterialize:
+    async def test_a_private_input_of_another_user_is_not_materialized(self, db):
         entity_id = await _entity(db)
         owner, other = uuid4(), uuid4()
 
@@ -358,18 +351,60 @@ class TestAudienceScopedGather:
 
         gap = await _gap(db, entity_id, audience_user_id=other)
 
-        perception, facts = await gather_divergence_inputs(db.pool, gap)
-        # The other user cannot see owner's private perception series, so it is
-        # never gathered and never reaches a derivation it must not feed.
-        assert perception == []
-        assert len(facts) == N
-
-        # With one whole side invisible the derivation cannot proceed.
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
+        # The other user cannot see owner's private perception series, so
+        # materialize abstains -- the private claim never reaches a derivation
+        # it must not feed.
+        perc_result = await materialize(
+            ARGUMENTS[0], db.pool, entity_id=entity_id, audience=other
         )
+        assert isinstance(perc_result, Abstention)
+
+        # The shared fundamentals are visible.
+        fact_result = await materialize(
+            ARGUMENTS[1], db.pool, entity_id=entity_id, audience=other
+        )
+        assert isinstance(fact_result, Materialized)
+        assert len(fact_result.value) == N
+
+        # With one whole side abstaining the derivation cannot proceed.
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
         assert result.outcome == "unfillable"
         assert await db.pool.fetchval(
             "SELECT count(*) FROM claim WHERE derivation = 'derived'"
         ) == 0
+
+
+# ----------------------------------------- edges equal materialized ids (D5 risk)
+
+
+class TestEdgesEqualMaterializedIds:
+    async def test_claim_input_edges_equal_materialized_claim_ids(self, db):
+        """The claim_input edges must be exactly the ids materialization
+        reported -- not a subset. An incomplete edge set means a derived claim
+        whose licence is computed from a subset of its real inputs (a licence
+        leak with extra steps)."""
+        entity_id = await _entity(db)
+        await _seed_shared(db, entity_id)
+        gap = await _gap(db, entity_id, audience_user_id=None)
+
+        # Materialize independently to get the reported claim_ids.
+        perc_m = await materialize(
+            ARGUMENTS[0], db.pool, entity_id=entity_id, audience=None
+        )
+        fact_m = await materialize(
+            ARGUMENTS[1], db.pool, entity_id=entity_id, audience=None
+        )
+        assert isinstance(perc_m, Materialized)
+        assert isinstance(fact_m, Materialized)
+        materialized_ids = set(perc_m.claim_ids) | set(fact_m.claim_ids)
+
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
+        assert result.outcome == "filled", result.reason
+        claim_id = result.claim_ids[0]
+
+        edge_ids = {
+            r["input_id"] for r in await db.pool.fetch(
+                "SELECT input_id FROM claim_input WHERE claim_id = $1", claim_id
+            )
+        }
+        assert edge_ids == materialized_ids
