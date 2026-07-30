@@ -29,18 +29,22 @@ from omni.capabilities.portfolio import (
     atr_position_size,
     current_drawdown,
     drawdown_breaker,
+    efficient_frontier,
     ewma_volatility,
+    expected_shortfall,
     fit_factor_risk_model,
     fractional_kelly,
     hrp_weights,
     kelly_fraction,
     kelly_from_win_prob,
+    max_sharpe_weights,
     meta_label_size,
     min_variance_weights,
     optimize_weights,
     risk_contributions,
     risk_contributions_from_vol,
     risk_parity_weights,
+    value_at_risk,
     vol_target_weights,
 )
 from omni.ingest.protocol import Unavailable
@@ -566,3 +570,145 @@ def test_factor_risk_model_attributes_present():
     dec = model.decompose_portfolio_risk(w)
     d = dec.to_dict()
     assert abs(d["factor_variance"] + d["specific_variance"] - d["total_variance"]) < 1e-9
+
+
+# =========================================================================== #
+# Mean-variance SLSQP + historical VaR/ES (CE1)                                #
+# Ported from app/services/portfolio/optimization_service.py (max_sharpe +    #
+# efficient frontier) and the inline risk-metrics handler (VaR/ES).            #
+# =========================================================================== #
+def _returns_panel(seed: int = 0, n: int = 300):
+    """Three independent assets with distinct Sharpe ratios.
+
+    LOW (low mean, very low vol) has the highest per-period Sharpe; HIGH has the
+    lowest. Independence keeps the covariance near-diagonal so the tangency
+    portfolio is well-defined and the frontier is a clean U-shape.
+    """
+    rng = np.random.default_rng(seed)
+    high = rng.normal(0.0010, 0.020, n)
+    mid = rng.normal(0.0007, 0.012, n)
+    low = rng.normal(0.0004, 0.006, n)
+    return pd.DataFrame({"HIGH": high, "MID": mid, "LOW": low})
+
+
+def test_max_sharpe_weights_long_only_and_bounded():
+    R = _returns_panel()
+    w = max_sharpe_weights(R, min_weight=0.0, max_weight=0.5)
+    assert (w >= -1e-9).all()
+    assert (w <= 0.5 + 1e-9).all()
+    assert abs(w.sum() - 1.0) < 1e-6
+
+
+def test_max_sharpe_dominates_equal_weight_and_each_asset():
+    """The tangency portfolio has Sharpe >= every constituent and >= equal
+    weight -- that is the definition of maximum-Sharpe. A stub returning equal
+    weight fails the per-asset bound when the assets have unequal Sharpes."""
+    R = _returns_panel()
+    w = max_sharpe_weights(R).to_numpy()
+    ppy = 252
+    mean = R.mean().to_numpy()
+    cov = np.cov(R.to_numpy(), rowvar=False)
+
+    def sharpe_of(wv):
+        ret = float(np.sum(mean * wv) * ppy)
+        vol = float(np.sqrt(wv @ (cov * ppy) @ wv))
+        return ret / vol
+
+    port_sharpe = sharpe_of(w)
+    eq = np.full(3, 1.0 / 3)
+    assert port_sharpe >= sharpe_of(eq) - 1e-6
+    for i in range(3):
+        unit = np.zeros(3)
+        unit[i] = 1.0
+        assert port_sharpe >= sharpe_of(unit) - 1e-6
+    assert port_sharpe > sharpe_of(eq)  # strictly beats equal weight
+
+
+def test_max_sharpe_is_on_the_efficient_frontier():
+    """The max-Sharpe portfolio's Sharpe is >= the best Sharpe on the sampled
+    frontier (tangency lies on the frontier)."""
+    R = _returns_panel()
+    w = max_sharpe_weights(R).to_numpy()
+    mean = R.mean().to_numpy()
+    cov = np.cov(R.to_numpy(), rowvar=False)
+    ppy = 252
+    ret = float(np.sum(mean * w) * ppy)
+    vol = float(np.sqrt(w @ (cov * ppy) @ w))
+    max_sharpe = ret / vol
+
+    fr = efficient_frontier(R)
+    assert len(fr) > 0
+    assert max_sharpe >= fr["sharpe_ratio"].max() - 1e-6
+
+
+def test_efficient_frontier_return_monotone_and_min_vol_beats_equal_weight():
+    R = _returns_panel()
+    fr = efficient_frontier(R)
+    assert list(fr.columns) == ["return", "volatility", "sharpe_ratio"]
+    assert len(fr) > 0
+    # Target returns are a linspace -> the realised returns come back ascending.
+    assert np.all(np.diff(fr["return"].to_numpy()) > 0)
+    # The leftmost (minimum-variance) frontier point must beat naive equal
+    # weight on volatility -- otherwise it is not the efficient frontier.
+    cov = np.cov(R.to_numpy(), rowvar=False) * 252
+    eq = np.full(3, 1.0 / 3)
+    eq_vol = float(np.sqrt(eq @ cov @ eq))
+    assert fr["volatility"].min() < eq_vol
+
+
+def test_max_sharpe_raises_on_single_asset():
+    with pytest.raises(Unavailable, match=">= 2 assets"):
+        max_sharpe_weights(pd.DataFrame({"A": np.linspace(0.01, 0.02, 50)}))
+
+
+def test_efficient_frontier_raises_on_too_few_observations():
+    # Two assets but only one usable row -> covariance undefined.
+    R = pd.DataFrame({"A": [0.01], "B": [0.02]})
+    with pytest.raises(Unavailable, match="aligned observations"):
+        efficient_frontier(R)
+
+
+def test_value_at_risk_known_quantile():
+    """Hand-verified: the 5th percentile of [-.05,-.02,0,.01,.03] under linear
+    interpolation is -0.044 (position 0.2 between -.05 and -.02)."""
+    r = [-0.05, -0.02, 0.0, 0.01, 0.03]
+    var = value_at_risk(r, confidence=0.95)
+    assert abs(var - (-0.044)) < 1e-9
+
+
+def test_expected_shortfall_known_and_le_var():
+    """Only -0.05 falls at/below the -0.044 VaR, so ES = -0.05 (single-point
+    tail). ES must be <= VaR (a deeper or equal loss)."""
+    r = [-0.05, -0.02, 0.0, 0.01, 0.03]
+    var = value_at_risk(r, confidence=0.95)
+    es = expected_shortfall(r, confidence=0.95)
+    assert abs(es - (-0.05)) < 1e-9
+    assert es <= var
+
+
+def test_value_at_risk_and_expected_shortfall_negative_on_losses():
+    rng = np.random.default_rng(7)
+    r = rng.normal(0.0005, 0.015, 500)
+    assert value_at_risk(r) < 0.0
+    assert expected_shortfall(r) < 0.0
+    assert expected_shortfall(r) <= value_at_risk(r)
+
+
+def test_value_at_risk_raises_on_too_few_observations():
+    with pytest.raises(Unavailable):
+        value_at_risk([0.01])
+    with pytest.raises(Unavailable):
+        value_at_risk([np.nan, np.nan])
+
+
+def test_expected_shortfall_single_tail_is_extreme_loss():
+    """With one observation in the tail, ES is that observation (the most
+    extreme loss), not a fabricated average and not equal to the interpolated
+    VaR. For [0.10,0.05,0.02,0.0,-0.30] the 5th-pctile VaR is -0.24 (linear
+    interpolation), so only -0.30 falls at/below it -> ES = -0.30 = min."""
+    r = [0.10, 0.05, 0.02, 0.0, -0.30]
+    var = value_at_risk(r, confidence=0.95)
+    es = expected_shortfall(r, confidence=0.95)
+    assert abs(var - (-0.24)) < 1e-9
+    assert abs(es - (-0.30)) < 1e-12
+    assert es < var
