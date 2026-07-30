@@ -342,6 +342,42 @@ async def test_analysis_run_returns_result_with_evidence_and_licence(
     assert body["licence"]["audience_user_id"] is None
 
 
+async def test_analysis_run_serializes_a_non_claim_declared_result(
+    db, database_url
+):
+    """market_risk.credit_risk (QF1) returns a plain dict, not a ClaimDraft --
+    the serializer's ClaimDraft-only unpacking would 500 on this path before
+    the isinstance(draft, dict) branch was added. FRED-sourced spreads resolve
+    shareable even though the static extracted.py entry stays touches_byo=True."""
+    await _entity(db, symbol="AAPL")
+    entity_id = await db.pool.fetchval(
+        "SELECT id FROM entity WHERE symbol = 'AAPL'"
+    )
+    now = datetime(2024, 1, 1, tzinfo=UTC)
+    for key, value in (("BAMLC0A0CM", 1.1), ("BAMLH0A0HYM2", 3.8)):
+        await db.pool.execute(
+            _D8_INSERT_CLAIM, entity_id, "macro_series_point", key,
+            json.dumps({"value": value}), "fred",
+            now, now, 1.0, "allowed", None,
+        )
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post(
+            "/analysis/run",
+            json={"capability": "market_risk.credit_risk", "target": "AAPL"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["abstained"] is False
+    # A plain dict, emitted as-is -- not unpacked as a ClaimDraft.
+    assert "score" in body["result"]
+    assert "claim_type" not in body["result"]
+    assert body["licence"]["redistributable"] == "allowed"
+    assert body["licence"]["audience_user_id"] is None
+
+
 async def test_analysis_run_unknown_capability_is_not_found(db, database_url):
     await _entity(db, symbol="AAPL")
     app = _make_app(database_url)

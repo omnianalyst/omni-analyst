@@ -126,18 +126,26 @@ def _analysis_to_dict(result: AnalysisResult) -> dict:
         return body
 
     draft = result.result
-    body["result"] = {
-        "claim_type": draft.claim_type,
-        "key": draft.key,
-        "value": draft.value,
-        "unit": draft.unit,
-        "evidence": draft.evidence,
-        "event_date": draft.event_date.isoformat() if draft.event_date else None,
-        "knowledge_date": (
-            draft.knowledge_date.isoformat() if draft.knowledge_date else None
-        ),
-        "confidence": draft.confidence,
-    }
+    if isinstance(draft, dict):
+        # A non-claim declared analysis (e.g. market_risk.credit_risk via
+        # QF1): compute returns a plain, already JSON-serialisable dict rather
+        # than a ClaimDraft, because it never writes a claim. Emit it as-is --
+        # evidence/licence are populated identically for both result shapes,
+        # since they live on AnalysisResult, not on the result object.
+        body["result"] = draft
+    else:
+        body["result"] = {
+            "claim_type": draft.claim_type,
+            "key": draft.key,
+            "value": draft.value,
+            "unit": draft.unit,
+            "evidence": draft.evidence,
+            "event_date": draft.event_date.isoformat() if draft.event_date else None,
+            "knowledge_date": (
+                draft.knowledge_date.isoformat() if draft.knowledge_date else None
+            ),
+            "confidence": draft.confidence,
+        }
     body["evidence"] = list(result.evidence)
     body["licence"] = {
         "redistributable": result.redistributable,
