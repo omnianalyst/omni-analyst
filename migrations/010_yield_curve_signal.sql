@@ -1,0 +1,29 @@
+-- The yield-curve-inversion signal: the first claim type earned after
+-- perception_divergence, following D2's step-5 template. It is a derived STATE
+-- ("is the 2Y/10Y curve inverted right now"), not a horizon-parameterized
+-- computation, so it passes the durability test: something consumes it
+-- (macro.recession_probability's inversion flag) and it has a meaningful
+-- freshness policy.
+--
+-- The enum addition is isolated here, ALONE, following migration 003's pattern
+-- exactly. Postgres forbids using a new enum value in the same transaction that
+-- adds it ("unsafe use of new value ... New enum values must be committed
+-- before they can be used"), and the Neutron migrator wraps each migration's
+-- entire `up` in one transaction -- so a claim_type_policy INSERT that
+-- references 'yield_curve_signal' cannot share this file. Verified empirically
+-- against this PG17 instance (ALTER TYPE + INSERT in one tx aborts the whole
+-- transaction, so the value would not even be added). The policy row lands in a
+-- follow-up migration once this value is committed; this order's scope is a
+-- single migration file.
+--
+-- Intended claim_type_policy row (staleness justification in _orchestrator/
+-- reports/D10.md): DGS2/DGS10 are daily treasury constant-maturity yields, so
+-- the signal's headline output (current_spread, is_inverted) can change every
+-- publication day; 1 day matches that daily cadence and the perception_divergence
+-- convention ("derived; only as fresh as its inputs"):
+--
+--   INSERT INTO claim_type_policy (claim_type, default_staleness, note) VALUES
+--       ('yield_curve_signal', INTERVAL '1 day',
+--        'derived from daily DGS2/DGS10 treasury yields; only as fresh as its inputs');
+
+ALTER TYPE claim_type ADD VALUE IF NOT EXISTS 'yield_curve_signal';

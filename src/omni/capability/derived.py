@@ -25,10 +25,12 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from omni.capabilities.macro import yield_curve_inversion
 from omni.capability.arguments import ArgumentSpec, Materialized
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.coverage.visibility import visible_claims
 from omni.fill.derived import DerivedCapability, fill_analysis
+from omni.ingest.protocol import ClaimDraft, Unavailable
 from omni.perception.divergence import (
     MIN_HISTORY,
     DivergenceInput,
@@ -196,12 +198,148 @@ DERIVED = DerivedCapability(
 )
 
 
+# ----------------------------------------------------------- yield-curve signal
+#
+# The first earned claim type after perception_divergence (D2 step 5). A derived
+# STATE -- "is the 2Y/10Y curve inverted right now" -- not a horizon-parameterized
+# computation, so it earns a claim type: macro.recession_probability consumes the
+# inversion flag, and the signal has a real freshness policy. The compute is the
+# existing (unchanged) ``macro.yield_curve_inversion``; this declaration gives its
+# output a durable home in the coverage store.
+#
+# v1 sources this from FRED ``DGS2``/``DGS10`` (confirmed in
+# ../software/backend/app/workers/signal_fusion_tasks.py:349-350); those series
+# ids are the ArgumentSpec keys (the exact purpose D9's ``key`` field exists for:
+# two series sharing one claim_type, ``macro_series_point``, distinguished here).
+
+YC_NAME = "macro.yield_curve_signal"
+YC_PRODUCES = "yield_curve_signal"
+YC_KEY = "2y_10y"
+
+# ``yield_curve_inversion`` looks at ``common_dates[-252:]`` (one trading year of
+# daily yields) and counts inversions over ``spreads[-90:]``. ``window`` passes
+# the function its full intended lookback when that much history exists;
+# ``min_obs`` is the floor below which the 90-day inverted count would be
+# silently truncated -- a 45-day count wearing a "90d" label is the fabrication
+# vector AGENTS.md warns against. 90, not 252: the headline output
+# (``days_inverted_90d``, ``is_inverted``) is fully meaningful at 90 common
+# dates; demanding a full trading year would abstain for any entity younger than
+# that when the recession signal is already honest at ~four months of data.
+YC_WINDOW = 252
+YC_MIN_OBS = 90
+
+YC_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="series_2y",
+        claim_type="macro_series_point",
+        key="DGS2",
+        shape="series",
+        transform="level",
+        window=YC_WINDOW,
+        min_obs=YC_MIN_OBS,
+    ),
+    ArgumentSpec(
+        name="series_10y",
+        claim_type="macro_series_point",
+        key="DGS10",
+        shape="series",
+        transform="level",
+        window=YC_WINDOW,
+        min_obs=YC_MIN_OBS,
+    ),
+)
+
+YC_CONSUMES = tuple(spec.claim_type for spec in YC_ARGUMENTS)
+
+
+async def compute_yield_curve_signal_declared(
+    pool, gap, *, series_2y: Materialized, series_10y: Materialized
+):
+    """Declared-path compute: adapt ``Materialized`` to the two
+    ``dict[date, float]`` arguments ``yield_curve_inversion`` expects.
+
+    ``yield_curve_inversion`` takes series shaped as dicts keyed by date, not
+    the ordered ``Materialized`` shape ``materialize`` returns -- the same kind
+    of shape mismatch ``compute_divergence_declared`` bridges for
+    ``DivergenceInput`` lists. The adapter lives here, next to that one, not in
+    ``arguments.py`` (per D5/D10): the shape conversion is specific to this one
+    analysis function's signature.
+
+    Returns a ``ClaimDraft`` of ``claim_type="yield_curve_signal"`` whose
+    ``value`` is the durable state a consumer reads (spread, inversion flag,
+    90-day count) and whose ``evidence`` carries the recent spread trajectory
+    (dates serialized for JSONB) and the input claim ids. The bulky
+    ``historical_spreads`` is evidence, not value: it is supporting detail
+    reconstructable from the inputs, not the headline signal a consumer joins on.
+    Abstains (``None``) when fewer than 90 common dates survive -- the function's
+    ``days_inverted_90d`` is a count over ``spreads[-90:]`` and silently shrinks
+    below that, so the per-series ``min_obs`` floor is backed by a check on the
+    actual intersection.
+    """
+    d2y = {r.event_date: r.value for r in series_2y.rows}
+    d10y = {r.event_date: r.value for r in series_10y.rows}
+
+    common = set(d2y) & set(d10y)
+    if len(common) < YC_MIN_OBS:
+        return None
+
+    try:
+        result = await yield_curve_inversion(d2y, d10y)
+    except Unavailable:
+        return None
+
+    last_event = max(common)
+    latest_knowledge = max(
+        r.knowledge_date for r in (*series_2y.rows, *series_10y.rows)
+    )
+
+    historical = [
+        {
+            "date": s["date"].isoformat(),
+            "spread": s["spread"],
+            "inverted": s["inverted"],
+        }
+        for s in result["historical_spreads"]
+    ]
+
+    return ClaimDraft(
+        claim_type=YC_PRODUCES,
+        key=YC_KEY,
+        value={
+            "current_spread": result["current_spread"],
+            "is_inverted": result["is_inverted"],
+            "days_inverted_90d": result["days_inverted_90d"],
+        },
+        event_date=last_event,
+        knowledge_date=latest_knowledge,
+        confidence=1.0,
+        unit="percent",
+        evidence={
+            "series": ["DGS2", "DGS10"],
+            "historical_spreads": historical,
+            "input_claim_ids": [
+                str(r.id) for r in (*series_2y.rows, *series_10y.rows)
+            ],
+        },
+    )
+
+
+YIELD_CURVE = DerivedCapability(
+    name=YC_NAME,
+    arguments=YC_ARGUMENTS,
+    compute=compute_yield_curve_signal_declared,
+)
+
+
 def build_derived_registry() -> Registry:
     """Register the derived capabilities that are wired and tested today."""
     registry = Registry()
 
     async def call(pool, gap):
         return await fill_analysis(pool, gap, capability=DERIVED)
+
+    async def call_yield_curve(pool, gap):
+        return await fill_analysis(pool, gap, capability=YIELD_CURVE)
 
     registry.add(
         Capability(
@@ -219,6 +357,24 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.perception.divergence",
             call=call,
+        )
+    )
+    registry.add(
+        Capability(
+            name=YC_NAME,
+            description=(
+                "2Y/10Y treasury yield-curve inversion signal: current spread, "
+                "inversion flag and 90-day days-inverted count, derived from "
+                "DGS2/DGS10 macro_series_point claims."
+            ),
+            consumes=YC_CONSUMES,
+            produces=(YC_PRODUCES,),
+            touches_byo=False,
+            cost=0.1,
+            maturity=Maturity.WIRED,
+            callability=Callability.YES,
+            origin="omni.capabilities.macro.yield_curve_inversion",
+            call=call_yield_curve,
         )
     )
     return registry
