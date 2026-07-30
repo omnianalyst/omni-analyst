@@ -26,12 +26,13 @@ from __future__ import annotations
 from uuid import UUID
 
 from neutron import App, Router
-from neutron.error import bad_request, not_found
+from neutron.error import not_found
 from pydantic import BaseModel
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
 from omni.credentials.catalog import redistribution_for
+from omni.orchestrator.analysis import AnalysisResult, run_analysis
 from omni.orchestrator.planner import (
     Objective,
     Plan,
@@ -50,6 +51,12 @@ class ObjectiveRequest(BaseModel):
     entity_kind: str | None = None
     shareable: bool = False
     budget: float = 10.0
+
+
+class AnalysisRequest(BaseModel):
+    capability: str
+    target: str
+    entity_kind: str | None = None
 
 
 def _audience(request: Request) -> UUID | None:
@@ -102,6 +109,43 @@ def _plan_to_dict(p: Plan) -> dict:
         "satisfiable": p.satisfiable,
         "partial": p.partial,
     }
+
+
+def _analysis_to_dict(result: AnalysisResult) -> dict:
+    body: dict = {
+        "capability": result.capability,
+        "abstained": result.abstained,
+    }
+    if result.abstained:
+        body["shortfalls"] = [
+            {"argument": s.argument, "reason": s.reason}
+            for s in result.shortfalls
+        ]
+        body["evidence"] = []
+        body["licence"] = None
+        return body
+
+    draft = result.result
+    body["result"] = {
+        "claim_type": draft.claim_type,
+        "key": draft.key,
+        "value": draft.value,
+        "unit": draft.unit,
+        "evidence": draft.evidence,
+        "event_date": draft.event_date.isoformat() if draft.event_date else None,
+        "knowledge_date": (
+            draft.knowledge_date.isoformat() if draft.knowledge_date else None
+        ),
+        "confidence": draft.confidence,
+    }
+    body["evidence"] = list(result.evidence)
+    body["licence"] = {
+        "redistributable": result.redistributable,
+        "audience_user_id": (
+            str(result.audience_user_id) if result.audience_user_id else None
+        ),
+    }
+    return body
 
 
 async def _resolve_entity_id(pool, target: str, entity_kind: str | None) -> UUID | None:
@@ -180,6 +224,25 @@ def build_router(app: App) -> Router:
         body["answered"] = outcome.answered
         body["demand_raised"] = [str(d) for d in outcome.demand_raised]
         return body
+
+    @router.post("/analysis/run", status_code=200)
+    async def run_analysis_by_name(
+        req: AnalysisRequest, request: Request
+    ) -> dict:
+        entity_id = await _resolve_entity_id(
+            app.db.pool, req.target, req.entity_kind
+        )
+        if entity_id is None:
+            raise not_found(f"No entity with symbol '{req.target}'")
+        audience = _audience(request)
+        result = await run_analysis(
+            registry,
+            app.db.pool,
+            name=req.capability,
+            entity_id=entity_id,
+            audience=audience,
+        )
+        return _analysis_to_dict(result)
 
     @router.get("/capabilities")
     async def list_capabilities() -> dict:
