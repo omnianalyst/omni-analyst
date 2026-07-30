@@ -247,3 +247,81 @@ class TestScorecard:
         counts = await refusal_counts(db.pool)
         assert counts[Refusal.UNCALIBRATED.value] == 1
         assert counts[Refusal.NOT_FALSIFIABLE.value] == 1
+
+
+class TestClaimlessFindings:
+    """A finding need not be anchored to a single claim. The schema now allows
+    claim_id to be NULL provided `supporting` names the evidence -- but the
+    pre-existing falsifiability invariant on surfaced findings is untouched, and
+    the new CHECK rejects a claim-less finding that names nothing.
+    """
+
+    async def test_a_claimless_surfaced_finding_without_a_prediction_is_rejected(self, db):
+        """Relaxing claim_id does not relax falsifiability: surfaced_findings_
+        are_falsifiable is a separate CHECK on prediction_id. A surfaced,
+        claim-less, prediction-less row is rejected exactly as before."""
+        e = await _entity(db)
+        with pytest.raises(asyncpg.IntegrityConstraintViolationError) as exc:
+            await db.pool.execute(
+                "INSERT INTO finding (claim_id, entity_id, status, method, "
+                "confidence, threshold, supporting) "
+                "VALUES (NULL,$1,'surfaced','detect',0.85,0.7,"
+                "'[\"input claim a\"]'::jsonb)",
+                e,
+            )
+        assert exc.value.constraint_name == "surfaced_findings_are_falsifiable"
+
+    async def test_a_claimless_refused_finding_with_supporting_is_stored(self, db):
+        """The new path: a refused finding (no prediction required) anchored to
+        no claim, with its evidence named in `supporting`. Confirms a None
+        claim_id passes through publish.record() into a nullable UUID column."""
+        e = await _entity(db)
+        v = assess(_candidate(None, supporting=("input claim a",)), [])
+        assert v.refusal is Refusal.UNCALIBRATED
+        fid = await record(db.pool, v, entity_id=e)
+
+        row = await db.pool.fetchrow(
+            "SELECT status, claim_id, supporting FROM finding WHERE id=$1", fid
+        )
+        assert row["status"] == "refused"
+        assert row["claim_id"] is None
+        assert "input claim a" in row["supporting"]
+
+    async def test_a_claimless_finding_with_empty_supporting_is_rejected(self, db):
+        """The whole point of the new CHECK: a finding with no claim and no
+        named evidence is untraceable and must not be stored. `refusal` is
+        supplied so refusal_names_a_reason does not fire -- the new CHECK is the
+        only thing being exercised."""
+        e = await _entity(db)
+        with pytest.raises(asyncpg.IntegrityConstraintViolationError) as exc:
+            await db.pool.execute(
+                "INSERT INTO finding (claim_id, entity_id, status, method, "
+                "confidence, refusal, supporting) "
+                "VALUES (NULL,$1,'refused','detect',0.5,'test','[]'::jsonb)",
+                e,
+            )
+        assert exc.value.constraint_name == "claim_or_supporting_names_the_evidence"
+
+    async def test_a_claimless_surfaced_finding_with_a_real_prediction_is_allowed(self, db):
+        """Proves the relaxation does not block a surfaced claim-less finding in
+        principle. The prediction here is a SYNTHETIC price triple-barrier
+        fixture (a real entry_price/upper_barrier/lower_barrier); it demonstrates
+        the CHECK permits the row, NOT that any real non-price analysis can
+        produce a scorable prediction. That question is explicitly open -- see
+        the D11 report."""
+        e = await _entity(db)
+        p = await _prediction(db, e)
+        v = assess(
+            _candidate(None, supporting=("input claim a",),
+                       disconfirming=("risk event",)),
+            [_bucket(0.7, 40, 34)],
+        )
+        assert v.surfaced
+        fid = await record(db.pool, v, entity_id=e, prediction_id=p)
+
+        row = await db.pool.fetchrow(
+            "SELECT status, claim_id, prediction_id FROM finding WHERE id=$1", fid
+        )
+        assert row["status"] == "surfaced"
+        assert row["claim_id"] is None
+        assert row["prediction_id"] is not None
