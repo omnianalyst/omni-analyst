@@ -504,3 +504,241 @@ def put_call_parity_errors(
             "chain is missing bid or ask"
         )
     return errors
+
+
+# ---------------------------------------------------------------------------
+# Strategy scanner (ported from the inline screener at
+# app/api/v1/endpoints/options.py:855-1005). The v1 handler fetched each chain
+# via yfinance -- a prohibited provider per the credential catalog (W-19 /
+# RECENSUS) -- so this port takes the chain as data and performs no fetch. The
+# caller owns ingestion; the screener owns the strategy-selection arithmetic.
+#
+# A contract is the same plain dict the chain analytics above consume:
+#   {strike, option_type, bid, ask, implied_volatility, expiry?, days_to_expiry?}
+# Legs are grouped by `expiry` so a spread can pair a long and a short call
+# struck in the same maturity. `days_to_expiry` (when present) gates the
+# short-dated skip; an expiry without it is still screened.
+#
+# `probability_of_profit` is a moneyness heuristic, not a priced model: v1
+# labelled it "simplified" / "estimate" and the census accepted it as a
+# modelled estimate. The heuristics are ported bit-for-bit, including one
+# defect -- see `_covered_call_candidates`.
+# ---------------------------------------------------------------------------
+
+_CC_MONEYNESS = (1.02, 1.10)      # covered call: 2-10% OTM calls
+_CSP_MONEYNESS = (0.90, 0.98)     # cash-secured put: 2-10% OTM puts
+_BCS_LONG_MONEYNESS = (0.98, 1.02)  # bull-call long leg: near ATM
+_MIN_DAYS_TO_EXPIRY = 7           # v1 skips expirations closer than this
+
+
+def _group_legs_by_expiry(
+    contracts: Sequence[dict[str, Any]],
+) -> dict[Any, dict[str, Any]]:
+    """Group flat contracts into ``{expiry: {days_to_expiry, legs}}`` where
+    ``legs`` maps ``strike -> {"call"|"put": contract}``."""
+    groups: dict[Any, dict[str, Any]] = {}
+    for c in contracts:
+        key = c.get("expiry")
+        group = groups.setdefault(
+            key, {"days_to_expiry": c.get("days_to_expiry"), "legs": {}}
+        )
+        strike = c["strike"]
+        legs = group["legs"].setdefault(strike, {})
+        side = c.get("option_type")
+        if side in ("call", "put") and side not in legs:
+            legs[side] = c
+    return groups
+
+
+def _covered_call_candidates(
+    legs: dict[float, dict[str, dict[str, Any]]],
+    spot: float,
+    expiry: Any,
+    days_to_expiry: Any,
+    min_probability: float,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for strike, sides in legs.items():
+        call = sides.get("call")
+        if call is None:
+            continue
+        moneyness = strike / spot
+        if not (_CC_MONEYNESS[0] <= moneyness <= _CC_MONEYNESS[1]):
+            continue
+        premium = call.get("bid", 0) or 0
+        if premium <= 0:
+            continue
+        return_if_called = ((strike - spot) + premium) / spot
+        return_if_not_called = premium / spot
+        # v1 heuristic, ported verbatim. NOTE: for an OTM covered call
+        # (moneyness > 1) this evaluates to < 0.5, i.e. it reports a LOWER
+        # probability of profit the FURTHER OTM the call -- the opposite of
+        # the economic truth (a further-OTM call is less likely to be
+        # assigned, so the writer is more likely to keep the premium). v1's
+        # own comment ("Higher moneyness = higher prob of profit") contradicts
+        # its formula. Ported bit-for-bit per PORTING.md; the defect is
+        # recorded, not "fixed".
+        prob_profit = 0.5 + 0.5 * (1 - moneyness)
+        if prob_profit >= min_probability:
+            out.append(
+                {
+                    "type": "covered_call",
+                    "strike": strike,
+                    "expiry": expiry,
+                    "days_to_expiry": days_to_expiry,
+                    "premium_collected": premium,
+                    "return_if_called": return_if_called,
+                    "return_if_not_called": return_if_not_called,
+                    "probability_of_profit": prob_profit,
+                    "max_risk": 0.0,
+                    "implied_volatility": call.get("implied_volatility"),
+                }
+            )
+    return out
+
+
+def _cash_secured_put_candidates(
+    legs: dict[float, dict[str, dict[str, Any]]],
+    spot: float,
+    expiry: Any,
+    days_to_expiry: Any,
+    min_probability: float,
+    max_risk: float,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for strike, sides in legs.items():
+        put = sides.get("put")
+        if put is None:
+            continue
+        moneyness = strike / spot
+        if not (_CSP_MONEYNESS[0] <= moneyness <= _CSP_MONEYNESS[1]):
+            continue
+        premium = put.get("bid", 0) or 0
+        if premium <= 0:
+            continue
+        return_on_cash = premium / strike
+        prob_profit = 0.5 + 0.5 * (1 - moneyness)
+        if prob_profit >= min_probability and strike <= max_risk:
+            out.append(
+                {
+                    "type": "cash_secured_put",
+                    "strike": strike,
+                    "expiry": expiry,
+                    "days_to_expiry": days_to_expiry,
+                    "premium_collected": premium,
+                    "return_on_cash": return_on_cash,
+                    "probability_of_profit": prob_profit,
+                    "max_risk": float(strike),
+                    "implied_volatility": put.get("implied_volatility"),
+                }
+            )
+    return out
+
+
+def _bull_call_spread_candidates(
+    legs: dict[float, dict[str, dict[str, Any]]],
+    spot: float,
+    expiry: Any,
+    days_to_expiry: Any,
+    min_probability: float,
+    max_risk: float,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    strikes = sorted(legs)
+    for strike in strikes:
+        long_call = legs[strike].get("call")
+        if long_call is None:
+            continue
+        long_moneyness = strike / spot
+        if not (_BCS_LONG_MONEYNESS[0] <= long_moneyness <= _BCS_LONG_MONEYNESS[1]):
+            continue
+        long_ask = long_call.get("ask", 0) or 0
+        for otm_strike in strikes:
+            if not (strike < otm_strike <= strike * 1.05):
+                continue
+            short_call = legs[otm_strike].get("call")
+            if short_call is None:
+                continue
+            short_bid = short_call.get("bid", 0) or 0
+            if not (long_ask > short_bid > 0):
+                continue
+            net_debit = long_ask - short_bid
+            max_profit = (otm_strike - strike) - net_debit
+            max_loss = net_debit
+            if not (max_profit > 0 and max_loss <= max_risk):
+                continue
+            risk_reward = max_profit / max_loss if max_loss > 0 else 0.0
+            prob_profit = min(0.85, 0.4 + 0.1 * risk_reward)
+            if prob_profit >= min_probability:
+                out.append(
+                    {
+                        "type": "bull_call_spread",
+                        "long_strike": strike,
+                        "short_strike": otm_strike,
+                        "expiry": expiry,
+                        "days_to_expiry": days_to_expiry,
+                        "net_debit": net_debit,
+                        "max_profit": max_profit,
+                        "max_loss": max_loss,
+                        "probability_of_profit": prob_profit,
+                        "risk_reward_ratio": risk_reward,
+                    }
+                )
+                break  # v1 takes the first qualifying short leg per long leg
+    return out
+
+
+def scan_option_strategies(
+    contracts: Sequence[dict[str, Any]],
+    spot: float,
+    *,
+    min_probability: float = 0.6,
+    max_risk: float = 1000.0,
+    strategy_types: Sequence[str] = ("covered_call", "cash_secured_put", "spread"),
+) -> list[dict[str, Any]]:
+    """Screen an options chain for income / spread strategy candidates.
+
+    Ported from v1 ``GET /options/strategies/scanner``. The chain arrives as
+    data (no yfinance); `spot` is required -- moneyness is undefined without
+    it. Candidates are returned sorted by ``probability_of_profit`` descending.
+
+    `probability_of_profit` is a moneyness heuristic ported verbatim from v1,
+    not a priced probability; see the module notes above and the per-strategy
+    docstrings. Each candidate carries the fields its v1 counterpart did.
+
+    Raises ``Unavailable`` on an empty chain or a non-positive spot. An
+    expiration whose ``days_to_expiry`` is present and below
+    ``_MIN_DAYS_TO_EXPIRY`` is skipped, matching v1.
+    """
+    contracts = _require(contracts)
+    if spot <= 0:
+        raise Unavailable(f"non-positive spot {spot}; moneyness is undefined")
+
+    types = set(strategy_types)
+    groups = _group_legs_by_expiry(contracts)
+
+    found: list[dict[str, Any]] = []
+    for expiry, group in groups.items():
+        days = group["days_to_expiry"]
+        if days is not None and days < _MIN_DAYS_TO_EXPIRY:
+            continue
+        legs = group["legs"]
+        if "covered_call" in types:
+            found.extend(
+                _covered_call_candidates(legs, spot, expiry, days, min_probability)
+            )
+        if "cash_secured_put" in types:
+            found.extend(
+                _cash_secured_put_candidates(
+                    legs, spot, expiry, days, min_probability, max_risk
+                )
+            )
+        if "spread" in types:
+            found.extend(
+                _bull_call_spread_candidates(
+                    legs, spot, expiry, days, min_probability, max_risk
+                )
+            )
+
+    found.sort(key=lambda x: x["probability_of_profit"], reverse=True)
+    return found
