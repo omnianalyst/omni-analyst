@@ -1428,19 +1428,27 @@ def build_extracted_registry() -> Registry:
         ),
         _bind(
             "market_risk.growth_risk",
-            "Growth risk from a GDP nowcast and employment, with an embedded "
-            "recession-probability heuristic.",
+            "Growth risk from a GDP nowcast and employment. The output carries "
+            "a growth_score_recession_heuristic field that is a DISTINCT "
+            "GDP/unemployment heuristic, NOT the same quantity as "
+            "macro.recession_probability's yield-curve/Sahm/LEI composite.",
             fn=risk.analyze_growth_risk,
             consumes=("macro_series_point",),
             provenance=(
                 "Inputs (gdp_growth, unemployment, job_growth) are "
                 "macro_series_point series sourced from FRED (allowed), with no "
-                "price input, so the result is shareable. NB the embedded "
-                "recession_probability uses risk.py's GDP/unemployment heuristic "
-                "(0.15 base plus band adds), which DIVERGES from the already-"
-                "registered macro.recession_probability (a yield-curve/Sahm/LEI "
-                "composite) -- see N6; do not treat the two as interchangeable. "
-                "Score thresholds are policy-fixed, not calibrated."
+                "price input, so the result is shareable. The "
+                "growth_score_recession_heuristic field is risk.py's "
+                "GDP/unemployment heuristic (0.15 base plus band adds) -- a "
+                "diagnostic for why the growth score moved, NOT a second "
+                "estimate of macro.recession_probability's calibrated-seeming "
+                "composite. The two use different inputs and a different model "
+                "and disagree on the same state (0.85 vs 1.0 -- see QM M2 / "
+                "N6); do not average, compare or substitute them. The field "
+                "name intentionally contains neither 'probability' nor "
+                "'recession_probability' so a consumer cannot read it as "
+                "interchangeable with macro.recession_probability's `probability` "
+                "output key. Score thresholds are policy-fixed, not calibrated."
             ),
         ),
         _bind(

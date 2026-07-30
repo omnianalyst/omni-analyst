@@ -1161,7 +1161,7 @@ def _cases():
             {"gdp_growth": -0.5, "unemployment": 6.0, "job_growth": 40000},
             # gdp<0 -> 90; unemp>5 -> +20 = 100; recession 0.15+0.5+0.2 = 0.85
             lambda r: r["score"] == 100
-            and r["recession_probability"] == pytest.approx(0.85),
+            and r["growth_score_recession_heuristic"] == pytest.approx(0.85),
         ),
         "market_risk.credit_risk": (
             {"ig_spread": 200.0, "hy_spread": 700.0},
@@ -1505,6 +1505,44 @@ class TestInvocation:
         assert sync_out == pytest.approx(2.5)
         assert "triggered" in async_out
 
+    async def test_growth_risk_recession_field_is_not_interchangeable_with_macro_composite(
+        self, registry
+    ):
+        # QM M2 / QF2: growth_risk embeds a GDP/unemployment recession heuristic
+        # that DIVERGES from the registered macro.recession_probability composite
+        # on the same state (0.85 vs 1.0). The two must never share an output
+        # field name, or a consumer reads them as two estimates of one calibrated
+        # quantity and averages them into meaninglessness. macro.recession_probability
+        # surfaces its result under the key `probability`; growth_risk must not
+        # surface a key that collides with that or with the bare name
+        # `recession_probability` (which mirrors the macro capability's own name).
+        growth = await registry.get("market_risk.growth_risk").call(
+            gdp_growth=-0.5, unemployment=6.0, job_growth=40000
+        )
+        macro = await registry.get("macro.recession_probability").call(
+            yield_curve_inverted=True,
+            sahm_triggered=True,
+            lei_signals=["negative"],
+        )
+        assert "probability" not in growth, (
+            "growth_risk must not surface a `probability` key; it collides with "
+            "macro.recession_probability's output key and implies a calibrated "
+            "estimate where there is only a band-add heuristic"
+        )
+        assert "recession_probability" not in growth, (
+            "growth_risk must not surface a `recession_probability` key; the "
+            "bare name reads as interchangeable with macro.recession_probability"
+        )
+        assert "growth_score_recession_heuristic" in growth, (
+            "growth_risk must carry its recession heuristic under an explicitly "
+            "named, unambiguous field (growth_score_recession_heuristic)"
+        )
+        # The two numbers really do differ on this state -- the divergence the
+        # distinct naming exists to surface, not hide.
+        assert growth["growth_score_recession_heuristic"] != pytest.approx(
+            macro["probability"]
+        )
+
 
 class TestLicenceClassification:
     @pytest.mark.parametrize(
@@ -1712,8 +1750,9 @@ class TestLicenceClassification:
         # input -- so it is the one market_risk cap safe to fold into shared
         # coverage. Proven by the closed producer set: the only
         # macro_series_point producer is fred.series (FALLBACK_ALLOWED). Its
-        # embedded recession_probability diverges from macro.recession_probability
-        # -- that is a divergence in the NUMBER, not a licence issue; see N6.
+        # embedded growth_score_recession_heuristic diverges from
+        # macro.recession_probability -- that is a divergence in the NUMBER, not
+        # a licence issue; see N6 / QM M2.
         assert registry.get("market_risk.growth_risk").touches_byo is False
 
     @pytest.mark.parametrize(

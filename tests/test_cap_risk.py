@@ -325,7 +325,7 @@ class TestAnalyzeGrowthRisk:
         # gdp<0 -> 90; unemp>5 -> +20 -> capped 100
         out = analyze_growth_risk(-1.0, 6.0, 200000.0)
         assert out["score"] == pytest.approx(100.0)
-        assert out["recession_probability"] == pytest.approx(0.85)
+        assert out["growth_score_recession_heuristic"] == pytest.approx(0.85)
 
     def test_weak_job_growth_penalizes(self):
         # gdp 1.5 -> 50; job_growth<50000 -> +20 -> 70
