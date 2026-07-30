@@ -32,6 +32,7 @@ from omni.capability.arguments import (
 from omni.capability.derived import ARGUMENTS, DERIVED
 from omni.coverage.visibility import visible_claims
 from omni.fill.derived import fill_analysis
+from omni.perception.divergence import resolve_derived_licence
 
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
 N = 100
@@ -408,3 +409,96 @@ class TestEdgesEqualMaterializedIds:
             )
         }
         assert edge_ids == materialized_ids
+
+
+class _VisibilityReadCounter:
+    """Wraps a pool, counting ``fetch`` calls that touch the visibility CTE.
+
+    Every read through ``visible_claims`` (and the old ``_to_inputs_by_ids`` /
+    ``_licence_inputs`` re-reads) carries ``redistributable = 'allowed'`` in its
+    SQL; no other query in the fill path does. Delegates all other methods
+    (``fetchval``, ``execute``, ``acquire``) to the real pool untouched.
+    """
+
+    def __init__(self, pool):
+        self._pool = pool
+        self.count = 0
+
+    async def fetch(self, sql, *args):
+        if "redistributable = 'allowed'" in sql:
+            self.count += 1
+        return await self._pool.fetch(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._pool, name)
+
+
+# ----------------------------------------- licence from carried rows (D7 risk)
+
+
+class TestLicenceFromCarriedRows:
+    async def test_resolve_derived_licence_over_rows_matches_re_read(self, db):
+        """``resolve_derived_licence`` over ``Materialized.rows`` produces the
+        same ``(redistributable, audience)`` the old re-read produced. The
+        byo_only leak test depends on this: one byo_only input among allowed
+        ones makes the whole derivation private to that input's owner."""
+        entity_id = await _entity(db)
+        owner = uuid4()
+        perc_obs, fact_obs = _gen(+20, -20)
+        await _insert_series(
+            db, entity_id, perc_obs, claim_type="perception_macro", key="vix",
+            source="polygon", redistributable="byo_only",
+            audience_user_id=owner,
+        )
+        await _insert_series(
+            db, entity_id, fact_obs, claim_type="fundamental_metric",
+            key="Revenues", source="sec_edgar", redistributable="allowed",
+            audience_user_id=None,
+        )
+
+        perc_m = await materialize(
+            ARGUMENTS[0], db.pool, entity_id=entity_id, audience=owner
+        )
+        fact_m = await materialize(
+            ARGUMENTS[1], db.pool, entity_id=entity_id, audience=owner
+        )
+        assert isinstance(perc_m, Materialized)
+        assert isinstance(fact_m, Materialized)
+
+        # The licence inputs are the carried rows -- no re-read.
+        rows = [*perc_m.rows, *fact_m.rows]
+        redistributable, audience = resolve_derived_licence(rows)
+
+        # One byo_only input among allowed ones makes the whole derivation
+        # private to that input's owner.
+        assert redistributable == "byo_only"
+        assert audience == owner
+
+        # Cross-check: the perception rows carry byo_only, the fundamental
+        # rows carry allowed -- the most restrictive wins.
+        assert all(r.redistributable == "byo_only" for r in perc_m.rows)
+        assert all(r.redistributable == "allowed" for r in fact_m.rows)
+
+
+# ----------------------------------------------------------- re-reads are gone
+
+
+class TestNoReReads:
+    async def test_declared_fill_reads_visible_claims_once_per_argument(self, db):
+        """A declared ``fill_analysis`` issues exactly one ``visible_claims``
+        read per ArgumentSpec (materialization) and no more. The re-reads D5
+        carried -- two ``_to_inputs_by_ids`` in the compute adapter and one
+        ``_licence_inputs`` for the licence -- are gone, supplied by
+        ``Materialized.rows``."""
+        entity_id = await _entity(db)
+        await _seed_shared(db, entity_id)
+        gap = await _gap(db, entity_id, audience_user_id=None)
+
+        counter = _VisibilityReadCounter(db.pool)
+        result = await fill_analysis(counter, gap, capability=DERIVED)
+        assert result.outcome == "filled", result.reason
+
+        # Two ArgumentSpecs -> two materialization reads. The old code added
+        # three more (two _to_inputs_by_ids + one _licence_inputs); those are
+        # gone. Exactly len(ARGUMENTS) visibility reads remain.
+        assert counter.count == len(ARGUMENTS)

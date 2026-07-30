@@ -26,8 +26,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from types import SimpleNamespace
-from uuid import UUID
 
 from omni.capability.arguments import (
     Abstention,
@@ -35,7 +33,6 @@ from omni.capability.arguments import (
     Materialized,
     materialize,
 )
-from omni.coverage.visibility import visible_claims_cte
 from omni.fill.pipeline import (
     _RELEASE,
     _RESOLVE,
@@ -71,38 +68,6 @@ class DerivedCapability:
     compute: Callable
     arguments: tuple[ArgumentSpec, ...] | None = None
     gather: Callable | None = None
-
-
-_LICENCE_BY_IDS = f"""
-SELECT c.redistributable, c.audience_user_id
-FROM ({visible_claims_cte()}) c
-WHERE c.id = ANY($2::uuid[])
-"""
-
-
-async def _licence_inputs(pool, audience, claim_ids: list[UUID]) -> list:
-    """Re-read the materialized input claims to recover their licence fields.
-
-    ``materialize`` (D4) returns values and claim_ids but not the
-    ``redistributable`` / ``audience_user_id`` that ``resolve_derived_licence``
-    needs. Those are re-read through ``visible_claims`` (audience-scoped) --
-    never the bare table -- so a private claim of another user that
-    ``materialize`` correctly excluded is not present here either.
-
-    ``resolve_derived_licence`` accesses ``.redistributable`` and
-    ``.audience_user_id``; ``SimpleNamespace`` carries exactly those, without
-    fabricating a ``value`` that ``DivergenceInput`` would require.
-    """
-    if not claim_ids:
-        return []
-    rows = await pool.fetch(_LICENCE_BY_IDS, audience, list(claim_ids))
-    return [
-        SimpleNamespace(
-            redistributable=r["redistributable"],
-            audience_user_id=r["audience_user_id"],
-        )
-        for r in rows
-    ]
 
 
 async def fill_analysis(
@@ -168,7 +133,7 @@ async def _fill_declared(pool, gap, capability: DerivedCapability) -> FillResult
         )
     )
 
-    licence_inputs = await _licence_inputs(pool, audience, input_claim_ids)
+    licence_inputs = [r for m in materialized.values() for r in m.rows]
     redistributable, audience_resolved = resolve_derived_licence(licence_inputs)
 
     claim_id = await write_derived(

@@ -20,13 +20,23 @@ A null observation (FRED's ``"."``) is coverage of a period, not an input; it is
 skipped at extraction. The transform then drops the first undefined element for
 return/diff transforms, and ``window`` takes the trailing N **after** the
 transform -- reversing that order silently returns N-1 observations.
+
+The returned ``Materialized`` carries ``rows`` -- one ``ProvenanceRow`` per
+surviving observation (post-extraction, post-transform, post-window), each with
+the id, dates, post-transform value and licence fields the original claim
+carried. A consumer that needs those (dates for ``compute_divergence``'s
+bitemporal rule, licence fields for ``resolve_derived_licence``) reads them from
+``rows`` rather than re-querying: the rows are exactly the set
+``claim_ids`` was derived from, so the edge set and the licence set come from
+one union and cannot diverge.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from uuid import UUID
 
 from omni.coverage.visibility import visible_claims
@@ -112,17 +122,44 @@ class Abstention:
 
 
 @dataclass(frozen=True)
+class ProvenanceRow:
+    """One observation's full provenance, carried alongside the materialized value.
+
+    Exactly the fields a consumer needs to rebuild what ``materialize`` used to
+    drop (dates, licence) without a second query: ``compute_divergence`` indexes
+    on ``event_date`` and takes the newest ``knowledge_date``; licence
+    resolution reads ``redistributable`` and ``audience_user_id``. ``id``
+    matches the corresponding entry in ``Materialized.claim_ids``; ``value`` is
+    the post-transform scalar at this position (the level for
+    ``transform="level"``), so it agrees with the materialized ``.value``.
+    """
+
+    id: UUID
+    event_date: datetime
+    knowledge_date: datetime
+    value: float
+    redistributable: str
+    audience_user_id: UUID | None
+
+
+@dataclass(frozen=True)
 class Materialized:
     """A successful materialization: the value plus the claims that produced it.
 
     ``claim_ids`` is the provenance a derived claim must declare as
     ``claim_input`` edges (migration 002's deferred trigger rejects a derived
-    claim with no inputs). Returning it here means ``fill_analysis`` does not
-    need a second gather pass to recover provenance.
+    claim with no inputs). ``rows`` carries the per-observation provenance
+    (dates, licence, value) for the same surviving set -- the post-transform,
+    post-window observations the ``.value`` was actually computed from -- so a
+    consumer rebuilds what it needs (``DivergenceInput`` lists, licence fields)
+    from one read rather than re-querying. ``claim_ids`` is
+    ``tuple(r.id for r in rows)`` by construction, so the edge set and the
+    licence set come from one union and cannot diverge.
     """
 
     value: float | list[float] | AlignedSeries
     claim_ids: tuple[UUID, ...]
+    rows: tuple[ProvenanceRow, ...]
 
 
 @dataclass(frozen=True)
@@ -182,12 +219,13 @@ def _short_reason(name: str, observed: int, required: int) -> str:
 
 
 async def _levels_for_entity(pool, spec: ArgumentSpec, *, entity_id, audience):
-    """Visible claims for one entity as ``(keys, levels, ids)`` ascending.
+    """Visible claims for one entity as ``(keys, levels, prov)`` ascending.
 
     Null observations are skipped at extraction. Multiple claims for one
     ``align_on`` value (different sources, or the same source at a later
     ``knowledge_date``) collapse to the latest-knowable -- the point-in-time
-    value for that period.
+    value for that period. ``prov`` carries the full per-observation provenance
+    (id, dates, licence, extracted level) in lockstep with ``keys``/``levels``.
     """
     rows = await visible_claims(
         pool,
@@ -195,7 +233,7 @@ async def _levels_for_entity(pool, spec: ArgumentSpec, *, entity_id, audience):
         entity_id=entity_id,
         claim_type=spec.claim_type,
     )
-    latest: dict = {}  # align_on -> (knowledge_date, level, id)
+    latest: dict = {}  # align_on -> (knowledge_date, ProvenanceRow)
     for r in rows:
         level = _extract_scalar(r["value"], spec.value_field)
         if level is None:
@@ -204,26 +242,38 @@ async def _levels_for_entity(pool, spec: ArgumentSpec, *, entity_id, audience):
         kdate = r["knowledge_date"]
         existing = latest.get(key)
         if existing is None or kdate > existing[0]:
-            latest[key] = (kdate, level, r["id"])
+            latest[key] = (
+                kdate,
+                ProvenanceRow(
+                    id=r["id"],
+                    event_date=r["event_date"],
+                    knowledge_date=kdate,
+                    value=level,
+                    redistributable=r["redistributable"],
+                    audience_user_id=r["audience_user_id"],
+                ),
+            )
     ordered = sorted(latest.items(), key=lambda kv: kv[0])
     keys = [kv[0] for kv in ordered]
-    levels = [kv[1][1] for kv in ordered]
-    ids = [kv[1][2] for kv in ordered]
-    return keys, levels, ids
+    levels = [kv[1][1].value for kv in ordered]
+    prov = [kv[1][1] for kv in ordered]
+    return keys, levels, prov
 
 
-def _apply_transform(keys, levels, ids, transform: str):
+def _apply_transform(keys, levels, prov, transform: str):
     """Transform the level series, dropping the first element for returns/diff.
 
     The transformed value at position ``i`` is keyed to ``keys[i]`` (the end of
     the period). A non-positive level makes an adjacent return undefined and is
     skipped -- it is not a valid input for that transform. This is an exact
     data comparison (``<= 0``), not the computed-stat ``== 0`` hazard: levels
-    are stored values, and a stored ``0.0`` is exactly zero.
+    are stored values, and a stored ``0.0`` is exactly zero. The carried
+    provenance row's ``value`` is updated to the post-transform scalar so it
+    agrees with the materialized ``.value``.
     """
     if transform == "level":
-        return list(keys), list(levels), list(ids)
-    t_keys, t_vals, t_ids = [], [], []
+        return list(keys), list(levels), list(prov)
+    t_keys, t_vals, t_prov = [], [], []
     for i in range(1, len(levels)):
         prev, cur = levels[i - 1], levels[i]
         if transform == "log_return":
@@ -240,17 +290,17 @@ def _apply_transform(keys, levels, ids, transform: str):
             raise ValueError(f"unknown transform: {transform}")
         t_keys.append(keys[i])
         t_vals.append(value)
-        t_ids.append(ids[i])
-    return t_keys, t_vals, t_ids
+        t_prov.append(replace(prov[i], value=value))
+    return t_keys, t_vals, t_prov
 
 
-def _apply_window(keys, vals, ids, window: int | None):
+def _apply_window(keys, vals, prov, window: int | None):
     """Trailing ``window`` observations, after transform. ``None`` or too-large
     returns the series unchanged (the ``min_obs`` floor catches a true
     shortfall)."""
     if window is None or window <= 0 or len(vals) <= window:
-        return list(keys), list(vals), list(ids)
-    return list(keys[-window:]), list(vals[-window:]), list(ids[-window:])
+        return list(keys), list(vals), list(prov)
+    return list(keys[-window:]), list(vals[-window:]), list(prov[-window:])
 
 
 def _floor(spec: ArgumentSpec, observed: int) -> Abstention | None:
@@ -265,20 +315,22 @@ def _empty_abstention(spec: ArgumentSpec) -> Abstention:
     return Abstention(spec.name, f"{spec.name}: no observations")
 
 
-def _shape_scalar(vals, ids) -> Materialized:
-    return Materialized(value=vals[-1], claim_ids=(ids[-1],))
+def _shape_scalar(vals, prov) -> Materialized:
+    return Materialized(value=vals[-1], claim_ids=(prov[-1].id,), rows=(prov[-1],))
 
 
-def _shape_series(vals, ids) -> Materialized:
-    return Materialized(value=list(vals), claim_ids=tuple(ids))
+def _shape_series(vals, prov) -> Materialized:
+    return Materialized(
+        value=list(vals), claim_ids=tuple(p.id for p in prov), rows=tuple(prov)
+    )
 
 
 async def _materialize_one(spec, pool, *, entity_id, audience):
-    keys, levels, ids = await _levels_for_entity(
+    keys, levels, prov = await _levels_for_entity(
         pool, spec, entity_id=entity_id, audience=audience
     )
-    t_keys, t_vals, t_ids = _apply_transform(keys, levels, ids, spec.transform)
-    _w_keys, w_vals, w_ids = _apply_window(t_keys, t_vals, t_ids, spec.window)
+    t_keys, t_vals, t_prov = _apply_transform(keys, levels, prov, spec.transform)
+    _w_keys, w_vals, w_prov = _apply_window(t_keys, t_vals, t_prov, spec.window)
 
     if not w_vals:
         return _empty_abstention(spec)
@@ -287,8 +339,8 @@ async def _materialize_one(spec, pool, *, entity_id, audience):
         return short
 
     if spec.shape == "scalar":
-        return _shape_scalar(w_vals, w_ids)
-    return _shape_series(w_vals, w_ids)  # "series" and "list" share this path
+        return _shape_scalar(w_vals, w_prov)
+    return _shape_series(w_vals, w_prov)  # "series" and "list" share this path
 
 
 async def _related_entity_ids(pool, entity_id, relation: str) -> list[UUID]:
@@ -307,41 +359,45 @@ async def _materialize_related(spec, pool, *, entity_id, audience):
             spec.name, f"{spec.name}: no entities related via {spec.relation!r}"
         )
 
-    per: dict[UUID, tuple[list, list[float], list[UUID]]] = {}
+    per: dict[UUID, tuple[list, list[float], list[ProvenanceRow]]] = {}
     for eid in eids:
-        keys, levels, ids = await _levels_for_entity(
+        keys, levels, prov = await _levels_for_entity(
             pool, spec, entity_id=eid, audience=audience
         )
-        per[eid] = _apply_transform(keys, levels, ids, spec.transform)
+        per[eid] = _apply_transform(keys, levels, prov, spec.transform)
 
     if spec.shape == "list":
         vals: list[float] = []
-        ids_out: list[UUID] = []
-        for eid, (_tk, tv, ti) in per.items():
+        prov_out: list[ProvenanceRow] = []
+        for eid, (_tk, tv, tp) in per.items():
             if tv:
                 vals.append(tv[-1])
-                ids_out.append(ti[-1])
+                prov_out.append(tp[-1])
         if spec.window is not None and spec.window > 0 and len(vals) > spec.window:
-            vals, ids_out = vals[-spec.window:], ids_out[-spec.window:]
+            vals, prov_out = vals[-spec.window:], prov_out[-spec.window:]
         if not vals:
             return _empty_abstention(spec)
         short = _floor(spec, len(vals))
         if short is not None:
             return short
-        return Materialized(value=list(vals), claim_ids=tuple(ids_out))
+        return Materialized(
+            value=list(vals),
+            claim_ids=tuple(p.id for p in prov_out),
+            rows=tuple(prov_out),
+        )
 
     # scalar / series: align on the intersection of the transformed keys.
-    keysets = [set(tk) for (tk, _tv, _ti) in per.values()]
+    keysets = [set(tk) for (tk, _tv, _tp) in per.values()]
     common = sorted(set.intersection(*keysets))
     windowed = common[-spec.window:] if spec.window else common
 
     by_entity: dict[UUID, tuple[float, ...]] = {}
-    all_ids: list[UUID] = []
-    for eid, (tk, tv, ti) in per.items():
+    all_prov: list[ProvenanceRow] = []
+    for eid, (tk, tv, tp) in per.items():
         idx = {k: i for i, k in enumerate(tk)}
         sel = [idx[k] for k in windowed]
         by_entity[eid] = tuple(tv[i] for i in sel)
-        all_ids.extend(ti[i] for i in sel)
+        all_prov.extend(tp[i] for i in sel)
 
     if not windowed:
         return Abstention(spec.name, f"{spec.name}: empty intersection of related series")
@@ -355,11 +411,16 @@ async def _materialize_related(spec, pool, *, entity_id, audience):
                 spec.name,
                 f"{spec.name}: scalar needs exactly one related entity, found {len(eids)}",
             )
-        return Materialized(value=by_entity[eids[0]][-1], claim_ids=(all_ids[-1],))
+        return Materialized(
+            value=by_entity[eids[0]][-1],
+            claim_ids=(all_prov[-1].id,),
+            rows=(all_prov[-1],),
+        )
 
     return Materialized(
         value=AlignedSeries(index=tuple(windowed), by_entity=by_entity),
-        claim_ids=tuple(all_ids),
+        claim_ids=tuple(p.id for p in all_prov),
+        rows=tuple(all_prov),
     )
 
 
@@ -367,8 +428,9 @@ async def materialize(spec: ArgumentSpec, pool, *, entity_id: UUID, audience):
     """Materialize ``spec`` against the store, or abstain.
 
     Reads through ``visible_claims`` scoped to ``audience`` only. Returns a
-    ``Materialized`` value (with contributing ``claim_ids``) or an
-    ``Abstention`` naming the shortfall. Never pads, never fabricates.
+    ``Materialized`` value (with contributing ``claim_ids`` and per-observation
+    provenance ``rows``) or an ``Abstention`` naming the shortfall. Never pads,
+    never fabricates.
     """
     if spec.entity_scope in ("objective", "explicit"):
         return await _materialize_one(spec, pool, entity_id=entity_id, audience=audience)
