@@ -12,13 +12,6 @@ does not, because fetching it again would not help.
 import asyncio
 
 import pytest
-
-_ALL_CLAIM_TYPES = {
-    "price_snapshot", "fundamental_metric", "filing_event", "macro_series_point",
-    "news_event", "manipulation_signal", "perception_news", "perception_macro",
-    "perception_social", "perception_positioning", "perception_divergence",
-    "onchain_flow", "onchain_tvl", "onchain_supply",
-}
 from neutron.test import TestClient
 
 from omni.api.objective import build_router
@@ -123,22 +116,40 @@ async def test_a_shareable_objective_needing_prices_is_refused(db, database_url)
     assert not body["satisfiable"]
 
 
-async def test_an_unanswerable_objective_produces_demand_rows(db, database_url):
+async def test_an_unanswerable_objective_produces_demand_rows(
+    db, database_url, monkeypatch
+):
     """An objective the registry cannot serve becomes demand.
 
-    The unproduced claim type is discovered from the registry rather than named
-    here. This test has now broken twice by hardcoding one — first news_event,
-    then perception_positioning — because each got a producer and the test was
-    asserting on a gap rather than on behaviour. If every type has a producer it
-    skips, which is a true statement about the system rather than a failure.
+    The no-producer condition is constructed, not discovered: build a registry
+    with every producer of one real CLAIM_TYPES member removed, so the
+    NO_PRODUCER shortfall path and the demand it raises are exercised no matter
+    how complete the live registry becomes. The previous form read the live
+    registry and skipped once every claim type gained a producer, which
+    silently dropped coverage of this path.
     """
+    from omni.api import objective as objective_module
+    from omni.capability.extracted import CLAIM_TYPES
+    from omni.capability.registry import Registry
     from omni.scheduler.worker import default_registry
 
-    produced = {t for c in default_registry()._by_name.values() for t in c.produces}
-    unproduced = sorted(_ALL_CLAIM_TYPES - produced)
-    if not unproduced:
-        pytest.skip("every claim type has a producer; nothing is unanswerable")
-    claim_type = unproduced[0]
+    claim_type = "news_event"
+    assert claim_type in CLAIM_TYPES
+
+    def _registry_without(omitted):
+        pruned = Registry()
+        full = default_registry()
+        for cap in full._by_name.values():
+            if omitted not in cap.produces:
+                pruned.add(cap)
+        for name, hit_rate in full._reliability.items():
+            pruned.observe_reliability(name, hit_rate)
+        return pruned
+
+    monkeypatch.setattr(
+        objective_module, "default_registry", lambda: _registry_without(claim_type)
+    )
+
     await _entity(db, symbol="AAPL")
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
