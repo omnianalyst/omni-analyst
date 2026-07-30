@@ -109,6 +109,7 @@ def _bind(
 def build_extracted_registry() -> Registry:
     from omni.capabilities import (
         attribution,
+        backtest,
         execution_analytics,
         fixed_income,
         fundamentals,
@@ -1510,6 +1511,118 @@ def build_extracted_registry() -> Registry:
                 "geopolitical sub-scores are themselves byo, so the blend "
                 "inherits the most restrictive licence of its inputs. "
                 "black_swan_prob is a policy formula, not an estimate."
+            ),
+        ),
+    ):
+        registry.add(cap)
+
+    # --- Backtest validation: multiple-testing correction + the no-leakage
+    # backtester (capabilities/backtest.py) -------------------------------
+    # The project's defence against fooling itself: deflated Sharpe,
+    # probability of backtest overfitting, a causal point-in-time backtester
+    # and a leakage probe. Every one runs over a strategy return series or a
+    # price series (returns are price_snapshot-derived; the only price
+    # producers are the byo_only polygon/coingecko feeds), so all are
+    # touches_byo exactly like detect.manipulation. The closed enum has no
+    # claim type for a Sharpe credibility report, a PBO reading, a backtest
+    # equity curve or a leakage verdict, so produces is empty for all: these
+    # are analysis steps, not claim writers.
+    #
+    # The leaf Sharpe helpers (sharpe_ratio, probabilistic_sharpe_ratio,
+    # expected_max_sharpe, deflated_sharpe_ratio) and forward_returns are
+    # deliberately NOT registered: they take pre-computed scalars or are
+    # inputs to evaluate_strategy_sharpe / backtest_signal, and registering
+    # them alongside the composites is the "forty near-identical maths
+    # functions" the work order warns against -- see _orchestrator/reports/N4.md.
+    # No already-registered capability computes a deflated Sharpe, a PBO or a
+    # no-look-ahead backtest; fundamentals.portfolio_returns emits a
+    # descriptive annualised Sharpe (hardcoded 2.0 risk-free) but no
+    # multiple-testing correction, so there is no duplicate to collapse.
+    for cap in (
+        _bind(
+            "backtest.evaluate_strategy_sharpe",
+            "End-to-end Sharpe credibility report for a strategy return "
+            "series: annualised Sharpe, per-period Sharpe, skew, kurtosis, "
+            "the Probabilistic Sharpe Ratio (vs 0) and the Deflated Sharpe "
+            "Ratio (vs the expected max over n_trials), with an is_credible "
+            "gate at DSR > 0.95.",
+            fn=backtest.evaluate_strategy_sharpe,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "Model output, not a measurement: PSR/DSR are probabilities "
+                "under the stated skew/kurtosis-adjusted distribution, not "
+                "observed frequencies. sr_variance defaults to 1/n_obs (the "
+                "Sharpe estimator's sampling variance under the null) when "
+                "the caller omits it; n_trials is caller-asserted. consumes "
+                "price_snapshot because a returns series is price-derived -- a "
+                "planner assembles it from price_snapshot claims via the "
+                "price->return transform (the convention every returns-"
+                "consuming cap in this file follows). A constant or too-short "
+                "series yields NaN fields and is_credible=False rather than a "
+                "fabricated verdict."
+            ),
+        ),
+        _bind(
+            "backtest.probability_of_backtest_overfitting",
+            "Probability of Backtest Overfitting via Combinatorially-"
+            "Symmetric Cross-Validation: the fraction of train/test splits "
+            "where the in-sample-best strategy ranks below the median out-of-"
+            "sample, over a (T, N) per-strategy performance matrix.",
+            fn=backtest.probability_of_backtest_overfitting,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            is_proxy=True,
+            proxy_of=("out_of_sample_degradation",),
+            provenance=(
+                "A PROXY for out-of-sample degradation: PBO near 0.5+ means "
+                "the in-sample selection rank does not carry out of sample, "
+                "not that the live strategy will lose money. Model output "
+                "over a caller-supplied performance matrix (per-strategy "
+                "returns, price_snapshot-derived). T < n_groups raises "
+                "Unavailable rather than silently rewriting n_groups to a "
+                "different granularity -- the v1 substitution this port "
+                "exists to remove."
+            ),
+        ),
+        _bind(
+            "backtest.backtest_signal",
+            "Point-in-time single-asset backtest of a position signal against "
+            "a price series: the signal is lagged (>=1 bar) before applying to "
+            "forward returns, so a signal known at t can only earn the t->t+h "
+            "return. Returns per-bar strategy returns and the cumulative "
+            "equity curve, net of a proportional cost_per_turn.",
+            fn=backtest.backtest_signal,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "The no-look-ahead invariant is enforced by shifting the "
+                "signal forward one bar; there is no code path by which a "
+                "same-bar signal touches a same-bar return. `prices` is a "
+                "price_snapshot series (polygon/coingecko, byo_only), so the "
+                "resulting returns/equity inherit that licence. `signal` is a "
+                "caller-supplied position series, not a claim -- a planner "
+                "needs a signal-producing step to assemble it. lag < 1 raises "
+                "rather than allowing look-ahead."
+            ),
+        ),
+        _bind(
+            "backtest.leakage_probe",
+            "Demonstrate that the backtester forbids look-ahead: build a "
+            "perfect-foresight signal (the future return sign) and verify the "
+            "causal backtester (lag>=1) fails to reproduce the impossible "
+            "look-ahead PnL. Returns the naive, causal and leak_prevented "
+            "verdict.",
+            fn=backtest.leakage_probe,
+            consumes=("price_snapshot",),
+            touches_byo=True,
+            provenance=(
+                "A diagnostic self-test of the no-leakage invariant, not a "
+                "strategy result. `prices` is a price_snapshot series "
+                "(byo_only); the probe's totals inherit that licence. "
+                "leak_prevented is True iff the causal total is dramatically "
+                "below the perfect-foresight total -- a backtest that can see "
+                "the future is worse than none."
             ),
         ),
     ):
