@@ -18,7 +18,9 @@ from omni.capabilities.news import (
     parse_feed_date,
     score_portfolio_impact,
     score_stocktwits_messages,
+    sector_news_outlook,
     stocktwits_sentiment,
+    symbol_news_impact,
 )
 from omni.ingest.protocol import Unavailable
 
@@ -281,3 +283,155 @@ def test_a_feed_date_is_timezone_aware():
     land shifted by the process's offset — a silent error in a store whose
     premise is knowing when something became knowable."""
     assert parse_feed_date((2024, 1, 15, 9, 30, 0)).tzinfo is not None
+
+
+class TestSymbolNewsImpact:
+    def test_ten_strong_bullish_articles_score_eighty(self):
+        # volume_factor = min(1, 10/10) = 1.0; strength = |0.6| = 0.6
+        # impact = (1.0*0.5 + 0.6*0.5)*100 = 80.0
+        articles = [("bullish", 0.6, 0.9)] * 10
+        out = symbol_news_impact(articles)
+        assert out["articles_count"] == 10
+        assert out["sentiment"] == "bullish"
+        assert out["sentiment_score"] == pytest.approx(0.6)
+        assert out["impact_score"] == pytest.approx(80.0)
+        assert out["sentiment_breakdown"] == {"bullish": 10, "bearish": 0, "neutral": 0}
+
+    def test_volume_caps_at_ten_articles(self):
+        # Twenty articles saturate the volume factor at 1.0, so the impact
+        # equals the ten-article case -- proving the cap, not a raw count.
+        assert symbol_news_impact([("bullish", 0.6, 0.9)] * 20)["impact_score"] == (
+            pytest.approx(symbol_news_impact([("bullish", 0.6, 0.9)] * 10)["impact_score"])
+        )
+
+    def test_fewer_articles_lower_the_impact_than_a_full_window_at_same_sentiment(self):
+        # Same sentiment strength, but volume_factor = 0.5 for five articles
+        # vs 1.0 for ten -- the impact must differ.
+        full = symbol_news_impact([("bullish", 0.6, 0.9)] * 10)["impact_score"]
+        half = symbol_news_impact([("bullish", 0.6, 0.9)] * 5)["impact_score"]
+        assert half < full
+        # (0.5*0.5 + 0.6*0.5)*100 = 55.0
+        assert half == pytest.approx(55.0)
+
+    def test_bearish_mix_is_negative_and_labelled_bearish(self):
+        out = symbol_news_impact([("bearish", -0.6, 0.8)] * 8)
+        assert out["sentiment"] == "bearish"
+        assert out["sentiment_score"] == pytest.approx(-0.6)
+        assert out["impact_score"] == pytest.approx(
+            (min(1.0, 8 / 10.0) * 0.5 + 0.6 * 0.5) * 100
+        )
+        assert out["sentiment_breakdown"]["bearish"] == 8
+
+    def test_midband_sentiment_is_neutral(self):
+        # avg sentiment 0.1 sits inside the (-0.2, 0.2) neutral band.
+        out = symbol_news_impact([("neutral", 0.1, 0.5)] * 4)
+        assert out["sentiment"] == "neutral"
+
+    def test_confidence_is_averaged_not_maxed(self):
+        out = symbol_news_impact([("bullish", 0.6, 1.0), ("bullish", 0.6, 0.4)])
+        assert out["confidence"] == pytest.approx(0.7)
+
+    def test_empty_window_raises_rather_than_returning_neutral(self):
+        with pytest.raises(Unavailable, match="no articles"):
+            symbol_news_impact([])
+
+    def test_impact_discriminates_volume_from_sentiment(self):
+        # A wrong implementation that scored on volume alone (count*10) would
+        # give 100 here, not 80; one that scored on sentiment alone would ignore
+        # the article count. This pins the half/half blend.
+        out = symbol_news_impact([("bullish", 1.0, 0.9)] * 1)
+        # volume_factor = 0.1, strength = 1.0 -> (0.1*0.5 + 1.0*0.5)*100 = 55.0
+        assert out["impact_score"] == pytest.approx(55.0)
+
+
+class TestSectorNewsOutlook:
+    MAPPING = {
+        "Technology": ["AAPL", "MSFT"],
+        "Energy": ["XOM"],
+    }
+
+    def test_bullish_tech_dominates_bearish_energy_by_volume(self):
+        rows = [
+            # AAPL: 8 bullish, 2 bearish
+            ("AAPL", 0.5, 10, 8, 2, 0),
+            # MSFT: 6 bullish, 4 bearish
+            ("MSFT", 0.3, 10, 6, 4, 0),
+            # XOM: 2 bullish, 8 bearish
+            ("XOM", -0.5, 10, 2, 8, 0),
+        ]
+        out = sector_news_outlook(rows, sector_mapping=self.MAPPING)
+        # Tech total = 20, score = (14 - 6)/20 = 0.4 -> positive
+        tech = next(s for s in out if s["sector"] == "Technology")
+        assert tech["outlook"] == "positive"
+        assert tech["outlook_score"] == pytest.approx(0.4)
+        assert tech["confidence"] == pytest.approx(1.0)  # min(1, 20/20)
+        assert tech["articles_analyzed"] == 20
+        # Energy total = 10, score = (2 - 8)/10 = -0.6 -> negative
+        energy = next(s for s in out if s["sector"] == "Energy")
+        assert energy["outlook"] == "negative"
+        assert energy["outlook_score"] == pytest.approx(-0.6)
+        assert energy["articles_analyzed"] == 10
+        # Tech has more articles so ranks first
+        assert out[0]["sector"] == "Technology"
+
+    def test_score_uses_net_sentiment_not_bullish_share(self):
+        # bullish=14, bearish=6, neutral=0 -> score = (14-6)/20 = 0.4.
+        # A wrong impl using bullish/total would give 0.7 instead.
+        rows = [("AAPL", 0.5, 20, 14, 6, 0)]
+        out = sector_news_outlook(rows, sector_mapping={"Tech": ["AAPL"]})
+        assert out[0]["outlook_score"] == pytest.approx(0.4)
+
+    def test_confidence_saturates_at_twenty_articles(self):
+        rows = [("AAPL", 0.5, 10, 5, 5, 0)]
+        out = sector_news_outlook(rows, sector_mapping={"Tech": ["AAPL"]})
+        assert out[0]["confidence"] == pytest.approx(0.5)
+
+    def test_outlook_label_boundaries(self):
+        mapping = {"S": ["SYM"]}
+        # total=10, (6-4)/10 = 0.2 -> slightly_positive (0.1 < 0.2 < 0.3)
+        assert sector_news_outlook(
+            [("SYM", 0.0, 10, 6, 4, 0)], sector_mapping=mapping
+        )[0]["outlook"] == "slightly_positive"
+        # total=10, (4-6)/10 = -0.2 -> slightly_negative
+        assert sector_news_outlook(
+            [("SYM", 0.0, 10, 4, 6, 0)], sector_mapping=mapping
+        )[0]["outlook"] == "slightly_negative"
+        # exactly balanced -> neutral
+        assert sector_news_outlook(
+            [("SYM", 0.0, 10, 5, 5, 0)], sector_mapping=mapping
+        )[0]["outlook"] == "neutral"
+
+    def test_unmapped_tickers_are_skipped(self):
+        rows = [
+            ("UNMAPPED", 0.5, 100, 100, 0, 0),
+            ("AAPL", 0.5, 5, 4, 1, 0),
+        ]
+        out = sector_news_outlook(rows, sector_mapping=self.MAPPING)
+        assert len(out) == 1
+        assert out[0]["sector"] == "Technology"
+        assert out[0]["articles_analyzed"] == 5
+
+    def test_top_symbols_sorted_by_sentiment_desc_and_capped(self):
+        rows = [
+            ("AAPL", 0.9, 1, 1, 0, 0),
+            ("MSFT", -0.3, 1, 0, 1, 0),
+        ]
+        out = sector_news_outlook(rows, sector_mapping=self.MAPPING)
+        tech = next(s for s in out if s["sector"] == "Technology")
+        assert tech["top_symbols"][0]["symbol"] == "AAPL"
+        assert tech["top_symbols"][1]["symbol"] == "MSFT"
+
+    def test_none_avg_sentiment_is_preserved_not_substituted(self):
+        rows = [("AAPL", None, 3, 2, 1, 0)]
+        out = sector_news_outlook(rows, sector_mapping={"Tech": ["AAPL"]})
+        assert out[0]["top_symbols"][0]["sentiment_score"] is None
+
+    def test_no_mapped_ticker_raises(self):
+        with pytest.raises(Unavailable, match="no ticker"):
+            sector_news_outlook(
+                [("ZZZ", 0.5, 10, 10, 0, 0)], sector_mapping=self.MAPPING
+            )
+
+    def test_empty_rows_raise(self):
+        with pytest.raises(Unavailable):
+            sector_news_outlook([], sector_mapping=self.MAPPING)
