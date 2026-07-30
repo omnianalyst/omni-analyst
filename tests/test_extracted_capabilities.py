@@ -1190,6 +1190,72 @@ def _cases():
             and r["risk_level"] == "moderate"
             and r["black_swan_prob"] == pytest.approx(50.0 / 3000.0),
         ),
+        # --- backtest validation (capabilities/backtest.py) ---
+        "backtest.evaluate_strategy_sharpe": (
+            {
+                "returns": list(
+                    np.random.default_rng(11).normal(0.0012, 0.01, 252)
+                ),
+                "n_trials": 10,
+                "periods_per_year": 252,
+            },
+            # The discriminator: PSR vs 0 is 0.989 (>0.95) but once the
+            # expected-max-Sharpe over n_trials=10 is subtracted the DSR drops
+            # to 0.764 (<0.95). is_credible follows the DEFLATED Sharpe, not
+            # the naive PSR -- a handler that gated credibility on PSR, or that
+            # ignored n_trials (DSR==PSR), fails here.
+            lambda r: r.psr > 0.95
+            and r.dsr < 0.95
+            and r.is_credible is False
+            and r.dsr < r.psr
+            and r.annualized_sharpe > 1.0
+            and r.n_obs == 252
+            and r.n_trials == 10,
+        ),
+        "backtest.probability_of_backtest_overfitting": (
+            {
+                # Strategy A (col 0) strictly dominates B (col 1) in every
+                # group, so the in-sample-best is A out-of-sample too: every
+                # split's logit is > 0 -> PBO == 0.0 (no overfitting).
+                "performance": [[0.002, 0.001]] * 20,
+                "n_groups": 10,
+            },
+            lambda r: r.pbo == 0.0
+            and r.n_strategies == 2
+            and r.n_combinations > 0,
+        ),
+        "backtest.backtest_signal": (
+            {
+                "signal": pd.Series(
+                    [1.0, 1.0, 1.0, 1.0, 1.0],
+                    index=pd.date_range("2024-01-01", periods=5, freq="D"),
+                ),
+                "prices": pd.Series(
+                    [100.0, 101.0, 102.0, 103.0, 104.0],
+                    index=pd.date_range("2024-01-01", periods=5, freq="D"),
+                ),
+            },
+            # Long-only on a rising series. lag=1 shifts the signal off the
+            # same bar, so the first bar's position is fillna(0) -> its net
+            # return is 0.0 (not dropped: only the last bar's NaN forward
+            # return is). 4 net bars survive; total return is positive.
+            lambda r: r.n_bars == 4
+            and float(r.returns.iloc[0]) == 0.0
+            and r.total_return() > 0,
+        ),
+        "backtest.leakage_probe": (
+            {
+                "prices": pd.Series(
+                    [100.0, 102.0, 100.0, 102.0, 100.0, 102.0, 100.0, 102.0],
+                    index=pd.date_range("2024-01-01", periods=8, freq="D"),
+                ),
+            },
+            # Zigzag prices: the perfect-foresight (future-sign) signal is
+            # hugely profitable naively (same-bar) but the causal lag destroys
+            # the edge -> leak_prevented is True.
+            lambda r: r["leak_prevented"] is True
+            and r["naive_lookahead_total"] > 0,
+        ),
     }
 
 
@@ -1240,6 +1306,20 @@ class TestRegistryShape:
             "market_risk.correlation_risks",
             "market_risk.geopolitical_risks",
             "market_risk.overall_risk_score",
+        }
+
+    def test_the_backtest_block_registers_without_a_name_collision(
+        self, registry
+    ):
+        # build_extracted_registry() raises ValueError on a duplicate name, so
+        # merely reaching here proves no collision; this asserts the intended
+        # set landed intact (guards a merge that drops or duplicates an entry,
+        # and a prefix that drifts away from `backtest.`).
+        assert {n for n in registry._by_name if n.startswith("backtest.")} == {
+            "backtest.evaluate_strategy_sharpe",
+            "backtest.probability_of_backtest_overfitting",
+            "backtest.backtest_signal",
+            "backtest.leakage_probe",
         }
 
 
@@ -1444,6 +1524,25 @@ class TestLicenceClassification:
         # embedded recession_probability diverges from macro.recession_probability
         # -- that is a divergence in the NUMBER, not a licence issue; see N6.
         assert registry.get("market_risk.growth_risk").touches_byo is False
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "backtest.evaluate_strategy_sharpe",
+            "backtest.probability_of_backtest_overfitting",
+            "backtest.backtest_signal",
+            "backtest.leakage_probe",
+        ],
+    )
+    def test_backtest_caps_over_returns_inherit_the_price_licence(
+        self, registry, name
+    ):
+        # Each runs over a strategy return series or a price series; returns
+        # are price_snapshot-derived (the only producers are the byo_only
+        # polygon/coingecko feeds), so every one inherits that licence exactly
+        # like detect.manipulation -- over-excluded from shared plans rather
+        # than risking a leak.
+        assert registry.get(name).touches_byo is True
 
     def test_a_shareable_query_excludes_every_licensed_producer(self, registry):
         """How a planner avoids tainting an answer it intends to share."""
