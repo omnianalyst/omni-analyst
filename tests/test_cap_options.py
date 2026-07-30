@@ -26,6 +26,7 @@ from omni.capabilities.options import (
     monte_carlo,
     put_call_parity_errors,
     put_call_ratio,
+    scan_option_strategies,
 )
 from omni.ingest.protocol import Unavailable
 
@@ -635,3 +636,167 @@ class TestOptionTypeValidation:
         # The work order requires the exception to name the value it received.
         with pytest.raises(Unavailable, match="Call"):
             black_scholes(S, K, T, R, SIGMA, 0.0, "Call")
+
+
+# ---------------------------------------------------------------------------
+# Strategy scanner (ported from the inline screener; chain arrives as data)
+# ---------------------------------------------------------------------------
+
+
+def _leg(strike, otype, *, bid=1.0, ask=2.0, iv=0.3, expiry="2025-12-19", dte=30):
+    return {
+        "strike": strike,
+        "option_type": otype,
+        "bid": bid,
+        "ask": ask,
+        "implied_volatility": iv,
+        "expiry": expiry,
+        "days_to_expiry": dte,
+    }
+
+
+class TestScanOptionStrategies:
+    def test_empty_chain_raises(self):
+        with pytest.raises(Unavailable):
+            scan_option_strategies([], 100.0)
+
+    def test_nonpositive_spot_raises(self):
+        with pytest.raises(Unavailable):
+            scan_option_strategies([_leg(100, "call")], 0.0)
+        with pytest.raises(Unavailable):
+            scan_option_strategies([_leg(100, "call")], -5.0)
+
+    def test_covered_call_uses_the_moneyness_heuristic_verbatim(self):
+        # strike 105, spot 100 -> moneyness 1.05 -> prob = 0.5 + 0.5*(1-1.05) = 0.475
+        chain = [_leg(105, "call", bid=2.0)]
+        out = scan_option_strategies(
+            chain, 100.0, min_probability=0.0, strategy_types=("covered_call",)
+        )
+        assert len(out) == 1
+        cc = out[0]
+        assert cc["type"] == "covered_call"
+        assert cc["strike"] == 105
+        assert cc["premium_collected"] == 2.0
+        assert cc["probability_of_profit"] == pytest.approx(0.475)
+        assert cc["return_if_called"] == pytest.approx(((105 - 100) + 2.0) / 100)
+        assert cc["return_if_not_called"] == pytest.approx(2.0 / 100)
+        assert cc["max_risk"] == 0.0
+
+    def test_covered_call_probability_is_inverted_relative_to_assignment_risk(self):
+        # Documents the v1 defect: a further-OTM call (more likely to expire
+        # worthless, so safer to write) gets a LOWER prob_of_profit under v1's
+        # formula. 110-strike must score below 105-strike.
+        chain = [_leg(105, "call", bid=2.0), _leg(110, "call", bid=1.0)]
+        out = scan_option_strategies(
+            chain, 100.0, min_probability=0.0, strategy_types=("covered_call",)
+        )
+        by_strike = {c["strike"]: c["probability_of_profit"] for c in out}
+        assert by_strike[110] < by_strike[105]
+        assert by_strike[105] == pytest.approx(0.475)
+        assert by_strike[110] == pytest.approx(0.45)
+
+    def test_covered_call_skips_in_the_money_and_non_otm_strikes(self):
+        # Only the 2-10% OTM band qualifies; 101 (1%) and 112 (12%) are out.
+        chain = [
+            _leg(101, "call", bid=1.5),
+            _leg(105, "call", bid=2.0),
+            _leg(112, "call", bid=0.5),
+        ]
+        out = scan_option_strategies(
+            chain, 100.0, min_probability=0.0, strategy_types=("covered_call",)
+        )
+        assert [c["strike"] for c in out] == [105]
+
+    def test_cash_secured_put_candidate(self):
+        # strike 95, spot 100 -> moneyness 0.95 -> prob = 0.5 + 0.5*0.05 = 0.525
+        chain = [_leg(95, "put", bid=1.5)]
+        out = scan_option_strategies(
+            chain, 100.0, min_probability=0.0, strategy_types=("cash_secured_put",)
+        )
+        assert len(out) == 1
+        put = out[0]
+        assert put["type"] == "cash_secured_put"
+        assert put["probability_of_profit"] == pytest.approx(0.525)
+        assert put["return_on_cash"] == pytest.approx(1.5 / 95)
+        assert put["max_risk"] == 95.0
+
+    def test_cash_secured_put_filtered_by_max_risk(self):
+        # strike 95 exceeds max_risk 90 -> excluded though it qualifies otherwise.
+        chain = [_leg(95, "put", bid=1.5), _leg(90, "put", bid=1.0)]
+        out = scan_option_strategies(
+            chain,
+            100.0,
+            min_probability=0.0,
+            max_risk=90.0,
+            strategy_types=("cash_secured_put",),
+        )
+        assert [c["strike"] for c in out] == [90]
+
+    def test_bull_call_spread_candidate_pnl_and_probability(self):
+        # long 100 @ ask 5, short 104 @ bid 2 -> debit 3, max_profit 1, max_loss 3
+        chain = [_leg(100, "call", ask=5.0), _leg(104, "call", bid=2.0)]
+        out = scan_option_strategies(
+            chain, 100.0, min_probability=0.0, strategy_types=("spread",)
+        )
+        assert len(out) == 1
+        sp = out[0]
+        assert sp["type"] == "bull_call_spread"
+        assert sp["long_strike"] == 100
+        assert sp["short_strike"] == 104
+        assert sp["net_debit"] == pytest.approx(3.0)
+        assert sp["max_profit"] == pytest.approx(1.0)
+        assert sp["max_loss"] == pytest.approx(3.0)
+        assert sp["risk_reward_ratio"] == pytest.approx(1.0 / 3.0)
+        assert sp["probability_of_profit"] == pytest.approx(min(0.85, 0.4 + 0.1 * (1.0 / 3.0)))
+
+    def test_bull_call_spread_takes_first_qualifying_short_leg(self):
+        # Two short legs qualify (104 and 104.5); v1 breaks after the first.
+        chain = [
+            _leg(100, "call", ask=5.0),
+            _leg(104, "call", bid=2.0),
+            _leg(104.5, "call", bid=1.5),
+        ]
+        out = scan_option_strategies(
+            chain, 100.0, min_probability=0.0, strategy_types=("spread",)
+        )
+        assert len(out) == 1
+        assert out[0]["short_strike"] == 104
+
+    def test_bull_call_spread_rejects_non_positive_max_profit(self):
+        # short 103 @ bid 2: debit 3, max_profit = 0 -> rejected (needs > 0).
+        chain = [_leg(100, "call", ask=5.0), _leg(103, "call", bid=2.0)]
+        out = scan_option_strategies(
+            chain, 100.0, min_probability=0.0, strategy_types=("spread",)
+        )
+        assert out == []
+
+    def test_results_sorted_by_probability_descending(self):
+        chain = [
+            _leg(105, "call", bid=2.0),  # covered call, prob 0.475
+            _leg(95, "put", bid=1.5),    # CSP, prob 0.525
+            _leg(100, "call", ask=5.0),
+            _leg(104, "call", bid=2.0),  # spread, prob 0.4 + 0.1/3
+        ]
+        out = scan_option_strategies(chain, 100.0, min_probability=0.0)
+        probs = [c["probability_of_profit"] for c in out]
+        assert probs == sorted(probs, reverse=True)
+        # highest is the CSP at 0.525
+        assert out[0]["type"] == "cash_secured_put"
+        assert out[0]["probability_of_profit"] == pytest.approx(0.525)
+
+    def test_short_dated_expiration_is_skipped(self):
+        chain = [_leg(105, "call", bid=2.0, dte=5)]
+        out = scan_option_strategies(
+            chain, 100.0, min_probability=0.0, strategy_types=("covered_call",)
+        )
+        assert out == []
+
+    def test_min_probability_filter_excludes_low_scoring_candidates(self):
+        chain = [_leg(95, "put", bid=1.5)]  # prob 0.525
+        out = scan_option_strategies(
+            chain,
+            100.0,
+            min_probability=0.6,
+            strategy_types=("cash_secured_put",),
+        )
+        assert out == []
