@@ -15,6 +15,7 @@ import signal
 
 from omni.config import settings
 from omni.db import connect, migrate
+from omni.entities.identify import run as populate_identifiers
 from omni.scheduler.worker import Scheduler, SchedulerConfig, default_registry
 
 logging.basicConfig(
@@ -26,6 +27,14 @@ logger = logging.getLogger("omni.scheduler")
 async def main() -> None:
     client = await connect(settings.database_url)
     await migrate(client)
+
+    # Identifier population is one idempotent HTTP request against SEC's ticker
+    # map; running it on every boot is self-healing for entities added since the
+    # last boot. `populate_identifiers` contains every SEC failure (no
+    # User-Agent, SEC unreachable) and logs it, so a SEC outage cannot stop the
+    # scheduler coming up -- the loops are the scheduler's job, CIKs are a
+    # precondition it improves when it can.
+    await populate_identifiers(client.pool, user_agent=settings.sec_user_agent)
 
     registry = default_registry()
     scheduler = Scheduler(client.pool, registry, SchedulerConfig())

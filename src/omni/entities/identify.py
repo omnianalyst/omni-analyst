@@ -26,11 +26,15 @@ misattribution the coverage store exists to prevent.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from omni.ingest.protocol import Unavailable
+
+logger = logging.getLogger("omni.entities.identify")
 
 COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
@@ -209,3 +213,69 @@ async def assign_company_ciks(
         )
 
     return IdentifyReport(outcomes=tuple(outcomes))
+
+
+def _log_report(report: IdentifyReport) -> None:
+    if report.fetch_error:
+        logger.warning("identifier population failed: %s", report.fetch_error)
+        return
+    resolved = sum(1 for o in report.outcomes if o.status == RESOLVED)
+    absent = sum(1 for o in report.outcomes if o.status == ABSENT)
+    ambiguous = sum(1 for o in report.outcomes if o.status == AMBIGUOUS)
+    logger.info(
+        "identifiers populated: %d resolved, %d absent, %d ambiguous",
+        resolved,
+        absent,
+        ambiguous,
+    )
+    # Every non-resolve is logged with its symbol and reason: the difference
+    # between "the universe is seeded" and "EDGAR silently covers 60% of it" is
+    # this list, so an operator can see exactly which symbols got no CIK.
+    for outcome in report.outcomes:
+        if outcome.status != RESOLVED:
+            logger.info(
+                "skip %s %s: %s", outcome.status, outcome.symbol, outcome.reason
+            )
+
+
+async def run(
+    pool, *, user_agent: str | None = None, fetch_fn: MapFetcher | None = None
+) -> None:
+    """Run the CIK resolution step against ``pool`` and log the outcome.
+
+    Every SEC failure is contained here and logged, never raised: a missing
+    User-Agent raises ``Unavailable`` out of ``assign_company_ciks`` before the
+    fetch, and a transport failure is folded into ``report.fetch_error`` inside
+    it. Either way ``run`` logs and returns. The scheduler calls this at
+    startup -- where identifier population is a precondition it should improve
+    when it can, not a dependency it dies on -- and the CLI ``main`` below calls
+    the same path.
+    """
+    try:
+        report = await assign_company_ciks(
+            pool, user_agent=user_agent, fetch_fn=fetch_fn
+        )
+    except Unavailable as exc:
+        logger.warning("identifier population skipped: %s", exc)
+        return
+    _log_report(report)
+
+
+async def main() -> None:
+    from omni.config import settings
+    from omni.db import connect, migrate
+
+    client = await connect(settings.database_url)
+    try:
+        await migrate(client)
+        await run(client.pool, user_agent=settings.sec_user_agent)
+    finally:
+        await client.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    asyncio.run(main())
