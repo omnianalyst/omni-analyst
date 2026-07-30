@@ -20,6 +20,15 @@ living only inside it) is not ported. Note: the work order's "Why" describes
 -- it does not. Those live in the dropped service wrapper. ``optimizer.py``
 holds HRP / risk parity / min variance, which is what is ported below.
 
+CE1 later revisited that wrapper: its SQLAlchemy session lives only in the
+returns fetch (``_fetch_returns_matrix``), not in the optimisation math. The
+SLSQP kernel itself is pure numpy/scipy, so ``max_sharpe_weights`` and
+``efficient_frontier`` are lifted here with the caller supplying the returns
+matrix. ``value_at_risk`` / ``expected_shortfall`` are lifted from the inline
+risk-metrics handler; the rest of that handler (Sharpe/Sortino/max-drawdown)
+was already covered by ``attribution.py`` and ``fundamentals.py``.
+
+
 Where v1 substitutes a default on missing input -- a zero EWMA volatility on
 too few observations, a zero ATR, a silent equal-weight fallback for an
 un-invertible covariance, a fabricated unit correlation for a zero-variance
@@ -45,6 +54,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage
+from scipy.optimize import minimize
 from scipy.spatial.distance import squareform
 
 from omni.ingest.protocol import Unavailable
@@ -424,6 +434,185 @@ def risk_contributions(cov, weights) -> pd.Series:
     pv = float(w @ sigma_w)
     rc = w * sigma_w / pv if pv > 0 else np.zeros_like(w)
     return pd.Series(rc, index=assets)
+
+
+# =========================================================================== #
+# Mean-variance optimisation (SLSQP)
+# =========================================================================== #
+# Ported from app/services/portfolio/optimization_service.py. H1 dropped that
+# file citing its SQLAlchemy session; the session lives only in the returns
+# fetch (``_fetch_returns_matrix``), not in the optimisation math. The SLSQP
+# kernel is pure numpy/scipy and is lifted here; the caller supplies the returns
+# matrix. No DB, no session, no fabricated risk-free rate.
+def _as_returns_df(returns) -> pd.DataFrame:
+    if isinstance(returns, pd.DataFrame):
+        return returns
+    arr = np.asarray(returns, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    cols = [f"A{i}" for i in range(arr.shape[1])]
+    return pd.DataFrame(arr, columns=cols)
+
+
+def _returns_moments(returns):
+    """Per-period mean vector and covariance matrix from a returns panel.
+
+    Rows containing any non-finite value are dropped (scatter-NaN tolerance,
+    matching ``fit_factor_risk_model``). Raises ``Unavailable`` when there are
+    fewer than two assets or fewer than two usable observations -- a covariance
+    on one row is not a covariance.
+    """
+    df = _as_returns_df(returns)
+    assets = list(df.columns)
+    R = df.to_numpy(dtype=float)
+    R = R[np.all(np.isfinite(R), axis=1)]
+    n_assets = R.shape[1]
+    if n_assets < 2:
+        raise Unavailable("need >= 2 assets for mean-variance optimisation")
+    if R.shape[0] < 2:
+        raise Unavailable(
+            f"need >= 2 aligned observations for a covariance, got {R.shape[0]}"
+        )
+    mean_ret = np.mean(R, axis=0)
+    cov = np.atleast_2d(np.cov(R, rowvar=False))
+    if cov.shape != (n_assets, n_assets):
+        cov = cov.reshape(n_assets, n_assets)
+    return mean_ret, cov, assets
+
+
+def _portfolio_stats(w, mean_ret, cov, risk_free_rate, periods_per_year):
+    ret = float(np.sum(mean_ret * w) * periods_per_year)
+    vol = float(np.sqrt(w @ (cov * periods_per_year) @ w))
+    sharpe = (ret - risk_free_rate) / vol if vol > 1e-12 else 0.0
+    return ret, vol, sharpe
+
+
+def max_sharpe_weights(
+    returns,
+    *,
+    risk_free_rate: float = 0.0,
+    min_weight: float = 0.0,
+    max_weight: float = 1.0,
+    periods_per_year: int = TRADING_DAYS,
+) -> pd.Series:
+    """Long-only maximum-Sharpe (tangency) weights via SLSQP.
+
+    Maximises the annualised Sharpe ``(ret - rf) / vol`` subject to
+    ``sum(w) == 1`` and ``min_weight <= w <= max_weight``. Ported from the
+    ``max_sharpe`` branch of ``PortfolioOptimizer.optimize``. ``risk_free_rate``
+    is an annualised decimal (0.05 = 5%); there is no fabricated default, 0.0
+    means the caller is supplying excess returns.
+    """
+    mean_ret, cov, assets = _returns_moments(returns)
+    n = len(assets)
+
+    def neg_sharpe(w):
+        return -_portfolio_stats(w, mean_ret, cov, risk_free_rate, periods_per_year)[2]
+
+    bounds = tuple((min_weight, max_weight) for _ in range(n))
+    constraints = ({"type": "eq", "fun": lambda w: np.sum(w) - 1.0},)
+    x0 = np.full(n, 1.0 / n)
+    result = minimize(
+        neg_sharpe, x0, method="SLSQP", bounds=bounds, constraints=constraints,
+        options={"maxiter": 500, "ftol": 1e-10},
+    )
+    w = np.clip(result.x, min_weight, max_weight)
+    s = w.sum()
+    w = w / s if s > 0 else np.full(n, 1.0 / n)
+    return pd.Series(w, index=assets)
+
+
+def efficient_frontier(
+    returns,
+    *,
+    risk_free_rate: float = 0.0,
+    min_weight: float = 0.0,
+    max_weight: float = 1.0,
+    n_points: int = 50,
+    periods_per_year: int = TRADING_DAYS,
+) -> pd.DataFrame:
+    """Long-only efficient frontier via SLSQP (min-variance-at-target-return).
+
+    For each target return on a linspace from the lowest to the highest
+    single-asset annualised return, minimises portfolio variance subject to
+    ``sum(w) == 1``, the box bounds and the return target. Ported from
+    ``PortfolioOptimizer._efficient_frontier``; only points the optimiser
+    converged on are returned (v1 behaviour). Columns match v1's point keys:
+    ``return``, ``volatility``, ``sharpe_ratio``.
+    """
+    mean_ret, cov, _ = _returns_moments(returns)
+    n = mean_ret.size
+
+    bounds = tuple((min_weight, max_weight) for _ in range(n))
+    eq_sum = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
+    min_ret = float(np.min(mean_ret)) * periods_per_year
+    max_ret = float(np.max(mean_ret)) * periods_per_year
+    targets = np.linspace(min_ret, max_ret, n_points)
+    x0 = np.full(n, 1.0 / n)
+
+    rows = []
+    for target in targets:
+        cons = (
+            eq_sum,
+            {"type": "eq", "fun": lambda w, t=target: np.sum(mean_ret * w) * periods_per_year - t},
+        )
+
+        def min_var(w):
+            return float(np.sqrt(w @ (cov * periods_per_year) @ w))
+
+        result = minimize(
+            min_var, x0, method="SLSQP", bounds=bounds, constraints=cons,
+            options={"maxiter": 200, "ftol": 1e-8},
+        )
+        if result.success:
+            ret, vol, sharpe = _portfolio_stats(
+                result.x, mean_ret, cov, risk_free_rate, periods_per_year
+            )
+            rows.append({"return": ret, "volatility": vol, "sharpe_ratio": sharpe})
+
+    return pd.DataFrame(rows, columns=["return", "volatility", "sharpe_ratio"])
+
+
+# --------------------------------------------------------------------------- #
+# Historical risk metrics (VaR / expected shortfall)
+# --------------------------------------------------------------------------- #
+# Ported from the inline risk-metrics handler's historical VaR/ES kernel. v1
+# scaled returns by 100 and reported dollar figures tied to a portfolio value;
+# the scaling and dollar conversion are the caller's job here. Fewer than two
+# finite observations raises ``Unavailable`` -- v1 returned 0.0, declaring "no
+# risk". (Sharpe/Sortino/max-drawdown for the same endpoint are already covered
+# by annualized_sharpe/annualized_sortino in attribution.py and max_drawdown in
+# fundamentals.py; those are not duplicated here.)
+def value_at_risk(returns, *, confidence: float = 0.95) -> float:
+    """Historical (non-parametric) Value-at-Risk as a decimal loss.
+
+    ``confidence=0.95`` returns the 5th-percentile return (negative for a
+    typical loss). Raises ``Unavailable`` on fewer than two finite observations.
+    """
+    r = pd.Series(np.asarray(returns, dtype=float)).dropna()
+    if r.size < 2:
+        raise Unavailable(f"need >= 2 finite returns for VaR, got {r.size}")
+    alpha = 1.0 - confidence
+    return float(np.percentile(r.to_numpy(), alpha * 100.0))
+
+
+def expected_shortfall(returns, *, confidence: float = 0.95) -> float:
+    """Historical Expected Shortfall (CVaR): mean return in the tail beyond VaR.
+
+    The average of returns at or below the VaR quantile, as a decimal. Always
+    ``<= value_at_risk`` (the tail mean cannot exceed the threshold); when only
+    one observation falls in the tail it is that observation (the most extreme
+    loss). Raises ``Unavailable`` on fewer than two finite observations.
+    """
+    r = pd.Series(np.asarray(returns, dtype=float)).dropna()
+    if r.size < 2:
+        raise Unavailable(f"need >= 2 finite returns for ES, got {r.size}")
+    var = value_at_risk(r, confidence=confidence)
+    arr = r.to_numpy()
+    tail = arr[arr <= var]
+    if tail.size == 0:
+        return var
+    return float(tail.mean())
 
 
 # =========================================================================== #
