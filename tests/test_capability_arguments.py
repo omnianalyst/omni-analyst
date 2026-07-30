@@ -340,3 +340,90 @@ class TestListShape:
         assert sorted(result.value) == [12.0, 22.0]
         assert len(result.claim_ids) == 2
 
+
+# ----------------------------------------- 8. provenance audience scoping (D7)
+
+
+class TestRowsAreAudienceScoped:
+    async def test_another_users_private_claim_is_absent_from_rows(self, db):
+        """The carried rows are exactly what ``visible_claims`` returned for the
+        audience -- a claim private to another user is absent, not just from the
+        values but from the provenance set the licence is computed over."""
+        entity_id = await _entity(db)
+        owner, other = uuid4(), uuid4()
+        owner_ids = await _seed_levels(
+            db, entity_id, [100.0, 101.0], start=BASE,
+            redistributable="byo_only", audience_user_id=owner, source="polygon",
+        )
+        other_ids = await _seed_levels(
+            db, entity_id, [200.0, 201.0], start=BASE + timedelta(days=2),
+            redistributable="byo_only", audience_user_id=other, source="polygon",
+        )
+
+        spec = ArgumentSpec(
+            name="series", claim_type="price_snapshot", shape="series", min_obs=1,
+        )
+
+        owner_view = await materialize(
+            spec, db.pool, entity_id=entity_id, audience=owner
+        )
+        assert isinstance(owner_view, Materialized)
+        row_ids = {r.id for r in owner_view.rows}
+        # Owner's own private claims are carried.
+        assert row_ids == set(owner_ids)
+        # The other user's private claims never reached the rows -- the
+        # audience scoping visible_claims enforces applies to the provenance
+        # set, not just the values.
+        assert row_ids.isdisjoint(other_ids)
+        # Licence fields on the rows match the private claims.
+        assert all(r.redistributable == "byo_only" for r in owner_view.rows)
+        assert all(r.audience_user_id == owner for r in owner_view.rows)
+
+
+# --------------------------------- 9. rows match post-transform post-window (D7)
+
+
+class TestRowsMatchPostTransformPostWindow:
+    async def test_rows_are_the_survivors_after_transform_and_window(self, db):
+        """Over a spec that both transforms (log_return) and windows, the rows
+        must be the post-transform, post-window set -- the same set claim_ids
+        was derived from. Carrying the pre-transform or pre-window set would
+        make the licence computed over inputs the value does not depend on."""
+        entity_id = await _entity(db)
+        levels = [100.0 + i for i in range(20)]
+        ids = await _seed_levels(db, entity_id, levels)
+
+        spec = ArgumentSpec(
+            name="returns",
+            claim_type="price_snapshot",
+            shape="series",
+            transform="log_return",
+            window=10,
+        )
+        result = await materialize(spec, db.pool, entity_id=entity_id, audience=None)
+
+        assert isinstance(result, Materialized)
+        # 20 levels -> 19 log returns (transform drops the first) -> trailing 10.
+        assert len(result.value) == 10
+        assert len(result.rows) == 10
+        assert len(result.claim_ids) == 10
+
+        # log_return at position i is keyed to the end-of-period claim ids[i];
+        # after transform the ids are ids[1:] (19), window takes ids[10:].
+        expected_ids = ids[10:]
+        assert list(result.claim_ids) == expected_ids
+        assert [r.id for r in result.rows] == expected_ids
+
+        # The dropped claims (position 0 + the first 9 returns' end-of-period
+        # claims) are absent from the rows -- carrying them would widen the
+        # licence set beyond the inputs the value depends on.
+        assert set(ids[:10]).isdisjoint({r.id for r in result.rows})
+
+        # Each row's value is the post-transform return, not the raw level.
+        # A fake carrying pre-transform levels fails here.
+        expected_returns = [
+            math.log(levels[i] / levels[i - 1]) for i in range(10, 20)
+        ]
+        assert [r.value for r in result.rows] == expected_returns
+        assert result.value == expected_returns
+

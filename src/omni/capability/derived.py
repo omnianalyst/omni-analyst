@@ -9,9 +9,11 @@ through ``visible_claims`` (audience-scoped), abstains if either is short,
 and calls the compute adapter.
 
 The adapter (``compute_divergence_declared``) bridges the shape mismatch
-between ``materialize``'s output (``Materialized``: values + claim_ids) and
-``compute_divergence``'s input (``list[DivergenceInput]``: values + dates +
-licence). See its docstring for where and why.
+between ``materialize``'s output and ``compute_divergence``'s input by building
+``DivergenceInput`` lists from the provenance rows ``Materialized`` carries --
+the dates and licence fields ``compute_divergence`` needs, read once through
+``visible_claims`` during materialization rather than re-queried. See its
+docstring for the detail.
 
 ``touches_byo=True`` is the safe-direction planning hint; the actual decision
 is made per-fill by ``resolve_derived_licence`` over the materialized inputs.
@@ -25,10 +27,9 @@ from uuid import UUID
 
 from omni.capability.arguments import ArgumentSpec, Materialized
 from omni.capability.registry import Callability, Capability, Maturity, Registry
-from omni.coverage.visibility import visible_claims, visible_claims_cte
+from omni.coverage.visibility import visible_claims
 from omni.fill.derived import DerivedCapability, fill_analysis
 from omni.perception.divergence import (
-    DEFAULT_WINDOW,
     MIN_HISTORY,
     DivergenceInput,
     compute_divergence,
@@ -102,26 +103,26 @@ def _to_inputs(rows) -> list[DivergenceInput]:
     return out
 
 
-_INPUTS_BY_IDS = f"""
-SELECT c.id, c.event_date, c.knowledge_date, c.value,
-       c.redistributable, c.audience_user_id
-FROM ({visible_claims_cte()}) c
-WHERE c.id = ANY($2::uuid[])
-"""
+def _to_inputs_from_rows(rows) -> list[DivergenceInput]:
+    """Build ``DivergenceInput`` lists from the provenance rows ``materialize``
+    carried -- no re-read.
 
-
-async def _to_inputs_by_ids(
-    pool, audience, claim_ids
-) -> list[DivergenceInput]:
-    """Re-read claims by id through ``visible_claims`` as ``DivergenceInput``s.
-
-    Audience scoping is preserved: a private claim of another user that
-    ``materialize`` correctly excluded is not present here either.
+    Each row already carries the id, dates, post-transform value and licence
+    fields ``compute_divergence`` needs. This is the single place the
+    ``Materialized``-to-``DivergenceInput`` shape conversion happens, so a
+    future analysis that hits the same mismatch puts its adapter here.
     """
-    if not claim_ids:
-        return []
-    rows = await pool.fetch(_INPUTS_BY_IDS, audience, list(claim_ids))
-    return _to_inputs(rows)
+    return [
+        DivergenceInput(
+            id=r.id,
+            event_date=r.event_date,
+            knowledge_date=r.knowledge_date,
+            value=r.value,
+            redistributable=r.redistributable,
+            audience_user_id=r.audience_user_id,
+        )
+        for r in rows
+    ]
 
 
 async def compute_divergence_declared(
@@ -133,30 +134,15 @@ async def compute_divergence_declared(
 ):
     """Declared-path compute: adapt ``Materialized`` to ``DivergenceInput`` lists.
 
-    **The shape mismatch** (D5's specific risk): ``materialize`` (D4) returns
-    ``Materialized(value=list[float], claim_ids=tuple[UUID, ...])`` -- the
-    levels and their provenance, but not the ``event_date`` /
-    ``knowledge_date`` each claim carries. ``compute_divergence`` expects
-    ``list[DivergenceInput]`` (id, event_date, knowledge_date, value,
-    redistributable, audience_user_id) because the rolling-z engine indexes
-    on ``event_date`` and the bitemporal rule sets ``knowledge_date`` to the
-    newest input's. Those date fields are not in ``Materialized`` and cannot
-    be added without changing ``arguments.py`` (D4, forbidden here).
-
-    The adapter therefore re-reads the claims by id through ``visible_claims``
-    (audience-scoped, the sanctioned reader) and builds the
-    ``DivergenceInput`` lists ``compute_divergence`` validates. This is the
-    single place where the ``Materialized``-to-``DivergenceInput`` conversion
-    happens, so a future analysis that hits the same mismatch knows where to
-    look.
+    The per-observation provenance (id, dates, value, licence) is carried in
+    ``Materialized.rows`` by ``materialize`` -- the post-transform, post-window
+    set the value was actually computed from, read through ``visible_claims``
+    (audience-scoped). This builds the ``DivergenceInput`` lists from those rows
+    directly, so ``compute_divergence`` gets the same inputs the old re-read
+    produced without a second query.
     """
-    audience = gap["audience_user_id"]
-    perc = await _to_inputs_by_ids(
-        pool, audience, perception_macro.claim_ids
-    )
-    facts = await _to_inputs_by_ids(
-        pool, audience, fundamental_metric.claim_ids
-    )
+    perc = _to_inputs_from_rows(perception_macro.rows)
+    facts = _to_inputs_from_rows(fundamental_metric.rows)
     return compute_divergence(perc, facts)
 
 
