@@ -295,7 +295,15 @@ class TestLeasing:
 class TestLicenceThroughTheLoop:
     async def test_a_byo_fill_stays_private_to_the_requester(self, db):
         """The licence rule surviving a full pass through the pipeline."""
-        entity_id = await _entity(db)
+        # polygon keys per-entity (resolve._PROVIDER_IDENTIFIER), so the fill
+        # path reads the entity's polygon identifier, not gap["key"]. The entity
+        # must carry one or the gap declines as unfillable before the adapter is
+        # called -- which would skip the licence path this test exists to run.
+        entity_id = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name, identifiers) "
+            "VALUES ('company', 'AAPL', 'AAPL', "
+            "'{\"polygon\": \"AAPL\"}'::jsonb) RETURNING id",
+        )
         owner = uuid4()
         await direct_attention(
             db.pool, entity_id=entity_id, claim_type="price_snapshot",
