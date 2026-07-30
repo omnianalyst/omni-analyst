@@ -120,13 +120,18 @@ class TestSchedulerLoops:
         )
         await scheduler.start()
         try:
-            # Generous budget, early exit. This polled for 5s and passed alone
-            # but failed under full-suite load, where database round-trips are
-            # slower — a timing-flaky test is worse than no test, because it
-            # trains you to rerun rather than to look.
+            # Poll the same observable the assertions check. `stats.filled` is
+            # incremented by the fill loop only after a completed cycle has
+            # written its claim, so it is set strictly later than
+            # `visible_claims`. Polling that earlier proxy and then stopping the
+            # scheduler cancels the cycle mid-flight, before it records its
+            # outcome — so `filled` would still be 0 and the test would pass or
+            # fail on scheduling order. Contention widens that window; it does
+            # not create it. Polling the recorded outcome makes both assertions
+            # describe the same moment, so the test cannot race itself.
             deadline = asyncio.get_event_loop().time() + 30
             while asyncio.get_event_loop().time() < deadline:
-                if await visible_claims(db.pool, audience=None):
+                if scheduler.stats.filled >= 1:
                     break
                 await asyncio.sleep(0.05)
         finally:
