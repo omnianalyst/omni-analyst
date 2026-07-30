@@ -64,12 +64,18 @@ class Calibration:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A claim considered for surfacing, with the evidence gathered about it."""
+    """A claim considered for surfacing, with the evidence gathered about it.
 
-    claim_id: UUID
+    claim_id is optional: a finding need not be anchored to a single claim. An
+    analysis-sourced finding (a risk score, a correlation) points at no one
+    claim, so it carries None here and names its evidence in `supporting`. A
+    claim-backed finding keeps a real claim_id as before.
+    """
+
     claim_type: str
     method: str
     confidence: float
+    claim_id: UUID | None = None
     supporting: tuple[str, ...] = ()
     disconfirming: tuple[str, ...] = ()
     searched_for_disconfirming: bool = False
