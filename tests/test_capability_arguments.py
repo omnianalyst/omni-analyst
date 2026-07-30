@@ -77,12 +77,13 @@ async def _seed_levels(
     redistributable="allowed",
     audience_user_id=None,
     start=BASE,
+    knowledge_offset=1,
 ):
     """Insert one claim per level on consecutive days; nulls carry FRED's '.'."""
     ids = []
     for i, level in enumerate(levels):
         event_date = start + timedelta(days=i)
-        knowledge_date = event_date + timedelta(days=1)
+        knowledge_date = event_date + timedelta(days=knowledge_offset)
         value = json.dumps({"value": level}) if level is not None else json.dumps(
             {"value": "."}
         )
@@ -426,4 +427,102 @@ class TestRowsMatchPostTransformPostWindow:
         ]
         assert [r.value for r in result.rows] == expected_returns
         assert result.value == expected_returns
+
+
+# ------------------------------------------- 10. key narrows to one series (D9)
+
+
+class TestKeySpecNarrowsToOneSeries:
+    """Two series sharing a claim_type (the live shape: eight keys under
+    ``fundamental_metric``) must be selectable by ``key``. Without it,
+    ``materialize`` blends them -- a silent landmine, not an error."""
+
+    async def test_key_selects_only_the_matching_series_values(self, db):
+        entity_id = await _entity(db)
+        rev = [100.0, 110.0, 120.0, 130.0]
+        nil = [10.0, 12.0, 14.0, 16.0]
+        # Same event_dates, different keys -- the live collision shape. Both
+        # series under one claim_type is exactly what ArgumentSpec could not
+        # disambiguate before D9.
+        await _seed_levels(
+            db, entity_id, rev, claim_type="fundamental_metric", key="Revenues",
+        )
+        await _seed_levels(
+            db, entity_id, nil, claim_type="fundamental_metric",
+            key="NetIncomeLoss", knowledge_offset=2,
+        )
+
+        spec = ArgumentSpec(
+            name="fundamentals",
+            claim_type="fundamental_metric",
+            key="Revenues",
+            shape="series",
+            transform="level",
+            min_obs=1,
+        )
+        result = await materialize(
+            spec, db.pool, entity_id=entity_id, audience=None
+        )
+
+        assert isinstance(result, Materialized)
+        # Only the Revenues observations -- actual values, not just a count.
+        assert result.value == rev
+
+    async def test_no_key_blends_every_series_sharing_the_type(self, db):
+        entity_id = await _entity(db)
+        rev = [100.0, 110.0, 120.0, 130.0]
+        nil = [10.0, 12.0, 14.0, 16.0]
+        await _seed_levels(
+            db, entity_id, rev, claim_type="fundamental_metric", key="Revenues",
+        )
+        await _seed_levels(
+            db, entity_id, nil, claim_type="fundamental_metric",
+            key="NetIncomeLoss", knowledge_offset=2,
+        )
+
+        # No key: today's behaviour, unchanged for any spec that does not set
+        # it. The two series share every event_date; the latest-knowable dedup
+        # collapses them, and NetIncomeLoss (the later-knowable series) silently
+        # wins every date while Revenues is dropped entirely -- the landmine.
+        spec = ArgumentSpec(
+            name="fundamentals",
+            claim_type="fundamental_metric",
+            shape="series",
+            transform="level",
+            min_obs=1,
+        )
+        result = await materialize(
+            spec, db.pool, entity_id=entity_id, audience=None
+        )
+
+        assert isinstance(result, Materialized)
+        assert result.value != rev
+        assert result.value == nil
+
+    async def test_a_key_matching_nothing_abstains_via_min_obs(self, db):
+        entity_id = await _entity(db)
+        await _seed_levels(
+            db, entity_id, [100.0, 110.0], claim_type="fundamental_metric",
+            key="Revenues",
+        )
+
+        spec = ArgumentSpec(
+            name="fundamentals",
+            claim_type="fundamental_metric",
+            key="Assets",
+            shape="series",
+            transform="level",
+            min_obs=2,
+        )
+        result = await materialize(
+            spec, db.pool, entity_id=entity_id, audience=None
+        )
+
+        # No matching series -> no observations -> the existing min_obs floor,
+        # the same honest-refusal path every other shortfall takes, not a new
+        # error type.
+        assert isinstance(result, Abstention)
+        assert result.argument == "fundamentals"
+        assert "0 of 2" in result.reason
+        assert "short 2" in result.reason
 

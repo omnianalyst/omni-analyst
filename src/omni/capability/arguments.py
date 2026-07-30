@@ -54,6 +54,10 @@ class ArgumentSpec:
 
     - ``name``: kwarg name the analysis function receives.
     - ``claim_type``: which claims to gather (passed to ``visible_claims``).
+    - ``key``: restrict gathering to one series among several sharing
+      ``claim_type`` (passed to ``visible_claims``'s ``key``). ``None`` (the
+      default) gathers every claim of the type -- today's behaviour, so a spec
+      over a single-key type is unchanged.
     - ``shape``: ``scalar`` (latest), ``series`` (ordered), ``list``
       (unordered collection, e.g. one value per related entity).
     - ``transform``: applied to the level series before windowing.
@@ -71,6 +75,7 @@ class ArgumentSpec:
 
     name: str
     claim_type: str
+    key: str | None = None
     shape: str = "series"
     transform: str = "level"
     window: int | None = None
@@ -232,6 +237,7 @@ async def _levels_for_entity(pool, spec: ArgumentSpec, *, entity_id, audience):
         audience=audience,
         entity_id=entity_id,
         claim_type=spec.claim_type,
+        key=spec.key,
     )
     latest: dict = {}  # align_on -> (knowledge_date, ProvenanceRow)
     for r in rows:

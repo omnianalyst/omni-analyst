@@ -38,6 +38,16 @@ from omni.perception.divergence import (
 NAME = "perception.divergence"
 PRODUCES = "perception_divergence"
 
+# TODO(D9): neither spec sets ``key``. Divergence compares ONE perception
+# series against ONE fundamental concept, yet a real entity carries several
+# keys per claim_type (eight under ``fundamental_metric`` in the live DB); with
+# no key, ``materialize`` blends them into one series and ``compute_divergence``
+# emits a confident, wrong claim. The correct key is caller-supplied (which
+# series pair to compare -- VIX vs Revenues, sentiment vs Earnings), not a
+# fixed constant this capability can pick, so it is left unset pending a
+# decision by whoever owns divergence. The single-key test fixtures (``vix``,
+# ``Revenues``) are why this has never surfaced. The mechanism
+# (``ArgumentSpec.key``) now exists; set it when the pairing is decided.
 ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ArgumentSpec(
         name="perception_macro",
