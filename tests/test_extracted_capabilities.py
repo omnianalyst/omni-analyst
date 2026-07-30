@@ -315,6 +315,21 @@ def _flat_window_bars(price=100.0):
 
 def _cases():
     cpi = [100.0] * 11 + [101.0, 103.0]
+
+    # A 15-date x 6-asset panel where signal rank matches forward-return rank on
+    # every date -> per-date IC of 1.0 with enough periods to be significant and
+    # to reach the STRONG EDGE verdict. Hand-computed in test_cap_crossasset.
+    _edge_rows = []
+    for _d in range(15):
+        for _a in range(6):
+            _edge_rows.append({
+                "date": _d,
+                "asset": f"a{_a}",
+                "signal": _a + 1,
+                "forward_return": (_a + 1) * 0.1,
+            })
+    _edge_panel = pd.DataFrame(_edge_rows)
+
     return {
         "macro.sahm_rule": (
             {"unemployment_values": [3.5] * 9 + [3.9, 4.1, 4.3]},
@@ -1190,6 +1205,120 @@ def _cases():
             and r["risk_level"] == "moderate"
             and r["black_swan_prob"] == pytest.approx(50.0 / 3000.0),
         ),
+        # --- cross-asset relationships and signal edge (capabilities/crossasset.py) ---
+        "crossasset.infer_cycle_phase": (
+            {"leaders": {"Financials", "Consumer Discretionary", "Industrials"}},
+            lambda r: r == "early_cycle",
+        ),
+        "crossasset.detect_divergences": (
+            {
+                "corr_dict": {
+                    "SPY": {"VIX": 0.1, "HYG": 0.6},
+                    "VIX": {"SPY": 0.1},
+                    "HYG": {"SPY": 0.6},
+                    "GLD": {"TLT": 0.3},
+                    "TLT": {"GLD": 0.3},
+                }
+            },
+            # SPY/VIX expected -0.7, actual +0.1 -> diff +0.8 (>0.5, "high").
+            # GLD/TLT and SPY/HYG exactly at norm -> not flagged.
+            lambda r: len(r) == 1
+            and r[0]["pair"] == "SPY/VIX"
+            and r[0]["divergence"] == pytest.approx(0.8)
+            and r[0]["significance"] == "high",
+        ),
+        "crossasset.cross_asset_correlations": (
+            {
+                "returns_data": {
+                    "A": [float(i) for i in range(1, 21)],
+                    "B": [float(i) for i in range(1, 21)],
+                    "C": [-float(i) for i in range(1, 21)],
+                    "D": [2.0 * i for i in range(1, 21)],
+                }
+            },
+            # B=A (corr 1.0); C=-A (corr -1.0); D=2A (corr 1.0).
+            lambda r: r["matrix"]["A"]["B"] == pytest.approx(1.0)
+            and r["matrix"]["A"]["C"] == pytest.approx(-1.0)
+            and r["data_points"] == 20
+            and r["divergences"] == [],
+        ),
+        "crossasset.roro_indicator": (
+            # Only VIX present with enough history: 5d return -0.25 -> vix_score
+            # clamps to 1.0, weight 0.30 -> composite 0.30 -> RISK_ON.
+            {"returns": {"VIX": [0.0] * 5 + [-0.05] * 5}},
+            lambda r: r["components"] == {"vix_direction": 1.0}
+            and r["score"] == pytest.approx(0.30, abs=0.001)
+            and r["classification"] == "RISK_ON",
+        ),
+        "crossasset.sector_rotation": (
+            {
+                "sector_prices": {
+                    "Technology": [100.0 + 0.5 * i for i in range(20)],
+                    "Energy": [50.0] * 20,
+                    "Utilities": [100.0 - 0.5 * i for i in range(20)],
+                }
+            },
+            # Tech 100->109.5 -> ret_20d 9.5; Energy flat -> momentum 0.0.
+            lambda r: r["leaders"][0]["sector"] == "Technology"
+            and r["sectors"]["Technology"]["return_20d"] == 9.5
+            and r["sectors"]["Energy"]["momentum_score"] == 0.0,
+        ),
+        "crossasset.information_coefficient": (
+            {
+                "panel": pd.DataFrame({
+                    "date": [1] * 6 + [2] * 6,
+                    "asset": ["a", "b", "c", "d", "e", "f"] * 2,
+                    "signal": [1, 2, 3, 4, 5, 6] * 2,
+                    "forward_return": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6] * 2,
+                }),
+                "signal_col": "signal",
+                "forward_return_col": "forward_return",
+            },
+            # Perfect rank match each date -> IC 1.0; 2 periods < 12 -> not sig.
+            lambda r: r.mean_ic == pytest.approx(1.0)
+            and r.n_periods == 2
+            and r.is_significant is False,
+        ),
+        "crossasset.time_series_ic": (
+            {
+                "signal": pd.Series([float(i) for i in range(1, 11)]),
+                "forward_return": pd.Series([0.1 * i for i in range(1, 11)]),
+                "method": "pearson",
+            },
+            lambda r: r.mean_ic == pytest.approx(1.0)
+            and r.n_periods == 10
+            and r.positive_ic_rate == 1.0,
+        ),
+        "crossasset.quantile_analysis": (
+            {
+                "panel": pd.DataFrame({
+                    "date": [1] * 10 + [2] * 10,
+                    "asset": [f"a{i}" for i in range(10)] * 2,
+                    "signal": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] * 2,
+                    "forward_return": [
+                        0.01, 0.02, 0.03, 0.04, 0.05,
+                        0.06, 0.07, 0.08, 0.09, 0.10,
+                    ] * 2,
+                }),
+                "signal_col": "signal",
+                "forward_return_col": "forward_return",
+                "n_quantiles": 5,
+            },
+            # Monotone signal -> top-minus-bottom 0.09-0.01=0.08, monotone 1.0.
+            lambda r: r.top_minus_bottom == pytest.approx(0.08)
+            and r.monotonicity == pytest.approx(1.0)
+            and r.n_periods == 2,
+        ),
+        "crossasset.evaluate_signal": (
+            {
+                "panel": _edge_panel,
+                "signal_col": "signal",
+                "forward_return_col": "forward_return",
+            },
+            lambda r: r.ic.mean_ic == pytest.approx(1.0)
+            and r.ic.is_significant is True
+            and r.verdict.startswith("STRONG EDGE"),
+        ),
     }
 
 
@@ -1240,6 +1369,27 @@ class TestRegistryShape:
             "market_risk.correlation_risks",
             "market_risk.geopolitical_risks",
             "market_risk.overall_risk_score",
+        }
+
+    def test_the_crossasset_block_registers_without_a_name_collision(
+        self, registry
+    ):
+        # build_extracted_registry() raises ValueError on a duplicate name, so
+        # reaching here proves no collision; this asserts the intended set
+        # landed intact (guards a merge that drops or duplicates an entry, and a
+        # prefix that drifts away from `crossasset.`).
+        assert {
+            n for n in registry._by_name if n.startswith("crossasset.")
+        } == {
+            "crossasset.infer_cycle_phase",
+            "crossasset.detect_divergences",
+            "crossasset.cross_asset_correlations",
+            "crossasset.roro_indicator",
+            "crossasset.sector_rotation",
+            "crossasset.information_coefficient",
+            "crossasset.time_series_ic",
+            "crossasset.quantile_analysis",
+            "crossasset.evaluate_signal",
         }
 
 
@@ -1432,6 +1582,47 @@ class TestLicenceClassification:
         # detect.manipulation -- over-excluded from shared plans rather than
         # risking a leak.
         assert registry.get(name).touches_byo is True
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "crossasset.infer_cycle_phase",
+            "crossasset.detect_divergences",
+            "crossasset.cross_asset_correlations",
+            "crossasset.roro_indicator",
+            "crossasset.sector_rotation",
+            "crossasset.information_coefficient",
+            "crossasset.time_series_ic",
+            "crossasset.quantile_analysis",
+            "crossasset.evaluate_signal",
+        ],
+    )
+    def test_crossasset_caps_inherit_the_price_licence(self, registry, name):
+        # Every crossasset analysis runs over price-derived series (returns,
+        # sector prices, forward-return panels) or over an already-computed
+        # structure built from them (a correlation dict, a set of leader labels
+        # ranked from sector prices). price_snapshot is produced only by the
+        # byo_only polygon/coingecko feeds, so every output inherits that
+        # licence -- including infer_cycle_phase and detect_divergences, which
+        # take no claims directly but whose inputs are downstream of prices
+        # (matching regime.detect_regime_changes, touches_byo over a label
+        # sequence). None may fold into shared coverage.
+        assert registry.get(name).touches_byo is True
+
+    def test_no_crossasset_cap_consuming_a_price_is_marked_shareable(
+        self, registry
+    ):
+        # Structural guard for the leak class QN found in fundamentals: any
+        # crossasset capability that declares a price_snapshot input must carry
+        # the price licence. infer_cycle_phase / detect_divergences consume no
+        # claims (their inputs are inter-step values) but are still touches_byo
+        # via the parametrized test above; this guard specifically locks the
+        # declared-consume side.
+        for name, cap in registry._by_name.items():
+            if name.startswith("crossasset.") and "price_snapshot" in cap.consumes:
+                assert cap.touches_byo is True, (
+                    f"{name} consumes a byo_only price but is marked shareable"
+                )
 
     def test_market_risk_growth_score_is_shareable_because_it_runs_on_fred_macro(
         self, registry
