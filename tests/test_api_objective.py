@@ -7,10 +7,20 @@ planner reaching the caller as a structured shortfall rather than a failed
 write. The demand rule is the other thing these tests defend: a missing
 producer becomes demand (the system's work queue), but a licensing refusal
 does not, because fetching it again would not help.
+
+The ``/analysis/run`` endpoint (D8) is the name-keyed invocation path for
+analyses that declare their arguments. It is tested here end-to-end through
+HTTP: the one declared analysis today (``perception.divergence``) returns a
+result with provenance and a licence verdict, unknown names and
+no-declared-arguments capabilities are distinct client errors, and nothing is
+written to the database.
 """
 
 import asyncio
+import json
+from datetime import UTC, datetime, timedelta
 
+import numpy as np
 import pytest
 from neutron.test import TestClient
 
@@ -255,3 +265,140 @@ async def test_capabilities_lists_builtin_adapters_with_tiers(db, database_url):
         assert "produces" in cap
         assert "entity_kinds" in cap
         assert "reliability" in cap  # None when uncalibrated, never absent
+
+
+# ----------------------------------------------------------- /analysis/run
+
+
+_D8_BASE = datetime(2024, 1, 1, tzinfo=UTC)
+_D8_N = 100
+_D8_SPIKE = 15
+
+
+def _d8_gen(perc_delta: float, fact_delta: float, *, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    base = 50.0 + rng.normal(0, 0.8, _D8_N)
+    perc = base.copy()
+    fact = base.copy()
+    for i in range(_D8_N - _D8_SPIKE, _D8_N):
+        k = (i - (_D8_N - _D8_SPIKE)) / _D8_SPIKE
+        perc[i] += perc_delta * k
+        fact[i] += fact_delta * k
+    dates = [_D8_BASE + timedelta(days=i) for i in range(_D8_N)]
+    return list(zip(dates, perc.tolist())), list(zip(dates, fact.tolist()))
+
+
+_D8_INSERT_CLAIM = """
+INSERT INTO claim (entity_id, claim_type, key, value, source,
+                   event_date, knowledge_date, confidence,
+                   redistributable, audience_user_id, derivation)
+VALUES ($1,$2::claim_type,$3,$4::jsonb,$5,$6,$7,$8,
+        $9::redistribution,$10,'ingested')
+RETURNING id
+"""
+
+
+async def _d8_seed(db, entity_id, *, seed=0):
+    perc_obs, fact_obs = _d8_gen(+20, -20, seed=seed)
+    for obs, claim_type, key, source in (
+        (perc_obs, "perception_macro", "vix", "fred"),
+        (fact_obs, "fundamental_metric", "Revenues", "sec_edgar"),
+    ):
+        for event_date, value in obs:
+            await db.pool.execute(
+                _D8_INSERT_CLAIM, entity_id, claim_type, key,
+                json.dumps({"value": value}), source,
+                event_date, event_date + timedelta(days=1), 1.0,
+                "allowed", None,
+            )
+
+
+async def test_analysis_run_returns_result_with_evidence_and_licence(
+    db, database_url
+):
+    await _entity(db, symbol="AAPL")
+    entity_id = await db.pool.fetchval(
+        "SELECT id FROM entity WHERE symbol = 'AAPL'"
+    )
+    await _d8_seed(db, entity_id)
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post(
+            "/analysis/run",
+            json={"capability": "perception.divergence", "target": "AAPL"},
+        )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["capability"] == "perception.divergence"
+    assert body["abstained"] is False
+    assert body["result"]["claim_type"] == "perception_divergence"
+    assert "direction" in body["result"]["value"]
+    assert "score" in body["result"]["value"]
+    assert body["result"]["confidence"] > 0.0
+    assert len(body["evidence"]) > 0
+    assert body["licence"]["redistributable"] == "allowed"
+    assert body["licence"]["audience_user_id"] is None
+
+
+async def test_analysis_run_unknown_capability_is_not_found(db, database_url):
+    await _entity(db, symbol="AAPL")
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post(
+            "/analysis/run",
+            json={"capability": "does.not.exist", "target": "AAPL"},
+        )
+
+    assert r.status_code == 404, r.text
+    detail = r.json()
+    assert "does.not.exist" in detail["detail"]
+
+
+async def test_analysis_run_no_declared_arguments_is_bad_request(
+    db, database_url
+):
+    await _entity(db, symbol="AAPL")
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post(
+            "/analysis/run",
+            json={
+                "capability": "backtest.evaluate_strategy_sharpe",
+                "target": "AAPL",
+            },
+        )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()
+    assert "declares no arguments" in detail["detail"]
+
+
+async def test_analysis_run_writes_nothing_to_the_database(db, database_url):
+    """The name-keyed path returns a result; it does not persist a claim, a
+    finding, or a gap. A claim count before and after proves it."""
+    await _entity(db, symbol="AAPL")
+    entity_id = await db.pool.fetchval(
+        "SELECT id FROM entity WHERE symbol = 'AAPL'"
+    )
+    await _d8_seed(db, entity_id)
+
+    tables = ("claim", "gap", "fill_attempt", "finding")
+    before = {
+        t: await db.pool.fetchval(f"SELECT count(*) FROM {t}") for t in tables
+    }
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post(
+            "/analysis/run",
+            json={"capability": "perception.divergence", "target": "AAPL"},
+        )
+
+    assert r.status_code == 200, r.text
+    after = {
+        t: await db.pool.fetchval(f"SELECT count(*) FROM {t}") for t in tables
+    }
+    for t in tables:
+        assert after[t] == before[t], f"{t} changed during analysis run"
