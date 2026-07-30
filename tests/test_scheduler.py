@@ -173,7 +173,7 @@ class TestDefaultRegistry:
     def test_the_default_registry_is_everything_runnable(self):
         r = default_registry()
         assert len(r) == r.summary()["invocable"]
-        assert len(r) == 125
+        assert len(r) == 126
 
     def test_derived_capabilities_are_reachable_through_default_registry(self):
         # The defect this catches: build_derived_registry() was never merged, so
@@ -185,6 +185,19 @@ class TestDefaultRegistry:
         assert [c.name for c in producers] == ["perception.divergence"]
         # And it is invocable through the merged registry, not just present.
         capability = r.get("perception.divergence")
+        assert capability is not None
+        assert capability.call is not None
+        assert capability.invocable
+
+    def test_yield_curve_signal_is_reachable_through_default_registry(self):
+        # D10's earned claim type must resolve through the registry the
+        # scheduler actually builds -- the same discipline the divergence test
+        # above enforces. producing() is how the planner and fill dispatcher
+        # select, so a claim type no capability produces is unreachable.
+        r = default_registry()
+        producers = r.producing("yield_curve_signal")
+        assert [c.name for c in producers] == ["macro.yield_curve_signal"]
+        capability = r.get("macro.yield_curve_signal")
         assert capability is not None
         assert capability.call is not None
         assert capability.invocable
