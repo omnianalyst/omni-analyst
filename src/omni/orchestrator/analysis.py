@@ -15,8 +15,9 @@ result plus its provenance and licence verdict. No persistence -- no claim, no
 finding, no gap.
 
 Only capabilities with declared ``ArgumentSpec`` s are callable here. Today
-that is ``perception.divergence`` alone (the one analysis with a declaration).
-A capability without declared arguments is refused with a reason, never
+that is ``perception.divergence`` (claim-producing, ``_DECLARED_ANALYSES``) and
+``market_risk.credit_risk`` (non-claim, ``_NON_CLAIM_ANALYSES``). A capability
+without declared arguments in either map is refused with a reason, never
 silently falling back to ``capability.call(target)`` -- the defect this path
 exists to avoid.
 
@@ -32,14 +33,16 @@ inputs -- the same rule that governs derived claims, not a new one.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 
 from neutron.error import bad_request, not_found
 
-from omni.capability.arguments import Abstention, Materialized, materialize
+from omni.capability.arguments import Abstention, ArgumentSpec, Materialized, materialize
 from omni.capability.derived import DERIVED
 from omni.capability.registry import Registry
+from omni.capabilities.risk import analyze_credit_risk
 from omni.fill.derived import DerivedCapability
 from omni.perception.divergence import resolve_derived_licence
 
@@ -51,6 +54,88 @@ from omni.perception.divergence import resolve_derived_licence
 # called through capability.call(target).
 _DECLARED_ANALYSES: dict[str, DerivedCapability] = {
     DERIVED.name: DERIVED,
+}
+
+
+@dataclass(frozen=True)
+class DeclaredAnalysis:
+    """A non-claim analysis assembled from coverage -- like ``DerivedCapability``
+    but without the claim-writing contract.
+
+    ``DerivedCapability`` (``fill/derived.py``) is claim-writing machinery: its
+    ``compute`` returns a ``ClaimDraft | None`` and ``fill_analysis`` persists
+    it through ``write_derived``. A credit-risk score is the opposite case -- a
+    policy-banded read of two spreads with no natural claim type (like every
+    other ``market_risk.*`` composite), so it never writes a claim. This narrower
+    type carries the same declared-input contract (an ``ArgumentSpec`` tuple
+    materialized through ``visible_claims``) but a ``compute`` that returns a
+    plain ``dict | None``. Stretching ``DerivedCapability`` to cover it would
+    loosen a claim-writing contract to admit a result that is never a claim.
+
+    No ``gather`` escape hatch. The escape hatch in ``DerivedCapability`` exists
+    for structures the declaration cannot describe (multi-entity panels,
+    caller-built inputs). Credit risk reads two named scalar series, each fully
+    pinned by its ``ArgumentSpec`` (``claim_type`` + ``key`` selects exactly one
+    series); there is no panel or caller-built structure to escape to, so a
+    ``gather`` here would be dead machinery.
+    """
+
+    name: str
+    arguments: tuple[ArgumentSpec, ...]
+    compute: Callable[..., dict | None]
+
+
+# FRED publishes the ICE BofA US Corporate Index OAS as ``BAMLC0A0CM`` and the
+# ICE BofA US High Yield Index OAS as ``BAMLH0A0HYM2`` -- both ``allowed``
+# ``macro_series_point`` series from ``fred.series``. Both ids were confirmed
+# against FRED before use: ``BAMLC0A0CM`` and ``BAMLH0A0HYM2`` resolve; the work
+# order's ``BAMLH0A0HYM`` (no trailing 2) returns a FRED 404 -- the high-yield
+# OAS id carries the 2.
+#
+# ``min_obs=1``: the function wants one current spread level (scalar), so the
+# count floor is one observation -- fewer than one means no spread exists and
+# the call abstains. ``ArgumentSpec`` has no date/freshness field, so the
+# declaration cannot refuse a stale latest observation by age; the scalar shape
+# takes the most recent observation by event_date, and whether that latest is
+# fresh enough for a live read is the producer's responsibility, not something
+# the declaration can enforce. A higher ``min_obs`` would not improve recency
+# (five points from a series that stopped publishing still yield a stale
+# spread), so it would be a misleading proxy rather than an honest guard.
+_CREDIT_RISK_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="ig_spread",
+        claim_type="macro_series_point",
+        key="BAMLC0A0CM",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+    ArgumentSpec(
+        name="hy_spread",
+        claim_type="macro_series_point",
+        key="BAMLH0A0HYM2",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+)
+
+
+async def _compute_credit_risk(
+    *, ig_spread: Materialized, hy_spread: Materialized
+) -> dict | None:
+    return analyze_credit_risk(
+        ig_spread=ig_spread.value,
+        hy_spread=hy_spread.value,
+    )
+
+
+_NON_CLAIM_ANALYSES: dict[str, DeclaredAnalysis] = {
+    "market_risk.credit_risk": DeclaredAnalysis(
+        name="market_risk.credit_risk",
+        arguments=_CREDIT_RISK_ARGUMENTS,
+        compute=_compute_credit_risk,
+    ),
 }
 
 
@@ -71,9 +156,10 @@ class AnalysisResult:
     result was produced. ``shortfalls`` carries the reasons.
 
     On success, ``result`` is the compute function's output (a ``ClaimDraft``
-    for declared-path capabilities), ``evidence`` is the contributing claim ids,
-    and ``redistributable`` / ``audience_user_id`` are the licence verdict from
-    ``resolve_derived_licence`` over the inputs.
+    for claim-producing capabilities, a plain ``dict`` for non-claim ones),
+    ``evidence`` is the contributing claim ids, and ``redistributable`` /
+    ``audience_user_id`` are the licence verdict from ``resolve_derived_licence``
+    over the inputs.
     """
 
     capability: str
@@ -108,16 +194,24 @@ async def run_analysis(
             f"(callability={cap.callability.value}, maturity={cap.maturity.value})"
         )
 
-    declared = _DECLARED_ANALYSES.get(name)
-    if declared is None or declared.arguments is None:
+    derived = _DECLARED_ANALYSES.get(name)
+    analysis = _NON_CLAIM_ANALYSES.get(name)
+    if (derived is None or derived.arguments is None) and analysis is None:
         raise bad_request(
             f"Capability {name!r} declares no arguments; it cannot be assembled "
             f"from coverage"
         )
 
+    if derived is not None and derived.arguments is not None:
+        arguments = derived.arguments
+        is_claim_path = True
+    else:
+        arguments = analysis.arguments
+        is_claim_path = False
+
     materialized: dict[str, Materialized] = {}
     abstentions: list[Abstention] = []
-    for spec in declared.arguments:
+    for spec in arguments:
         result = await materialize(
             spec, pool, entity_id=entity_id, audience=audience
         )
@@ -135,14 +229,16 @@ async def run_analysis(
             ),
         )
 
-    context = {
-        "entity_id": entity_id,
-        "audience_user_id": audience,
-        "claim_type": cap.produces[0] if cap.produces else "",
-        "key": "",
-    }
-
-    computed = await declared.compute(pool, context, **materialized)
+    if is_claim_path:
+        context = {
+            "entity_id": entity_id,
+            "audience_user_id": audience,
+            "claim_type": cap.produces[0] if cap.produces else "",
+            "key": "",
+        }
+        computed = await derived.compute(pool, context, **materialized)
+    else:
+        computed = await analysis.compute(**materialized)
 
     if computed is None:
         count = sum(len(m.claim_ids) for m in materialized.values())
