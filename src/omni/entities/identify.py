@@ -79,7 +79,22 @@ def parse_ticker_map(payload: dict) -> dict[str, list[str]]:
     returns them verbatim to the EDGAR adapter.
     """
     index: dict[str, list[str]] = {}
+    if not isinstance(payload, dict):
+        # A well-formed-JSON-but-wrong-shape body (SEC serves a JSON error
+        # object, wraps the map in {"data": [...]}, or changes the schema) is a
+        # source failure: the structure is what SEC served, not logic we own.
+        # Raise Unavailable here so the existing containment folds it into the
+        # same fetch_error path as a non-JSON body. This guard catches only
+        # structure; a wrong field name within a well-formed entry is a silent
+        # logic bug that surfaces as an empty index and zero resolved symbols.
+        raise Unavailable(
+            "SEC ticker map payload is not a JSON object"
+        )
     for entry in payload.values():
+        if not isinstance(entry, dict):
+            raise Unavailable(
+                "SEC ticker map entry is not a JSON object"
+            )
         ticker = entry.get("ticker")
         cik = entry.get("cik_str")
         if not ticker or cik is None:
@@ -135,7 +150,17 @@ async def _fetch_ticker_map(user_agent: str) -> dict:
         raise Unavailable(
             f"SEC company_tickers returned HTTP {response.status_code}"
         )
-    return response.json()
+    try:
+        return response.json()
+    except json.JSONDecodeError as exc:
+        # A 200 whose body is not JSON is still a source failure -- SEC serves
+        # an HTML notice to clients it considers undeclared automated tools,
+        # and a throttled or gzip-truncated payload decodes the same way. This
+        # is decoding a remote payload, not our parse, so it is Unavailable --
+        # the same signal the transport and status guards above raise.
+        raise Unavailable(
+            "SEC company_tickers returned HTTP 200 with a non-JSON body"
+        ) from exc
 
 
 async def assign_company_ciks(
@@ -188,7 +213,16 @@ async def assign_company_ciks(
     if not payload:
         return IdentifyReport(outcomes=(), fetch_error="empty ticker map")
 
-    index = parse_ticker_map(payload)
+    try:
+        index = parse_ticker_map(payload)
+    except Unavailable as exc:
+        # parse_ticker_map raises Unavailable only for a structurally wrong
+        # remote payload -- a source failure, same class as the fetch failing.
+        # It is caught here for the same reason the fetch is: a body SEC served
+        # in a shape we cannot index must not crash a seeding run. A logic bug
+        # in the parse raises something other than Unavailable and still
+        # surfaces, which is the distinction T2 preserved.
+        return IdentifyReport(outcomes=(), fetch_error=str(exc) or repr(exc))
 
     rows = await pool.fetch(
         "SELECT id, symbol FROM entity WHERE kind = $1", COMPANY_KIND

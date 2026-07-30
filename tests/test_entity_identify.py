@@ -12,6 +12,7 @@ keys, idempotency, and a fetch failure that writes nothing and stays quiet.
 import json
 import logging
 
+import httpx
 import pytest
 
 from omni.entities.identify import (
@@ -54,6 +55,42 @@ def _failing_fetcher(exc):
         raise exc
 
     return fn
+
+
+# The non-JSON and wrong-shape tests exercise the real `_fetch_ticker_map` (not
+# an injected fetch_fn), because the fix lives there: it is the translation of
+# `response.json()` / payload shape into Unavailable that must be proven. No
+# network call is made -- httpx.AsyncClient is replaced with a fake whose
+# `.json()` decodes `text` exactly like the real one, so a non-JSON body raises
+# json.JSONDecodeError and a JSON body of any shape is returned verbatim.
+class _FakeResponse:
+    def __init__(self, status_code, text):
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class _FakeAsyncClient:
+    def __init__(self, response):
+        self._response = response
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, headers=None):
+        return self._response
+
+
+def _patch_httpx(monkeypatch, response):
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient(response))
 
 
 async def _company(db, symbol, *, identifiers=None, name=None):
@@ -185,6 +222,61 @@ class TestAssignCompanyCiks:
         identifiers = await _identifiers(db, entity)
         assert identifiers == {}
 
+    async def test_a_200_with_non_json_body_is_a_source_failure(
+        self, db, monkeypatch
+    ):
+        # SEC serves an HTML notice (or a truncated/gzip-broken payload) as a
+        # 200. response.json() raises json.JSONDecodeError, which is not an
+        # httpx.HTTPError; before the fix that escaped every guard and crashed
+        # the scheduler. It must be translated to Unavailable, contained here,
+        # written nowhere, and surfaced as a fetch_error.
+        _patch_httpx(
+            monkeypatch, _FakeResponse(200, "<html>SEC throttled notice</html>")
+        )
+        entity = await _company(db, "AAPL")
+
+        report = await assign_company_ciks(db.pool, user_agent="test-agent")
+
+        assert report.fetch_error
+        assert "non-JSON" in report.fetch_error
+        assert report.outcomes == ()
+        assert await _identifiers(db, entity) == {}
+
+    async def test_a_json_payload_of_the_wrong_shape_is_a_source_failure(
+        self, db, monkeypatch
+    ):
+        # A 200 body that is valid JSON but not the dict-of-dicts SEC ticker map
+        # (an error object, a wrapped response, or a schema change). Deciding
+        # this is a source failure: the structure is what SEC served. The guard
+        # is structural only -- it never swallows a logic bug, which would show
+        # as zero resolved symbols, not as an exception.
+        _patch_httpx(
+            monkeypatch,
+            _FakeResponse(200, '{"error": "rate limited", "message": "stop"}'),
+        )
+        entity = await _company(db, "AAPL")
+
+        report = await assign_company_ciks(db.pool, user_agent="test-agent")
+
+        assert report.fetch_error
+        assert "not a JSON object" in report.fetch_error
+        assert report.outcomes == ()
+        assert await _identifiers(db, entity) == {}
+
+    async def test_a_top_level_json_array_is_a_source_failure(
+        self, db, monkeypatch
+    ):
+        # The other structural failure: payload itself is not a JSON object.
+        _patch_httpx(monkeypatch, _FakeResponse(200, "[1, 2, 3]"))
+        entity = await _company(db, "AAPL")
+
+        report = await assign_company_ciks(db.pool, user_agent="test-agent")
+
+        assert report.fetch_error
+        assert "not a JSON object" in report.fetch_error
+        assert report.outcomes == ()
+        assert await _identifiers(db, entity) == {}
+
     async def test_key_for_returns_the_cik_after_assignment(self, db):
         # The contract the fill path depends on: after this step runs against a
         # company with a real symbol, resolve.key_for(entity, "sec_edgar")
@@ -260,6 +352,28 @@ class TestEntryPoint:
             await run(db.pool)
 
         assert any("skipped" in r.message for r in caplog.records)
+        assert await _identifiers(db, entity) == {}
+
+    async def test_run_survives_a_200_non_json_body_and_logs(
+        self, db, monkeypatch, caplog
+    ):
+        # The scheduler-bootability property: the exact defect (a 200 whose body
+        # is not JSON) must not escape `run`, which is what scheduler startup
+        # awaits. It returns normally and logs the failure.
+        _patch_httpx(
+            monkeypatch, _FakeResponse(200, "<html>SEC throttled notice</html>")
+        )
+        entity = await _company(db, "AAPL")
+
+        with caplog.at_level(logging.WARNING, logger="omni.entities.identify"):
+            await run(db.pool, user_agent="test-agent")
+
+        assert any(
+            "identifier population failed" in r.message for r in caplog.records
+        )
+        assert any(
+            "non-JSON" in r.message for r in caplog.records
+        )
         assert await _identifiers(db, entity) == {}
 
     async def test_an_entity_created_after_first_run_gets_its_cik_on_second_run(
