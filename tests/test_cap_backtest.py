@@ -19,6 +19,7 @@ import pytest
 
 from omni.capabilities.backtest import (
     PurgedKFold,
+    average_trade_duration,
     backtest_signal,
     deflated_sharpe_ratio,
     evaluate_strategy_sharpe,
@@ -28,6 +29,7 @@ from omni.capabilities.backtest import (
     probabilistic_sharpe_ratio,
     probability_of_backtest_overfitting,
     sharpe_ratio,
+    win_rate,
 )
 from omni.ingest.protocol import Unavailable
 
@@ -269,3 +271,47 @@ def test_backtest_signal_lag_governs_which_bars_are_reachable():
     res_lag2 = backtest_signal(sig, prices, lag=2, cost_per_turn=0.0)
     assert res_lag1.total_return() == pytest.approx(0.10, abs=1e-9)
     assert res_lag2.total_return() == pytest.approx(0.0, abs=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# Strategy / trade-performance statistics (from v1 trading router)
+# --------------------------------------------------------------------------- #
+
+def test_win_rate_is_winning_over_total():
+    assert win_rate(7, 10) == 0.7
+
+
+def test_win_rate_zero_winners_is_zero():
+    assert win_rate(0, 5) == 0.0
+
+
+def test_win_rate_all_winners_is_one():
+    assert win_rate(3, 3) == 1.0
+
+
+def test_win_rate_undefined_with_no_closed_trades():
+    # v1 left win_rate = 0.0 when total_trades == 0, indistinguishable from a
+    # strategy that loses every trade.
+    with pytest.raises(Unavailable):
+        win_rate(0, 0)
+
+
+def test_win_rate_rejects_negative_winners():
+    with pytest.raises(Unavailable):
+        win_rate(-1, 10)
+
+
+def test_average_trade_duration_converts_seconds_to_hours():
+    # [3600, 7200] -> mean 5400s -> 1.5h.
+    assert average_trade_duration([3600, 7200]) == 1.5
+
+
+def test_average_trade_duration_single_trade():
+    assert average_trade_duration([1800]) == 0.5
+
+
+def test_average_trade_duration_empty_raises():
+    # v1 returned 0.0 on an empty list, reporting a zero-hour average over
+    # trades that do not exist.
+    with pytest.raises(Unavailable):
+        average_trade_duration([])

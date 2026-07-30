@@ -39,8 +39,9 @@ entry points are sync leaf math.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -872,3 +873,74 @@ def drawdown_breaker(
     if reduce_threshold is not None and dd >= reduce_threshold:
         return float(reduce_to * size)
     return float(size)
+
+
+# --------------------------------------------------------------------------- #
+# Cross-portfolio comparison (from v1 portfolio_comparison router)
+# --------------------------------------------------------------------------- #
+
+
+def portfolio_comparison_metrics(portfolios: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Comparative leaders and peer averages across several portfolios.
+
+    Extracted from v1 ``portfolio_comparison.calculate_comparison_metrics``
+    (portfolio_comparison.py:182-228), the pure module function the
+    ``GET /portfolio/compare`` handler called after computing per-portfolio
+    metrics. Each entry in ``portfolios`` is one portfolio's metric dict and
+    must carry ``id``, ``name``, ``period_return_percent``, ``volatility``
+    and ``sharpe_ratio`` -- the keys v1 selected on directly.
+
+    Returns the overall best and worst performer (by period return), the
+    lowest-risk portfolio (by volatility), the best risk-adjusted one (by
+    Sharpe), and the peer average of each. v1 returned ``{}`` on an empty
+    list; an empty comparison has no leaders, so this raises ``Unavailable``
+    instead.
+
+    The correlation *matrix* between portfolios that v1's twin endpoint
+    (``GET /portfolio/correlation-matrix``) produced is not re-extracted
+    here: ``portfolio_risk.calculate_correlation_matrix`` already computes a
+    Pearson correlation matrix over ``{label: return_series}`` and raises on
+    the thin/zero-variance inputs v1 papered over with a fabricated identity
+    matrix, so that row is covered by an existing home rather than duplicated.
+    """
+    portfolios = list(portfolios)
+    if not portfolios:
+        raise Unavailable("no portfolios; cannot compute comparison metrics")
+
+    best_return = max(portfolios, key=lambda p: p["period_return_percent"])
+    worst_return = min(portfolios, key=lambda p: p["period_return_percent"])
+    lowest_risk = min(portfolios, key=lambda p: p["volatility"])
+    best_sharpe = max(portfolios, key=lambda p: p["sharpe_ratio"])
+
+    n = len(portfolios)
+    avg_return = sum(p["period_return_percent"] for p in portfolios) / n
+    avg_volatility = sum(p["volatility"] for p in portfolios) / n
+    avg_sharpe = sum(p["sharpe_ratio"] for p in portfolios) / n
+
+    return {
+        "best_performer": {
+            "id": best_return["id"],
+            "name": best_return["name"],
+            "return_percent": best_return["period_return_percent"],
+        },
+        "worst_performer": {
+            "id": worst_return["id"],
+            "name": worst_return["name"],
+            "return_percent": worst_return["period_return_percent"],
+        },
+        "lowest_risk": {
+            "id": lowest_risk["id"],
+            "name": lowest_risk["name"],
+            "volatility": lowest_risk["volatility"],
+        },
+        "best_risk_adjusted": {
+            "id": best_sharpe["id"],
+            "name": best_sharpe["name"],
+            "sharpe_ratio": best_sharpe["sharpe_ratio"],
+        },
+        "averages": {
+            "return_percent": avg_return,
+            "volatility": avg_volatility,
+            "sharpe_ratio": avg_sharpe,
+        },
+    }
