@@ -10,6 +10,7 @@ keys, idempotency, and a fetch failure that writes nothing and stays quiet.
 """
 
 import json
+import logging
 
 import pytest
 
@@ -18,6 +19,7 @@ from omni.entities.identify import (
     AMBIGUOUS,
     RESOLVED,
     assign_company_ciks,
+    run,
 )
 from omni.entities.resolve import key_for
 from omni.ingest.protocol import Unavailable
@@ -198,3 +200,87 @@ class TestAssignCompanyCiks:
             entity,
         )
         assert key_for(row, "sec_edgar") == str(NVDA_CIK)
+
+
+class TestEntryPoint:
+    # `run` is the entry point both the CLI (`python -m omni.entities.identify`)
+    # and the scheduler startup call. It runs the step against a pool and logs
+    # the report, containing every SEC failure so a caller that treats CIK
+    # population as best-effort -- the scheduler at boot -- is never blocked.
+
+    async def test_run_reports_resolved_absent_ambiguous_counts(self, db, caplog):
+        aapl = await _company(db, "AAPL")
+        nvda = await _company(db, "NVDA")
+        await _company(db, "NOPE")
+        await _company(db, "DUP")
+        payload = _payload(
+            (AAPL_CIK, "AAPL", "Apple Inc."),
+            (NVDA_CIK, "NVDA", "NVIDIA CORP"),
+            (111, "DUP", "First DUP"),
+            (222, "DUP", "Second DUP"),
+        )
+
+        with caplog.at_level(logging.INFO, logger="omni.entities.identify"):
+            await run(db.pool, fetch_fn=_fetcher(payload))
+
+        summary = [
+            r for r in caplog.records if "identifiers populated" in r.message
+        ]
+        assert summary, "run() logged no summary line"
+        line = summary[0].message
+        assert "2 resolved" in line
+        assert "1 absent" in line
+        assert "1 ambiguous" in line
+        # The step actually ran, not just logged: both resolved symbols got CIKs.
+        assert (await _identifiers(db, aapl))["cik"] == str(AAPL_CIK)
+        assert (await _identifiers(db, nvda))["cik"] == str(NVDA_CIK)
+
+    async def test_a_fetch_failure_does_not_propagate_and_is_reported(
+        self, db, caplog
+    ):
+        # The guard that keeps the scheduler bootable: a SEC fetch failure must
+        # not escape the entry point, and must be surfaced in the log.
+        entity = await _company(db, "AAPL")
+
+        with caplog.at_level(logging.WARNING, logger="omni.entities.identify"):
+            await run(
+                db.pool, fetch_fn=_failing_fetcher(Unavailable("SEC is down"))
+            )
+
+        assert any("SEC is down" in r.message for r in caplog.records)
+        assert await _identifiers(db, entity) == {}
+
+    async def test_a_missing_user_agent_does_not_propagate(self, db, caplog):
+        # No fetch_fn and no user_agent -> assign_company_ciks raises
+        # Unavailable before fetching; run() must contain that too. This is the
+        # most likely real failure (operator forgot SEC_USER_AGENT).
+        entity = await _company(db, "AAPL")
+
+        with caplog.at_level(logging.WARNING, logger="omni.entities.identify"):
+            await run(db.pool)
+
+        assert any("skipped" in r.message for r in caplog.records)
+        assert await _identifiers(db, entity) == {}
+
+    async def test_an_entity_created_after_first_run_gets_its_cik_on_second_run(
+        self, db
+    ):
+        # The self-healing property that makes boot-time invocation sufficient:
+        # an entity created while the scheduler is already up gets its CIK on
+        # the next boot (or manual run), because the step re-reads every
+        # company row each time.
+        payload = _payload(
+            (AAPL_CIK, "AAPL", "Apple Inc."),
+            (NVDA_CIK, "NVDA", "NVIDIA CORP"),
+        )
+        fetch_fn = _fetcher(payload)
+
+        aapl = await _company(db, "AAPL")
+        await run(db.pool, fetch_fn=fetch_fn)
+        assert (await _identifiers(db, aapl))["cik"] == str(AAPL_CIK)
+
+        nvda = await _company(db, "NVDA")
+        assert await _identifiers(db, nvda) == {}
+
+        await run(db.pool, fetch_fn=fetch_fn)
+        assert (await _identifiers(db, nvda))["cik"] == str(NVDA_CIK)
