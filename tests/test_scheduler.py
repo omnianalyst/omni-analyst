@@ -173,4 +173,18 @@ class TestDefaultRegistry:
     def test_the_default_registry_is_everything_runnable(self):
         r = default_registry()
         assert len(r) == r.summary()["invocable"]
-        assert len(r) >= 30
+        assert len(r) == 125
+
+    def test_derived_capabilities_are_reachable_through_default_registry(self):
+        # The defect this catches: build_derived_registry() was never merged, so
+        # producing("perception_divergence") on the registry the scheduler builds
+        # returned nothing. Reaching it through default_registry -- not through
+        # build_derived_registry directly -- is what makes the gap visible.
+        r = default_registry()
+        producers = r.producing("perception_divergence")
+        assert [c.name for c in producers] == ["perception.divergence"]
+        # And it is invocable through the merged registry, not just present.
+        capability = r.get("perception.divergence")
+        assert capability is not None
+        assert capability.call is not None
+        assert capability.invocable

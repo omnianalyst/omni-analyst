@@ -169,11 +169,14 @@ class Scheduler:
 
 
 def default_registry() -> Registry:
-    """Everything v2 can actually run: the adapters plus extracted analysis."""
+    """Everything v2 can actually run: adapters, extracted analysis, derived."""
     from omni.capability.builtin import build_builtin_registry
+    from omni.capability.derived import build_derived_registry
     from omni.capability.extracted import build_extracted_registry
 
     registry = build_builtin_registry()
     for capability in build_extracted_registry()._by_name.values():
+        registry.add(capability)
+    for capability in build_derived_registry()._by_name.values():
         registry.add(capability)
     return registry
