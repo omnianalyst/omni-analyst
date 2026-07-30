@@ -27,6 +27,7 @@ import pytest
 
 from omni.capabilities.microstructure import (
     OrderBook,
+    analyze_spread,
     effective_spread,
     kyle_lambda,
     order_flow_toxicity,
@@ -400,3 +401,71 @@ class TestOrderFlowToxicity:
         trades = _vpin_trades([100.0 + 0.01 * i for i in range(50)])
         with pytest.raises(Unavailable, match=">=5 for VPIN"):
             await order_flow_toxicity(trades, volume_bucket_size=1e6)
+
+
+# ---------------------------------------------------------------------------
+# analyze_spread (time-series spread analysis from the v1 level2 router)
+# ---------------------------------------------------------------------------
+
+def test_spread_stats_are_hand_computed():
+    # Index 0 = most recent. avg = (12 + 4 + 8) / 3 = 8.
+    out = analyze_spread([12.0, 4.0, 8.0])
+    assert out["current_spread_bps"] == 12.0
+    assert out["avg_spread_bps"] == 8.0
+    assert out["min_spread_bps"] == 4.0
+    assert out["max_spread_bps"] == 12.0
+
+
+def test_spread_trend_widening_when_recent_above_older():
+    # First three (recent) average 20, last three (older) average 10.
+    # 20 > 10 * 1.1 -> widening.
+    out = analyze_spread([20.0, 20.0, 20.0, 10.0, 10.0, 10.0])
+    assert out["spread_trend"] == "widening"
+
+
+def test_spread_trend_narrowing_when_recent_below_older():
+    out = analyze_spread([5.0, 5.0, 5.0, 50.0, 50.0, 50.0])
+    assert out["spread_trend"] == "narrowing"
+
+
+def test_spread_trend_stable_when_recent_within_band():
+    # recent avg 10, older avg 10 -> within 0.9..1.1 band -> stable.
+    out = analyze_spread([10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
+    assert out["spread_trend"] == "stable"
+
+
+def test_spread_trend_unknown_with_fewer_than_three_observations():
+    # v1 returned "stable" on <3 points, asserting a direction it cannot
+    # determine; here the trend is None (unknown).
+    out = analyze_spread([5.0, 7.0])
+    assert out["spread_trend"] is None
+
+
+def test_spread_liquidity_buckets_by_current_spread():
+    assert analyze_spread([5.0])["liquidity_score"] == 90.0  # < 10 bps
+    assert analyze_spread([40.0])["liquidity_score"] == 70.0  # < 50 bps
+    assert analyze_spread([80.0])["liquidity_score"] == 50.0  # < 100 bps
+    assert analyze_spread([150.0])["liquidity_score"] == 30.0  # else
+
+
+def test_spread_zero_bps_scores_tightest_not_worst():
+    # v1's `if current_spread and ...` falsy-guard sent a 0 bps spread to the
+    # 30 bucket; an explicit comparison sends it to 90 (a locked/zero spread
+    # is maximum liquidity).
+    assert analyze_spread([0.0])["liquidity_score"] == 90.0
+
+
+def test_spread_depth_imbalance_penalises_liquidity():
+    # 40 bps -> 70; imbalance 0.6 (> 0.5) -> -10 = 60.
+    out = analyze_spread([40.0], current_depth_imbalance=0.6)
+    assert out["liquidity_score"] == 60.0
+
+
+def test_spread_depth_imbalance_below_threshold_does_not_penalise():
+    out = analyze_spread([40.0], current_depth_imbalance=0.3)
+    assert out["liquidity_score"] == 70.0
+
+
+def test_spread_empty_raises():
+    with pytest.raises(Unavailable):
+        analyze_spread([])

@@ -41,6 +41,7 @@ from omni.capabilities.portfolio import (
     meta_label_size,
     min_variance_weights,
     optimize_weights,
+    portfolio_comparison_metrics,
     risk_contributions,
     risk_contributions_from_vol,
     risk_parity_weights,
@@ -712,3 +713,69 @@ def test_expected_shortfall_single_tail_is_extreme_loss():
     assert abs(var - (-0.24)) < 1e-9
     assert abs(es - (-0.30)) < 1e-12
     assert es < var
+
+
+# --------------------------------------------------------------------------- #
+# Cross-portfolio comparison (from v1 portfolio_comparison router)
+# --------------------------------------------------------------------------- #
+
+
+def _pf(pid, ret, vol, sharpe):
+    return {
+        "id": pid,
+        "name": pid,
+        "period_return_percent": ret,
+        "volatility": vol,
+        "sharpe_ratio": sharpe,
+    }
+
+
+def test_comparison_picks_best_worst_lowest_risk_best_sharpe():
+    out = portfolio_comparison_metrics(
+        [
+            _pf("A", ret=10.0, vol=20.0, sharpe=0.5),
+            _pf("B", ret=25.0, vol=12.0, sharpe=1.8),
+            _pf("C", ret=-5.0, vol=30.0, sharpe=-0.4),
+        ]
+    )
+    assert out["best_performer"]["id"] == "B"
+    assert out["best_performer"]["return_percent"] == 25.0
+    assert out["worst_performer"]["id"] == "C"
+    assert out["worst_performer"]["return_percent"] == -5.0
+    assert out["lowest_risk"]["id"] == "B"
+    assert out["lowest_risk"]["volatility"] == 12.0
+    assert out["best_risk_adjusted"]["id"] == "B"
+    assert out["best_risk_adjusted"]["sharpe_ratio"] == 1.8
+
+
+def test_comparison_averages_are_hand_computed():
+    out = portfolio_comparison_metrics(
+        [_pf("A", ret=10.0, vol=20.0, sharpe=0.5), _pf("B", ret=30.0, vol=40.0, sharpe=1.5)]
+    )
+    assert out["averages"]["return_percent"] == 20.0
+    assert out["averages"]["volatility"] == 30.0
+    assert out["averages"]["sharpe_ratio"] == 1.0
+
+
+def test_comparison_best_and_worst_can_differ_when_returns_span_zero():
+    out = portfolio_comparison_metrics(
+        [_pf("WIN", ret=15.0, vol=18.0, sharpe=1.0), _pf("LOSE", ret=-15.0, vol=18.0, sharpe=-1.0)]
+    )
+    assert out["best_performer"]["id"] == "WIN"
+    assert out["worst_performer"]["id"] == "LOSE"
+    # Equal volatility -> lowest_risk is the first min() encountered (WIN).
+    assert out["lowest_risk"]["volatility"] == 18.0
+
+
+def test_comparison_two_portfolios_minimum_works():
+    out = portfolio_comparison_metrics(
+        [_pf("A", ret=5.0, vol=10.0, sharpe=0.2), _pf("B", ret=8.0, vol=14.0, sharpe=0.9)]
+    )
+    assert out["best_performer"]["id"] == "B"
+    assert out["best_risk_adjusted"]["id"] == "B"
+
+
+def test_comparison_empty_raises():
+    # v1 returned {} on an empty list; an empty comparison has no leaders.
+    with pytest.raises(Unavailable):
+        portfolio_comparison_metrics([])

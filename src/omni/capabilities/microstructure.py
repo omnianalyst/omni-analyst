@@ -63,6 +63,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 import numpy as np
 
@@ -408,3 +409,94 @@ async def order_flow_toxicity(
     if not imbalances:
         raise Unavailable("every bucket had zero volume; VPIN undefined")
     return float(np.mean(imbalances))
+
+
+# --------------------------------------------------------------------------- #
+# Time-series spread analysis (from v1 level2 router)
+# --------------------------------------------------------------------------- #
+
+def analyze_spread(
+    spread_bps: Sequence[float],
+    *,
+    current_depth_imbalance: float | None = None,
+) -> dict[str, Any]:
+    """Spread level, trend and liquidity score over a series of snapshots.
+
+    Extracted from the inline analytics in v1's
+    ``GET /level2/{symbol}/spread-analysis`` handler (level2.py:182-237), which
+    read historical order-book snapshots and computed the average / min / max /
+    current spread, a widening-vs-narrowing trend, and a bucketed liquidity
+    score inline. The snapshot fetch (and its single-reading fallback) stayed
+    in the handler; this is the pure statistics-over-observations part that
+    was ``needs-extraction``.
+
+    ``spread_bps`` is the series of per-snapshot bid-ask spreads in basis
+    points, ordered most-recent-first (index 0 is the current reading, as v1
+    assumed -- it took ``current_spread = spreads[0]`` and compared the first
+    three against the last three). At least one observation is required.
+
+    ``current_depth_imbalance`` is the top-of-book depth imbalance
+    ``|bid_depth - ask_depth| / (bid_depth + ask_depth)`` of the current
+    snapshot, in [0, 1]. It is optional: v1 defaulted it to 0 (no penalty)
+    when the snapshot carried no depth, which is the neutral balanced-book
+    reading rather than a fabrication, so ``None`` simply skips the penalty.
+
+    Two v1 default-substitutions are removed:
+
+    - The no-snapshots branch fabricated a full response from a single current
+      reading (``liquidity_score = 50.0``, ``spread_trend = "stable"``). With
+      no series there is no trend and no honest liquidity reading, so an empty
+      ``spread_bps`` raises ``Unavailable``.
+    - The trend was ``"stable"`` whenever fewer than three observations were
+      available, asserting a direction that cannot be determined from one or
+      two points. With fewer than three the trend is ``None`` (unknown); with
+      three or more it is ``"widening"`` / ``"narrowing"`` / ``"stable"`` per
+      v1's recent-vs-older 1.1x / 0.9x thresholds.
+
+    The liquidity buckets (<10 bps -> 90, <50 -> 70, <100 -> 50, else 30) and
+    the -10 imbalance penalty are v1's real heuristics, kept verbatim. v1
+    guarded the bucket test with ``if current_spread and ...`` whose ``and``
+    was really there for the ``None`` current-spread case; since an empty
+    series is refused up front the current reading is always a float, so the
+    buckets use explicit comparisons and a genuine 0 bps spread scores 90
+    (tightest), not the 30 v1's falsy-guard mis-assigned it.
+    """
+    spreads = list(spread_bps)
+    if not spreads:
+        raise Unavailable("no spread observations; trend and liquidity unknown")
+
+    current_spread = spreads[0]
+    avg_spread = sum(spreads) / len(spreads)
+
+    if len(spreads) >= 3:
+        recent_avg = sum(spreads[:3]) / 3
+        older_avg = sum(spreads[-3:]) / 3 if len(spreads) >= 6 else avg_spread
+        if recent_avg > older_avg * 1.1:
+            trend = "widening"
+        elif recent_avg < older_avg * 0.9:
+            trend = "narrowing"
+        else:
+            trend = "stable"
+    else:
+        trend = None
+
+    if current_spread < 10:
+        liquidity_score = 90.0
+    elif current_spread < 50:
+        liquidity_score = 70.0
+    elif current_spread < 100:
+        liquidity_score = 50.0
+    else:
+        liquidity_score = 30.0
+
+    if current_depth_imbalance is not None and current_depth_imbalance > 0.5:
+        liquidity_score -= 10
+
+    return {
+        "current_spread_bps": float(current_spread),
+        "avg_spread_bps": round(avg_spread, 4),
+        "min_spread_bps": round(min(spreads), 4),
+        "max_spread_bps": round(max(spreads), 4),
+        "spread_trend": trend,
+        "liquidity_score": float(max(0.0, min(100.0, liquidity_score))),
+    }

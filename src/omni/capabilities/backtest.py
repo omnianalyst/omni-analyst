@@ -419,3 +419,42 @@ def leakage_probe(prices: pd.Series, *, horizon: int = 1) -> dict:
         # impossible look-ahead path (perfect foresight can't survive the lag).
         "leak_prevented": causal_total < naive_total * 0.5,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Strategy / trade-performance statistics (from v1 trading router)
+# --------------------------------------------------------------------------- #
+
+def win_rate(winning_trades: int, total_trades: int) -> float:
+    """Fraction of closed trades that were winners, in [0, 1].
+
+    Extracted from v1 ``trading.get_strategy_metrics`` (trading.py:850-853),
+    which read ``executor.winning_trades / executor.total_trades`` and left
+    ``win_rate = 0.0`` when ``total_trades`` was zero. A strategy that has
+    taken no trades has an unknown win rate, not a 0% one -- a 0% reading on
+    an empty book is indistinguishable from a strategy that loses every
+    trade, so the zero-denominator case raises ``Unavailable`` rather than
+    returning the default.
+    """
+    if total_trades <= 0:
+        raise Unavailable(
+            f"total_trades={total_trades}; win rate undefined with no closed trades"
+        )
+    if winning_trades < 0:
+        raise Unavailable(f"winning_trades={winning_trades} is negative")
+    return winning_trades / total_trades
+
+
+def average_trade_duration(trade_durations_seconds: Sequence[float]) -> float:
+    """Mean closed-trade duration in hours.
+
+    Extracted from v1 ``trading._calculate_avg_trade_duration``
+    (trading.py:785-799). Each element is one trade's duration in seconds;
+    the result is the mean converted to hours. v1 returned ``0.0`` on an empty
+    list, which reports a zero-hour average holding time over trades that do
+    not exist -- that raises ``Unavailable`` here.
+    """
+    durations = list(trade_durations_seconds)
+    if not durations:
+        raise Unavailable("no trade durations; average duration unknown")
+    return round(sum(durations) / len(durations) / 3600, 2)
