@@ -76,6 +76,12 @@ from scipy import stats
 from omni.ingest.protocol import Unavailable
 
 _TRADING_DAYS = 252
+# Tolerance for the zero-dispersion guard, on the standard deviation (the
+# scale-consistent quantity per AGENTS.md). Matches attribution.py:75. A
+# constant, non-exactly-representable series -- e.g. [0.05]*50 -- has a true
+# variance of 0 but np.var returns ~1e-34 and np.std ~1e-17, so an `== 0.0`
+# guard passes; this tolerance refuses it.
+_ZERO_STD_ATOL = 1e-12
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +126,7 @@ def _require_resolvable_tail(
 
 
 def _require_nonzero_variance(returns_array: np.ndarray, what: str) -> None:
-    if float(np.var(returns_array)) == 0.0:
+    if np.isclose(float(np.std(returns_array)), 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable(
             f"{what}: sample variance is 0 (constant series); no risk signal"
         )
@@ -324,7 +330,7 @@ def calculate_beta(
         )
 
     benchmark_variance = float(np.var(benchmark, ddof=1))
-    if benchmark_variance == 0:
+    if np.isclose(float(np.std(benchmark, ddof=1)), 0.0, atol=_ZERO_STD_ATOL):
         raise Unavailable("benchmark variance is 0; beta is undefined")
 
     covariance = float(np.cov(asset, benchmark, ddof=1)[0, 1])
@@ -366,8 +372,8 @@ def calculate_correlation_matrix(
     if len(df) < 2:
         raise Unavailable("fewer than 2 aligned return observations after dropna")
 
-    variances = df.var()
-    zero_var = list(variances[variances == 0].index)
+    stds = df.std()
+    zero_var = list(stds[np.isclose(stds, 0.0, atol=_ZERO_STD_ATOL)].index)
     if zero_var:
         raise Unavailable(
             f"zero-variance series; correlation undefined for: {zero_var}"
