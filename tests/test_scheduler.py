@@ -120,13 +120,18 @@ class TestSchedulerLoops:
         )
         await scheduler.start()
         try:
-            # Generous budget, early exit. This polled for 5s and passed alone
-            # but failed under full-suite load, where database round-trips are
-            # slower — a timing-flaky test is worse than no test, because it
-            # trains you to rerun rather than to look.
+            # Poll the same observable the assertions check. `stats.filled` is
+            # incremented by the fill loop only after a completed cycle has
+            # written its claim, so it is set strictly later than
+            # `visible_claims`. Polling that earlier proxy and then stopping the
+            # scheduler cancels the cycle mid-flight, before it records its
+            # outcome — so `filled` would still be 0 and the test would pass or
+            # fail on scheduling order. Contention widens that window; it does
+            # not create it. Polling the recorded outcome makes both assertions
+            # describe the same moment, so the test cannot race itself.
             deadline = asyncio.get_event_loop().time() + 30
             while asyncio.get_event_loop().time() < deadline:
-                if await visible_claims(db.pool, audience=None):
+                if scheduler.stats.filled >= 1:
                     break
                 await asyncio.sleep(0.05)
         finally:
@@ -168,4 +173,46 @@ class TestDefaultRegistry:
     def test_the_default_registry_is_everything_runnable(self):
         r = default_registry()
         assert len(r) == r.summary()["invocable"]
-        assert len(r) >= 30
+        assert len(r) == 127
+
+    def test_derived_capabilities_are_reachable_through_default_registry(self):
+        # The defect this catches: build_derived_registry() was never merged, so
+        # producing("perception_divergence") on the registry the scheduler builds
+        # returned nothing. Reaching it through default_registry -- not through
+        # build_derived_registry directly -- is what makes the gap visible.
+        r = default_registry()
+        producers = r.producing("perception_divergence")
+        assert [c.name for c in producers] == ["perception.divergence"]
+        # And it is invocable through the merged registry, not just present.
+        capability = r.get("perception.divergence")
+        assert capability is not None
+        assert capability.call is not None
+        assert capability.invocable
+
+    def test_yield_curve_signal_is_reachable_through_default_registry(self):
+        # D10's earned claim type must resolve through the registry the
+        # scheduler actually builds -- the same discipline the divergence test
+        # above enforces. producing() is how the planner and fill dispatcher
+        # select, so a claim type no capability produces is unreachable.
+        r = default_registry()
+        producers = r.producing("yield_curve_signal")
+        assert [c.name for c in producers] == ["macro.yield_curve_signal"]
+        capability = r.get("macro.yield_curve_signal")
+        assert capability is not None
+        assert capability.call is not None
+        assert capability.invocable
+
+    def test_sahm_rule_signal_is_reachable_through_default_registry(self):
+        # D14's earned claim type must resolve through the registry the
+        # scheduler actually builds -- the same discipline the divergence and
+        # yield-curve tests above enforce. No worker.py edit is needed: D3
+        # already merged build_derived_registry() into default_registry(), and
+        # the sahm capability is registered there, so it flows through
+        # automatically.
+        r = default_registry()
+        producers = r.producing("sahm_rule_signal")
+        assert [c.name for c in producers] == ["macro.sahm_rule_signal"]
+        capability = r.get("macro.sahm_rule_signal")
+        assert capability is not None
+        assert capability.call is not None
+        assert capability.invocable

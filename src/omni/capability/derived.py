@@ -1,16 +1,23 @@
 """The derived capabilities that actually run today.
 
 Sibling of ``builtin``: where that module binds ingestion adapters, this one
-binds derivations -- claims computed from claims already in the store. Each
-derivation names its inputs (so the planner can route a gap to it) and carries
-``touches_byo=True``, because whether the output is shareable depends on the
-licences of inputs a static descriptor cannot see. Over-restricting is the
-safe direction; the actual decision is made per-fill by ``resolve_derived_licence``.
+binds derivations -- claims computed from claims already in the store.
+``perception.divergence`` is restated here as a **declaration**: two
+``ArgumentSpec``s (``perception_macro`` and ``fundamental_metric``) plus the
+existing ``compute_divergence``. ``fill_analysis`` materializes the arguments
+through ``visible_claims`` (audience-scoped), abstains if either is short,
+and calls the compute adapter.
 
-The bound ``gather`` reads inputs only through ``visible_claims`` scoped to
-the gap's audience, never the claim table directly -- reading a private input
-another user cannot see into a derivation would be the redistribution leak the
-licence rule exists to prevent.
+The adapter (``compute_divergence_declared``) bridges the shape mismatch
+between ``materialize``'s output and ``compute_divergence``'s input by building
+``DivergenceInput`` lists from the provenance rows ``Materialized`` carries --
+the dates and licence fields ``compute_divergence`` needs, read once through
+``visible_claims`` during materialization rather than re-queried. See its
+docstring for the detail.
+
+``touches_byo=True`` is the safe-direction planning hint; the actual decision
+is made per-fill by ``resolve_derived_licence`` over the materialized inputs.
+``consumes`` is derived from the spec claim types, not hand-written.
 """
 
 from __future__ import annotations
@@ -18,14 +25,49 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from omni.capabilities.macro import sahm_rule, yield_curve_inversion
+from omni.capability.arguments import ArgumentSpec, Materialized
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.coverage.visibility import visible_claims
-from omni.fill.derived import fill_derived
-from omni.perception.divergence import DivergenceInput, compute_divergence
+from omni.fill.derived import DerivedCapability, fill_analysis
+from omni.ingest.protocol import ClaimDraft, Unavailable
+from omni.perception.divergence import (
+    MIN_HISTORY,
+    DivergenceInput,
+    compute_divergence,
+)
 
 NAME = "perception.divergence"
 PRODUCES = "perception_divergence"
-CONSUMES = ("perception_macro", "fundamental_metric")
+
+# TODO(D9): neither spec sets ``key``. Divergence compares ONE perception
+# series against ONE fundamental concept, yet a real entity carries several
+# keys per claim_type (eight under ``fundamental_metric`` in the live DB); with
+# no key, ``materialize`` blends them into one series and ``compute_divergence``
+# emits a confident, wrong claim. The correct key is caller-supplied (which
+# series pair to compare -- VIX vs Revenues, sentiment vs Earnings), not a
+# fixed constant this capability can pick, so it is left unset pending a
+# decision by whoever owns divergence. The single-key test fixtures (``vix``,
+# ``Revenues``) are why this has never surfaced. The mechanism
+# (``ArgumentSpec.key``) now exists; set it when the pairing is decided.
+ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="perception_macro",
+        claim_type="perception_macro",
+        shape="series",
+        transform="level",
+        min_obs=MIN_HISTORY,
+    ),
+    ArgumentSpec(
+        name="fundamental_metric",
+        claim_type="fundamental_metric",
+        shape="series",
+        transform="level",
+        min_obs=MIN_HISTORY,
+    ),
+)
+
+CONSUMES = tuple(spec.claim_type for spec in ARGUMENTS)
 
 
 def _scalar(raw) -> float | None:
@@ -73,16 +115,58 @@ def _to_inputs(rows) -> list[DivergenceInput]:
     return out
 
 
+def _to_inputs_from_rows(rows) -> list[DivergenceInput]:
+    """Build ``DivergenceInput`` lists from the provenance rows ``materialize``
+    carried -- no re-read.
+
+    Each row already carries the id, dates, post-transform value and licence
+    fields ``compute_divergence`` needs. This is the single place the
+    ``Materialized``-to-``DivergenceInput`` shape conversion happens, so a
+    future analysis that hits the same mismatch puts its adapter here.
+    """
+    return [
+        DivergenceInput(
+            id=r.id,
+            event_date=r.event_date,
+            knowledge_date=r.knowledge_date,
+            value=r.value,
+            redistributable=r.redistributable,
+            audience_user_id=r.audience_user_id,
+        )
+        for r in rows
+    ]
+
+
+async def compute_divergence_declared(
+    pool,
+    gap,
+    *,
+    perception_macro: Materialized,
+    fundamental_metric: Materialized,
+):
+    """Declared-path compute: adapt ``Materialized`` to ``DivergenceInput`` lists.
+
+    The per-observation provenance (id, dates, value, licence) is carried in
+    ``Materialized.rows`` by ``materialize`` -- the post-transform, post-window
+    set the value was actually computed from, read through ``visible_claims``
+    (audience-scoped). This builds the ``DivergenceInput`` lists from those rows
+    directly, so ``compute_divergence`` gets the same inputs the old re-read
+    produced without a second query.
+    """
+    perc = _to_inputs_from_rows(perception_macro.rows)
+    facts = _to_inputs_from_rows(fundamental_metric.rows)
+    return compute_divergence(perc, facts)
+
+
 async def gather_divergence_inputs(
     pool, gap
 ) -> tuple[list[DivergenceInput], list[DivergenceInput]]:
     """Load perception_macro and fundamental_metric claims visible to the gap's
     audience, as DivergenceInputs.
 
-    Two streams, in the order ``compute_divergence`` expects them: perception
-    first, facts second. Each is read through ``visible_claims`` scoped to the
-    gap's ``audience_user_id``, so an input private to another user is never
-    gathered and therefore never reaches a derivation it must not feed.
+    The injected-gather escape hatch: kept as the template for a capability
+    whose inputs the declaration cannot describe (multi-entity panels,
+    caller-built structures). Divergence itself now uses the declared path.
     """
     audience: UUID | None = gap["audience_user_id"]
     entity_id = gap["entity_id"]
@@ -99,12 +183,279 @@ async def gather_divergence_inputs(
 def compute_divergence_claim(
     perception: list[DivergenceInput], facts: list[DivergenceInput]
 ):
-    """Adapt ``compute_divergence`` to the fill path's ``(draft, ids) | None``
-    contract, declaring every input as an edge."""
+    """Adapt ``compute_divergence`` to the escape-hatch fill path's
+    ``(draft, ids) | None`` contract, declaring every input as an edge."""
     draft = compute_divergence(perception, facts)
     if draft is None:
         return None
     return draft, [c.id for c in (*perception, *facts)]
+
+
+DERIVED = DerivedCapability(
+    name=NAME,
+    arguments=ARGUMENTS,
+    compute=compute_divergence_declared,
+)
+
+
+# ----------------------------------------------------------- yield-curve signal
+#
+# The first earned claim type after perception_divergence (D2 step 5). A derived
+# STATE -- "is the 2Y/10Y curve inverted right now" -- not a horizon-parameterized
+# computation, so it earns a claim type: macro.recession_probability consumes the
+# inversion flag, and the signal has a real freshness policy. The compute is the
+# existing (unchanged) ``macro.yield_curve_inversion``; this declaration gives its
+# output a durable home in the coverage store.
+#
+# v1 sources this from FRED ``DGS2``/``DGS10`` (confirmed in
+# ../software/backend/app/workers/signal_fusion_tasks.py:349-350); those series
+# ids are the ArgumentSpec keys (the exact purpose D9's ``key`` field exists for:
+# two series sharing one claim_type, ``macro_series_point``, distinguished here).
+
+YC_NAME = "macro.yield_curve_signal"
+YC_PRODUCES = "yield_curve_signal"
+YC_KEY = "2y_10y"
+
+# ``yield_curve_inversion`` looks at ``common_dates[-252:]`` (one trading year of
+# daily yields) and counts inversions over ``spreads[-90:]``. ``window`` passes
+# the function its full intended lookback when that much history exists;
+# ``min_obs`` is the floor below which the 90-day inverted count would be
+# silently truncated -- a 45-day count wearing a "90d" label is the fabrication
+# vector AGENTS.md warns against. 90, not 252: the headline output
+# (``days_inverted_90d``, ``is_inverted``) is fully meaningful at 90 common
+# dates; demanding a full trading year would abstain for any entity younger than
+# that when the recession signal is already honest at ~four months of data.
+YC_WINDOW = 252
+YC_MIN_OBS = 90
+
+YC_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="series_2y",
+        claim_type="macro_series_point",
+        key="DGS2",
+        shape="series",
+        transform="level",
+        window=YC_WINDOW,
+        min_obs=YC_MIN_OBS,
+    ),
+    ArgumentSpec(
+        name="series_10y",
+        claim_type="macro_series_point",
+        key="DGS10",
+        shape="series",
+        transform="level",
+        window=YC_WINDOW,
+        min_obs=YC_MIN_OBS,
+    ),
+)
+
+YC_CONSUMES = tuple(spec.claim_type for spec in YC_ARGUMENTS)
+
+
+async def compute_yield_curve_signal_declared(
+    pool, gap, *, series_2y: Materialized, series_10y: Materialized
+):
+    """Declared-path compute: adapt ``Materialized`` to the two
+    ``dict[date, float]`` arguments ``yield_curve_inversion`` expects.
+
+    ``yield_curve_inversion`` takes series shaped as dicts keyed by date, not
+    the ordered ``Materialized`` shape ``materialize`` returns -- the same kind
+    of shape mismatch ``compute_divergence_declared`` bridges for
+    ``DivergenceInput`` lists. The adapter lives here, next to that one, not in
+    ``arguments.py`` (per D5/D10): the shape conversion is specific to this one
+    analysis function's signature.
+
+    Returns a ``ClaimDraft`` of ``claim_type="yield_curve_signal"`` whose
+    ``value`` is the durable state a consumer reads (spread, inversion flag,
+    90-day count) and whose ``evidence`` carries the recent spread trajectory
+    (dates serialized for JSONB) and the input claim ids. The bulky
+    ``historical_spreads`` is evidence, not value: it is supporting detail
+    reconstructable from the inputs, not the headline signal a consumer joins on.
+    Abstains (``None``) when fewer than 90 common dates survive -- the function's
+    ``days_inverted_90d`` is a count over ``spreads[-90:]`` and silently shrinks
+    below that, so the per-series ``min_obs`` floor is backed by a check on the
+    actual intersection.
+    """
+    d2y = {r.event_date: r.value for r in series_2y.rows}
+    d10y = {r.event_date: r.value for r in series_10y.rows}
+
+    common = set(d2y) & set(d10y)
+    if len(common) < YC_MIN_OBS:
+        return None
+
+    try:
+        result = await yield_curve_inversion(d2y, d10y)
+    except Unavailable:
+        return None
+
+    last_event = max(common)
+    latest_knowledge = max(
+        r.knowledge_date for r in (*series_2y.rows, *series_10y.rows)
+    )
+
+    historical = [
+        {
+            "date": s["date"].isoformat(),
+            "spread": s["spread"],
+            "inverted": s["inverted"],
+        }
+        for s in result["historical_spreads"]
+    ]
+
+    return ClaimDraft(
+        claim_type=YC_PRODUCES,
+        key=YC_KEY,
+        value={
+            "current_spread": result["current_spread"],
+            "is_inverted": result["is_inverted"],
+            "days_inverted_90d": result["days_inverted_90d"],
+        },
+        event_date=last_event,
+        knowledge_date=latest_knowledge,
+        confidence=1.0,
+        unit="percent",
+        evidence={
+            "series": ["DGS2", "DGS10"],
+            "historical_spreads": historical,
+            "input_claim_ids": [
+                str(r.id) for r in (*series_2y.rows, *series_10y.rows)
+            ],
+        },
+    )
+
+
+YIELD_CURVE = DerivedCapability(
+    name=YC_NAME,
+    arguments=YC_ARGUMENTS,
+    compute=compute_yield_curve_signal_declared,
+)
+
+
+# --------------------------------------------------------------- sahm-rule signal
+#
+# The second earned claim type after perception_divergence (D2 step 5), applying
+# D10's template a second time. A derived STATE -- "has the Sahm recession
+# threshold triggered right now" -- not a horizon-parameterized computation, so
+# it earns a claim type: macro.recession_probability consumes the triggered flag
+# as a direct argument (sahm_triggered), and the signal has a real freshness
+# policy. The compute is the existing (unchanged) ``macro.sahm_rule``; this
+# declaration gives its output a durable home in the coverage store.
+#
+# v1 sources this from FRED ``UNRATE`` (Civilian Unemployment Rate). The series
+# id was verified against FRED directly before use -- confirmed: id "UNRATE",
+# title "Unemployment Rate", frequency "Monthly", units "Percent", Seasonally
+# Adjusted (QF1 found a prose-named id that 404s, so no series id is taken on
+# faith). UNRATE is the ArgumentSpec key.
+
+SAHM_NAME = "macro.sahm_rule_signal"
+SAHM_PRODUCES = "sahm_rule_signal"
+SAHM_KEY = "unrate"
+
+# ``sahm_rule`` reads ``unemployment_values[-3:]`` (the 3-month moving average)
+# and ``unemployment_values[-12:]`` (the 12-month low), and raises ``Unavailable``
+# below 12 observations. The crux where D10's template needed a daily-vs-monthly
+# adjustment: D10 sized ``window``/``min_obs`` against DAILY treasury yields
+# (252 observations ~= one trading year). UNRATE is MONTHLY, so 12 observations
+# already span ~one calendar year, and a count sized as if the series were daily
+# would be wrong in the opposite direction.
+#
+# Arithmetic (monthly):
+#   - ``min_obs = 12``: the function's hard floor. The spec abstains at 11, so
+#     ``sahm_rule``'s ``Unavailable`` branch (raises at <12) is unreachable
+#     through the declared path -- abstention is the spec's job, not the
+#     capability's. There is one input series and no two-series intersection, so
+#     unlike YIELD_CURVE no compute-time floor check is needed: per-series
+#     ``min_obs`` sees the whole count the function sees.
+#   - ``window = 18`` = 12 (the function's trailing-12 lookback, ~one calendar
+#     year of monthly data) + 6 months margin for publication lag (a reference
+#     month's reading lands in the first week of the following month, so the
+#     newest available observation can lag) and a missing mid-series
+#     observation, so a single hole does not drop the materialized count below
+#     ``min_obs``. ``sahm_rule`` ignores anything older than its trailing-12
+#     slice, so the extra observations are margin only -- passing 18 to a
+#     function that reads ``[-12:]`` and ``[-3:]`` yields the same trailing-12
+#     and trailing-3 as passing exactly 12.
+SAHM_MIN_OBS = 12
+SAHM_WINDOW = 18
+
+SAHM_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="unemployment",
+        claim_type="macro_series_point",
+        key="UNRATE",
+        shape="series",
+        transform="level",
+        window=SAHM_WINDOW,
+        min_obs=SAHM_MIN_OBS,
+    ),
+)
+
+SAHM_CONSUMES = tuple(spec.claim_type for spec in SAHM_ARGUMENTS)
+
+
+async def compute_sahm_rule_signal_declared(pool, gap, *, unemployment: Materialized):
+    """Declared-path compute: adapt ``Materialized`` to the ``Sequence[float]``
+    ``sahm_rule`` expects.
+
+    ``sahm_rule`` takes a single ordered float series, not the ``Materialized``
+    shape ``materialize`` returns -- the same kind of shape mismatch
+    ``compute_yield_curve_signal_declared`` bridges. The adapter lives here,
+    next to that one, not in ``arguments.py`` (per D5/D10): the shape conversion
+    is specific to this one analysis function's signature.
+
+    Returns a ``ClaimDraft`` of ``claim_type="sahm_rule_signal"`` whose ``value``
+    is the durable state a consumer reads (the Sahm indicator and the triggered
+    flag ``macro.recession_probability`` consumes as ``sahm_triggered``) and
+    whose ``evidence`` carries the supporting ``current_unemployment`` /
+    ``12m_low`` (reconstructable from the inputs) and the input claim ids.
+
+    ``min_obs=12`` on the spec guarantees ``sahm_rule`` never sees fewer than
+    its 12-observation floor, so its ``Unavailable`` branch is unreachable
+    through the declared path; the try/except is defense-in-depth, not the
+    abstention mechanism. Unlike YIELD_CURVE there is one input series and no
+    two-series intersection, so there is no compute-time floor check to add.
+
+    ``sahm_rule`` returns numpy scalars (``np.mean``/``np.min`` -> ``np.float64``;
+    the ``>=`` threshold -> ``np.bool_``), which ``json.dumps`` cannot serialize.
+    Casting to native ``float``/``bool`` here is adapter plumbing -- the values
+    are identical, only the wrapper changes -- and lives with the rest of the
+    shape bridging rather than in ``macro.py`` (whose behaviour is unchanged).
+    """
+    values = [r.value for r in unemployment.rows]
+
+    try:
+        result = await sahm_rule(values)
+    except Unavailable:
+        return None
+
+    last_row = unemployment.rows[-1]
+    latest_knowledge = max(r.knowledge_date for r in unemployment.rows)
+
+    return ClaimDraft(
+        claim_type=SAHM_PRODUCES,
+        key=SAHM_KEY,
+        value={
+            "indicator": float(result["value"]),
+            "triggered": bool(result["triggered"]),
+        },
+        event_date=last_row.event_date,
+        knowledge_date=latest_knowledge,
+        confidence=1.0,
+        unit="percent",
+        evidence={
+            "series": ["UNRATE"],
+            "current_unemployment": float(result["current_unemployment"]),
+            "12m_low": float(result["12m_low"]),
+            "input_claim_ids": [str(r.id) for r in unemployment.rows],
+        },
+    )
+
+
+SAHM = DerivedCapability(
+    name=SAHM_NAME,
+    arguments=SAHM_ARGUMENTS,
+    compute=compute_sahm_rule_signal_declared,
+)
 
 
 def build_derived_registry() -> Registry:
@@ -112,10 +463,13 @@ def build_derived_registry() -> Registry:
     registry = Registry()
 
     async def call(pool, gap):
-        return await fill_derived(
-            pool, gap, compute=compute_divergence_claim,
-            gather=gather_divergence_inputs,
-        )
+        return await fill_analysis(pool, gap, capability=DERIVED)
+
+    async def call_yield_curve(pool, gap):
+        return await fill_analysis(pool, gap, capability=YIELD_CURVE)
+
+    async def call_sahm(pool, gap):
+        return await fill_analysis(pool, gap, capability=SAHM)
 
     registry.add(
         Capability(
@@ -133,6 +487,42 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.perception.divergence",
             call=call,
+        )
+    )
+    registry.add(
+        Capability(
+            name=YC_NAME,
+            description=(
+                "2Y/10Y treasury yield-curve inversion signal: current spread, "
+                "inversion flag and 90-day days-inverted count, derived from "
+                "DGS2/DGS10 macro_series_point claims."
+            ),
+            consumes=YC_CONSUMES,
+            produces=(YC_PRODUCES,),
+            touches_byo=False,
+            cost=0.1,
+            maturity=Maturity.WIRED,
+            callability=Callability.YES,
+            origin="omni.capabilities.macro.yield_curve_inversion",
+            call=call_yield_curve,
+        )
+    )
+    registry.add(
+        Capability(
+            name=SAHM_NAME,
+            description=(
+                "Sahm recession rule signal: the 3-month moving average minus "
+                "the 12-month low of the unemployment rate, and the >=0.5 "
+                "triggered flag, derived from UNRATE macro_series_point claims."
+            ),
+            consumes=SAHM_CONSUMES,
+            produces=(SAHM_PRODUCES,),
+            touches_byo=False,
+            cost=0.1,
+            maturity=Maturity.WIRED,
+            callability=Callability.YES,
+            origin="omni.capabilities.macro.sahm_rule",
+            call=call_sahm,
         )
     )
     return registry

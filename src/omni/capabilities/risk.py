@@ -383,7 +383,7 @@ def analyze_growth_risk(
         "gdp_growth": gdp_growth,
         "unemployment": unemployment,
         "job_growth": job_growth,
-        "recession_probability": estimate_recession_probability(
+        "growth_score_recession_heuristic": estimate_recession_probability(
             gdp_growth, unemployment
         ),
     }

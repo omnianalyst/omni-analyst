@@ -190,6 +190,51 @@ class TestHonestRefusal:
         assert await db.pool.fetchval("SELECT resolved_at FROM gap") is not None
 
 
+class TestIdempotentReingest:
+    async def test_a_fill_that_wrote_no_new_claim_is_not_recorded_filled(self, db):
+        """A source that returns only data already held produces an empty
+        claim_ids. That is not a fill, and recording it as one both overstates
+        coverage and -- via filled_attempt_produces_a_claim -- kills the worker.
+        Distinct from a failure: the source answered, correctly."""
+        entity_id = await _entity(db)
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="macro_series_point", key="GDP"
+        )
+        await persist_gaps(db.pool, await detect_gaps(db.pool))
+
+        registry = _fred_registry()
+        first = await run_once(db.pool, registry=registry, worker_id="w1")
+        assert first.outcome == "filled"
+        assert len(first.claim_ids) == 2
+
+        # Re-open an identical gap against the now-covered target. The source
+        # will answer again, but every draft is already held, so write_claims
+        # returns no ids -- the defect's trigger.
+        await db.pool.execute(
+            "INSERT INTO gap (entity_id, claim_type, key, gap_class, "
+            "audience_user_id, score) "
+            "VALUES ($1, 'macro_series_point', 'GDP', 'missing', NULL, 1.0)",
+            entity_id,
+        )
+
+        # Must not raise, and must not be recorded as 'filled'.
+        result = await run_once(db.pool, registry=registry, worker_id="w1")
+        assert result is not None
+        assert result.outcome != "filled", result.reason
+
+        attempt = await db.pool.fetchrow(
+            "SELECT outcome, claim_id, reason FROM fill_attempt WHERE gap_id = $1",
+            result.gap_id,
+        )
+        assert attempt["outcome"] != "filled"
+        assert attempt["claim_id"] is None
+        assert attempt["reason"], "nothing-new must carry a reason distinct from failure"
+        assert "already held" in attempt["reason"]
+
+        # The loop completes the cycle rather than dying: the queue drains.
+        assert await drain(db.pool, registry=registry, worker_id="w1") == []
+
+
 class TestLeasing:
     async def test_two_workers_do_not_take_the_same_gap(self, db):
         entity_id = await _entity(db)
@@ -250,7 +295,15 @@ class TestLeasing:
 class TestLicenceThroughTheLoop:
     async def test_a_byo_fill_stays_private_to_the_requester(self, db):
         """The licence rule surviving a full pass through the pipeline."""
-        entity_id = await _entity(db)
+        # polygon keys per-entity (resolve._PROVIDER_IDENTIFIER), so the fill
+        # path reads the entity's polygon identifier, not gap["key"]. The entity
+        # must carry one or the gap declines as unfillable before the adapter is
+        # called -- which would skip the licence path this test exists to run.
+        entity_id = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name, identifiers) "
+            "VALUES ('company', 'AAPL', 'AAPL', "
+            "'{\"polygon\": \"AAPL\"}'::jsonb) RETURNING id",
+        )
         owner = uuid4()
         await direct_attention(
             db.pool, entity_id=entity_id, claim_type="price_snapshot",

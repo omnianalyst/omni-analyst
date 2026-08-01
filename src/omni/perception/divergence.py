@@ -258,7 +258,7 @@ RETURNING id
 _INSERT_EDGE = "INSERT INTO claim_input (claim_id, input_id) VALUES ($1, $2)"
 
 
-async def write_divergence(
+async def write_derived(
     pool,
     draft: ClaimDraft,
     *,
@@ -266,8 +266,9 @@ async def write_divergence(
     input_claim_ids: list[UUID],
     audience_user_id: UUID | None,
     redistributable: str,
+    source: str = SOURCE,
 ) -> UUID:
-    """Persist a derived divergence claim and its ``claim_input`` edges.
+    """Persist a derived claim and its ``claim_input`` edges.
 
     Both writes share one transaction. Migration 002's deferred constraint
     trigger rejects a ``derived`` claim with no declared inputs at commit, so
@@ -276,6 +277,10 @@ async def write_divergence(
     ``redistributable`` and ``audience_user_id`` must be the output of
     ``resolve_derived_licence`` applied to the same inputs -- not a guess.
     The per-edge trigger is the safety net if they are wrong.
+
+    ``claim_type``, ``key``, ``unit``, ``value`` and ``evidence`` travel on
+    ``draft``; ``source`` is the one field that is not on the draft, so it is
+    a parameter (defaulting to the module's ``SOURCE`` for divergence).
     """
 
     async with pool.acquire() as conn, conn.transaction():
@@ -287,7 +292,7 @@ async def write_divergence(
             json.dumps(draft.value),
             draft.unit,
             json.dumps(draft.evidence),
-            SOURCE,
+            source,
             draft.event_date,
             draft.knowledge_date,
             draft.confidence,

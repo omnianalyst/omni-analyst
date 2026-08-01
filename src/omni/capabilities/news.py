@@ -30,7 +30,7 @@ enters the store.
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 
 import numpy as np
@@ -236,3 +236,203 @@ async def stocktwits_sentiment(symbol: str, *, fetch_fn: StockTwitsFetcher) -> d
     messages = payload.get("messages", [])
     watchers = payload.get("symbol", {}).get("watchlist_count", 0)
     return score_stocktwits_messages(messages, watchers=watchers)
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol news impact and sector outlook
+#
+# Ported from v1 `news.py` -- the inline SQL+aggregation in the
+# `/news/impact/symbol/{symbol}` and `/news/sectors` handlers. The SQL that
+# fetched the article/entity/sentiment rows is gone (that is fill-pipeline
+# territory); the aggregation over already-fetched rows is the analysis, and
+# that is what is lifted here.
+#
+# Defaults removed (raise `Unavailable` instead), per the work order:
+# - The per-symbol handler returned a fabricated {sentiment:"neutral",
+#   sentiment_score:0.0, confidence:0.0, impact_score:0.0} when no articles
+#   matched. An empty window is an honest gap, not a neutral market: it raises.
+# - The sector handler initialised every sector to outlook:"neutral" / score:0.0
+#   and confidence:0.0 before processing rows, so the response always carried
+#   all eight sectors even when none had coverage. A sector with no articles is
+#   now simply absent from the result -- its absence is the gap signal, not a
+#   row of zeros dressed up as a neutral read.
+# - The handler substituted confidence 0.5 wherever the DB score was NULL. A
+#   missing confidence is the caller's problem; this module never invents one.
+# ---------------------------------------------------------------------------
+
+
+def symbol_news_impact(
+    articles: Sequence[tuple[str, float, float]],
+) -> dict:
+    """Aggregate one symbol's article sentiments into a news-impact read.
+
+    `articles` are the `(sentiment, sentiment_score, confidence)` triples the
+    v1 SQL join produced (sentiment is the label, e.g. "bullish"; the score is
+    the signed polarity; confidence is the model's self-reported confidence).
+    The impact score combines volume (how many articles) with sentiment
+    strength (how polarised they are), each weighted half, on a 0-100 scale --
+    carried bit-for-bit from the v1 handler.
+
+    Raises `Unavailable` when no articles are supplied: the v1 handler returned
+    a neutral/zero read indistinguishable from "we looked and found nothing
+    moving", which is exactly the substitution this layer exists to remove.
+    """
+    count = len(articles)
+    if count == 0:
+        raise Unavailable("no articles in window; news impact is undefined")
+
+    total_sentiment = 0.0
+    total_confidence = 0.0
+    bullish = 0
+    bearish = 0
+    neutral = 0
+
+    for sentiment, sentiment_score, confidence in articles:
+        total_sentiment += sentiment_score
+        total_confidence += confidence
+        if sentiment == "bullish":
+            bullish += 1
+        elif sentiment == "bearish":
+            bearish += 1
+        else:
+            neutral += 1
+
+    avg_sentiment = total_sentiment / count
+    avg_confidence = total_confidence / count
+
+    if avg_sentiment > 0.2:
+        overall_sentiment = "bullish"
+    elif avg_sentiment < -0.2:
+        overall_sentiment = "bearish"
+    else:
+        overall_sentiment = "neutral"
+
+    # v1: volume tops out at 10 articles; sentiment strength is |avg|. Each
+    # contributes half to a 0-100 score.
+    volume_factor = min(1.0, count / 10.0)
+    sentiment_strength = abs(avg_sentiment)
+    impact_score = (volume_factor * 0.5 + sentiment_strength * 0.5) * 100
+
+    return {
+        "articles_count": count,
+        "sentiment": overall_sentiment,
+        "sentiment_score": round(avg_sentiment, 3),
+        "confidence": round(avg_confidence, 3),
+        "impact_score": round(impact_score, 1),
+        "sentiment_breakdown": {
+            "bullish": bullish,
+            "bearish": bearish,
+            "neutral": neutral,
+        },
+    }
+
+
+def _sector_outlook_label(score: float) -> str:
+    if score > 0.3:
+        return "positive"
+    elif score > 0.1:
+        return "slightly_positive"
+    elif score < -0.3:
+        return "negative"
+    elif score < -0.1:
+        return "slightly_negative"
+    return "neutral"
+
+
+SectorMapping = Mapping[str, Sequence[str]]
+
+
+def sector_news_outlook(
+    rows: Sequence[tuple[str, float | None, int, int, int, int]],
+    *,
+    sector_mapping: SectorMapping,
+) -> list[dict]:
+    """Aggregate per-ticker news sentiment into a sector-level outlook.
+
+    `rows` are the `(ticker, avg_sentiment, article_count, bullish, bearish,
+    neutral)` tuples the v1 SQL join produced (the same shape
+    `aggregate_market_sentiment` consumes, but keyed by ticker rather than by
+    sentiment label). `sector_mapping` maps a sector name to its member tickers
+    -- the static ticker->sector table is honest scaffolding (a fixed universe
+    definition), not fabricated data, so it is an explicit argument the caller
+    owns rather than something this function invents.
+
+    The outlook score is `(bullish - bearish) / total` over the sentiment-label
+    counts (volume-weighted by article count), with a confidence that saturates
+    at 20 articles -- carried bit-for-bit from the v1 handler.
+
+    Raises `Unavailable` when no supplied ticker maps to any sector: the v1
+    handler returned all eight sectors at neutral/zero in that case, which looks
+    like a measured calm market rather than "we have no coverage".
+    """
+    ticker_to_sector: dict[str, str] = {}
+    for sector, tickers in sector_mapping.items():
+        for ticker in tickers:
+            ticker_to_sector[ticker.upper()] = sector
+
+    agg: dict[str, dict] = {}
+
+    for ticker, avg_sentiment, article_count, bullish, bearish, neutral in rows:
+        sector = ticker_to_sector.get((ticker or "").upper())
+        if sector is None:
+            continue
+
+        bucket = agg.setdefault(
+            sector,
+            {
+                "articles_analyzed": 0,
+                "bullish_count": 0,
+                "bearish_count": 0,
+                "neutral_count": 0,
+                "top_symbols": [],
+            },
+        )
+        bucket["articles_analyzed"] += article_count
+        bucket["bullish_count"] += bullish
+        bucket["bearish_count"] += bearish
+        bucket["neutral_count"] += neutral
+        bucket["top_symbols"].append(
+            {
+                "symbol": (ticker or "").upper(),
+                "sentiment_score": avg_sentiment,
+                "article_count": article_count,
+            }
+        )
+
+    if not agg:
+        raise Unavailable(
+            "no ticker in the supplied rows maps to a sector in sector_mapping"
+        )
+
+    sectors_output: list[dict] = []
+    for sector, data in agg.items():
+        total = data["bullish_count"] + data["bearish_count"] + data["neutral_count"]
+        if total == 0:
+            # Articles exist but none carry a sentiment label. Unlike v1, which
+            # emitted neutral/zero, this is reported as zero-confidence neutral
+            # only when there is article volume -- a genuine "covered but
+            # unlabelled" state, distinct from an absent sector.
+            score = 0.0
+        else:
+            score = (data["bullish_count"] - data["bearish_count"]) / total
+
+        sectors_output.append(
+            {
+                "sector": sector,
+                "outlook": _sector_outlook_label(score),
+                "outlook_score": round(score, 3),
+                "confidence": min(1.0, total / 20),
+                "articles_analyzed": data["articles_analyzed"],
+                "bullish_count": data["bullish_count"],
+                "bearish_count": data["bearish_count"],
+                "neutral_count": data["neutral_count"],
+                "top_symbols": sorted(
+                    data["top_symbols"],
+                    key=lambda x: x["sentiment_score"] if x["sentiment_score"] is not None else 0.0,
+                    reverse=True,
+                )[:5],
+            }
+        )
+
+    sectors_output.sort(key=lambda x: x["articles_analyzed"], reverse=True)
+    return sectors_output

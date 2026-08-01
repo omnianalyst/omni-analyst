@@ -26,6 +26,7 @@ from omni.coverage.writer import (
     ProhibitedSource,
     write_claims,
 )
+from omni.entities.resolve import _PROVIDER_IDENTIFIER, key_for
 from omni.ingest.protocol import ClaimDraft, Unavailable
 
 DEFAULT_LEASE_SECONDS = 300
@@ -61,6 +62,15 @@ _RECORD_ATTEMPT = """
 INSERT INTO fill_attempt (gap_id, capability, outcome, claim_id, reason, finished_at)
 VALUES ($1, $2, $3::fill_outcome, $4, $5, now())
 RETURNING id
+"""
+
+# Per-entity providers (sec_edgar/polygon/coingecko) fetch by an identifier that
+# lives on the entity row, not by the gap's series key. The columns mirror what
+# resolve.key_for reads, so the row can be handed to it unchanged.
+_LOAD_ENTITY = """
+SELECT id, kind, symbol, name, identifiers
+FROM entity
+WHERE id = $1
 """
 
 _RESOLVE = """
@@ -122,9 +132,35 @@ async def fill_gap(
         return FillResult(gap_id, "unfillable", None, [], reason)
 
     failures: list[str] = []
+    # A per-entity provider (one whose provider_key is in _PROVIDER_IDENTIFIER)
+    # is fetched by an identifier on the entity row, never by gap["key"]: the
+    # latter is NULL for a fundamental/price gap, and handing it through is how a
+    # CIK of "None" reached EDGAR. Load the row once only when such a candidate
+    # exists, so a FRED/rss gap pays no extra round-trip.
+    needs_entity = any(c.provider_key in _PROVIDER_IDENTIFIER for c in candidates)
+    entity = await _load_entity(pool, gap["entity_id"]) if needs_entity else None
+
     for registration in candidates:
         try:
-            drafts = await registration.call(gap["key"])
+            if registration.provider_key in _PROVIDER_IDENTIFIER:
+                if entity is None:
+                    raise Unavailable(
+                        f"no entity row for {gap['entity_id']}; cannot resolve "
+                        f"{registration.provider_key!r} identifier"
+                    )
+                arg = key_for(entity, registration.provider_key)
+            else:
+                arg = gap["key"]
+                if arg is None:
+                    # A NULL series key is not something to fetch: passing it
+                    # through is how a CIK of "None" reached EDGAR, and for a
+                    # series/rss provider it would invent a call to series None
+                    # or feed URL None. Decline rather than hand the adapter NULL.
+                    raise Unavailable(
+                        f"gap has no key and {registration.provider_key!r} "
+                        f"is fetched by it"
+                    )
+            drafts = await registration.call(arg)
         except Unavailable as exc:
             failures.append(f"{registration.name}: {exc}")
             continue
@@ -159,7 +195,23 @@ async def fill_gap(
             failures.append(f"{registration.name}: {exc}")
             continue
 
-        first = claim_ids[0] if claim_ids else None
+        if not claim_ids:
+            # The source answered, but every draft was already held -- a
+            # correct source re-queried. Not 'filled' (nothing was written, so
+            # coverage did not improve) and not a failure (the source worked).
+            # Resolved, not released: the demand is met by claims already in
+            # the store, and re-querying reproduces the same already-held data,
+            # so a retry buys nothing. The reason distinguishes nothing-new
+            # from the failure path below.
+            reason = (
+                f"{registration.name} returned no new observations "
+                f"(all {len(drafts)} already held)"
+            )
+            await _record(pool, gap_id, registration.name, "unfillable", None, reason)
+            await pool.execute(_RESOLVE, gap_id)
+            return FillResult(gap_id, "unfillable", registration.name, [], reason)
+
+        first = claim_ids[0]
         await _record(pool, gap_id, registration.name, "filled", first, None)
         await pool.execute(_RESOLVE, gap_id)
         return FillResult(gap_id, "filled", registration.name, claim_ids, None)
@@ -181,6 +233,11 @@ async def _record(
     await pool.execute(
         _RECORD_ATTEMPT, gap_id, capability or "none", outcome, claim_id, reason
     )
+
+
+async def _load_entity(pool, entity_id):
+    row = await pool.fetchrow(_LOAD_ENTITY, entity_id)
+    return dict(row) if row else None
 
 
 async def run_once(

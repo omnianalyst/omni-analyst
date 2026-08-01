@@ -1,6 +1,7 @@
-"""A1 -- the derived-claim fill path.
+"""A1/D5 -- the derived-claim fill path, driven through fill_analysis.
 
-Covers the behaviour the work order names:
+Covers the behaviour the work order names, now through the **declared**
+path (``ArgumentSpec`` + ``materialize``) rather than an injected gather:
 
 - a perception_divergence gap filled from two shared inputs, producing a claim
   and its claim_input edges in one commit
@@ -9,7 +10,9 @@ Covers the behaviour the work order names:
 - insufficient history producing unfillable with a reason and no claim
 - the gap's attempts incrementing and next_attempt_at set on an unfillable,
   matching the ingested path's backoff
-- inputs read audience-scoped: a private input of another user is not gathered
+- inputs read audience-scoped: a private input of another user is not
+  materialized (Abstention), so the derivation cannot proceed
+- the claim_input edges written equal the ids materialization reported
 """
 
 from __future__ import annotations
@@ -21,12 +24,15 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
-from omni.capability.derived import (
-    compute_divergence_claim,
-    gather_divergence_inputs,
+from omni.capability.arguments import (
+    Abstention,
+    Materialized,
+    materialize,
 )
+from omni.capability.derived import ARGUMENTS, DERIVED
 from omni.coverage.visibility import visible_claims
-from omni.fill.derived import fill_derived
+from omni.fill.derived import fill_analysis
+from omni.perception.divergence import resolve_derived_licence
 
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
 N = 100
@@ -135,10 +141,7 @@ class TestFilledFromSharedInputs:
         perc_ids, fact_ids = await _seed_shared(db, entity_id)
         gap = await _gap(db, entity_id, audience_user_id=None)
 
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
-        )
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
 
         assert result.outcome == "filled", result.reason
         assert result.capability == "perception.divergence"
@@ -203,10 +206,7 @@ class TestByoOnlyLeak:
         # The gap belongs to the owner: only they can see the byo input.
         gap = await _gap(db, entity_id, audience_user_id=owner)
 
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
-        )
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
         assert result.outcome == "filled", result.reason
         claim_id = result.claim_ids[0]
 
@@ -265,10 +265,7 @@ class TestInsufficientHistory:
         )
         gap = await _gap(db, entity_id, audience_user_id=None)
 
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
-        )
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
 
         assert result.outcome == "unfillable"
         assert result.reason is not None
@@ -316,10 +313,7 @@ class TestBackoffMatchesIngestedPath:
         assert before["attempts"] == 0
         assert before["next_attempt_at"] is None
 
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
-        )
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
         assert result.outcome == "unfillable"
 
         after = await db.pool.fetchrow(
@@ -337,8 +331,8 @@ class TestBackoffMatchesIngestedPath:
 # ------------------------------------------------------- audience-scoped gather
 
 
-class TestAudienceScopedGather:
-    async def test_a_private_input_of_another_user_is_not_gathered(self, db):
+class TestAudienceScopedMaterialize:
+    async def test_a_private_input_of_another_user_is_not_materialized(self, db):
         entity_id = await _entity(db)
         owner, other = uuid4(), uuid4()
 
@@ -358,18 +352,153 @@ class TestAudienceScopedGather:
 
         gap = await _gap(db, entity_id, audience_user_id=other)
 
-        perception, facts = await gather_divergence_inputs(db.pool, gap)
-        # The other user cannot see owner's private perception series, so it is
-        # never gathered and never reaches a derivation it must not feed.
-        assert perception == []
-        assert len(facts) == N
-
-        # With one whole side invisible the derivation cannot proceed.
-        result = await fill_derived(
-            db.pool, gap,
-            compute=compute_divergence_claim, gather=gather_divergence_inputs,
+        # The other user cannot see owner's private perception series, so
+        # materialize abstains -- the private claim never reaches a derivation
+        # it must not feed.
+        perc_result = await materialize(
+            ARGUMENTS[0], db.pool, entity_id=entity_id, audience=other
         )
+        assert isinstance(perc_result, Abstention)
+
+        # The shared fundamentals are visible.
+        fact_result = await materialize(
+            ARGUMENTS[1], db.pool, entity_id=entity_id, audience=other
+        )
+        assert isinstance(fact_result, Materialized)
+        assert len(fact_result.value) == N
+
+        # With one whole side abstaining the derivation cannot proceed.
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
         assert result.outcome == "unfillable"
         assert await db.pool.fetchval(
             "SELECT count(*) FROM claim WHERE derivation = 'derived'"
         ) == 0
+
+
+# ----------------------------------------- edges equal materialized ids (D5 risk)
+
+
+class TestEdgesEqualMaterializedIds:
+    async def test_claim_input_edges_equal_materialized_claim_ids(self, db):
+        """The claim_input edges must be exactly the ids materialization
+        reported -- not a subset. An incomplete edge set means a derived claim
+        whose licence is computed from a subset of its real inputs (a licence
+        leak with extra steps)."""
+        entity_id = await _entity(db)
+        await _seed_shared(db, entity_id)
+        gap = await _gap(db, entity_id, audience_user_id=None)
+
+        # Materialize independently to get the reported claim_ids.
+        perc_m = await materialize(
+            ARGUMENTS[0], db.pool, entity_id=entity_id, audience=None
+        )
+        fact_m = await materialize(
+            ARGUMENTS[1], db.pool, entity_id=entity_id, audience=None
+        )
+        assert isinstance(perc_m, Materialized)
+        assert isinstance(fact_m, Materialized)
+        materialized_ids = set(perc_m.claim_ids) | set(fact_m.claim_ids)
+
+        result = await fill_analysis(db.pool, gap, capability=DERIVED)
+        assert result.outcome == "filled", result.reason
+        claim_id = result.claim_ids[0]
+
+        edge_ids = {
+            r["input_id"] for r in await db.pool.fetch(
+                "SELECT input_id FROM claim_input WHERE claim_id = $1", claim_id
+            )
+        }
+        assert edge_ids == materialized_ids
+
+
+class _VisibilityReadCounter:
+    """Wraps a pool, counting ``fetch`` calls that touch the visibility CTE.
+
+    Every read through ``visible_claims`` (and the old ``_to_inputs_by_ids`` /
+    ``_licence_inputs`` re-reads) carries ``redistributable = 'allowed'`` in its
+    SQL; no other query in the fill path does. Delegates all other methods
+    (``fetchval``, ``execute``, ``acquire``) to the real pool untouched.
+    """
+
+    def __init__(self, pool):
+        self._pool = pool
+        self.count = 0
+
+    async def fetch(self, sql, *args):
+        if "redistributable = 'allowed'" in sql:
+            self.count += 1
+        return await self._pool.fetch(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._pool, name)
+
+
+# ----------------------------------------- licence from carried rows (D7 risk)
+
+
+class TestLicenceFromCarriedRows:
+    async def test_resolve_derived_licence_over_rows_matches_re_read(self, db):
+        """``resolve_derived_licence`` over ``Materialized.rows`` produces the
+        same ``(redistributable, audience)`` the old re-read produced. The
+        byo_only leak test depends on this: one byo_only input among allowed
+        ones makes the whole derivation private to that input's owner."""
+        entity_id = await _entity(db)
+        owner = uuid4()
+        perc_obs, fact_obs = _gen(+20, -20)
+        await _insert_series(
+            db, entity_id, perc_obs, claim_type="perception_macro", key="vix",
+            source="polygon", redistributable="byo_only",
+            audience_user_id=owner,
+        )
+        await _insert_series(
+            db, entity_id, fact_obs, claim_type="fundamental_metric",
+            key="Revenues", source="sec_edgar", redistributable="allowed",
+            audience_user_id=None,
+        )
+
+        perc_m = await materialize(
+            ARGUMENTS[0], db.pool, entity_id=entity_id, audience=owner
+        )
+        fact_m = await materialize(
+            ARGUMENTS[1], db.pool, entity_id=entity_id, audience=owner
+        )
+        assert isinstance(perc_m, Materialized)
+        assert isinstance(fact_m, Materialized)
+
+        # The licence inputs are the carried rows -- no re-read.
+        rows = [*perc_m.rows, *fact_m.rows]
+        redistributable, audience = resolve_derived_licence(rows)
+
+        # One byo_only input among allowed ones makes the whole derivation
+        # private to that input's owner.
+        assert redistributable == "byo_only"
+        assert audience == owner
+
+        # Cross-check: the perception rows carry byo_only, the fundamental
+        # rows carry allowed -- the most restrictive wins.
+        assert all(r.redistributable == "byo_only" for r in perc_m.rows)
+        assert all(r.redistributable == "allowed" for r in fact_m.rows)
+
+
+# ----------------------------------------------------------- re-reads are gone
+
+
+class TestNoReReads:
+    async def test_declared_fill_reads_visible_claims_once_per_argument(self, db):
+        """A declared ``fill_analysis`` issues exactly one ``visible_claims``
+        read per ArgumentSpec (materialization) and no more. The re-reads D5
+        carried -- two ``_to_inputs_by_ids`` in the compute adapter and one
+        ``_licence_inputs`` for the licence -- are gone, supplied by
+        ``Materialized.rows``."""
+        entity_id = await _entity(db)
+        await _seed_shared(db, entity_id)
+        gap = await _gap(db, entity_id, audience_user_id=None)
+
+        counter = _VisibilityReadCounter(db.pool)
+        result = await fill_analysis(counter, gap, capability=DERIVED)
+        assert result.outcome == "filled", result.reason
+
+        # Two ArgumentSpecs -> two materialization reads. The old code added
+        # three more (two _to_inputs_by_ids + one _licence_inputs); those are
+        # gone. Exactly len(ARGUMENTS) visibility reads remain.
+        assert counter.count == len(ARGUMENTS)

@@ -43,6 +43,15 @@ from scipy import stats
 
 from omni.ingest.protocol import Unavailable
 
+# Tolerance for "is this dispersion degenerate?" checks, applied to the sample
+# standard deviation (ddof=1). std of a bit-identical constant series can land
+# at ~1e-17 rather than exactly 0.0 (0.05 is not representable in binary64), so
+# a guard written ``== 0.0`` or ``> 0`` misses it and divides the mean by ~1e-17
+# -- fabricating an information ratio of ~7e15 or a Sharpe of ~1e17 from a flat
+# series. One tolerance on the one scale-consistent quantity (std, not the
+# scale-squared variance), matching attribution.py:75. See AGENTS.md.
+_ZERO_STD_ATOL = 1e-12
+
 # ---------------------------------------------------------------------------
 # Cross-asset engine
 # ---------------------------------------------------------------------------
@@ -517,11 +526,11 @@ def _summarize_ic(by_period: pd.Series, method: str) -> ICResult:
         ic_ir = np.nan
         t_stat = np.nan
         p_value = np.nan
-    elif not np.isfinite(ic_std) or ic_std == 0.0:
+    elif not np.isfinite(ic_std) or np.isclose(ic_std, 0.0, atol=_ZERO_STD_ATOL):
         # IC is perfectly constant across periods. If it's a non-zero constant the
         # relationship is trivially, perfectly consistent (infinite IR); if it's a
         # constant zero there is no relationship.
-        if mean_ic != 0.0:
+        if not np.isclose(mean_ic, 0.0, atol=_ZERO_STD_ATOL):
             ic_ir = np.inf
             t_stat = np.inf
             p_value = 0.0
@@ -627,7 +636,11 @@ def quantile_analysis(
     if n_periods >= 2:
         mu = float(ls_returns.mean())
         sd = float(ls_returns.std(ddof=1))
-        ls_sharpe = (mu / sd * np.sqrt(periods_per_year)) if sd > 0 else np.nan
+        ls_sharpe = (
+            mu / sd * np.sqrt(periods_per_year)
+            if not np.isclose(sd, 0.0, atol=_ZERO_STD_ATOL)
+            else np.nan
+        )
         ls_ann = mu * periods_per_year
     else:
         ls_sharpe = np.nan
