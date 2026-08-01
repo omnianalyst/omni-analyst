@@ -1,0 +1,37 @@
+-- The inflation signal: the third earned macro claim type after
+-- yield_curve_signal and sahm_rule_signal, applying D10/D14's template a third
+-- time. It is a derived STATE ("what is CPI inflation right now" -- YoY, MoM-
+-- annualized, 3m-annualized), not a horizon-parameterized computation, so it
+-- passes the durability test: something consumes it (macro.taylor_rule takes
+-- `inflation` as a direct argument) and it has a meaningful freshness policy.
+--
+-- The enum addition is isolated here, ALONE, following 010/003/013 exactly.
+-- Postgres forbids using a new enum value in the same transaction that adds it
+-- ("unsafe use of new value ... New enum values must be committed before they
+-- can be used"), and the Neutron migrator wraps each migration's entire `up` in
+-- one transaction -- so a claim_type_policy INSERT that references
+-- 'inflation_signal' cannot share this file. Verified empirically in D10's
+-- report (ALTER TYPE + INSERT in one tx aborts the whole transaction, so the
+-- value would not even be added). The policy row lands in the follow-up
+-- migration 016 once this value is committed; this is the convention
+-- 010/011 and 013/014 established and this follows rather than inventing a
+-- third one.
+--
+-- Source series: FRED CPIAUCSL (Consumer Price Index for All Urban Consumers:
+-- All Items, Index 1982-84=100, Seasonally Adjusted) -- verified against FRED
+-- directly (series page confirms title and Monthly frequency) and corroborated
+-- by v1 software/backend/app/services/macroeconomic/fed_data_service.py:106
+-- ("cpi_all_items": "CPIAUCSL"). macro.inflation_measures runs on an index
+-- LEVEL series, which CPIAUCSL is; a percent-change series would double-count.
+--
+-- Intended claim_type_policy row (staleness justification in 016): CPIAUCSL is
+-- a MONTHLY FRED series, so the signal's headline fields can change at most
+-- once per publication month. The macro_series_point default of 35 days is
+-- explicitly for monthly FRED series, so the derived signal matches its input's
+-- cadence: "only as fresh as its inputs."
+--
+--   INSERT INTO claim_type_policy (claim_type, default_staleness, note) VALUES
+--       ('inflation_signal', INTERVAL '35 days',
+--        'derived from monthly CPIAUCSL consumer price index; only as fresh as its inputs');
+
+ALTER TYPE claim_type ADD VALUE IF NOT EXISTS 'inflation_signal';

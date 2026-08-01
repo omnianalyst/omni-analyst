@@ -57,6 +57,7 @@ CLAIM_TYPES = frozenset(
         "onchain_supply",
         "yield_curve_signal",
         "sahm_rule_signal",
+        "inflation_signal",
     }
 )
 

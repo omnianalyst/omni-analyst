@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
-from omni.capabilities.macro import sahm_rule, yield_curve_inversion
+from omni.capabilities.macro import inflation_measures, sahm_rule, yield_curve_inversion
 from omni.capability.arguments import ArgumentSpec, Materialized
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.coverage.visibility import visible_claims
@@ -458,6 +458,142 @@ SAHM = DerivedCapability(
 )
 
 
+# ------------------------------------------------------------ inflation signal
+#
+# The third earned macro claim type after yield_curve_signal (D10) and
+# sahm_rule_signal (D14), applying D10's template a third time. A derived
+# STATE -- "what is CPI inflation right now" (YoY, MoM-annualized,
+# 3m-annualized) -- not a horizon-parameterized computation, so it earns a
+# claim type: macro.taylor_rule takes ``inflation`` as a direct argument, and
+# the signal has a real freshness policy. The compute is the existing
+# (unchanged) ``macro.inflation_measures``; this declaration gives its output a
+# durable home in the coverage store.
+#
+# v1 sources this from FRED ``CPIAUCSL`` (Consumer Price Index for All Urban
+# Consumers: All Items, Index 1982-84=100, Seasonally Adjusted). The series id
+# was verified against FRED directly (series page confirms title and Monthly
+# frequency) AND corroborated by v1
+# software/backend/app/services/macroeconomic/fed_data_service.py:106
+# ("cpi_all_items": "CPIAUCSL") -- two sources, no prose taken on faith.
+# CPIAUCSL is the ArgumentSpec key. inflation_measures runs on an index LEVEL
+# series (YoY = index[-1]/index[-13] - 1); a percent-change series would
+# double-count, which is why ``transform="level"`` is correct here.
+
+INFLATION_NAME = "macro.inflation_signal"
+INFLATION_PRODUCES = "inflation_signal"
+INFLATION_KEY = "cpi_all"
+INFLATION_SPEC_KEY = "CPIAUCSL"
+
+# ``inflation_measures`` reads ``cpi_values[-1]`` (current), ``[-2]`` (previous
+# month), ``[-4]`` (three months ago) and ``[-13]`` (one year ago), and raises
+# ``Unavailable`` below 13 observations (the year-ago index is the binding
+# floor). The same daily-vs-monthly adjustment D14 made for UNRATE applies
+# here: CPIAUCSL is MONTHLY, so 13 observations already span ~one calendar year
+# (a YoY reading needs a year of data by definition).
+#
+# Arithmetic (monthly):
+#   - ``min_obs = 13``: the function's hard floor. The spec abstains at 12, so
+#     ``inflation_measures``' ``Unavailable`` branch (raises at <13) is
+#     unreachable through the declared path -- abstention is the spec's job,
+#     not the capability's. One input series, no two-series intersection, so
+#     unlike YIELD_CURVE no compute-time floor check is needed.
+#   - ``window = 19`` = 13 (the function's trailing-13 year-ago lookback,
+#     ~one calendar year of monthly data) + 6 months margin for the ~1-month
+#     publication lag and a missing mid-series observation, so a single hole
+#     does not drop the materialized count below ``min_obs``. The function
+#     ignores anything older than its trailing-13 slice, so the extra six are
+#     margin only -- passing 19 to a function that reads ``[-13:]``/``[-4]``/
+#     ``[-2]``/``[-1]`` yields the same result as passing exactly 13.
+INFLATION_MIN_OBS = 13
+INFLATION_WINDOW = 19
+
+INFLATION_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="cpi",
+        claim_type="macro_series_point",
+        key=INFLATION_SPEC_KEY,
+        shape="series",
+        transform="level",
+        window=INFLATION_WINDOW,
+        min_obs=INFLATION_MIN_OBS,
+    ),
+)
+
+INFLATION_CONSUMES = tuple(spec.claim_type for spec in INFLATION_ARGUMENTS)
+
+
+async def compute_inflation_signal_declared(pool, gap, *, cpi: Materialized):
+    """Declared-path compute: adapt ``Materialized`` to the ``Sequence[float]``
+    ``inflation_measures`` expects.
+
+    ``inflation_measures`` takes a single ordered CPI index series, not the
+    ``Materialized`` shape ``materialize`` returns -- the same shape mismatch
+    ``compute_sahm_rule_signal_declared`` bridges. The adapter lives here, next
+    to that one, not in ``arguments.py`` (per D5/D10): the shape conversion is
+    specific to this one analysis function's signature.
+
+    Returns a ``ClaimDraft`` of ``claim_type="inflation_signal"`` whose
+    ``value`` is the durable state a consumer reads (the three inflation rates
+    ``macro.taylor_rule`` consumes as ``inflation`` -- YoY is the headline) and
+    whose ``evidence`` carries the supporting ``current_index`` and ``trend``
+    (reconstructable from the inputs) and the input claim ids.
+
+    ``min_obs=13`` on the spec guarantees ``inflation_measures`` never sees
+    fewer than its 13-observation floor, so its ``Unavailable`` branch is
+    unreachable through the declared path; the try/except is defense-in-depth,
+    not the abstention mechanism. One input series, no two-series intersection,
+    so no compute-time floor check is needed (unlike YIELD_CURVE).
+
+    ``inflation_measures``/``calculate_inflation_trend`` return numpy scalars
+    (``np.mean``/``np.std`` -> ``np.float64``), which ``json.dumps`` cannot
+    serialize. Casting to native ``float`` here is adapter plumbing -- the
+    values are identical, only the wrapper changes -- and lives with the rest
+    of the shape bridging rather than in ``macro.py`` (whose behaviour is
+    unchanged).
+    """
+    values = [r.value for r in cpi.rows]
+
+    try:
+        result = await inflation_measures(values)
+    except Unavailable:
+        return None
+
+    last_row = cpi.rows[-1]
+    latest_knowledge = max(r.knowledge_date for r in cpi.rows)
+    trend = result["trend"]
+
+    return ClaimDraft(
+        claim_type=INFLATION_PRODUCES,
+        key=INFLATION_KEY,
+        value={
+            "yoy": float(result["yoy"]),
+            "mom_annualized": float(result["mom_annualized"]),
+            "3m_annualized": float(result["3m_annualized"]),
+        },
+        event_date=last_row.event_date,
+        knowledge_date=latest_knowledge,
+        confidence=1.0,
+        unit="percent",
+        evidence={
+            "series": [INFLATION_SPEC_KEY],
+            "current_index": float(result["current_index"]),
+            "trend": {
+                "momentum": trend["momentum"],
+                "3m_annualized": float(trend["3m_annualized"]),
+                "volatility": float(trend["volatility"]),
+            },
+            "input_claim_ids": [str(r.id) for r in cpi.rows],
+        },
+    )
+
+
+INFLATION = DerivedCapability(
+    name=INFLATION_NAME,
+    arguments=INFLATION_ARGUMENTS,
+    compute=compute_inflation_signal_declared,
+)
+
+
 def build_derived_registry() -> Registry:
     """Register the derived capabilities that are wired and tested today."""
     registry = Registry()
@@ -470,6 +606,9 @@ def build_derived_registry() -> Registry:
 
     async def call_sahm(pool, gap):
         return await fill_analysis(pool, gap, capability=SAHM)
+
+    async def call_inflation(pool, gap):
+        return await fill_analysis(pool, gap, capability=INFLATION)
 
     registry.add(
         Capability(
@@ -523,6 +662,24 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capabilities.macro.sahm_rule",
             call=call_sahm,
+        )
+    )
+    registry.add(
+        Capability(
+            name=INFLATION_NAME,
+            description=(
+                "CPI inflation measures: YoY, month-over-month annualized and "
+                "3-month annualized inflation, plus trend, derived from "
+                "CPIAUCSL macro_series_point (index level) claims."
+            ),
+            consumes=INFLATION_CONSUMES,
+            produces=(INFLATION_PRODUCES,),
+            touches_byo=False,
+            cost=0.1,
+            maturity=Maturity.WIRED,
+            callability=Callability.YES,
+            origin="omni.capabilities.macro.inflation_measures",
+            call=call_inflation,
         )
     )
     return registry
