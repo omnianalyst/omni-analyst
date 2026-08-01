@@ -11,8 +11,8 @@ This file binds those extracted functions as capabilities without modifying
 them. Each function becomes either a claim producer (its output maps to a
 claim_type already in the schema enum) or an analysis step (it consumes claims
 and returns a computed result, so `produces` is empty). No claim type is
-invented: the enum in migrations/001_core_schema.sql and 003_domains_and_graph.sql
-is closed, and `CLAIM_TYPES` below mirrors it so a drift is caught.
+invented: the claim_type enum declared across the migration files is closed,
+and `CLAIM_TYPES` below mirrors it so a drift is caught.
 
 Licence classification follows the work order: macro from FRED is shareable;
 news and sentiment from commercial APIs are not. Fundamentals are sourced from
@@ -34,9 +34,11 @@ from omni.capability.registry import (
     Registry,
 )
 
-# The closed claim_type enum, mirroring migrations/001_core_schema.sql and
-# migrations/003_domains_and_graph.sql. A capability declaring anything outside
-# this set is a schema bug; the tests check against this.
+# The closed claim_type enum, mirroring the claim_type values declared
+# across all migration files (001_core_schema.sql, 003_domains_and_graph.sql,
+# 010_yield_curve_signal.sql, ...). A capability declaring anything outside
+# this set is a schema bug; test_claim_types_frozenset_mirrors_the_migration_enum
+# asserts this set matches the migrations so the next addition fails loudly.
 CLAIM_TYPES = frozenset(
     {
         "price_snapshot",
@@ -53,6 +55,7 @@ CLAIM_TYPES = frozenset(
         "onchain_flow",
         "onchain_tvl",
         "onchain_supply",
+        "yield_curve_signal",
     }
 )
 
@@ -397,8 +400,8 @@ def build_extracted_registry() -> Registry:
         _bind(
             "news.aggregate_market_sentiment",
             "Aggregate per-sentiment counts into a single market read: "
-            "overall bullish/bearish/neutral, a breakdown and a weighted "
-            "score.",
+            "overall bullish/bearish/neutral, a per-sentiment breakdown and "
+            "total article count.",
             fn=news.aggregate_market_sentiment,
             consumes=("news_event",),
             produces=("perception_news",),
@@ -1454,7 +1457,8 @@ def build_extracted_registry() -> Registry:
         _bind(
             "market_risk.credit_risk",
             "Credit-spread risk against historical-average anchors (IG 120, "
-            "HY 450 bps): tight / widening / stressed bands.",
+            "HY 450 bps): a numeric stress score in {40, 60, 80} via 1.2x and "
+            "1.5x multipliers of the anchors, plus a spread_widening flag.",
             fn=risk.analyze_credit_risk,
             touches_byo=True,
             provenance=(
