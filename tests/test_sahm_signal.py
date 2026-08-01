@@ -329,19 +329,14 @@ class TestEvidenceShape:
 
 
 class TestMonthlySpacing:
-    async def test_twelve_daily_observations_satisfy_the_count_based_spec(
+    async def test_twelve_daily_observations_are_rejected_by_the_calendar_guard(
         self, db
     ):
-        """ArgumentSpec operates on COUNTS of observations (window/min_obs),
-        not calendar spacing, so it cannot tell 12 monthly observations
-        (intended: ~one year) from 12 daily observations (intended: ~two
-        weeks). This test documents that honestly rather than asserting a
-        guarantee the spec does not give: 12 daily observations clear
-        min_obs=12 and produce a sahm_rule_signal claim.
-
-        Closing this gap needs a spacing/freshness field on ArgumentSpec
-        (``capability/arguments.py``), which is outside this order's file list.
-        """
+        """``min_calendar_days`` closes the count-only limitation this test used
+        to document: 12 DAILY observations (span ~11 days) clear ``min_obs=12``
+        but fall short of ``min_calendar_days=330`` (~11 months), so the spec
+        abstains and ``sahm_rule`` is never handed a year of daily data
+        masquerading as monthly. The reason names the calendar shortfall."""
         entity_id = await _entity(db)
         # 12 DAILY observations (1-day spacing), not monthly.
         dates = [BASE + timedelta(days=i) for i in range(12)]
@@ -350,7 +345,7 @@ class TestMonthlySpacing:
         gap = await _demand_and_lease(db, entity_id)
 
         result = await fill_analysis(db.pool, gap, capability=SAHM)
-        # The count-based spec cannot distinguish daily from monthly spacing:
-        # 12 observations clear min_obs=12 regardless of cadence, so the fill
-        # proceeds. This is the documented limitation, not a guarantee.
-        assert result.outcome == "filled"
+        assert result.outcome == "unfillable"
+        assert result.claim_ids == []
+        assert "unemployment" in result.reason
+        assert "calendar days" in result.reason

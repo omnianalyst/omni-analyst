@@ -63,6 +63,12 @@ class ArgumentSpec:
     - ``transform``: applied to the level series before windowing.
     - ``window``: trailing N observations **after** transform; ``None`` = all.
     - ``min_obs``: abstain below this; never pad.
+    - ``min_calendar_days``: minimum span (in days) between the earliest and
+      latest surviving observation's ``align_on`` date; ``None`` = no calendar
+      check. This is the spacing/freshness dimension ``min_obs`` cannot express:
+      12 daily and 12 monthly observations both clear ``min_obs=12``, but only
+      the monthly set spans ~a year. A spec over a monthly series sets this so a
+      daily series cannot satisfy it.
     - ``value_field``: dotted path to the scalar inside the claim's JSONB
       ``value`` (default ``"value"`` reproduces the existing ``_scalar``
       discipline).
@@ -80,6 +86,7 @@ class ArgumentSpec:
     transform: str = "level"
     window: int | None = None
     min_obs: int | None = None
+    min_calendar_days: int | None = None
     value_field: str = "value"
     entity_scope: str = "objective"
     relation: str | None = None
@@ -104,6 +111,10 @@ class ArgumentSpec:
             raise ValueError(f"ArgumentSpec {self.name!r}: window must be positive")
         if self.min_obs is not None and self.min_obs <= 0:
             raise ValueError(f"ArgumentSpec {self.name!r}: min_obs must be positive")
+        if self.min_calendar_days is not None and self.min_calendar_days <= 0:
+            raise ValueError(
+                f"ArgumentSpec {self.name!r}: min_calendar_days must be positive"
+            )
         if self.align_on not in ("event_date", "knowledge_date"):
             raise ValueError(
                 f"ArgumentSpec {self.name!r}: align_on must be a claim date column"
@@ -352,6 +363,30 @@ def _empty_abstention(spec: ArgumentSpec) -> Abstention:
     return Abstention(spec.name, f"{spec.name}: no observations")
 
 
+def _calendar_short(spec: ArgumentSpec, keys) -> Abstention | None:
+    """``min_calendar_days`` guard: the span (in days) between the earliest and
+    latest surviving ``align_on`` date. Returns an ``Abstention`` naming the
+    shortfall if the windowed observations do not span enough calendar time.
+
+    This is the dimension ``min_obs`` cannot express: 12 daily and 12 monthly
+    observations both clear ``min_obs=12``, but only the monthly set spans ~a
+    year. The keys are the post-transform, post-window ``align_on`` values
+    (datetimes), so the span is over exactly the observations the value was
+    computed from. ``None`` (the default) disables the check, preserving every
+    existing spec's count-only behaviour.
+    """
+    if spec.min_calendar_days is None:
+        return None
+    span_days = (max(keys) - min(keys)).days
+    if span_days < spec.min_calendar_days:
+        return Abstention(
+            spec.name,
+            f"{spec.name}: {span_days} of {spec.min_calendar_days} required "
+            f"calendar days (short {spec.min_calendar_days - span_days})",
+        )
+    return None
+
+
 def _shape_scalar(vals, prov) -> Materialized:
     return Materialized(value=vals[-1], claim_ids=(prov[-1].id,), rows=(prov[-1],))
 
@@ -374,6 +409,9 @@ async def _materialize_one(spec, pool, *, entity_id, audience):
     short = _floor(spec, len(w_vals))
     if short is not None:
         return short
+    cal = _calendar_short(spec, _w_keys)
+    if cal is not None:
+        return cal
 
     if spec.shape == "scalar":
         return _shape_scalar(w_vals, w_prov)

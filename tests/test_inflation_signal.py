@@ -353,19 +353,14 @@ class TestEvidenceShape:
 
 
 class TestMonthlySpacing:
-    async def test_thirteen_daily_observations_satisfy_the_count_based_spec(
+    async def test_thirteen_daily_observations_are_rejected_by_the_calendar_guard(
         self, db
     ):
-        """ArgumentSpec operates on COUNTS of observations (window/min_obs),
-        not calendar spacing, so it cannot tell 13 monthly observations
-        (intended: ~one year, a real YoY) from 13 daily observations (intended:
-        ~two weeks, a nonsensical YoY). This test documents that honestly
-        rather than asserting a guarantee the spec does not give: 13 daily
-        observations clear min_obs=13 and produce an inflation_signal claim.
-
-        Closing this gap needs a spacing/freshness field on ArgumentSpec
-        (``capability/arguments.py``), which is the same open item D14 recorded.
-        """
+        """``min_calendar_days`` closes the count-only limitation this test used
+        to document: 13 DAILY observations (span ~12 days) clear ``min_obs=13``
+        but fall short of ``min_calendar_days=335`` (~11 months), so the spec
+        abstains rather than producing an inflation reading from two weeks of
+        daily data. The reason names the calendar shortfall."""
         entity_id = await _entity(db)
         # 13 DAILY observations (1-day spacing), not monthly.
         dates = [BASE + timedelta(days=i) for i in range(13)]
@@ -376,7 +371,7 @@ class TestMonthlySpacing:
         gap = await _demand_and_lease(db, entity_id)
 
         result = await fill_analysis(db.pool, gap, capability=INFLATION)
-        # The count-based spec cannot distinguish daily from monthly spacing:
-        # 13 observations clear min_obs=13 regardless of cadence, so the fill
-        # proceeds. This is the documented limitation, not a guarantee.
-        assert result.outcome == "filled"
+        assert result.outcome == "unfillable"
+        assert result.claim_ids == []
+        assert "cpi" in result.reason
+        assert "calendar days" in result.reason

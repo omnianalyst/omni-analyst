@@ -382,6 +382,12 @@ SAHM_KEY = "unrate"
 #     and trailing-3 as passing exactly 12.
 SAHM_MIN_OBS = 12
 SAHM_WINDOW = 18
+# 12 monthly observations span ~one calendar year (~335 days at month spacing);
+# 12 DAILY observations span ~11 days. ``min_calendar_days`` rejects the latter,
+# closing the count-only limitation D14 documented (a daily series used to
+# satisfy a monthly spec). 330 ~= 11 months, comfortably below a real trailing
+# 12-month span (~341 days at 31-day spacing) and well above any daily span.
+SAHM_MIN_CALENDAR_DAYS = 330
 
 SAHM_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ArgumentSpec(
@@ -392,6 +398,7 @@ SAHM_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         transform="level",
         window=SAHM_WINDOW,
         min_obs=SAHM_MIN_OBS,
+        min_calendar_days=SAHM_MIN_CALENDAR_DAYS,
     ),
 )
 
@@ -511,6 +518,10 @@ INFLATION_SPEC_KEY = "CPIAUCSL"
 #     ``[-2]``/``[-1]`` yields the same result as passing exactly 13.
 INFLATION_MIN_OBS = 13
 INFLATION_WINDOW = 19
+# 13 monthly observations span ~one calendar year; 13 DAILY span ~12 days.
+# ``min_calendar_days`` rejects the daily case, closing the count-only
+# limitation the inflation TestMonthlySpacing documented.
+INFLATION_MIN_CALENDAR_DAYS = 335
 
 INFLATION_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ArgumentSpec(
@@ -521,6 +532,7 @@ INFLATION_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         transform="level",
         window=INFLATION_WINDOW,
         min_obs=INFLATION_MIN_OBS,
+        min_calendar_days=INFLATION_MIN_CALENDAR_DAYS,
     ),
 )
 

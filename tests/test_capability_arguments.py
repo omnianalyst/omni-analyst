@@ -163,6 +163,76 @@ class TestMinObsFloor:
         assert len(result.value) == 20
 
 
+# ------------------------------------------------ 2b. min_calendar_days spacing
+
+
+class TestMinCalendarDays:
+    async def test_short_calendar_span_abstains_naming_the_shortfall(self, db):
+        # 20 observations on consecutive days span only 19 days -- they clear
+        # min_obs=20 but not min_calendar_days=300, the count-only limitation
+        # this field exists to close.
+        entity_id = await _entity(db)
+        await _seed_levels(db, entity_id, [float(v) for v in range(20)])
+
+        spec = ArgumentSpec(
+            name="returns",
+            claim_type="price_snapshot",
+            shape="series",
+            transform="level",
+            min_obs=20,
+            min_calendar_days=300,
+        )
+        result = await materialize(spec, db.pool, entity_id=entity_id, audience=None)
+
+        assert isinstance(result, Abstention)
+        assert result.argument == "returns"
+        assert "calendar days" in result.reason
+        assert "19 of 300" in result.reason
+
+    async def test_sufficient_calendar_span_materializes(self, db):
+        entity_id = await _entity(db)
+        await _seed_levels(db, entity_id, [float(v) for v in range(20)])
+
+        spec = ArgumentSpec(
+            name="returns",
+            claim_type="price_snapshot",
+            shape="series",
+            transform="level",
+            min_obs=20,
+            min_calendar_days=10,  # the 19-day span clears it
+        )
+        result = await materialize(spec, db.pool, entity_id=entity_id, audience=None)
+
+        assert isinstance(result, Materialized)
+        assert len(result.value) == 20
+
+    async def test_none_disables_the_calendar_check(self, db):
+        entity_id = await _entity(db)
+        await _seed_levels(db, entity_id, [float(v) for v in range(20)])
+
+        spec = ArgumentSpec(
+            name="returns",
+            claim_type="price_snapshot",
+            shape="series",
+            transform="level",
+            min_obs=20,
+            min_calendar_days=None,
+        )
+        result = await materialize(spec, db.pool, entity_id=entity_id, audience=None)
+        assert isinstance(result, Materialized)
+        assert len(result.value) == 20
+
+    def test_non_positive_min_calendar_days_rejected_at_construction(self):
+        with pytest.raises(ValueError):
+            ArgumentSpec(
+                name="returns",
+                claim_type="price_snapshot",
+                shape="series",
+                transform="level",
+                min_calendar_days=0,
+            )
+
+
 # ----------------------------------------------------------- 3. audience scope
 
 
