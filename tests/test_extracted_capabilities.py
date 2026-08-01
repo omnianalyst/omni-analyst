@@ -1,6 +1,8 @@
 """The extracted-capability registry: bound, honest, and planner-discoverable."""
 
+import re
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -22,9 +24,11 @@ from omni.capability.extracted import CLAIM_TYPES, build_extracted_registry
 from omni.capability.registry import Registry
 from omni.ingest.protocol import Unavailable
 
-# The schema enum, as declared in migrations/001_core_schema.sql and
-# migrations/003_domains_and_graph.sql. Mirrored here so the test catches a
-# capability (or a migration edit) that drifts outside it.
+# The schema enum, as declared across the migration files. Mirrored here so
+# the test catches a capability (or a migration edit) that drifts outside it.
+# The migration-driven test (test_claim_types_frozenset_mirrors_the_migration_enum)
+# is the real drift guard; this constant exists for the declared-claim-type
+# checks below.
 SCHEMA_CLAIM_TYPES = frozenset(
     {
         "price_snapshot",
@@ -41,8 +45,43 @@ SCHEMA_CLAIM_TYPES = frozenset(
         "onchain_flow",
         "onchain_tvl",
         "onchain_supply",
+        "yield_curve_signal",
     }
 )
+
+
+_MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _claim_type_enum_from_migrations() -> frozenset[str]:
+    """Read every claim_type enum value out of the migration SQL files.
+
+    Parses ``CREATE TYPE claim_type AS ENUM (...)`` (001) and every
+    ``ALTER TYPE claim_type ADD VALUE IF NOT EXISTS '...'`` (003, 010, ...)
+    so the frozenset in extracted.py cannot silently drift from the schema
+    the next time a claim type is added. Comment text is stripped first so a
+    commented-out DDL statement cannot fool the parser.
+    """
+    values: set[str] = set()
+    create_re = re.compile(
+        r"CREATE\s+TYPE\s+claim_type\s+AS\s+ENUM\s*\((.*?)\)",
+        re.DOTALL | re.IGNORECASE,
+    )
+    alter_re = re.compile(
+        r"ALTER\s+TYPE\s+claim_type\s+ADD\s+VALUE\s+IF\s+NOT\s+EXISTS"
+        r"\s+'([^']+)'",
+        re.IGNORECASE,
+    )
+    value_re = re.compile(r"'([^']+)'")
+    for sql_path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+        raw = sql_path.read_text()
+        cleaned = "\n".join(
+            line.split("--", 1)[0] for line in raw.splitlines()
+        )
+        for m in create_re.finditer(cleaned):
+            values.update(value_re.findall(m.group(1)))
+        values.update(alter_re.findall(cleaned))
+    return frozenset(values)
 
 
 @pytest.fixture
@@ -1398,6 +1437,23 @@ class TestRegistryShape:
     def test_claim_type_constant_matches_the_schema_enum(self):
         assert CLAIM_TYPES == SCHEMA_CLAIM_TYPES
 
+    def test_claim_types_frozenset_mirrors_the_migration_enum(self):
+        """Drift guard: CLAIM_TYPES must equal the claim_type values declared
+        across the migration files. The next migration that adds a claim type
+        (e.g. a concurrent branch adding 'sahm_rule_signal') will fail this
+        test until CLAIM_TYPES is updated -- that is the test working as
+        designed, not a defect. The one-line fix: add the new value to
+        CLAIM_TYPES in src/omni/capability/extracted.py.
+        """
+        enum_values = _claim_type_enum_from_migrations()
+        assert CLAIM_TYPES == enum_values, (
+            "CLAIM_TYPES drifted from the migration-defined claim_type enum.\n"
+            f"  in CLAIM_TYPES but not migrations: {CLAIM_TYPES - enum_values}\n"
+            f"  in migrations but not CLAIM_TYPES: {enum_values - CLAIM_TYPES}\n"
+            "If a concurrent branch added a claim type, add it to CLAIM_TYPES"
+            " in src/omni/capability/extracted.py to resolve."
+        )
+
     def test_every_declared_claim_type_is_in_the_closed_enum(self, registry):
         for name in registry._by_name:
             cap = registry.get(name)
@@ -1479,6 +1535,36 @@ class TestInvocation:
         kwargs, predicate = _cases()[name]
         result = await registry.get(name).call(**kwargs)
         assert predicate(result), f"{name} returned an unexpected result: {result!r}"
+
+    async def test_credit_risk_double_registration_resolves_to_same_function(
+        self, registry
+    ):
+        """market_risk.credit_risk is registered in BOTH extracted.py (bound
+        to risk.analyze_credit_risk) and orchestrator/analysis.py (whose
+        _compute_credit_risk calls the same function via the name-keyed
+        declared-argument path). Pin: both paths must produce identical output
+        for the same inputs. If someone rebinds one to a different function,
+        this test fails -- the two registrations have drifted.
+
+        This imports a private name (_compute_credit_risk) from analysis.py,
+        which a concurrent order owns. If that import fails on merge, the
+        declared-argument path has been restructured and this pin needs review
+        -- the ImportError is the signal, not a defect in the test.
+        """
+        from omni.capability.arguments import Materialized
+        from omni.capabilities.risk import analyze_credit_risk
+        from omni.orchestrator.analysis import _compute_credit_risk
+
+        ig = Materialized(value=200.0, claim_ids=(), rows=())
+        hy = Materialized(value=700.0, claim_ids=(), rows=())
+
+        via_analysis = await _compute_credit_risk(ig_spread=ig, hy_spread=hy)
+        via_extracted = await registry.get("market_risk.credit_risk").call(
+            ig_spread=200.0, hy_spread=700.0
+        )
+        direct = analyze_credit_risk(ig_spread=200.0, hy_spread=700.0)
+
+        assert via_analysis == via_extracted == direct
 
     async def test_a_missing_dependency_raises_rather_than_substituting(self, registry):
         """The fill pipeline needs the reason, not a silent default."""
