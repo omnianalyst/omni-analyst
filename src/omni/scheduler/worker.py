@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from omni.capability.registry import Registry
+from omni.conviction.ledger import resolve_due_predictions
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.fill.pipeline import drain
 
@@ -40,6 +41,10 @@ class SchedulerConfig:
     #: spend an entire API budget in one loop iteration.
     max_gaps_per_cycle: int = 25
     fill_workers: int = 2
+    #: Resolve reads only the coverage store (no external API), so it is cheap
+    #: like sweep rather than budgeted like fill. Its own interval because it
+    #: answers a different question: "which predictions' horizons just elapsed".
+    resolve_interval: float = 60.0
     licensed: tuple[str, ...] = ()
     worker_id: str = field(default_factory=lambda: f"omni-{os.getpid()}-{uuid4().hex[:6]}")
 
@@ -52,6 +57,7 @@ class Stats:
     filled: int = 0
     unfillable: int = 0
     errored: int = 0
+    resolved: int = 0
 
 
 async def sweep_once(pool) -> int:
@@ -73,6 +79,17 @@ async def fill_once(
         max_gaps=config.max_gaps_per_cycle,
         licensed=config.licensed,
     )
+
+
+async def resolve_once(pool) -> int:
+    """Resolve predictions whose horizons have elapsed.
+
+    Resolves against the shared network alone (audience=None): outcomes are
+    decided only by redistributable prices, which keeps the global
+    calibration_bucket free of audience-private data. See ledger.py for why a
+    non-None audience here would be a licence question rather than a code one.
+    """
+    return await resolve_due_predictions(pool)
 
 
 class Scheduler:
@@ -102,6 +119,15 @@ class Scheduler:
             self._tasks.append(
                 asyncio.create_task(self._fill_loop(f"{self._config.worker_id}-{i}"))
             )
+        # Resolve once before the loop starts, for the same reason sweep does:
+        # otherwise the loop sleeps a full interval before clearing predictions
+        # whose horizons already elapsed while the process was down.
+        try:
+            n = await resolve_once(self._pool)
+            self.stats.resolved += n
+        except Exception:
+            logger.exception("initial resolve failed")
+        self._tasks.append(asyncio.create_task(self._resolve_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -164,6 +190,29 @@ class Scheduler:
                 logger.exception("fill cycle failed")
             try:
                 await asyncio.sleep(self._config.fill_interval)
+            except asyncio.CancelledError:
+                break
+
+    async def _resolve_loop(self) -> None:
+        # start() already did one; wait before repeating.
+        try:
+            await asyncio.sleep(self._config.resolve_interval)
+        except asyncio.CancelledError:
+            return
+        while self._running:
+            try:
+                n = await resolve_once(self._pool)
+                self.stats.resolved += n
+                if n:
+                    logger.info("resolve closed %d predictions", n)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # Same discipline as sweep: a failed pass must not kill the loop,
+                # or resolution silently stops while the system looks healthy.
+                logger.exception("resolve cycle failed")
+            try:
+                await asyncio.sleep(self._config.resolve_interval)
             except asyncio.CancelledError:
                 break
 
