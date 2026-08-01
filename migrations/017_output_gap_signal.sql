@@ -1,0 +1,29 @@
+-- The output-gap signal: the fourth earned macro claim type after
+-- yield_curve_signal (D10), sahm_rule_signal (D14) and inflation_signal. It is
+-- a derived STATE ("what is the output gap right now" -- the percent deviation
+-- of real GDP from potential), not a horizon-parameterized computation, so it
+-- passes the durability test: something consumes it (macro.taylor_rule takes
+-- output_gap as a direct argument) and it has a meaningful freshness policy.
+--
+-- The enum addition is isolated here, ALONE, following 010/003/013/015 exactly
+-- (Postgres forbids using a new enum value in the same transaction that adds
+-- it; the Neutron migrator wraps each migration's `up` in one transaction).
+-- The policy row lands in the follow-up migration 018. This is the established
+-- convention, not a third one.
+--
+-- Source series: FRED GDPC1 (Real Gross Domestic Product) and GDPPOT (Real
+-- Potential Gross Domestic Product) -- both quarterly, chained 2017 dollars.
+-- Verified against FRED directly (titles confirmed). The gap is the level
+-- ratio (GDPC1 - GDPPOT) / GDPPOT * 100 -- the CBO definition, not v1's
+-- growth-rate-diff approximation. GDPC1/GDPPOT are the ArgumentSpec keys.
+--
+-- Intended claim_type_policy row (staleness justification in 018): GDPC1 and
+-- GDPPOT are QUARTERLY, so the headline output_gap changes at most once per
+-- publication quarter. Unlike 010's daily yields, 013/015's monthly series, a
+-- quarterly staleness is ~120 days (one quarter plus publication lag).
+--
+--   INSERT INTO claim_type_policy (claim_type, default_staleness, note) VALUES
+--       ('output_gap_signal', INTERVAL '120 days',
+--        'derived from quarterly GDPC1/GDPPOT; only as fresh as its inputs');
+
+ALTER TYPE claim_type ADD VALUE IF NOT EXISTS 'output_gap_signal';

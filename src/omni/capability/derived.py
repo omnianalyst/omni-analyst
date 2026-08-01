@@ -25,7 +25,12 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
-from omni.capabilities.macro import inflation_measures, sahm_rule, yield_curve_inversion
+from omni.capabilities.macro import (
+    inflation_measures,
+    output_gap,
+    sahm_rule,
+    yield_curve_inversion,
+)
 from omni.capability.arguments import ArgumentSpec, Materialized
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.coverage.visibility import visible_claims
@@ -594,6 +599,114 @@ INFLATION = DerivedCapability(
 )
 
 
+# -------------------------------------------------------------- output-gap signal
+#
+# The fourth earned macro claim type, and the one that unblocks macro.taylor_rule
+# as a composite consuming TWO earned claim types (inflation_signal + this). A
+# derived STATE -- "what is the output gap right now" (the CBO percent deviation
+# of real GDP from potential) -- not a horizon-parameterized computation, so it
+# earns a claim type: taylor_rule takes output_gap as a direct argument, and
+# the signal has a real freshness policy. The compute is the new (this session)
+# ``macro.output_gap``; this declaration gives its output a durable home.
+#
+# v1 sources real GDP from FRED ``GDPC1`` and potential GDP from ``GDPPOT``
+# (both confirmed against FRED directly: "Real Gross Domestic Product" /
+# "Real Potential Gross Domestic Product", quarterly, chained 2017 dollars). The
+# canonical level ratio (GDPC1 - GDPPOT) / GDPPOT * 100 is used, NOT v1's
+# growth-rate-diff approximation (which v1 itself flagged "simplified"). GDPC1
+# and GDPPOT are the ArgumentSpec keys.
+#
+# Scalar inputs (shape="scalar", min_obs=1): output_gap reads only the latest of
+# each series (the gap is a current state, one value per quarter). This is the
+# credit_risk/inflation_expectations shape, not sahm's series shape -- the
+# function does not need a lookback window. min_obs=1 abstains when either
+# series has no observation, so output_gap's Unavailable branch (raises on
+# empty / non-positive potential) is unreachable through the declared path.
+#
+# Alignment caveat: the two series' latest observations are read independently,
+# so if GDPC1 and GDPPOT's most recent reference quarters differ the gap is
+# approximate. For FRED both publish quarterly and usually align; a future
+# common-date intersection (a la yield_curve) would harden it. Documented, not
+# silently papered over.
+OUTPUT_GAP_NAME = "macro.output_gap_signal"
+OUTPUT_GAP_PRODUCES = "output_gap_signal"
+OUTPUT_GAP_KEY = "gdpc1_gdppot"
+OUTPUT_GAP_SPEC_KEYS = ("GDPC1", "GDPPOT")
+
+OUTPUT_GAP_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="gdp",
+        claim_type="macro_series_point",
+        key="GDPC1",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+    ArgumentSpec(
+        name="potential",
+        claim_type="macro_series_point",
+        key="GDPPOT",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+)
+
+OUTPUT_GAP_CONSUMES = tuple(spec.claim_type for spec in OUTPUT_GAP_ARGUMENTS)
+
+
+async def compute_output_gap_signal_declared(
+    pool, gap, *, gdp: Materialized, potential: Materialized
+):
+    """Declared-path compute: adapt two scalar ``Materialized`` values to the
+    ``Sequence[float]`` ``output_gap`` expects (it reads ``[-1]``).
+
+    One input observation per series is enough -- the gap is a current state --
+    so the adapter wraps each scalar in a one-element list, the same way
+    ``_compute_inflation_expectations`` / ``_compute_credit_risk`` adapt scalars
+    to sequence-indexing functions. ``min_obs=1`` on both specs guarantees
+    neither is empty, so ``output_gap``'s ``Unavailable`` branch is unreachable
+    through the declared path; the try/except is defense-in-depth.
+
+    Returns a ``ClaimDraft`` of ``claim_type="output_gap_signal"`` whose
+    ``value`` is the durable state ``macro.taylor_rule`` consumes (the percent
+    gap) and whose ``evidence`` carries the supporting ``gdp`` / ``potential``
+    levels (reconstructable from the inputs) and the input claim ids.
+    """
+    try:
+        result = await output_gap([gdp.value], [potential.value])
+    except Unavailable:
+        return None
+
+    latest_knowledge = max(r.knowledge_date for r in (*gdp.rows, *potential.rows))
+    last_event = max(gdp.rows[-1].event_date, potential.rows[-1].event_date)
+
+    return ClaimDraft(
+        claim_type=OUTPUT_GAP_PRODUCES,
+        key=OUTPUT_GAP_KEY,
+        value={
+            "output_gap": float(result["output_gap"]),
+        },
+        event_date=last_event,
+        knowledge_date=latest_knowledge,
+        confidence=1.0,
+        unit="percent",
+        evidence={
+            "series": list(OUTPUT_GAP_SPEC_KEYS),
+            "gdp": float(result["gdp"]),
+            "potential": float(result["potential"]),
+            "input_claim_ids": [str(r.id) for r in (*gdp.rows, *potential.rows)],
+        },
+    )
+
+
+OUTPUT_GAP = DerivedCapability(
+    name=OUTPUT_GAP_NAME,
+    arguments=OUTPUT_GAP_ARGUMENTS,
+    compute=compute_output_gap_signal_declared,
+)
+
+
 def build_derived_registry() -> Registry:
     """Register the derived capabilities that are wired and tested today."""
     registry = Registry()
@@ -609,6 +722,9 @@ def build_derived_registry() -> Registry:
 
     async def call_inflation(pool, gap):
         return await fill_analysis(pool, gap, capability=INFLATION)
+
+    async def call_output_gap(pool, gap):
+        return await fill_analysis(pool, gap, capability=OUTPUT_GAP)
 
     registry.add(
         Capability(
@@ -680,6 +796,25 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capabilities.macro.inflation_measures",
             call=call_inflation,
+        )
+    )
+    registry.add(
+        Capability(
+            name=OUTPUT_GAP_NAME,
+            description=(
+                "CBO output gap: the percent deviation of real GDP from "
+                "potential, (GDPC1 - GDPPOT) / GDPPOT * 100, derived from "
+                "GDPC1/GDPPOT macro_series_point (index level) claims. "
+                "Consumed by macro.taylor_rule."
+            ),
+            consumes=OUTPUT_GAP_CONSUMES,
+            produces=(OUTPUT_GAP_PRODUCES,),
+            touches_byo=False,
+            cost=0.1,
+            maturity=Maturity.WIRED,
+            callability=Callability.YES,
+            origin="omni.capabilities.macro.output_gap",
+            call=call_output_gap,
         )
     )
     return registry

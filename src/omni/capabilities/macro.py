@@ -187,6 +187,35 @@ def taylor_rule_variant(
     return r_star + inflation + alpha * (inflation - target) + beta * output_gap
 
 
+async def output_gap(
+    gdp_values: Sequence[float], potential_values: Sequence[float]
+) -> dict[str, Any]:
+    """The CBO output gap: percent deviation of real GDP from potential.
+
+    ``(gdp - potential) / potential * 100`` on the LEVEL series -- the textbook
+    definition (and what ``taylor_rule``'s percent ``output_gap`` term expects),
+    not v1's growth-rate-diff approximation
+    (``economic_modeling.py:360`` ``output_gap = gdp_growth - potential_growth``,
+    which it itself flagged "simplified"). GDPC1 and GDPPOT are both real, chained
+    dollars, so the level ratio is directly meaningful and authoritative.
+
+    Reads the latest of each series (the gap is a current STATE, one value per
+    quarter). Raises on empty input or non-positive potential (a negative
+    denominator would flip the gap's sign silently). Does not fabricate a gap
+    when either series is absent.
+    """
+    if not gdp_values or not potential_values:
+        raise Unavailable("missing GDP / potential GDP observations")
+    gdp = float(gdp_values[-1])
+    potential = float(potential_values[-1])
+    if potential <= 0:
+        raise Unavailable(
+            f"non-positive potential GDP ({potential}); cannot compute output gap"
+        )
+    gap = (gdp - potential) / potential * 100.0
+    return {"output_gap": gap, "gdp": gdp, "potential": potential}
+
+
 def policy_stance(deviation: float) -> str:
     if deviation > 1.0:
         return "restrictive"

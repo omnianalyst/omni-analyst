@@ -173,7 +173,7 @@ class TestDefaultRegistry:
     def test_the_default_registry_is_everything_runnable(self):
         r = default_registry()
         assert len(r) == r.summary()["invocable"]
-        assert len(r) == 128
+        assert len(r) == 129
 
     def test_derived_capabilities_are_reachable_through_default_registry(self):
         # The defect this catches: build_derived_registry() was never merged, so
@@ -228,6 +228,19 @@ class TestDefaultRegistry:
         producers = r.producing("inflation_signal")
         assert [c.name for c in producers] == ["macro.inflation_signal"]
         capability = r.get("macro.inflation_signal")
+        assert capability is not None
+        assert capability.call is not None
+        assert capability.invocable
+
+    def test_output_gap_signal_is_reachable_through_default_registry(self):
+        # The output-gap signal's earned claim type must resolve through the
+        # registry the scheduler actually builds. This is the claim type
+        # macro.taylor_rule consumes, so reachability here is what makes the
+        # taylor_rule composite possible.
+        r = default_registry()
+        producers = r.producing("output_gap_signal")
+        assert [c.name for c in producers] == ["macro.output_gap_signal"]
+        capability = r.get("macro.output_gap_signal")
         assert capability is not None
         assert capability.call is not None
         assert capability.invocable

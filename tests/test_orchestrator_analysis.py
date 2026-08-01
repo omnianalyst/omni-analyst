@@ -1170,3 +1170,100 @@ class TestInflationExpectations:
         reasons = {s.argument: s.reason for s in result.shortfalls}
         assert "exp_5y" in reasons
         assert "exp_10y" not in reasons
+
+
+# ----------------------------------------- taylor_rule (composite of two claims)
+#
+# The architectural payoff: a composite consuming TWO earned claim types
+# (inflation_signal + output_gap_signal) -- coverage accumulation made concrete.
+# Same ArgumentSpecs-over-claims pattern as recession_probability.
+
+
+class TestTaylorRule:
+    async def _seed(self, db, *, inflation, output_gap):
+        entity_id = await _entity(db, symbol="US")
+        inf = await _insert_signal(
+            db, entity_id, claim_type="inflation_signal", key="cpi_all",
+            value={
+                "yoy": inflation,
+                "mom_annualized": inflation,
+                "3m_annualized": inflation,
+            },
+        )
+        og = await _insert_signal(
+            db, entity_id, claim_type="output_gap_signal", key="gdpc1_gdppot",
+            value={"output_gap": output_gap},
+        )
+        return entity_id, inf, og
+
+    async def _run(self, db, entity_id):
+        return await run_analysis(
+            default_registry(), db.pool,
+            name="macro.taylor_rule",
+            entity_id=entity_id, audience=None,
+        )
+
+    async def test_composes_two_earned_claim_types(self, db):
+        # taylor_rule = 0.5 + inf + 1.5*(inf-2.0) + 0.5*gap
+        # inflation=2.5, output_gap=-1.0 -> 0.5 + 2.5 + 0.75 - 0.5 = 3.25.
+        # Discriminates coefficient bugs (inflation_weight 1.0 -> 3.0; missing
+        # (inf-target) term -> 2.5; output_gap_weight 1.0 -> 2.75).
+        entity_id, inf, og = await self._seed(db, inflation=2.5, output_gap=-1.0)
+        result = await self._run(db, entity_id)
+        assert not result.abstained, result.shortfalls
+        assert result.result["taylor_rate"] == pytest.approx(3.25)
+        # Evidence is the two claim ids the composite read from the store.
+        assert set(result.evidence) == {str(inf), str(og)}
+
+    async def test_zero_gap_at_target_inflation(self, db):
+        # inflation=2.0 (target), output_gap=0 -> 0.5 + 2.0 + 0 + 0 = 2.5
+        # (neutral real rate + inflation).
+        entity_id, _, _ = await self._seed(db, inflation=2.0, output_gap=0.0)
+        result = await self._run(db, entity_id)
+        assert result.result["taylor_rate"] == pytest.approx(2.5)
+
+    async def test_licence_shareable_for_fred_sourced_inputs(self, db):
+        entity_id, _, _ = await self._seed(db, inflation=2.5, output_gap=-1.0)
+        result = await self._run(db, entity_id)
+        assert result.redistributable == "allowed"
+        assert result.audience_user_id is None
+
+    async def test_abstains_when_one_signal_claim_absent(self, db, monkeypatch):
+        """With output_gap_signal absent the call abstains naming output_gap,
+        and compute is never invoked -- proven by a spy."""
+        entity_id = await _entity(db, symbol="US")
+        await _insert_signal(
+            db, entity_id, claim_type="inflation_signal", key="cpi_all",
+            value={
+                "yoy": 2.5,
+                "mom_annualized": 2.5,
+                "3m_annualized": 2.5,
+            },
+        )
+        # No output_gap_signal claim.
+
+        from omni.orchestrator import analysis as analysis_module
+
+        called: list = []
+
+        async def spy_compute(**kwargs):
+            called.append(kwargs)
+            return {}
+
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "macro.taylor_rule",
+            DeclaredAnalysis(
+                name="macro.taylor_rule",
+                arguments=analysis_module._TAYLOR_RULE_ARGUMENTS,
+                compute=spy_compute,
+            ),
+        )
+
+        result = await self._run(db, entity_id)
+
+        assert result.abstained
+        assert called == [], "compute called despite an argument abstention"
+        reasons = {s.argument: s.reason for s in result.shortfalls}
+        assert "output_gap" in reasons
+        assert "inflation" not in reasons

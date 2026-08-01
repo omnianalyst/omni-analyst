@@ -58,6 +58,7 @@ CLAIM_TYPES = frozenset(
         "yield_curve_signal",
         "sahm_rule_signal",
         "inflation_signal",
+        "output_gap_signal",
     }
 )
 

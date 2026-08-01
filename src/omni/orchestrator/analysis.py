@@ -58,7 +58,11 @@ from omni.capability.arguments import (
 )
 from omni.capability.derived import DERIVED
 from omni.capability.registry import Registry
-from omni.capabilities.macro import inflation_expectations, recession_probability
+from omni.capabilities.macro import (
+    inflation_expectations,
+    recession_probability,
+    taylor_rule,
+)
 from omni.capabilities.risk import analyze_credit_risk, calculate_overall_risk_score
 from omni.fill.derived import DerivedCapability
 from omni.perception.divergence import resolve_derived_licence
@@ -266,6 +270,58 @@ async def _compute_inflation_expectations(
     )
 
 
+# ----------------------------------------------------------- taylor_rule
+#
+# The first composite that demonstrates coverage accumulation end to end: it
+# consumes TWO earned claim types -- ``inflation_signal`` (the CPI YoY rate,
+# its ``yoy`` field) and ``output_gap_signal`` (the CBO percent gap, its
+# ``output_gap`` field) -- as plain ArgumentSpecs over the claims, exactly the
+# pattern ``macro.recession_probability`` used for yield_curve_signal +
+# sahm_rule_signal. A claim is durable, provenanced and re-derivable; the
+# composite reads what the coverage store accumulated, not a sibling's
+# ephemeral output. This is the architectural thesis made concrete: work done
+# for inflation and output-gap fills also feeds the policy-rate model.
+#
+# ``taylor_rule`` is the textbook rule with default coefficients (neutral 0.5,
+# inflation target 2.0, inflation weight 1.5, output-gap weight 0.5). The
+# inflation input is CPI YoY (the ``inflation_signal`` we have); the Fed's rule
+# is conventionally stated against PCE, but the function is generic and CPI is
+# a valid application -- documented rather than silently swapped.
+#
+# Each ArgumentSpec reads one number out of the producer's JSONB value via
+# ``value_field``; ``shape="scalar"`` takes the latest signal; ``min_obs=1``
+# abstains when either signal type has no claim yet, so the composite is honest
+# about a missing input instead of reading its absence as "no gap / no inflation".
+_TAYLOR_RULE_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="inflation",
+        claim_type="inflation_signal",
+        value_field="yoy",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+    ArgumentSpec(
+        name="output_gap",
+        claim_type="output_gap_signal",
+        value_field="output_gap",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+)
+
+
+async def _compute_taylor_rule(
+    *, inflation: Materialized, output_gap: Materialized
+) -> dict | None:
+    rate = taylor_rule(
+        inflation=inflation.value,
+        output_gap=output_gap.value,
+    )
+    return {"taylor_rate": float(rate)}
+
+
 # ----------------------------------------------------------- overall_risk_score
 #
 # calculate_overall_risk_score takes five keyword-only floats -- market_score,
@@ -357,6 +413,11 @@ _NON_CLAIM_ANALYSES: dict[str, DeclaredAnalysis] = {
         name="macro.inflation_expectations",
         arguments=_INFLATION_EXPECTATIONS_ARGUMENTS,
         compute=_compute_inflation_expectations,
+    ),
+    "macro.taylor_rule": DeclaredAnalysis(
+        name="macro.taylor_rule",
+        arguments=_TAYLOR_RULE_ARGUMENTS,
+        compute=_compute_taylor_rule,
     ),
 }
 
