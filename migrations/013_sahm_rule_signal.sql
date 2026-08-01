@@ -1,0 +1,32 @@
+-- The Sahm rule signal: the second claim type earned after
+-- perception_divergence, applying D10's yield-curve template a second time. It
+-- is a derived STATE ("has the Sahm recession threshold triggered right now"),
+-- not a horizon-parameterized computation, so it passes the durability test:
+-- something consumes it (macro.recession_probability's sahm_triggered flag) and
+-- it has a meaningful freshness policy.
+--
+-- The enum addition is isolated here, ALONE, following migrations 010 and 003
+-- exactly. Postgres forbids using a new enum value in the same transaction that
+-- adds it ("unsafe use of new value ... New enum values must be committed
+-- before they can be used"), and the Neutron migrator wraps each migration's
+-- entire `up` in one transaction -- so a claim_type_policy INSERT that
+-- references 'sahm_rule_signal' cannot share this file. Verified empirically in
+-- D10's report (ALTER TYPE + INSERT in one tx aborts the whole transaction, so
+-- the value would not even be added). The policy row lands in the follow-up
+-- migration 014 once this value is committed; this is the convention 010/011
+-- established and D14 follows rather than inventing a second one.
+--
+-- Intended claim_type_policy row (staleness justification in _orchestrator/
+-- reports/D14.md): UNRATE is a MONTHLY FRED series (confirmed against FRED:
+-- frequency "Monthly", units "Percent"), so unlike 010's daily treasury yields
+-- the Sahm signal's headline output can change at most once per publication
+-- month. A daily staleness would mark every reading stale for ~29 of every 30
+-- days and drive pointless refill attempts. The macro_series_point default of
+-- 35 days is explicitly for monthly FRED series, so the derived signal matches
+-- its input's cadence: "only as fresh as its inputs."
+--
+--   INSERT INTO claim_type_policy (claim_type, default_staleness, note) VALUES
+--       ('sahm_rule_signal', INTERVAL '35 days',
+--        'derived from monthly UNRATE unemployment rate; only as fresh as its inputs');
+
+ALTER TYPE claim_type ADD VALUE IF NOT EXISTS 'sahm_rule_signal';
