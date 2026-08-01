@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
-from omni.capabilities.macro import yield_curve_inversion
+from omni.capabilities.macro import sahm_rule, yield_curve_inversion
 from omni.capability.arguments import ArgumentSpec, Materialized
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.coverage.visibility import visible_claims
@@ -331,6 +331,133 @@ YIELD_CURVE = DerivedCapability(
 )
 
 
+# --------------------------------------------------------------- sahm-rule signal
+#
+# The second earned claim type after perception_divergence (D2 step 5), applying
+# D10's template a second time. A derived STATE -- "has the Sahm recession
+# threshold triggered right now" -- not a horizon-parameterized computation, so
+# it earns a claim type: macro.recession_probability consumes the triggered flag
+# as a direct argument (sahm_triggered), and the signal has a real freshness
+# policy. The compute is the existing (unchanged) ``macro.sahm_rule``; this
+# declaration gives its output a durable home in the coverage store.
+#
+# v1 sources this from FRED ``UNRATE`` (Civilian Unemployment Rate). The series
+# id was verified against FRED directly before use -- confirmed: id "UNRATE",
+# title "Unemployment Rate", frequency "Monthly", units "Percent", Seasonally
+# Adjusted (QF1 found a prose-named id that 404s, so no series id is taken on
+# faith). UNRATE is the ArgumentSpec key.
+
+SAHM_NAME = "macro.sahm_rule_signal"
+SAHM_PRODUCES = "sahm_rule_signal"
+SAHM_KEY = "unrate"
+
+# ``sahm_rule`` reads ``unemployment_values[-3:]`` (the 3-month moving average)
+# and ``unemployment_values[-12:]`` (the 12-month low), and raises ``Unavailable``
+# below 12 observations. The crux where D10's template needed a daily-vs-monthly
+# adjustment: D10 sized ``window``/``min_obs`` against DAILY treasury yields
+# (252 observations ~= one trading year). UNRATE is MONTHLY, so 12 observations
+# already span ~one calendar year, and a count sized as if the series were daily
+# would be wrong in the opposite direction.
+#
+# Arithmetic (monthly):
+#   - ``min_obs = 12``: the function's hard floor. The spec abstains at 11, so
+#     ``sahm_rule``'s ``Unavailable`` branch (raises at <12) is unreachable
+#     through the declared path -- abstention is the spec's job, not the
+#     capability's. There is one input series and no two-series intersection, so
+#     unlike YIELD_CURVE no compute-time floor check is needed: per-series
+#     ``min_obs`` sees the whole count the function sees.
+#   - ``window = 18`` = 12 (the function's trailing-12 lookback, ~one calendar
+#     year of monthly data) + 6 months margin for publication lag (a reference
+#     month's reading lands in the first week of the following month, so the
+#     newest available observation can lag) and a missing mid-series
+#     observation, so a single hole does not drop the materialized count below
+#     ``min_obs``. ``sahm_rule`` ignores anything older than its trailing-12
+#     slice, so the extra observations are margin only -- passing 18 to a
+#     function that reads ``[-12:]`` and ``[-3:]`` yields the same trailing-12
+#     and trailing-3 as passing exactly 12.
+SAHM_MIN_OBS = 12
+SAHM_WINDOW = 18
+
+SAHM_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="unemployment",
+        claim_type="macro_series_point",
+        key="UNRATE",
+        shape="series",
+        transform="level",
+        window=SAHM_WINDOW,
+        min_obs=SAHM_MIN_OBS,
+    ),
+)
+
+SAHM_CONSUMES = tuple(spec.claim_type for spec in SAHM_ARGUMENTS)
+
+
+async def compute_sahm_rule_signal_declared(pool, gap, *, unemployment: Materialized):
+    """Declared-path compute: adapt ``Materialized`` to the ``Sequence[float]``
+    ``sahm_rule`` expects.
+
+    ``sahm_rule`` takes a single ordered float series, not the ``Materialized``
+    shape ``materialize`` returns -- the same kind of shape mismatch
+    ``compute_yield_curve_signal_declared`` bridges. The adapter lives here,
+    next to that one, not in ``arguments.py`` (per D5/D10): the shape conversion
+    is specific to this one analysis function's signature.
+
+    Returns a ``ClaimDraft`` of ``claim_type="sahm_rule_signal"`` whose ``value``
+    is the durable state a consumer reads (the Sahm indicator and the triggered
+    flag ``macro.recession_probability`` consumes as ``sahm_triggered``) and
+    whose ``evidence`` carries the supporting ``current_unemployment`` /
+    ``12m_low`` (reconstructable from the inputs) and the input claim ids.
+
+    ``min_obs=12`` on the spec guarantees ``sahm_rule`` never sees fewer than
+    its 12-observation floor, so its ``Unavailable`` branch is unreachable
+    through the declared path; the try/except is defense-in-depth, not the
+    abstention mechanism. Unlike YIELD_CURVE there is one input series and no
+    two-series intersection, so there is no compute-time floor check to add.
+
+    ``sahm_rule`` returns numpy scalars (``np.mean``/``np.min`` -> ``np.float64``;
+    the ``>=`` threshold -> ``np.bool_``), which ``json.dumps`` cannot serialize.
+    Casting to native ``float``/``bool`` here is adapter plumbing -- the values
+    are identical, only the wrapper changes -- and lives with the rest of the
+    shape bridging rather than in ``macro.py`` (whose behaviour is unchanged).
+    """
+    values = [r.value for r in unemployment.rows]
+
+    try:
+        result = await sahm_rule(values)
+    except Unavailable:
+        return None
+
+    last_row = unemployment.rows[-1]
+    latest_knowledge = max(r.knowledge_date for r in unemployment.rows)
+
+    return ClaimDraft(
+        claim_type=SAHM_PRODUCES,
+        key=SAHM_KEY,
+        value={
+            "indicator": float(result["value"]),
+            "triggered": bool(result["triggered"]),
+        },
+        event_date=last_row.event_date,
+        knowledge_date=latest_knowledge,
+        confidence=1.0,
+        unit="percent",
+        evidence={
+            "series": ["UNRATE"],
+            "current_unemployment": float(result["current_unemployment"]),
+            "12m_low": float(result["12m_low"]),
+            "input_claim_ids": [str(r.id) for r in unemployment.rows],
+        },
+    )
+
+
+SAHM = DerivedCapability(
+    name=SAHM_NAME,
+    arguments=SAHM_ARGUMENTS,
+    compute=compute_sahm_rule_signal_declared,
+)
+
+
 def build_derived_registry() -> Registry:
     """Register the derived capabilities that are wired and tested today."""
     registry = Registry()
@@ -340,6 +467,9 @@ def build_derived_registry() -> Registry:
 
     async def call_yield_curve(pool, gap):
         return await fill_analysis(pool, gap, capability=YIELD_CURVE)
+
+    async def call_sahm(pool, gap):
+        return await fill_analysis(pool, gap, capability=SAHM)
 
     registry.add(
         Capability(
@@ -375,6 +505,24 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capabilities.macro.yield_curve_inversion",
             call=call_yield_curve,
+        )
+    )
+    registry.add(
+        Capability(
+            name=SAHM_NAME,
+            description=(
+                "Sahm recession rule signal: the 3-month moving average minus "
+                "the 12-month low of the unemployment rate, and the >=0.5 "
+                "triggered flag, derived from UNRATE macro_series_point claims."
+            ),
+            consumes=SAHM_CONSUMES,
+            produces=(SAHM_PRODUCES,),
+            touches_byo=False,
+            cost=0.1,
+            maturity=Maturity.WIRED,
+            callability=Callability.YES,
+            origin="omni.capabilities.macro.sahm_rule",
+            call=call_sahm,
         )
     )
     return registry

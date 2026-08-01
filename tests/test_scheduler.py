@@ -173,7 +173,7 @@ class TestDefaultRegistry:
     def test_the_default_registry_is_everything_runnable(self):
         r = default_registry()
         assert len(r) == r.summary()["invocable"]
-        assert len(r) == 126
+        assert len(r) == 127
 
     def test_derived_capabilities_are_reachable_through_default_registry(self):
         # The defect this catches: build_derived_registry() was never merged, so
@@ -198,6 +198,21 @@ class TestDefaultRegistry:
         producers = r.producing("yield_curve_signal")
         assert [c.name for c in producers] == ["macro.yield_curve_signal"]
         capability = r.get("macro.yield_curve_signal")
+        assert capability is not None
+        assert capability.call is not None
+        assert capability.invocable
+
+    def test_sahm_rule_signal_is_reachable_through_default_registry(self):
+        # D14's earned claim type must resolve through the registry the
+        # scheduler actually builds -- the same discipline the divergence and
+        # yield-curve tests above enforce. No worker.py edit is needed: D3
+        # already merged build_derived_registry() into default_registry(), and
+        # the sahm capability is registered there, so it flows through
+        # automatically.
+        r = default_registry()
+        producers = r.producing("sahm_rule_signal")
+        assert [c.name for c in producers] == ["macro.sahm_rule_signal"]
+        capability = r.get("macro.sahm_rule_signal")
         assert capability is not None
         assert capability.call is not None
         assert capability.invocable
