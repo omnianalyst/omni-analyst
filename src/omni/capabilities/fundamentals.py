@@ -26,6 +26,11 @@ import numpy as np
 
 from omni.ingest.protocol import Unavailable
 
+# Tolerance for "is this degenerate?" on a computed standard deviation, matching
+# the idiom attribution.py / portfolio_risk.py / crossasset.py use. Real daily
+# returns sit orders of magnitude above 1e-12; float-noise from np.std of a
+# constant series lands at ~1e-17 and would otherwise pass a `== 0` guard.
+_ZERO_STD_ATOL = 1e-12
 
 def ratio_quality_scores(ratios: dict[str, Any]) -> dict[str, str]:
     scores: dict[str, str] = {}
@@ -506,16 +511,17 @@ async def risk_metrics(
     annual_std = daily_std * np.sqrt(252)
     std_dev = annual_std * 100
 
-    negative_returns = returns_array[returns_array < 0]
-    downside_defined = (
-        len(negative_returns) > 0
-        and float(np.ptp(negative_returns)) != 0.0
-    )
-    downside_dev = (
-        float(np.std(negative_returns)) * np.sqrt(252) * 100
-        if downside_defined
-        else 0.0
-    )
+    # Sortino downside deviation -- the textbook denominator
+    # sqrt(mean(min(r, target) ** 2)) with target = 0: below-target returns
+    # contribute their squared deviation, at/above-target returns contribute
+    # zero. This is the canonical form attribution.py:480 already used; the
+    # prior implementation took np.std of the negative subset about its OWN
+    # mean, which is a different (non-Sortino) quantity -- the §6.7 defect.
+    # Zero iff no return is below target, in which case Sortino is undefined.
+    downside = np.minimum(returns_array, 0.0)
+    downside_dev_raw = float(np.sqrt(np.mean(downside**2)))
+    downside_defined = not np.isclose(downside_dev_raw, 0.0, atol=_ZERO_STD_ATOL)
+    downside_dev = downside_dev_raw * np.sqrt(252) * 100 if downside_defined else 0.0
 
     mean_daily_return = np.mean(returns_array)
     annual_return = mean_daily_return * 252 * 100

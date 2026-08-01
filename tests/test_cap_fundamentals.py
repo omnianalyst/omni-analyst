@@ -392,33 +392,36 @@ class TestRiskMetrics:
         assert out["value_at_risk_95"] == pytest.approx(-100.0)
         assert out["value_at_risk_99"] == pytest.approx(-100.0)
         assert out["conditional_var_95"] == pytest.approx(-100.0)
-        # 0.01 * sqrt(252) * 100 = 15.8745..., rounded to 2 dp (faithful to v1) -> 15.87
+        # 0.01 * sqrt(252) * 100 = 15.8745..., rounded to 2 dp -> 15.87
         assert out["standard_deviation"] == 15.87
-        # ten identical negatives: ptp == 0 so the series is treated as constant;
-        # downside_deviation is honestly 0.0 (no variation in the downside).
-        assert out["downside_deviation"] == 0.0
-        # Sortino is undefined when downside deviation is zero (x/0). Previously
-        # this divided ~1e-15 of float noise and emitted a sortino of roughly
-        # -1.6e15 -- a garbage number the test never checked. Honest result: None.
-        assert out["sortino_ratio"] is None
+        # Canonical Sortino downside dev = sqrt(mean(min(r,0)**2)). Ten -0.01
+        # returns give mean(0.0001*10/20) = 0.00005 -> sqrt = 0.007071 ->
+        # *sqrt(252)*100 = 11.2249 -> 11.22. NOT zero: there ARE downside
+        # returns, so there IS downside deviation even though they are equal --
+        # the prior code (std of the negative subset about its own mean)
+        # returned 0.0 here, the §6.7 defect.
+        assert out["downside_deviation"] == 11.22
+        # sortino = (annual_return 0 - risk_free 4.5) / 11.2249 = -0.4009 -> -0.4.
+        assert out["sortino_ratio"] == -0.4
         assert out["data_quality"] == "historical"
         assert out["data_points"] == 20
 
     async def test_sortino_and_downside_on_spread_negatives(self):
-        # negatives -0.02/-0.01 alternating give a clean downside std of 0.005.
+        # Canonical Sortino downside dev = sqrt(mean(min(r,0)**2)).
+        # downside = [-0.02,-0.01,0,0,0]*4 -> mean of squares = 0.002/20 = 0.0001
+        # -> sqrt = 0.01 -> *sqrt(252)*100 = 15.8745 -> 15.87.
         series = [-0.02, -0.01, 0.0, 0.01, 0.02] * 4  # 20 points, mean 0
         out = await risk_metrics(series, total_value=10_000, risk_free_rate_pct=4.5)
-        # downside_dev = 0.005 * sqrt(252) * 100 = 7.93725... -> 7.94
-        assert out["downside_deviation"] == 7.94
-        # sortino = (annual_return 0 - risk_free 4.5) / 7.93725... = -0.5669... -> -0.57
-        assert out["sortino_ratio"] == -0.57
+        assert out["downside_deviation"] == 15.87
+        # sortino = (annual_return 0 - risk_free 4.5) / 15.8745 = -0.2835 -> -0.28
+        assert out["sortino_ratio"] == -0.28
         # annual_return is exactly 0, so calmar is 0 regardless of drawdown.
         assert out["calmar_ratio"] == 0.0
 
     async def test_sortino_uses_the_supplied_risk_free_rate(self):
         # annual_return is 0 on this series, so sortino = (0 - rf) / downside_dev.
         series = [-0.02, -0.01, 0.0, 0.01, 0.02] * 4
-        dd = 0.005 * (252 ** 0.5) * 100
+        dd = 0.01 * (252 ** 0.5) * 100  # canonical Sortino downside dev
         out_zero = await risk_metrics(series, total_value=10_000, risk_free_rate_pct=0.0)
         out_four = await risk_metrics(series, total_value=10_000, risk_free_rate_pct=4.5)
         assert out_zero["sortino_ratio"] == pytest.approx(0.0, abs=0.01)
