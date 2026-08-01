@@ -323,52 +323,91 @@ class TestPortfolioReturns:
     async def test_returns_on_known_cash_flows(self):
         # initial_value = 10000 + 5000 - 2000 = 13000; total = 15000
         out = await portfolio_returns(
-            self.TRANSACTIONS, total_value=15_000, daily_returns=[0.01] * 4, period_days=365
+            self.TRANSACTIONS,
+            total_value=15_000,
+            daily_returns=[0.01] * 4,
+            period_days=365,
+            risk_free_rate_pct=2.0,
         )
         assert out["absolute_return"] == pytest.approx(2000.0)
         # function rounds to 2 dp (faithful to v1): 2000/13000*100 = 15.3846... -> 15.38
         assert out["percentage_return"] == 15.38
-        # flat returns -> zero volatility, zero sharpe, zero drawdown
+        # flat returns -> np.std of a bit-identical series is exactly 0.0.
         assert out["volatility"] == 0.0
-        assert out["sharpe_ratio"] == 0.0
+        # Sharpe is undefined for a zero-variance series (x/0). Returning a
+        # number here would be a fabrication; the honest result is None.
+        assert out["sharpe_ratio"] is None
         assert out["max_drawdown"] == 0.0
 
     async def test_annualization_uses_period_days(self):
         out = await portfolio_returns(
-            self.TRANSACTIONS, total_value=15_000, daily_returns=[0.01] * 4, period_days=365
+            self.TRANSACTIONS,
+            total_value=15_000,
+            daily_returns=[0.01] * 4,
+            period_days=365,
+            risk_free_rate_pct=2.0,
         )
         years = 365 / 365.25
         expected = (pow(1 + (2000.0 / 13000.0), 1 / years) - 1) * 100
         assert out["annualized_return"] == pytest.approx(expected, abs=0.01)
 
+    async def test_sharpe_subtracts_the_supplied_risk_free_rate(self):
+        # daily_returns with genuine variance: std([.01,-.01,.01,-.01]) == 0.01.
+        varying = [0.01, -0.01, 0.01, -0.01]
+        ann = (pow(1 + (2000.0 / 13000.0), 1 / (365 / 365.25)) - 1) * 100
+        vol = 0.01 * (252 ** 0.5) * 100
+        out_zero = await portfolio_returns(
+            self.TRANSACTIONS, total_value=15_000, daily_returns=varying,
+            period_days=365, risk_free_rate_pct=0.0,
+        )
+        out_two = await portfolio_returns(
+            self.TRANSACTIONS, total_value=15_000, daily_returns=varying,
+            period_days=365, risk_free_rate_pct=2.0,
+        )
+        assert out_zero["sharpe_ratio"] == pytest.approx(ann / vol, abs=0.01)
+        assert out_two["sharpe_ratio"] == pytest.approx((ann - 2.0) / vol, abs=0.01)
+        # different rf -> different sharpe (proves rf is wired, not ignored).
+        assert out_zero["sharpe_ratio"] != out_two["sharpe_ratio"]
+
     async def test_no_transactions_raises_rather_than_returning_zeros(self):
         with pytest.raises(Unavailable, match="no transactions"):
-            await portfolio_returns([], 15_000, [0.01] * 4, 365)
+            await portfolio_returns(
+                [], 15_000, [0.01] * 4, 365, risk_free_rate_pct=2.0
+            )
 
     async def test_single_daily_return_raises_rather_than_zero_volatility(self):
         with pytest.raises(Unavailable, match="fewer than 2 daily returns"):
-            await portfolio_returns(self.TRANSACTIONS, 15_000, [0.01], 365)
+            await portfolio_returns(
+                self.TRANSACTIONS, 15_000, [0.01], 365, risk_free_rate_pct=2.0
+            )
 
 
 class TestRiskMetrics:
     SERIES = [-0.01] * 10 + [0.01] * 10  # 20 points, mean 0, std 0.01
 
     async def test_known_var_std_and_downside_on_balanced_series(self):
-        out = await risk_metrics(self.SERIES, total_value=10_000)
+        out = await risk_metrics(
+            self.SERIES, total_value=10_000, risk_free_rate_pct=4.5
+        )
         assert out["value_at_risk_95"] == pytest.approx(-100.0)
         assert out["value_at_risk_99"] == pytest.approx(-100.0)
         assert out["conditional_var_95"] == pytest.approx(-100.0)
         # 0.01 * sqrt(252) * 100 = 15.8745..., rounded to 2 dp (faithful to v1) -> 15.87
         assert out["standard_deviation"] == 15.87
-        # ten identical negatives -> downside std is ~0 -> rounds to 0.0
+        # ten identical negatives: ptp == 0 so the series is treated as constant;
+        # downside_deviation is honestly 0.0 (no variation in the downside).
         assert out["downside_deviation"] == 0.0
+        # Sortino is undefined when downside deviation is zero (x/0). Previously
+        # this divided ~1e-15 of float noise and emitted a sortino of roughly
+        # -1.6e15 -- a garbage number the test never checked. Honest result: None.
+        assert out["sortino_ratio"] is None
         assert out["data_quality"] == "historical"
         assert out["data_points"] == 20
 
     async def test_sortino_and_downside_on_spread_negatives(self):
         # negatives -0.02/-0.01 alternating give a clean downside std of 0.005.
         series = [-0.02, -0.01, 0.0, 0.01, 0.02] * 4  # 20 points, mean 0
-        out = await risk_metrics(series, total_value=10_000)
+        out = await risk_metrics(series, total_value=10_000, risk_free_rate_pct=4.5)
         # downside_dev = 0.005 * sqrt(252) * 100 = 7.93725... -> 7.94
         assert out["downside_deviation"] == 7.94
         # sortino = (annual_return 0 - risk_free 4.5) / 7.93725... = -0.5669... -> -0.57
@@ -376,17 +415,49 @@ class TestRiskMetrics:
         # annual_return is exactly 0, so calmar is 0 regardless of drawdown.
         assert out["calmar_ratio"] == 0.0
 
+    async def test_sortino_uses_the_supplied_risk_free_rate(self):
+        # annual_return is 0 on this series, so sortino = (0 - rf) / downside_dev.
+        series = [-0.02, -0.01, 0.0, 0.01, 0.02] * 4
+        dd = 0.005 * (252 ** 0.5) * 100
+        out_zero = await risk_metrics(series, total_value=10_000, risk_free_rate_pct=0.0)
+        out_four = await risk_metrics(series, total_value=10_000, risk_free_rate_pct=4.5)
+        assert out_zero["sortino_ratio"] == pytest.approx(0.0, abs=0.01)
+        assert out_four["sortino_ratio"] == pytest.approx((0.0 - 4.5) / dd, abs=0.01)
+        # different rf -> different sortino (proves rf is wired, not ignored).
+        assert out_zero["sortino_ratio"] != out_four["sortino_ratio"]
+
+    async def test_calmar_is_none_when_there_is_no_drawdown(self):
+        # strictly rising returns -> cumulative NAV never dips -> max drawdown 0.
+        # calmar (return / drawdown) is then undefined, not 0.0.
+        rising = [0.001 * (i + 1) for i in range(20)]
+        out = await risk_metrics(rising, total_value=10_000, risk_free_rate_pct=2.0)
+        assert out["calmar_ratio"] is None
+        # no negative days -> no downside -> sortino also undefined.
+        assert out["sortino_ratio"] is None
+
     async def test_beta_is_one_when_benchmark_equals_portfolio(self):
-        out = await risk_metrics(self.SERIES, 10_000, benchmark_returns=self.SERIES)
+        out = await risk_metrics(
+            self.SERIES, 10_000, risk_free_rate_pct=4.5, benchmark_returns=self.SERIES
+        )
         assert out["portfolio_beta"] == pytest.approx(1.0)
 
     async def test_beta_is_null_when_no_benchmark_rather_than_one(self):
-        out = await risk_metrics(self.SERIES, 10_000)
+        out = await risk_metrics(self.SERIES, 10_000, risk_free_rate_pct=4.5)
+        assert out["portfolio_beta"] is None
+
+    async def test_beta_is_null_for_a_constant_benchmark_rather_than_garbage(self):
+        # a bit-identical benchmark has ~1e-34 variance from float noise; the old
+        # `cov_matrix[1,1] > 0` guard passed on that noise and divided by it.
+        constant_bench = [0.005] * 20
+        out = await risk_metrics(
+            self.SERIES, 10_000, risk_free_rate_pct=4.5,
+            benchmark_returns=constant_bench,
+        )
         assert out["portfolio_beta"] is None
 
     async def test_insufficient_history_raises_rather_than_running_a_monte_carlo(self):
         with pytest.raises(Unavailable, match="insufficient historical data"):
-            await risk_metrics(self.SERIES[:19], 10_000)
+            await risk_metrics(self.SERIES[:19], 10_000, risk_free_rate_pct=4.5)
 
 
 class TestStressTests:
