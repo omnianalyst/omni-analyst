@@ -111,6 +111,37 @@ class ArgumentSpec:
 
 
 @dataclass(frozen=True)
+class AnalysisOutputSpec:
+    """One argument sourced from a sibling capability's output, not a claim.
+
+    A composite that consumes another capability's score names that capability
+    here. At resolution time the sibling is run first (through the same
+    name-keyed machinery in ``orchestrator.analysis``), and the ``result_key``
+    field of its output dict feeds this argument as a ``Materialized`` value.
+
+    Distinct from ``ArgumentSpec``, not an overloaded ``shape=
+    "analysis_output"``, because every field ``ArgumentSpec`` carries for
+    claim extraction -- ``claim_type``, ``key``, ``transform``, ``window``,
+    ``value_field``, ``entity_scope``, ``relation``, ``align_on`` -- is
+    meaningless for a computed score. An ``ArgumentSpec`` that silently
+    ignores eight of its fields is a trap for the next author: they set
+    ``claim_type`` expecting it to scope a query, and nothing happens. The
+    same reasoning QF1 applied to ``DeclaredAnalysis`` vs
+    ``DerivedCapability`` (the contracts differ at the place that matters)
+    applies here: the source is different enough that overloading one type
+    creates dead fields and silent-ignore paths, not a simplification.
+
+    ``result_key`` defaults to ``"score"`` because every registered
+    market_risk sub-analysis returns ``{"score": float, ...}``. A sibling
+    whose headline output lives under a different key overrides it.
+    """
+
+    name: str
+    capability: str
+    result_key: str = "score"
+
+
+@dataclass(frozen=True)
 class Abstention:
     """An honest refusal to materialize, carrying the reason a caller records.
 

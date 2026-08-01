@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 from neutron.error import AppError
 
+from omni.capability.arguments import AnalysisOutputSpec, ArgumentSpec
 from omni.capability.derived import DERIVED
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 from omni.fill.derived import DerivedCapability
@@ -560,6 +561,383 @@ class TestCreditRiskScope:
                 name=name,
                 entity_id=entity_id,
                 audience=None,
+            )
+        assert exc_info.value.status == 400
+        assert "declares no arguments" in exc_info.value.detail
+
+
+# ======================================================================
+# D12 -- composite over sibling outputs (analysis_output argument shape)
+# ======================================================================
+#
+# market_risk.overall_risk_score takes five scores that are sibling
+# capabilities' outputs, not claims. The mechanism below resolves a sibling
+# by running it first (recursively), feeding its score into the composite.
+# Abstention propagates: one sub-analysis short -> composite abstains, compute
+# never called. Licence composes transitively through resolve_derived_licence
+# over every sub-analysis's input rows -- one rule, not two. Cycles and
+# excessive depth are refused with bad_request, not abstained.
+#
+# The mechanism is proven with test doubles (two trivial sub-analyses reading
+# macro_series_point scalars), because none of the five REAL sub-analyses
+# (breadth, growth, sentiment, correlation, geopolitical) are honestly
+# declarable from claims today. The real overall_risk_score therefore abstains
+# on all five -- the expected outcome, not a failure.
+
+
+_TEST_SUB_A_ARGS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="level",
+        claim_type="macro_series_point",
+        key="TESTA",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+)
+
+_TEST_SUB_B_ARGS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="level",
+        claim_type="macro_series_point",
+        key="TESTB",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+)
+
+_TEST_COMPOSITE_ARGS: tuple[AnalysisOutputSpec, ...] = (
+    AnalysisOutputSpec(name="a_score", capability="test.sub_a"),
+    AnalysisOutputSpec(name="b_score", capability="test.sub_b"),
+)
+
+
+async def _compute_test_sub(*, level) -> dict | None:
+    return {"score": level.value * 10}
+
+
+async def _compute_test_composite(*, a_score, b_score) -> dict | None:
+    return {"score": a_score.value + b_score.value}
+
+
+def _patch_test_composite(monkeypatch, *, compute=_compute_test_composite):
+    """Insert test.sub_a, test.sub_b and test.composite into _NON_CLAIM_ANALYSES."""
+    from omni.orchestrator import analysis as analysis_module
+
+    monkeypatch.setitem(
+        analysis_module._NON_CLAIM_ANALYSES,
+        "test.sub_a",
+        DeclaredAnalysis(
+            name="test.sub_a", arguments=_TEST_SUB_A_ARGS,
+            compute=_compute_test_sub,
+        ),
+    )
+    monkeypatch.setitem(
+        analysis_module._NON_CLAIM_ANALYSES,
+        "test.sub_b",
+        DeclaredAnalysis(
+            name="test.sub_b", arguments=_TEST_SUB_B_ARGS,
+            compute=_compute_test_sub,
+        ),
+    )
+    monkeypatch.setitem(
+        analysis_module._NON_CLAIM_ANALYSES,
+        "test.composite",
+        DeclaredAnalysis(
+            name="test.composite", arguments=_TEST_COMPOSITE_ARGS,
+            compute=compute,
+        ),
+    )
+
+
+def _test_registry():
+    """Registry with test capabilities registered as invocable."""
+    registry = Registry()
+
+    async def _noop(*args, **kwargs):
+        pass
+
+    for name in (
+        "test.composite", "test.self_ref",
+        "test.cycle_a", "test.cycle_b",
+    ):
+        registry.add(
+            Capability(
+                name=name,
+                description="test double",
+                callability=Callability.YES,
+                maturity=Maturity.WIRED,
+                call=_noop,
+            )
+        )
+    return registry
+
+
+# --------------------------------- test 1: all sub-scores resolvable
+
+
+class TestCompositeAllResolvable:
+    async def test_composite_returns_score_and_shareable_licence(self, db, monkeypatch):
+        """Both sub-analyses resolvable from allowed claims: the composite
+        returns a score, and its licence resolves shareable. The score is
+        a + b = 5*10 + 3*10 = 80, proving both sub-analyses' outputs reached
+        the composite's compute."""
+        entity_id = await _entity(db, symbol="US")
+        await _insert_series(
+            db, entity_id, [(BASE, 5.0)],
+            claim_type="macro_series_point", key="TESTA",
+            source="test", redistributable="allowed", audience_user_id=None,
+        )
+        await _insert_series(
+            db, entity_id, [(BASE, 3.0)],
+            claim_type="macro_series_point", key="TESTB",
+            source="test", redistributable="allowed", audience_user_id=None,
+        )
+
+        _patch_test_composite(monkeypatch)
+
+        result = await run_analysis(
+            _test_registry(), db.pool,
+            name="test.composite", entity_id=entity_id, audience=None,
+        )
+
+        assert not result.abstained, result.shortfalls
+        assert result.result["score"] == 80.0
+        assert result.redistributable == "allowed"
+        assert result.audience_user_id is None
+        assert len(result.evidence) == 2
+
+
+# ------------------------- test 2: one sub-analysis short -> abstention
+
+
+class TestCompositeAbstention:
+    async def test_one_sub_short_abstains_and_compute_never_called(
+        self, db, monkeypatch
+    ):
+        """THE most important test in the order. With sub_b's claim absent
+        (below min_obs), the composite abstains, names the blocked
+        sub-analysis, and the composite's compute is never invoked -- proven
+        by a spy, not an assumption."""
+        entity_id = await _entity(db, symbol="US")
+        await _insert_series(
+            db, entity_id, [(BASE, 5.0)],
+            claim_type="macro_series_point", key="TESTA",
+            source="test", redistributable="allowed", audience_user_id=None,
+        )
+
+        called: list = []
+
+        async def spy_compute(**kwargs):
+            called.append(kwargs)
+            return {}
+
+        _patch_test_composite(monkeypatch, compute=spy_compute)
+
+        result = await run_analysis(
+            _test_registry(), db.pool,
+            name="test.composite", entity_id=entity_id, audience=None,
+        )
+
+        assert result.abstained
+        assert called == [], (
+            "composite compute was called despite a sub-analysis abstention"
+        )
+        shortfall_args = {s.argument for s in result.shortfalls}
+        assert "b_score" in shortfall_args
+        assert "a_score" not in shortfall_args
+
+
+# ------------------- test 3: byo sub-score -> audience-scoped licence
+
+
+class TestCompositeAudienceIsolation:
+    async def test_byo_sub_score_resolves_to_owner_not_allowed(
+        self, db, monkeypatch
+    ):
+        """One sub-score sourced from a byo_only/audience-scoped claim: the
+        composite resolves to that audience, not allowed, even though the
+        other input is shareable. Mirrors D8's audience-isolation test."""
+        entity_id = await _entity(db, symbol="US")
+        owner, other = uuid4(), uuid4()
+
+        await _insert_series(
+            db, entity_id, [(BASE, 5.0)],
+            claim_type="macro_series_point", key="TESTA",
+            source="bloomberg", redistributable="byo_only",
+            audience_user_id=owner,
+        )
+        await _insert_series(
+            db, entity_id, [(BASE, 3.0)],
+            claim_type="macro_series_point", key="TESTB",
+            source="test", redistributable="allowed", audience_user_id=None,
+        )
+
+        _patch_test_composite(monkeypatch)
+        registry = _test_registry()
+
+        owner_result = await run_analysis(
+            registry, db.pool,
+            name="test.composite", entity_id=entity_id, audience=owner,
+        )
+        assert not owner_result.abstained, owner_result.shortfalls
+        assert owner_result.redistributable == "byo_only"
+        assert owner_result.audience_user_id == owner
+
+        other_result = await run_analysis(
+            registry, db.pool,
+            name="test.composite", entity_id=entity_id, audience=other,
+        )
+        assert other_result.abstained
+        shortfall_args = {s.argument for s in other_result.shortfalls}
+        assert "a_score" in shortfall_args
+        assert "b_score" not in shortfall_args
+
+
+# ------------------------- test 4: cycle and depth guards
+
+
+class TestCompositeCycleGuard:
+    async def test_self_referential_spec_is_refused(self, db, monkeypatch):
+        """A composite that names itself as a sub-analysis is refused with a
+        clear error, not recursed."""
+        entity_id = await _entity(db, symbol="US")
+
+        from omni.orchestrator import analysis as analysis_module
+
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "test.self_ref",
+            DeclaredAnalysis(
+                name="test.self_ref",
+                arguments=(
+                    AnalysisOutputSpec(
+                        name="x", capability="test.self_ref"
+                    ),
+                ),
+                compute=_compute_test_sub,
+            ),
+        )
+
+        with pytest.raises(AppError) as exc_info:
+            await run_analysis(
+                _test_registry(), db.pool,
+                name="test.self_ref", entity_id=entity_id, audience=None,
+            )
+        assert exc_info.value.status == 400
+        assert "cycle" in exc_info.value.detail
+
+    async def test_two_capability_cycle_is_refused(self, db, monkeypatch):
+        """A -> B -> A is refused, not recursed."""
+        entity_id = await _entity(db, symbol="US")
+
+        from omni.orchestrator import analysis as analysis_module
+
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "test.cycle_a",
+            DeclaredAnalysis(
+                name="test.cycle_a",
+                arguments=(
+                    AnalysisOutputSpec(
+                        name="b", capability="test.cycle_b"
+                    ),
+                ),
+                compute=_compute_test_sub,
+            ),
+        )
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "test.cycle_b",
+            DeclaredAnalysis(
+                name="test.cycle_b",
+                arguments=(
+                    AnalysisOutputSpec(
+                        name="a", capability="test.cycle_a"
+                    ),
+                ),
+                compute=_compute_test_sub,
+            ),
+        )
+
+        with pytest.raises(AppError) as exc_info:
+            await run_analysis(
+                _test_registry(), db.pool,
+                name="test.cycle_a", entity_id=entity_id, audience=None,
+            )
+        assert exc_info.value.status == 400
+        assert "cycle" in exc_info.value.detail
+
+
+# ---------- test 5: real overall_risk_score abstains (all five blocked)
+
+
+class TestOverallRiskScoreAbstains:
+    async def test_all_five_sub_analyses_blocked_abstains(self, db, monkeypatch):
+        """The real market_risk.overall_risk_score abstains because none of its
+        five sub-analyses are declarable from claims today. This is the
+        expected outcome -- the honest partial. The spy proves
+        calculate_overall_risk_score is never reached despite the composite
+        being registered as callable."""
+        entity_id = await _entity(db, symbol="US")
+
+        from omni.orchestrator import analysis as analysis_module
+
+        called: list = []
+
+        async def spy_compute(**kwargs):
+            called.append(kwargs)
+            return {}
+
+        spy = DeclaredAnalysis(
+            name="market_risk.overall_risk_score",
+            arguments=analysis_module._OVERALL_RISK_ARGUMENTS,
+            compute=spy_compute,
+        )
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "market_risk.overall_risk_score",
+            spy,
+        )
+
+        result = await run_analysis(
+            default_registry(), db.pool,
+            name="market_risk.overall_risk_score",
+            entity_id=entity_id, audience=None,
+        )
+
+        assert result.abstained
+        assert called == [], (
+            "overall_risk_score compute was called despite sub-analysis abstentions"
+        )
+        assert len(result.shortfalls) == 5
+        args = {s.argument for s in result.shortfalls}
+        assert args == {
+            "market_score", "economic_score", "sentiment_score",
+            "correlation_score", "geopolitical_score",
+        }
+
+
+# --------------------- test 6: nothing else became callable
+
+
+class TestOverallRiskScoreScope:
+    async def test_other_market_risk_still_refused(self, db):
+        """A market_risk capability not declared here (e.g. options_skew)
+        is still refused exactly as before -- the order widens callable
+        surface by exactly overall_risk_score, no more."""
+        entity_id = await _entity(db, symbol="US")
+        registry = default_registry()
+        name = "market_risk.options_skew"
+        cap = registry.get(name)
+        assert cap is not None, "expected this capability to exist in the registry"
+        assert cap.invocable
+
+        with pytest.raises(AppError) as exc_info:
+            await run_analysis(
+                registry, db.pool,
+                name=name, entity_id=entity_id, audience=None,
             )
         assert exc_info.value.status == 400
         assert "declares no arguments" in exc_info.value.detail

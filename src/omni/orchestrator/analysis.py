@@ -29,6 +29,16 @@ defaulted argument.
 
 The licence verdict reuses ``resolve_derived_licence`` over the materialized
 inputs -- the same rule that governs derived claims, not a new one.
+
+A composite (``market_risk.overall_risk_score``) declares its arguments as
+``AnalysisOutputSpec`` s instead of ``ArgumentSpec`` s: each names a sibling
+capability whose output (its ``score``) feeds the composite's argument. The
+sibling is resolved by running the same materialize-and-compute machinery
+recursively, so abstention propagates (a sub-analysis short of ``min_obs``
+abstains the whole composite) and licence composes to the most restrictive
+input across all sub-analyses transitively -- through the same
+``resolve_derived_licence``, not a second rule. Cycles and excessive depth are
+refused with a clear error (``MAX_COMPOSITE_DEPTH``) rather than recursing.
 """
 
 from __future__ import annotations
@@ -39,12 +49,28 @@ from uuid import UUID
 
 from neutron.error import bad_request, not_found
 
-from omni.capability.arguments import Abstention, ArgumentSpec, Materialized, materialize
+from omni.capability.arguments import (
+    Abstention,
+    AnalysisOutputSpec,
+    ArgumentSpec,
+    Materialized,
+    materialize,
+)
 from omni.capability.derived import DERIVED
 from omni.capability.registry import Registry
-from omni.capabilities.risk import analyze_credit_risk
+from omni.capabilities.risk import analyze_credit_risk, calculate_overall_risk_score
 from omni.fill.derived import DerivedCapability
 from omni.perception.divergence import resolve_derived_licence
+
+# The deepest composite chain this module will resolve before refusing.
+# ``overall_risk_score`` is depth 2 (composite -> sub-analysis -> claims); a
+# chain of composites would be depth 3+. No legitimate graph exceeds a handful
+# of levels, so 8 is generous headroom that still catches runaway recursion
+# before Python's own stack limit. At the limit the call is REFUSED with a
+# ``bad_request`` error, not an abstention: hitting it means the dependency
+# graph is pathologically deep (or a cycle the set-based guard missed), and an
+# abstention would disguise a structural defect as missing data.
+MAX_COMPOSITE_DEPTH = 8
 
 # The set of capabilities whose inputs are declared as ArgumentSpecs and whose
 # compute function takes (pool, context, **materialized). Today this is the
@@ -81,7 +107,7 @@ class DeclaredAnalysis:
     """
 
     name: str
-    arguments: tuple[ArgumentSpec, ...]
+    arguments: tuple[ArgumentSpec | AnalysisOutputSpec, ...]
     compute: Callable[..., dict | None]
 
 
@@ -130,11 +156,87 @@ async def _compute_credit_risk(
     )
 
 
+# ----------------------------------------------------------- overall_risk_score
+#
+# calculate_overall_risk_score takes five keyword-only floats -- market_score,
+# economic_score, sentiment_score, correlation_score, geopolitical_score -- each
+# the output ("score") of a sibling market_risk.* capability, not a claim. The
+# five AnalysisOutputSpecs below name those siblings; at resolution time each is
+# run first (recursively through _resolve_sibling_output) and its score feeds
+# the composite's argument.
+#
+# NONE of the five sub-analyses is declarable from claims through ArgumentSpec
+# today, so the composite abstains. That is the expected outcome for this
+# order, not a failure. Each is assessed below; the assessments are part of the
+# deliverable.
+#
+#   market_score -> market_risk.breadth (analyze_market_breadth): BLOCKED.
+#     Inputs are breadth statistics (advance_decline_ratio,
+#     percent_above_50ma/200ma, new_highs, new_lows) -- cross-section
+#     derivations over a universe of price_snapshots with no claim source.
+#
+#   economic_score -> market_risk.growth_risk (analyze_growth_risk): BLOCKED.
+#     gdp_growth and unemployment are macro_series_point scalars from FRED, but
+#     job_growth is a payroll-change count (compared against 50000) that has no
+#     direct FRED series -- it is a diff of PAYEMS with a x1000 unit conversion
+#     ArgumentSpec's transform vocabulary cannot express.
+#
+#   sentiment_score -> market_risk.sentiment: BLOCKED. No capability produces a
+#     sentiment score. The v1 sentiment analyzer (_analyze_sentiment_risks)
+#     was deliberately not ported (it fabricated 0.5 on missing input). The
+#     name below does not resolve to any declared analysis, so the composite
+#     abstains naming it.
+#
+#   correlation_score -> market_risk.correlation_risks (analyze_correlation_
+#     risks): BLOCKED. Takes returns_data: dict[str, Sequence[float]] -- a
+#     multi-symbol panel. ArgumentSpec describes single-series and two-entity
+#     aligned shapes, not an arbitrary dict-of-series keyed by symbol.
+#
+#   geopolitical_score -> market_risk.geopolitical_risks (analyze_geopolitical
+#     _risks): BLOCKED. Takes articles: Sequence[dict] where each dict needs
+#     title and summary. ArgumentSpec extracts scalar floats, not dicts.
+#     news_event claims carry {"title","url","feed"} -- no summary field, and
+#     the value is a JSONB object, not a scalar _extract_scalar can pull.
+_OVERALL_RISK_ARGUMENTS: tuple[AnalysisOutputSpec, ...] = (
+    AnalysisOutputSpec(name="market_score", capability="market_risk.breadth"),
+    AnalysisOutputSpec(name="economic_score", capability="market_risk.growth_risk"),
+    AnalysisOutputSpec(name="sentiment_score", capability="market_risk.sentiment"),
+    AnalysisOutputSpec(
+        name="correlation_score", capability="market_risk.correlation_risks"
+    ),
+    AnalysisOutputSpec(
+        name="geopolitical_score", capability="market_risk.geopolitical_risks"
+    ),
+)
+
+
+async def _compute_overall_risk(
+    *,
+    market_score: Materialized,
+    economic_score: Materialized,
+    sentiment_score: Materialized,
+    correlation_score: Materialized,
+    geopolitical_score: Materialized,
+) -> dict | None:
+    return calculate_overall_risk_score(
+        market_score=market_score.value,
+        economic_score=economic_score.value,
+        sentiment_score=sentiment_score.value,
+        correlation_score=correlation_score.value,
+        geopolitical_score=geopolitical_score.value,
+    )
+
+
 _NON_CLAIM_ANALYSES: dict[str, DeclaredAnalysis] = {
     "market_risk.credit_risk": DeclaredAnalysis(
         name="market_risk.credit_risk",
         arguments=_CREDIT_RISK_ARGUMENTS,
         compute=_compute_credit_risk,
+    ),
+    "market_risk.overall_risk_score": DeclaredAnalysis(
+        name="market_risk.overall_risk_score",
+        arguments=_OVERALL_RISK_ARGUMENTS,
+        compute=_compute_overall_risk,
     ),
 }
 
@@ -171,6 +273,157 @@ class AnalysisResult:
     shortfalls: tuple[AnalysisShortfall, ...] = ()
 
 
+def _lookup_declared(name: str):
+    """Return ``(arguments, compute, is_claim_path)`` or ``None``.
+
+    Checks both the claim-producing (``_DECLARED_ANALYSES``) and non-claim
+    (``_NON_CLAIM_ANALYSES``) registries. Used by ``run_analysis`` at the top
+    level and by ``_resolve_sibling_output`` for each sub-analysis.
+    """
+    derived = _DECLARED_ANALYSES.get(name)
+    if derived is not None and derived.arguments is not None:
+        return derived.arguments, derived.compute, True
+    analysis = _NON_CLAIM_ANALYSES.get(name)
+    if analysis is not None:
+        return analysis.arguments, analysis.compute, False
+    return None
+
+
+async def _materialize_all(
+    arguments: tuple[ArgumentSpec | AnalysisOutputSpec, ...],
+    registry: Registry,
+    pool,
+    *,
+    entity_id: UUID,
+    audience: UUID | None,
+    seen: frozenset[str],
+) -> tuple[dict[str, Materialized], list[Abstention], list]:
+    """Materialize each argument (claim-sourced or sibling-output).
+
+    For ``AnalysisOutputSpec`` arguments the sibling is resolved recursively
+    through ``_resolve_sibling_output``, which packs the sibling's transitive
+    ``claim_ids`` and ``rows`` into the returned ``Materialized`` -- so the
+    caller's licence resolution sees every input claim transitively, not just
+    the top-level ones. Returns ``(values, abstentions, rows)``.
+    """
+    values: dict[str, Materialized] = {}
+    abstentions: list[Abstention] = []
+    all_rows: list = []
+    for spec in arguments:
+        if isinstance(spec, AnalysisOutputSpec):
+            result = await _resolve_sibling_output(
+                spec, registry, pool,
+                entity_id=entity_id, audience=audience, seen=seen,
+            )
+        else:
+            result = await materialize(
+                spec, pool, entity_id=entity_id, audience=audience
+            )
+        if isinstance(result, Abstention):
+            abstentions.append(result)
+        else:
+            values[spec.name] = result
+            all_rows.extend(result.rows)
+    return values, abstentions, all_rows
+
+
+async def _resolve_sibling_output(
+    spec: AnalysisOutputSpec,
+    registry: Registry,
+    pool,
+    *,
+    entity_id: UUID,
+    audience: UUID | None,
+    seen: frozenset[str],
+) -> Materialized | Abstention:
+    """Run a sibling capability and extract its score as a ``Materialized``.
+
+    The sibling is resolved through the same ``_materialize_all`` machinery,
+    so its own sub-analyses (if any) are resolved transitively. Three
+    properties hold:
+
+    - **Abstention propagates.** If the sibling or any of its inputs abstain,
+      the composite abstains naming which sibling and why -- never a default.
+    - **Licence composes transitively.** The returned ``Materialized`` carries
+      every ``ProvenanceRow`` the sibling consumed, so the caller's
+      ``resolve_derived_licence`` sees the full transitive input set.
+    - **Cycles and depth are refused** (``bad_request``), not abstained: a
+      cycle is a structural defect, and disguising it as missing data would
+      hide the bug.
+    """
+    cap_name = spec.capability
+
+    if cap_name in seen:
+        chain = " -> ".join([*seen, cap_name])
+        raise bad_request(f"composite cycle detected: {chain}")
+
+    if len(seen) >= MAX_COMPOSITE_DEPTH:
+        raise bad_request(
+            f"composite depth limit ({MAX_COMPOSITE_DEPTH}) exceeded resolving "
+            f"{cap_name}"
+        )
+
+    new_seen = seen | {cap_name}
+
+    decl = _lookup_declared(cap_name)
+    if decl is None:
+        return Abstention(
+            spec.name,
+            f"{cap_name} is not a declared analysis; "
+            f"cannot resolve as a sub-analysis",
+        )
+
+    sibling_args, sibling_compute, is_claim_path = decl
+    values, abstentions, rows = await _materialize_all(
+        sibling_args, registry, pool,
+        entity_id=entity_id, audience=audience, seen=new_seen,
+    )
+
+    if abstentions:
+        reasons = "; ".join(a.reason for a in abstentions)
+        return Abstention(spec.name, f"{cap_name} abstained: {reasons}")
+
+    if is_claim_path:
+        sibling_cap = registry.get(cap_name)
+        context = {
+            "entity_id": entity_id,
+            "audience_user_id": audience,
+            "claim_type": (
+                sibling_cap.produces[0]
+                if sibling_cap and sibling_cap.produces
+                else ""
+            ),
+            "key": "",
+        }
+        computed = await sibling_compute(pool, context, **values)
+    else:
+        computed = await sibling_compute(**values)
+
+    if computed is None:
+        return Abstention(
+            spec.name, f"{cap_name} compute returned no result"
+        )
+
+    if isinstance(computed, dict):
+        val = computed.get(spec.result_key)
+    elif hasattr(computed, "value") and isinstance(computed.value, dict):
+        val = computed.value.get(spec.result_key)
+    else:
+        val = None
+
+    if val is None or not isinstance(val, (int, float)):
+        return Abstention(
+            spec.name,
+            f"{cap_name} produced no numeric {spec.result_key!r}",
+        )
+
+    return Materialized(
+        value=float(val),
+        claim_ids=tuple(r.id for r in rows),
+        rows=tuple(rows),
+    )
+
+
 async def run_analysis(
     registry: Registry,
     pool,
@@ -184,6 +437,9 @@ async def run_analysis(
     No persistence: the result and its provenance are returned, not written.
     Raises ``not_found`` for an unknown name and ``bad_request`` for a
     registered-but-not-invocable capability or one that declares no arguments.
+    For composites (capabilities whose arguments include
+    ``AnalysisOutputSpec``), each sibling is resolved recursively with
+    cycle/depth guards.
     """
     cap = registry.get(name)
     if cap is None:
@@ -194,31 +450,20 @@ async def run_analysis(
             f"(callability={cap.callability.value}, maturity={cap.maturity.value})"
         )
 
-    derived = _DECLARED_ANALYSES.get(name)
-    analysis = _NON_CLAIM_ANALYSES.get(name)
-    if (derived is None or derived.arguments is None) and analysis is None:
+    decl = _lookup_declared(name)
+    if decl is None:
         raise bad_request(
             f"Capability {name!r} declares no arguments; it cannot be assembled "
             f"from coverage"
         )
 
-    if derived is not None and derived.arguments is not None:
-        arguments = derived.arguments
-        is_claim_path = True
-    else:
-        arguments = analysis.arguments
-        is_claim_path = False
+    arguments, compute, is_claim_path = decl
 
-    materialized: dict[str, Materialized] = {}
-    abstentions: list[Abstention] = []
-    for spec in arguments:
-        result = await materialize(
-            spec, pool, entity_id=entity_id, audience=audience
-        )
-        if isinstance(result, Abstention):
-            abstentions.append(result)
-        else:
-            materialized[spec.name] = result
+    seen = frozenset({name})
+    materialized, abstentions, all_rows = await _materialize_all(
+        arguments, registry, pool,
+        entity_id=entity_id, audience=audience, seen=seen,
+    )
 
     if abstentions:
         return AnalysisResult(
@@ -236,9 +481,9 @@ async def run_analysis(
             "claim_type": cap.produces[0] if cap.produces else "",
             "key": "",
         }
-        computed = await derived.compute(pool, context, **materialized)
+        computed = await compute(pool, context, **materialized)
     else:
-        computed = await analysis.compute(**materialized)
+        computed = await compute(**materialized)
 
     if computed is None:
         count = sum(len(m.claim_ids) for m in materialized.values())
@@ -259,11 +504,12 @@ async def run_analysis(
 
     # D7 folded the dates/licence fields materialize() already reads into
     # Materialized.rows, so the licence set is read straight off what was just
-    # materialized rather than re-read by id -- the same fix D7 applied to
-    # fill_analysis, adopted here so this path does not reintroduce the
-    # re-read D7 deleted. resolve_derived_licence is duck-typed against
+    # materialized rather than re-read by id. For composites, each
+    # AnalysisOutputSpec's Materialized carries the sibling's transitive rows,
+    # so all_rows already sees every input claim transitively.
+    # resolve_derived_licence is duck-typed against
     # .redistributable/.audience_user_id, which ProvenanceRow carries.
-    licence_inputs = [row for m in materialized.values() for row in m.rows]
+    licence_inputs = all_rows
     redistributable, audience_resolved = resolve_derived_licence(licence_inputs)
 
     return AnalysisResult(

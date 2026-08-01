@@ -29,6 +29,7 @@ import pytest
 from omni.capability.arguments import (
     Abstention,
     AlignedSeries,
+    AnalysisOutputSpec,
     ArgumentSpec,
     Materialized,
     materialize,
@@ -525,4 +526,43 @@ class TestKeySpecNarrowsToOneSeries:
         assert result.argument == "fundamentals"
         assert "0 of 2" in result.reason
         assert "short 2" in result.reason
+
+
+# --------------------------------------------- 11. AnalysisOutputSpec (D12)
+
+
+class TestAnalysisOutputSpec:
+    """The distinct type for sibling-output arguments.
+
+    An ``AnalysisOutputSpec`` names a sibling capability whose computed score
+    feeds a composite's argument. It is NOT an overloaded ``ArgumentSpec``
+    shape -- every ``ArgumentSpec`` field for claim extraction (``claim_type``,
+    ``key``, ``transform``, ``window``, ``value_field``, ``entity_scope``,
+    ``relation``, ``align_on``) is meaningless for a computed score, and an
+    ``ArgumentSpec`` that silently ignores eight fields is a trap.
+    """
+
+    def test_constructs_with_name_and_capability(self):
+        spec = AnalysisOutputSpec(
+            name="market_score", capability="market_risk.breadth"
+        )
+        assert spec.name == "market_score"
+        assert spec.capability == "market_risk.breadth"
+
+    def test_result_key_defaults_to_score(self):
+        spec = AnalysisOutputSpec(name="x", capability="y")
+        assert spec.result_key == "score"
+
+    def test_result_key_can_be_overridden(self):
+        spec = AnalysisOutputSpec(
+            name="x", capability="y", result_key="level"
+        )
+        assert spec.result_key == "level"
+
+    def test_is_frozen(self):
+        from dataclasses import FrozenInstanceError
+
+        spec = AnalysisOutputSpec(name="x", capability="y")
+        with pytest.raises(FrozenInstanceError):
+            spec.name = "z"
 
