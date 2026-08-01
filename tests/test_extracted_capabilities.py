@@ -545,11 +545,12 @@ def _cases():
                 "total_value": 11000.0,
                 "daily_returns": [0.01, -0.005, 0.002],
                 "period_days": 365,
+                "risk_free_rate_pct": 4.5,
             },
             lambda r: r["percentage_return"] == pytest.approx(10.0),
         ),
         "fundamentals.risk_metrics": (
-            {"daily_returns": _FIXTURE_DAILY, "total_value": 10000.0},
+            {"daily_returns": _FIXTURE_DAILY, "total_value": 10000.0, "risk_free_rate_pct": 4.5},
             lambda r: r["data_quality"] == "historical"
             and r["data_points"] == 20
             and isinstance(r["value_at_risk_95"], float),
