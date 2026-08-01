@@ -179,6 +179,57 @@ def test_trend_rounds_to_three_decimals():
     out = consensus_trend([{"composite_score": 1 / 3}, {"composite_score": 2 / 3}])
     assert out["avg_score"] == round(1.0 / 2, 3)
     assert out["min_score"] == round(1 / 3, 3)
-    # Guard against an accidental "rounded to something" that still equals
-    # the raw float -- confirm rounding actually happened.
+    # Confirm rounding actually happened: the raw 1/3 is 0.3333... and must
+    # differ from the rounded 0.333. (The pre-existing ``!= math.inf`` below
+    # cannot fail for any plausible implementation and is kept only because
+    # the no-delete rule forbids removing it; this inequality is the real
+    # discrimination.)
+    assert out["min_score"] != 1 / 3
     assert out["min_score"] != math.inf
+
+
+def test_compare_factor_leader_at_exact_threshold_emits_no_insight():
+    # v1 used a strict ``> 0.5`` (software/.../consensus.py:714); a score
+    # exactly at the threshold is NOT a leader. Pins the boundary so the
+    # comparison cannot silently drift to ``>=``. The existing above/below
+    # tests use 0.6/0.8 and 0.45, which pass under both ``>`` and ``>=`` and
+    # therefore could not settle this.
+    out = compare_consensus(
+        {
+            "A": {
+                "composite_score": 0.5,
+                "factor_scores": {"technical": {"score": 0.5}},
+            },
+            "B": {
+                "composite_score": 0.5,
+                "factor_scores": {"technical": {"score": 0.3}},
+            },
+        }
+    )
+    assert not any("leads in" in s for s in out["insights"])
+
+
+def test_trend_current_and_change_are_positional_so_ordering_matters():
+    # The docstring contracts ``history`` as oldest-first. The function has no
+    # timestamp field to sort on (it consumes only composite_score + optional
+    # signal), so "current" is the LAST element by position and "change" is
+    # last-minus-first. Reversing the input therefore flips the sign of
+    # score_change and changes current_score. This pins the positional
+    # semantics so a future "helpful" refactor that re-sorts, picks max, or
+    # switches to max-minus-min would break here rather than silently produce
+    # a different trend from the same numbers.
+    ascending = [
+        {"composite_score": 0.2},
+        {"composite_score": 0.5},
+        {"composite_score": 0.8, "signal": "buy"},
+    ]
+    out_asc = consensus_trend(ascending)
+    assert out_asc["score_change"] == round(0.8 - 0.2, 3)
+    assert out_asc["current_score"] == 0.8
+    assert out_asc["current_signal"] == "buy"
+
+    # Same three points, reversed -- a violated oldest-first precondition.
+    out_rev = consensus_trend(list(reversed(ascending)))
+    assert out_rev["score_change"] == round(0.2 - 0.8, 3)
+    assert out_rev["current_score"] == 0.2
+    assert out_rev["current_signal"] is None
