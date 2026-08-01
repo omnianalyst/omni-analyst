@@ -46,6 +46,7 @@ SCHEMA_CLAIM_TYPES = frozenset(
         "onchain_tvl",
         "onchain_supply",
         "yield_curve_signal",
+        "sahm_rule_signal",
     }
 )
 
