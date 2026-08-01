@@ -1074,3 +1074,99 @@ class TestRecessionProbability:
             )
         assert exc_info.value.status == 400
         assert "declares no arguments" in exc_info.value.detail
+
+
+# ----------------------------------------- inflation_expectations (non-claim)
+#
+# The 7th callable-by-name capability, and the second on the non-claim
+# DeclaredAnalysis path (after credit_risk). 5y/10y breakeven inflation from
+# FRED T5YIE/T10YIE (both verified). Non-claim because nothing today consumes
+# "the current 5y5y forward" as durable coverage -- it is a computed read, not
+# an accumulating asset (contrast inflation_signal, which taylor_rule consumes).
+
+
+class TestInflationExpectations:
+    async def _seed(self, db, *, five_y, ten_y):
+        entity_id = await _entity(db, symbol="US")
+        f = await _insert_signal(
+            db, entity_id, claim_type="macro_series_point", key="T5YIE",
+            value={"value": five_y},
+        )
+        t = await _insert_signal(
+            db, entity_id, claim_type="macro_series_point", key="T10YIE",
+            value={"value": ten_y},
+        )
+        return entity_id, f, t
+
+    async def _run(self, db, entity_id):
+        return await run_analysis(
+            default_registry(), db.pool,
+            name="macro.inflation_expectations",
+            entity_id=entity_id, audience=None,
+        )
+
+    async def test_returns_breakevens_and_5y5y_forward(self, db):
+        entity_id, f, t = await self._seed(db, five_y=2.3, ten_y=2.4)
+        result = await self._run(db, entity_id)
+        assert not result.abstained, result.shortfalls
+        assert result.result["5y"] == pytest.approx(2.3)
+        assert result.result["10y"] == pytest.approx(2.4)
+        # 5y5y forward = 2*10y - 5y = 2.5. Discriminates a (10y-5y)=0.1 or
+        # arithmetic-mean=2.35 bug.
+        assert result.result["5y5y_forward"] == pytest.approx(2.5)
+        assert set(result.evidence) == {str(f), str(t)}
+
+    async def test_anchored_when_10y_near_target(self, db):
+        entity_id, _, _ = await self._seed(db, five_y=2.2, ten_y=2.1)
+        result = await self._run(db, entity_id)
+        # abs(2.1 - 2.0) = 0.1 < 0.5 -> anchored.
+        assert result.result["anchored"] is True
+
+    async def test_not_anchored_when_10y_far_from_target(self, db):
+        entity_id, _, _ = await self._seed(db, five_y=2.0, ten_y=2.8)
+        result = await self._run(db, entity_id)
+        # abs(2.8 - 2.0) = 0.8 >= 0.5 -> not anchored.
+        assert result.result["anchored"] is False
+
+    async def test_licence_shareable_for_fred_inputs(self, db):
+        entity_id, _, _ = await self._seed(db, five_y=2.3, ten_y=2.4)
+        result = await self._run(db, entity_id)
+        assert result.redistributable == "allowed"
+        assert result.audience_user_id is None
+
+    async def test_abstains_when_one_series_absent(self, db, monkeypatch):
+        """With T5YIE absent the call abstains naming exp_5y, and compute is
+        never invoked -- proven by a spy, matching the recession_probability
+        abstention test."""
+        entity_id = await _entity(db, symbol="US")
+        await _insert_signal(
+            db, entity_id, claim_type="macro_series_point", key="T10YIE",
+            value={"value": 2.4},
+        )
+        # No T5YIE claim.
+
+        from omni.orchestrator import analysis as analysis_module
+
+        called: list = []
+
+        async def spy_compute(**kwargs):
+            called.append(kwargs)
+            return {}
+
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "macro.inflation_expectations",
+            DeclaredAnalysis(
+                name="macro.inflation_expectations",
+                arguments=analysis_module._INFLATION_EXPECTATIONS_ARGUMENTS,
+                compute=spy_compute,
+            ),
+        )
+
+        result = await self._run(db, entity_id)
+
+        assert result.abstained
+        assert called == [], "compute called despite an argument abstention"
+        reasons = {s.argument: s.reason for s in result.shortfalls}
+        assert "exp_5y" in reasons
+        assert "exp_10y" not in reasons

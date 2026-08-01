@@ -58,7 +58,7 @@ from omni.capability.arguments import (
 )
 from omni.capability.derived import DERIVED
 from omni.capability.registry import Registry
-from omni.capabilities.macro import recession_probability
+from omni.capabilities.macro import inflation_expectations, recession_probability
 from omni.capabilities.risk import analyze_credit_risk, calculate_overall_risk_score
 from omni.fill.derived import DerivedCapability
 from omni.perception.divergence import resolve_derived_licence
@@ -212,6 +212,60 @@ async def _compute_recession_probability(
     )
 
 
+# ----------------------------------------------------------- inflation_expectations
+#
+# A non-claim macro analysis: 5y/10y breakeven inflation expectations and the
+# 5y5y forward + anchoring flag they imply. FRED publishes both as daily series
+# -- T5YIE (5-Year Breakeven Inflation Rate) and T10YIE (10-Year Breakeven
+# Inflation Rate) -- both ``allowed`` ``macro_series_point`` from ``fred``.
+# Both ids were confirmed against FRED before use (page titles: "5-Year
+# Breakeven Inflation Rate (T5YIE)", "10-Year Breakeven Inflation Rate
+# (T10YIE)").
+#
+# This is on the non-claim path (no ``claim_type`` earned): unlike
+# ``inflation_signal`` (CPI YoY, which ``macro.taylor_rule`` consumes), nothing
+# today reads "the current 5y5y forward" as durable coverage -- it is a
+# computed read, not an accumulating asset. If a consumer appears (e.g. an
+# anchoring-based conviction gate), it can be promoted to a DerivedCapability
+# the way ``sahm_rule`` -> ``sahm_rule_signal`` was.
+#
+# ``min_obs=1``: the function reads only the latest of each series
+# (``latest_5y = exp_5y[-1]``), so the count floor is one observation. The
+# scalar shape takes the most recent by event_date. ``ArgumentSpec`` has no
+# freshness field, so the declaration cannot refuse a stale latest by age --
+# the same limitation ``_CREDIT_RISK_ARGUMENTS`` documents (a higher min_obs
+# would not improve recency; it would be a misleading proxy). The compute wraps
+# each scalar in a one-element list because ``inflation_expectations`` takes
+# ``Sequence[float]`` and indexes ``[-1]``.
+_INFLATION_EXPECTATIONS_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="exp_5y",
+        claim_type="macro_series_point",
+        key="T5YIE",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+    ArgumentSpec(
+        name="exp_10y",
+        claim_type="macro_series_point",
+        key="T10YIE",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+)
+
+
+async def _compute_inflation_expectations(
+    *, exp_5y: Materialized, exp_10y: Materialized
+) -> dict | None:
+    return await inflation_expectations(
+        exp_5y=[exp_5y.value],
+        exp_10y=[exp_10y.value],
+    )
+
+
 # ----------------------------------------------------------- overall_risk_score
 #
 # calculate_overall_risk_score takes five keyword-only floats -- market_score,
@@ -298,6 +352,11 @@ _NON_CLAIM_ANALYSES: dict[str, DeclaredAnalysis] = {
         name="macro.recession_probability",
         arguments=_RECESSION_PROBABILITY_ARGUMENTS,
         compute=_compute_recession_probability,
+    ),
+    "macro.inflation_expectations": DeclaredAnalysis(
+        name="macro.inflation_expectations",
+        arguments=_INFLATION_EXPECTATIONS_ARGUMENTS,
+        compute=_compute_inflation_expectations,
     ),
 }
 
