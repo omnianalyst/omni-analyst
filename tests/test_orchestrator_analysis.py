@@ -941,3 +941,136 @@ class TestOverallRiskScoreScope:
             )
         assert exc_info.value.status == 400
         assert "declares no arguments" in exc_info.value.detail
+
+
+# ----------------------------------------- recession_probability (§6.3)
+#
+# The first composite within reach: consumes the two earned claim types
+# (yield_curve_signal from D10, sahm_rule_signal from D14) as plain ArgumentSpecs
+# over the claims -- NOT the analysis_output seam. lei_signals has no producer
+# today, so the composite runs as an honest 2-of-3 (probability in [0, 0.7]);
+# the LEI term is omitted, not fabricated.
+
+
+async def _insert_signal(
+    db, entity_id, *, claim_type, key, value,
+    source="fred", redistributable="allowed", audience_user_id=None,
+    event_date=None,
+):
+    """Insert one claim carrying an arbitrary JSONB ``value`` dict, returning id.
+
+    ``_insert_series`` hardcodes ``{"value": float}``; the earned signal claim
+    types carry object values (``{"is_inverted": bool, ...}``,
+    ``{"triggered": bool, ...}``) that ArgumentSpec's ``value_field`` reaches
+    into, so this sibling inserts the producer's real shape.
+    """
+    event_date = event_date or BASE
+    knowledge_date = event_date + timedelta(days=1)
+    return await db.pool.fetchval(
+        _INSERT_CLAIM, entity_id, claim_type, key,
+        json.dumps(value), source,
+        event_date, knowledge_date, 1.0,
+        redistributable, audience_user_id,
+    )
+
+
+class TestRecessionProbability:
+    async def _seed(self, db, *, inverted: bool, triggered: bool):
+        entity_id = await _entity(db, symbol="US")
+        yc = await _insert_signal(
+            db, entity_id, claim_type="yield_curve_signal", key="DGS10-DGS2",
+            value={"is_inverted": inverted, "current_spread": -0.3,
+                   "days_inverted_90d": 45},
+        )
+        sahm = await _insert_signal(
+            db, entity_id, claim_type="sahm_rule_signal", key="UNRATE",
+            value={"triggered": triggered, "indicator": 0.53},
+        )
+        return entity_id, yc, sahm
+
+    async def _run(self, db, entity_id):
+        return await run_analysis(
+            default_registry(), db.pool,
+            name="macro.recession_probability",
+            entity_id=entity_id, audience=None,
+        )
+
+    async def test_both_signals_triggered_yields_70_percent(self, db):
+        entity_id, yc, sahm = await self._seed(db, inverted=True, triggered=True)
+        result = await self._run(db, entity_id)
+        assert not result.abstained, result.shortfalls
+        # 0.3 (yield curve) + 0.4 (sahm); the 0.3 LEI term is honestly absent
+        # (no producer), so 0.7 -- not 1.0.
+        assert result.result["probability"] == pytest.approx(0.7)
+        assert isinstance(result.result["assessment"], str)
+        assert set(result.evidence) == {str(yc), str(sahm)}
+
+    async def test_neither_signal_yields_zero(self, db):
+        entity_id, _, _ = await self._seed(db, inverted=False, triggered=False)
+        result = await self._run(db, entity_id)
+        assert not result.abstained
+        assert result.result["probability"] == pytest.approx(0.0)
+
+    async def test_yield_curve_only_contributes_its_term(self, db):
+        entity_id, _, _ = await self._seed(db, inverted=True, triggered=False)
+        result = await self._run(db, entity_id)
+        assert result.result["probability"] == pytest.approx(0.3)
+
+    async def test_sahm_only_contributes_its_term(self, db):
+        entity_id, _, _ = await self._seed(db, inverted=False, triggered=True)
+        result = await self._run(db, entity_id)
+        assert result.result["probability"] == pytest.approx(0.4)
+
+    async def test_abstains_when_a_signal_claim_is_absent(self, db, monkeypatch):
+        """With yield_curve_signal absent the call abstains naming
+        yield_curve_inverted, and compute is never invoked -- proven by a spy,
+        matching the credit_risk abstention test."""
+        entity_id = await _entity(db, symbol="US")
+        await _insert_signal(
+            db, entity_id, claim_type="sahm_rule_signal", key="UNRATE",
+            value={"triggered": True, "indicator": 0.53},
+        )
+        # No yield_curve_signal claim.
+
+        from omni.orchestrator import analysis as analysis_module
+
+        called: list = []
+
+        async def spy_compute(**kwargs):
+            called.append(kwargs)
+            return {}
+
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "macro.recession_probability",
+            DeclaredAnalysis(
+                name="macro.recession_probability",
+                arguments=analysis_module._RECESSION_PROBABILITY_ARGUMENTS,
+                compute=spy_compute,
+            ),
+        )
+
+        result = await self._run(db, entity_id)
+
+        assert result.abstained
+        assert called == [], "compute called despite an argument abstention"
+        reasons = {s.argument: s.reason for s in result.shortfalls}
+        assert "yield_curve_inverted" in reasons
+        assert "sahm_triggered" not in reasons
+
+    async def test_undiscovered_macro_capability_still_refused(self, db):
+        """Sanity: declaring recession_probability widens the callable surface
+        by exactly one -- an unrelated macro capability is still refused with
+        'declares no arguments', not silently run."""
+        entity_id = await _entity(db, symbol="US")
+        registry = default_registry()
+        name = "macro.inflation_measures"
+        cap = registry.get(name)
+        assert cap is not None and cap.invocable
+        with pytest.raises(AppError) as exc_info:
+            await run_analysis(
+                registry, db.pool, name=name,
+                entity_id=entity_id, audience=None,
+            )
+        assert exc_info.value.status == 400
+        assert "declares no arguments" in exc_info.value.detail
