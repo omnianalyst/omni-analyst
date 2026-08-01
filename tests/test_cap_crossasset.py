@@ -28,6 +28,7 @@ from omni.capabilities.crossasset import (
     roro_indicator,
     sector_rotation,
     time_series_ic,
+    _summarize_ic,
 )
 from omni.ingest.protocol import Unavailable
 
@@ -509,3 +510,78 @@ class TestEvaluateSignal:
         # ICs alternate +1 / -1 -> mean ~0, not significant.
         assert ev.ic.is_significant is False
         assert ev.verdict.startswith("NO MEASURABLE EDGE")
+
+
+class TestFloatNoiseGuards:
+    """The zero-dispersion guards must fire on a constant series whose std is
+    float noise (~1e-17), not exactly 0.0. A guard written ``== 0.0`` or
+    ``> 0`` misses it and divides the mean by ~1e-17, fabricating a giant ratio
+    -- the same defect class that shipped a Sortino of -1.6e15 and a +5% gain
+    reported as Value at Risk (AGENTS.md, "Never compare a float to zero")."""
+
+    def test_constant_ic_series_is_degenerate_not_fabricated_ir(self):
+        # [0.05]*20 is a perfectly constant IC series; std(ddof=1) is ~7e-18
+        # (0.05 is not representable in binary64), so a guard written
+        # ``ic_std == 0.0`` misses it and ic_ir = mean_ic / 7e-18 ~= 7e15.
+        res = _summarize_ic(pd.Series([0.05] * 20), "spearman")
+        # Designed constant-nonzero behaviour (perfect consistency) is an
+        # infinite IR, not a meaningless finite giant. The ICResult ctor
+        # normalises inf t_stat -> nan (it does not normalise ic_ir).
+        assert res.ic_ir == np.inf      # was 7.02e15
+        assert res.p_value == 0.0       # was 9.14e-303
+        assert math.isnan(res.t_stat)   # was 3.14e16
+
+    def test_constant_ic_treated_identically_to_exact_zero_std_constant(self):
+        # 0.3 over 6 periods happens to give std(ddof=1) == 0.0 exactly; 0.05
+        # over 20 gives ~7e-18 float noise. Both are degenerate-constant and
+        # must be treated identically -- disagreeing on what counts as constant
+        # is itself the defect (AGENTS.md: one tolerance, one idiom per module).
+        exact = _summarize_ic(pd.Series([0.3] * 6), "spearman")
+        noisy = _summarize_ic(pd.Series([0.05] * 20), "spearman")
+        # Pre-fix: exact.ic_ir = inf (guard fired on exact 0.0 std) but
+        # noisy.ic_ir = 7e15 (guard missed float-noise std). They must agree.
+        assert exact.ic_ir == noisy.ic_ir == np.inf
+        assert exact.p_value == noisy.p_value
+
+    def test_constant_long_short_return_is_not_fabricated_sharpe(self):
+        # 6 dates, each with an identical 0.05 top-minus-bottom spread ->
+        # long_short_returns = [0.05]*6, whose std(ddof=1) is ~7.6e-18. A guard
+        # ``if sd > 0`` passes and computes mu/7.6e-18*sqrt(252) ~= 1e17.
+        rows = []
+        for d in range(6):
+            for a in range(10):
+                signal = a + 1
+                fwd = 0.05 if signal >= 9 else (0.0 if signal <= 2 else 0.02)
+                rows.append({
+                    "date": d,
+                    "asset": f"a{a}",
+                    "signal": signal,
+                    "forward_return": fwd,
+                })
+        q = quantile_analysis(
+            pd.DataFrame(rows), "signal", "forward_return", n_quantiles=5
+        )
+        assert math.isnan(q.long_short_sharpe)
+        # The flat return still annualises honestly.
+        assert q.long_short_return_ann == pytest.approx(0.05 * 252)
+
+    def test_varying_long_short_return_still_computes_real_sharpe(self):
+        # Control: a genuinely varying long-short return must still yield a
+        # finite Sharpe -- the fix must not over-refuse real dispersion.
+        rows = []
+        for d in range(6):
+            spread = 0.05 + 0.01 * d  # 0.05..0.10 -> genuinely varies
+            for a in range(10):
+                signal = a + 1
+                fwd = spread if signal >= 9 else (0.0 if signal <= 2 else 0.02)
+                rows.append({
+                    "date": d,
+                    "asset": f"a{a}",
+                    "signal": signal,
+                    "forward_return": fwd,
+                })
+        q = quantile_analysis(
+            pd.DataFrame(rows), "signal", "forward_return", n_quantiles=5
+        )
+        assert math.isfinite(q.long_short_sharpe)
+        assert q.long_short_sharpe > 0
