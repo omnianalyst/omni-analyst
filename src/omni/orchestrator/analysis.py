@@ -58,6 +58,7 @@ from omni.capability.arguments import (
 )
 from omni.capability.derived import DERIVED
 from omni.capability.registry import Registry
+from omni.capabilities.macro import recession_probability
 from omni.capabilities.risk import analyze_credit_risk, calculate_overall_risk_score
 from omni.fill.derived import DerivedCapability
 from omni.perception.divergence import resolve_derived_licence
@@ -156,6 +157,61 @@ async def _compute_credit_risk(
     )
 
 
+# ----------------------------------------------------------- recession_probability
+#
+# The first composite within reach (HANDOFF §6.3): a recession probability
+# assembled from two earned claim types -- yield_curve_signal (D10) and
+# sahm_rule_signal (D14) -- each consumed as a plain ArgumentSpec over the claim,
+# NOT via the analysis_output seam. A claim is durable, provenanced and
+# re-derivable; a passed sibling value is none of those, which is why §6.3 and
+# D12's own report both reach this call independently.
+#
+# The function's third input (lei_signals) has no producer today, so it is not
+# declared as an ArgumentSpec: materializing a claim type that nothing writes
+# would abstain and make the composite uncallable, defeating the point. Instead
+# lei_signals is passed as an empty list -- the honest "zero LEI signals
+# available" -- and recession_probability's `if lei_signals:` correctly omits
+# the 0.3 LEI term, so the result is a truthful 2-of-3 composite (probability in
+# [0, 0.7]). When an LEI producer exists, a third ArgumentSpec replaces the []
+# and the composite strengthens to [0, 1.0] with no other change.
+#
+# Each ArgumentSpec reads the boolean out of the producer's JSONB value:
+# yield_curve_signal carries {"is_inverted": bool, ...}, sahm_rule_signal
+# {"triggered": bool, ...}. value_field follows the dotted path and _extract_scalar
+# does float() at the end (True -> 1.0, False -> 0.0), cast back to bool here.
+# shape="scalar" takes the latest signal; min_obs=1 abstains when no signal of a
+# type exists yet (so the composite is honest about a missing input rather than
+# reading a stale or absent one as "no recession").
+_RECESSION_PROBABILITY_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="yield_curve_inverted",
+        claim_type="yield_curve_signal",
+        value_field="is_inverted",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+    ArgumentSpec(
+        name="sahm_triggered",
+        claim_type="sahm_rule_signal",
+        value_field="triggered",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+)
+
+
+async def _compute_recession_probability(
+    *, yield_curve_inverted: Materialized, sahm_triggered: Materialized
+) -> dict | None:
+    return await recession_probability(
+        yield_curve_inverted=bool(yield_curve_inverted.value),
+        sahm_triggered=bool(sahm_triggered.value),
+        lei_signals=[],
+    )
+
+
 # ----------------------------------------------------------- overall_risk_score
 #
 # calculate_overall_risk_score takes five keyword-only floats -- market_score,
@@ -237,6 +293,11 @@ _NON_CLAIM_ANALYSES: dict[str, DeclaredAnalysis] = {
         name="market_risk.overall_risk_score",
         arguments=_OVERALL_RISK_ARGUMENTS,
         compute=_compute_overall_risk,
+    ),
+    "macro.recession_probability": DeclaredAnalysis(
+        name="macro.recession_probability",
+        arguments=_RECESSION_PROBABILITY_ARGUMENTS,
+        compute=_compute_recession_probability,
     ),
 }
 
