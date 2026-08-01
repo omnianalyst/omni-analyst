@@ -424,7 +424,9 @@ async def portfolio_returns(
     total_value: float,
     daily_returns: Sequence[float],
     period_days: int,
-) -> dict[str, float]:
+    *,
+    risk_free_rate_pct: float,
+) -> dict[str, Any]:
     if not transactions:
         raise Unavailable("no transactions in period")
 
@@ -457,11 +459,11 @@ async def portfolio_returns(
     daily_std = np.std(daily_returns)
     volatility = daily_std * np.sqrt(252) * 100
 
-    risk_free_rate = 2.0
+    volatility_defined = float(np.ptp(daily_returns)) != 0.0
     sharpe_ratio = (
-        ((annualized_return - risk_free_rate) / volatility)
-        if volatility > 0
-        else 0.0
+        (annualized_return - risk_free_rate_pct) / volatility
+        if volatility_defined
+        else None
     )
 
     mdd = max_drawdown(daily_returns)
@@ -471,7 +473,9 @@ async def portfolio_returns(
         "percentage_return": round(percentage_return, 2),
         "annualized_return": round(annualized_return, 2),
         "volatility": round(volatility, 2),
-        "sharpe_ratio": round(sharpe_ratio, 2),
+        "sharpe_ratio": (
+            round(sharpe_ratio, 2) if sharpe_ratio is not None else None
+        ),
         "max_drawdown": round(mdd, 2),
     }
 
@@ -479,6 +483,8 @@ async def portfolio_returns(
 async def risk_metrics(
     daily_returns: Sequence[float],
     total_value: float,
+    *,
+    risk_free_rate_pct: float,
     benchmark_returns: Sequence[float] | None = None,
 ) -> dict[str, Any]:
     if len(daily_returns) < 20:
@@ -501,35 +507,38 @@ async def risk_metrics(
     std_dev = annual_std * 100
 
     negative_returns = returns_array[returns_array < 0]
+    downside_defined = (
+        len(negative_returns) > 0
+        and float(np.ptp(negative_returns)) != 0.0
+    )
     downside_dev = (
-        np.std(negative_returns) * np.sqrt(252) * 100
-        if len(negative_returns) > 0
+        float(np.std(negative_returns)) * np.sqrt(252) * 100
+        if downside_defined
         else 0.0
     )
 
     mean_daily_return = np.mean(returns_array)
     annual_return = mean_daily_return * 252 * 100
-    risk_free_rate = 4.5
 
     sortino = (
-        ((annual_return - risk_free_rate) / downside_dev)
-        if downside_dev > 0
-        else 0.0
+        (annual_return - risk_free_rate_pct) / downside_dev
+        if downside_defined
+        else None
     )
 
     cumulative = np.cumprod(1 + returns_array)
     running_max = np.maximum.accumulate(cumulative)
     drawdowns = (cumulative - running_max) / running_max
     max_dd = abs(float(np.min(drawdowns))) * 100
-    calmar = (annual_return / max_dd) if max_dd > 0 else 0.0
+    calmar = (annual_return / max_dd) if max_dd > 0 else None
 
     portfolio_beta: float | None = None
     if benchmark_returns is not None and len(benchmark_returns) >= 20:
         min_len = min(len(daily_returns), len(benchmark_returns))
         port_ret = np.array(daily_returns[:min_len])
         bench_ret = np.array(benchmark_returns[:min_len])
-        cov_matrix = np.cov(port_ret, bench_ret)
-        if cov_matrix[1, 1] > 0:
+        if float(np.ptp(bench_ret)) != 0.0:
+            cov_matrix = np.cov(port_ret, bench_ret)
             portfolio_beta = float(cov_matrix[0, 1] / cov_matrix[1, 1])
 
     return {
@@ -541,8 +550,12 @@ async def risk_metrics(
         ),
         "standard_deviation": round(std_dev, 2),
         "downside_deviation": round(downside_dev, 2),
-        "sortino_ratio": round(sortino, 2),
-        "calmar_ratio": round(calmar, 2),
+        "sortino_ratio": (
+            round(sortino, 2) if sortino is not None else None
+        ),
+        "calmar_ratio": (
+            round(calmar, 2) if calmar is not None else None
+        ),
         "data_quality": "historical",
         "data_points": len(daily_returns),
     }
