@@ -134,6 +134,17 @@ class TestCalculateVar:
         with pytest.raises(Unavailable, match="variance is 0"):
             calculate_var([0.001] * 50, 0.95)
 
+    def test_constant_nonrepresentable_series_raises_floatnoise(self):
+        # Discriminates the float-noise defect. np.var([0.05]*50) returns
+        # 1.9259299e-34, NOT 0.0, so an `== 0.0` guard passes and the
+        # function emits a fabricated VaR: daily_var_pct = 5.0 -- a +5% gain
+        # reported as the "value at risk" of a flat +5% series. The
+        # [0.001]*50 case above happens to give np.var == 0.0 exactly and
+        # therefore does NOT exercise this path; only a tolerance-based
+        # guard catches it.
+        with pytest.raises(Unavailable, match="variance is 0"):
+            calculate_var([0.05] * 50, 0.95)
+
     def test_confidence_at_zero_raises_valueerror(self):
         with pytest.raises(ValueError, match="confidence_level"):
             calculate_var(KNOWN_RETURNS, 0.0)
@@ -201,6 +212,14 @@ class TestCalculateCvar:
         with pytest.raises(Unavailable, match="variance is 0"):
             calculate_cvar([0.0] * 50, 0.95)
 
+    def test_constant_nonrepresentable_series_raises_floatnoise(self):
+        # Same float-noise defect as VaR: np.var([0.05]*50) = 1.93e-34,
+        # an `== 0.0` guard passes, and CVaR emits daily_cvar_pct = 4.9999999
+        # (plus tail_risk_ratio = 0.9999...) on a constant series. Only a
+        # tolerance guard refuses it.
+        with pytest.raises(Unavailable, match="variance is 0"):
+            calculate_cvar([0.05] * 50, 0.95)
+
     def test_confidence_above_one_raises_valueerror(self):
         with pytest.raises(ValueError, match="confidence_level"):
             calculate_cvar(KNOWN_RETURNS, 1.5)
@@ -253,6 +272,16 @@ class TestCalculateBeta:
         const_bench = [0.0, 0.0, 0.0, 0.0, 0.0]
         with pytest.raises(Unavailable, match="benchmark variance is 0"):
             calculate_beta(x, const_bench)
+
+    def test_constant_nonrepresentable_benchmark_raises_floatnoise(self):
+        # Discriminates the float-noise defect in the beta denominator guard.
+        # np.var([0.05]*50, ddof=1) = 3.46e-34 != 0, so an `== 0` guard passes
+        # and beta is computed as cov(noise) / 3.46e-34 -- probe returned 0.0
+        # for one asset; any value is possible. The [0.0]*5 case above is
+        # exactly representable and so does NOT exercise this path.
+        x = [0.01, 0.02, -0.01, 0.005, -0.02] * 10  # 50 paired obs
+        with pytest.raises(Unavailable, match="benchmark variance is 0"):
+            calculate_beta(x, [0.05] * 50)
 
 
 # ===========================================================================
@@ -312,6 +341,17 @@ class TestCalculateCorrelationMatrix:
         x = [0.01, 0.02, -0.01, 0.005, -0.02]
         with pytest.raises(Unavailable, match="zero-variance"):
             calculate_correlation_matrix({"A": x, "B": [0.0, 0.0, 0.0, 0.0, 0.0]})
+
+    def test_constant_nonrepresentable_series_raises_floatnoise(self):
+        # Discriminates the float-noise defect in the column-variance guard.
+        # np.var([0.05]*50) = 1.93e-34, so a `variances == 0` mask is empty,
+        # the guard passes, and df.corr() divides by ~0 -> NaN silently flows
+        # into the matrix and average_correlation (probe got
+        # average_correlation = nan, matrix[A][B] = nan). The [0.0]*5 case
+        # above is exactly representable and does NOT exercise this path.
+        x = [0.01, 0.02, -0.01, 0.005, -0.02] * 10  # 50 rows
+        with pytest.raises(Unavailable, match="zero-variance"):
+            calculate_correlation_matrix({"A": x, "B": [0.05] * 50})
 
 
 # ===========================================================================
