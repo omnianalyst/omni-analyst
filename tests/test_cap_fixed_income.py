@@ -316,12 +316,31 @@ class TestCalculateDuration:
         assert d["macaulay_duration"] == pytest.approx(t, abs=1e-9)
 
     def test_modified_below_macaulay_for_coupon_bond(self):
-        # Modified = Macaulay / (1 + ytm/ppy); always strictly less for ytm>0.
+        # Modified = -(1/P)(dP/dy) of the annual-compounding price the module
+        # uses, so Macaulay/(1+ytm); always strictly less for ytm>0.
         bond = _par_coupon_bond(coupon_rate=0.05, ytm=0.05)
         d = calculate_duration(bond)
         assert d["modified_duration"] < d["macaulay_duration"]
-        expected = d["macaulay_duration"] / (1 + 0.05 / 1)
+        expected = d["macaulay_duration"] / (1 + 0.05)
         assert d["modified_duration"] == pytest.approx(expected, abs=1e-12)
+
+    def test_modified_matches_effective_for_a_semi_annual_bond(self):
+        # For an option-free bond modified ≈ effective (both are -(1/P)dP/dy of
+        # the same price function). The /(1+y/ppy) bug made them disagree for
+        # ppy>1 (ratio ~1.022); with /(1+y) they agree. This is the case the
+        # ppy=1 fixtures cannot reach.
+        from dataclasses import fields as dataclass_fields
+
+        base = _par_coupon_bond(coupon_rate=0.05, ytm=0.05)
+        vals = {f.name: getattr(base, f.name) for f in dataclass_fields(base)}
+        vals["coupon_frequency"] = CouponFrequency.SEMI_ANNUAL
+        # Price base must be the actual annual-compounding price so the duration
+        # math and the effective-duration finite difference share one P.
+        vals["price"] = calculate_price(Bond(**{**vals, "yield_to_maturity": 0.05}))
+        d = calculate_duration(Bond(**vals), yield_change=0.0001)
+        assert d["modified_duration"] == pytest.approx(
+            d["effective_duration"], rel=0.01
+        )
 
     def test_effective_duration_signs(self):
         # Effective duration = (P_down - P_up) / (2 * dy * P_base). For a
@@ -367,18 +386,50 @@ class TestCalculateConvexity:
         # Magnitude test for the 5y annual par bond, 30/360 (times exactly
         # 1..5), ytm 5%, price 100, ppy 1. The value below is hand-derived
         # from the closed form the audit names --
-        #   sum(t*(t+1)*cf/(1+y)^t) / (price*(1+y)^2) / ppy^2
-        # -- NOT obtained by calling calculate_convexity. An independent
-        # finite-difference check on the price function
-        #   (P(+dy) + P(-dy) - 2P) / (P * dy^2)
-        # gives 23.935988508583247 at dy=1e-4, agreeing to ~1e-6 (the expected
-        # truncation error), which is why the constant is trustworthy. A wrong
-        # implementation that returns time-to-maturity (5.0) fails this by
-        # ~19; see the R4 report for the stub-and-restore proof.
+        #   sum(t*(t+1)*cf/(1+y)^t) / (price*(1+y)^2)
+        # -- NOT obtained by calling calculate_convexity (ppy=1 so the former
+        # /ppy^2 factor was a no-op here; it is exercised by the semi-annual
+        # test below). An independent finite-difference check on the price
+        # function (P(+dy) + P(-dy) - 2P) / (P * dy^2) gives 23.935988508583247
+        # at dy=1e-4, agreeing to ~1e-6 (the expected truncation error), which
+        # is why the constant is trustworthy. A wrong implementation that
+        # returns time-to-maturity (5.0) fails this by ~19; see the R4 report
+        # for the stub-and-restore proof.
         bond = _par_coupon_bond(coupon_rate=0.05, ytm=0.05)
         assert calculate_convexity(bond) == pytest.approx(
             23.935987497907238, abs=1e-9
         )
+
+    def test_semi_annual_convexity_matches_the_finite_difference_definition(self):
+        # The closed form must equal the convexity DEFINITION
+        # (P(+dy)+P(-dy)-2P)/(P*dy^2) for a semi-annual bond too. The /ppy^2
+        # factor (now removed) understated this by ~4x (5.91 vs 23.59); for
+        # ppy=1 it was a no-op, which is why the hand-derived annual test above
+        # never caught it. The finite difference IS convexity -- a closed form
+        # that disagrees with it is wrong by definition.
+        from dataclasses import fields as dataclass_fields
+
+        base = _par_coupon_bond(coupon_rate=0.05, ytm=0.05)
+        vals = {f.name: getattr(base, f.name) for f in dataclass_fields(base)}
+        vals["coupon_frequency"] = CouponFrequency.SEMI_ANNUAL
+        vals["price"] = calculate_price(Bond(**{**vals, "yield_to_maturity": 0.05}))
+        bond = Bond(**vals)
+        closed = calculate_convexity(bond)
+
+        def with_ytm(y):
+            v = dict(vals)
+            v["yield_to_maturity"] = y
+            return Bond(**v)
+
+        dy = 1e-5
+        p = calculate_price(with_ytm(0.05))
+        p_up = calculate_price(with_ytm(0.05 + dy))
+        p_dn = calculate_price(with_ytm(0.05 - dy))
+        finite_diff = (p_up + p_dn - 2 * p) / (p * dy**2)
+
+        assert closed == pytest.approx(finite_diff, rel=1e-3)
+        # Discriminates the old /ppy^2 bug, which returned ~5.9 here.
+        assert closed > 15.0
 
 
 # ---------------------------------------------------------------------------

@@ -331,8 +331,11 @@ def calculate_convexity(bond: Bond) -> float:
             pv = cf_amount / (1 + ytm) ** t
             weighted_sum += t * (t + 1) * pv
 
-    ppy = periods_per_year(bond.coupon_frequency)
-    return weighted_sum / (price * (1 + ytm) ** 2) / ppy**2
+    # Convexity = (1/P)(d²P/dy²) of the annual-compounding price the module
+    # uses = Σ t(t+1)CF/(1+y)^t / [P(1+y)²]. A /ppy² factor here is the
+    # per-period convention and understates by ppy² (4x for semi-annual); see
+    # the fixed_income audit for the finite-difference proof.
+    return weighted_sum / (price * (1 + ytm) ** 2)
 
 
 def calculate_z_spread(bond: Bond, risk_free_curve: YieldCurve) -> float:
@@ -650,8 +653,12 @@ def _macaulay_modified(
             weighted_pv_sum += t * pv
 
     macaulay = weighted_pv_sum / pv_sum if pv_sum > 0 else 0.0
-    ppy = periods_per_year(bond.coupon_frequency)
-    modified = macaulay / (1 + ytm / ppy)
+    # Modified = -(1/P)(dP/dy) of the annual-compounding price P = ΣCF/(1+y)^t
+    # the module actually uses, which is Macaulay/(1+ytm). A /ppy factor here
+    # would be the per-period-yield convention, inconsistent with a price that
+    # compounds annually regardless of coupon frequency; for ppy>1 it diverged
+    # from effective_duration by the same factor. See the fixed_income audit.
+    modified = macaulay / (1 + ytm)
     return pv_sum, macaulay, modified
 
 
