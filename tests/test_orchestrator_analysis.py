@@ -1179,6 +1179,92 @@ class TestInflationExpectations:
 # Same ArgumentSpecs-over-claims pattern as recession_probability.
 
 
+class TestPceInflation:
+    """The 10th callable-by-name capability, non-claim. PCE YoY from FRED PCEPI
+    (Monthly, verified). Hand-computed 4.0% YoY from a seeded index whose first
+    value is 100 and whose 13th (a year later) is 104; the abstention path seeds
+    one fewer than min_obs=13."""
+
+    async def _seed(self, db, *, n=13, start=100.0, end=104.0):
+        entity_id = await _entity(db, symbol="US")
+        step = (end - start) / (n - 1) if n > 1 else 0.0
+        obs = [
+            (BASE + timedelta(days=31 * i), start + step * i) for i in range(n)
+        ]
+        ids = await _insert_series(
+            db, entity_id, obs,
+            claim_type="macro_series_point", key="PCEPI",
+            source="fred", redistributable="allowed", audience_user_id=None,
+        )
+        return entity_id, ids
+
+    async def _run(self, db, entity_id):
+        return await run_analysis(
+            default_registry(), db.pool,
+            name="macro.pce_inflation",
+            entity_id=entity_id, audience=None,
+        )
+
+    async def test_returns_yoy_vs_target_and_distance(self, db):
+        entity_id, ids = await self._seed(db)
+        result = await self._run(db, entity_id)
+        assert not result.abstained, result.shortfalls
+        # (104 - 100) / 100 * 100 = 4.0% YoY. Discriminates a MoM bug or a
+        # wrong index pair (e.g. [-1]/[-12] would read one month short).
+        assert result.result["yoy"] == pytest.approx(4.0)
+        assert result.result["vs_target"] == pytest.approx(2.0)  # 4.0 - 2.0
+        assert result.result["distance_from_target"] == pytest.approx(2.0)
+        assert len(result.evidence) == 13
+
+    async def test_licence_shareable_for_fred_input(self, db):
+        entity_id, _ = await self._seed(db)
+        result = await self._run(db, entity_id)
+        assert result.redistributable == "allowed"
+        assert result.audience_user_id is None
+
+    async def test_abstains_below_min_obs_and_compute_not_called(self, db, monkeypatch):
+        """With only 12 observations (min_obs=13) the call abstains naming pce,
+        and compute is never invoked -- proven by a spy."""
+        entity_id, _ = await self._seed(db, n=12)
+
+        from omni.orchestrator import analysis as analysis_module
+
+        called: list = []
+
+        async def spy_compute(**kwargs):
+            called.append(kwargs)
+            return {}
+
+        monkeypatch.setitem(
+            analysis_module._NON_CLAIM_ANALYSES,
+            "macro.pce_inflation",
+            DeclaredAnalysis(
+                name="macro.pce_inflation",
+                arguments=analysis_module._PCE_INFLATION_ARGUMENTS,
+                compute=spy_compute,
+            ),
+        )
+
+        result = await self._run(db, entity_id)
+        assert result.abstained
+        assert called == [], "compute called despite an argument abstention"
+        reasons = {s.argument: s.reason for s in result.shortfalls}
+        assert "pce" in reasons
+
+    async def test_abstains_when_pcepi_absent(self, db):
+        entity_id = await _entity(db, symbol="US")
+        # No PCEPI claims at all.
+        result = await self._run(db, entity_id)
+        assert result.abstained
+
+
+# ----------------------------------------- taylor_rule (composite of two claims)
+#
+# The architectural payoff: a composite consuming TWO earned claim types
+# (inflation_signal + output_gap_signal) -- coverage accumulation made concrete.
+# Same ArgumentSpecs-over-claims pattern as recession_probability.
+
+
 class TestTaylorRule:
     async def _seed(self, db, *, inflation, output_gap):
         entity_id = await _entity(db, symbol="US")

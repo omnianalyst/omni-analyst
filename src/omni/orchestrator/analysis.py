@@ -60,6 +60,7 @@ from omni.capability.derived import DERIVED
 from omni.capability.registry import Registry
 from omni.capabilities.macro import (
     inflation_expectations,
+    pce_inflation,
     recession_probability,
     taylor_rule,
 )
@@ -270,6 +271,39 @@ async def _compute_inflation_expectations(
     )
 
 
+# ----------------------------------------------------------- pce_inflation
+#
+# The YoY % change in the PCE chain-type price index (FRED ``PCEPI``, Monthly,
+# verified). Non-claim for the same reason ``inflation_expectations`` is:
+# nothing today consumes "the current PCE YoY" as durable coverage --
+# ``taylor_rule`` reads ``inflation_signal`` (CPI), and PCE is a computed read,
+# not an accumulating asset. If a consumer appears (a PCE-based rule), it can be
+# promoted to a DerivedCapability the way CPI -> ``inflation_signal`` was; until
+# then the claim-type enum is not inflated speculatively. That defers the §8.2
+# strategy question (own type vs shared ``inflation_signal``) by the
+# reachability template's own rule: no consumer -> non-claim.
+#
+# ``min_obs=13``: ``pce_inflation`` indexes ``[-1]`` and ``[-13]`` (current and
+# ~12 months prior) for the YoY, so the floor is 13 observations. Monthly
+# cadence; ``ArgumentSpec`` has no date field so freshness is the producer's
+# responsibility -- the same limitation ``_INFLATION_EXPECTATIONS_ARGUMENTS``
+# documents (a higher min_obs would not improve recency).
+_PCE_INFLATION_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="pce",
+        claim_type="macro_series_point",
+        key="PCEPI",
+        shape="series",
+        transform="level",
+        min_obs=13,
+    ),
+)
+
+
+async def _compute_pce_inflation(*, pce: Materialized) -> dict | None:
+    return await pce_inflation(pce_values=pce.value)
+
+
 # ----------------------------------------------------------- taylor_rule
 #
 # The first composite that demonstrates coverage accumulation end to end: it
@@ -413,6 +447,11 @@ _NON_CLAIM_ANALYSES: dict[str, DeclaredAnalysis] = {
         name="macro.inflation_expectations",
         arguments=_INFLATION_EXPECTATIONS_ARGUMENTS,
         compute=_compute_inflation_expectations,
+    ),
+    "macro.pce_inflation": DeclaredAnalysis(
+        name="macro.pce_inflation",
+        arguments=_PCE_INFLATION_ARGUMENTS,
+        compute=_compute_pce_inflation,
     ),
     "macro.taylor_rule": DeclaredAnalysis(
         name="macro.taylor_rule",
