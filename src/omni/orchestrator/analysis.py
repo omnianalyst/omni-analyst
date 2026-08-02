@@ -49,6 +49,14 @@ from uuid import UUID
 
 from neutron.error import bad_request, not_found
 
+from omni.capabilities.macro import (
+    inflation_expectations,
+    labor_market_tightness,
+    pce_inflation,
+    recession_probability,
+    taylor_rule,
+)
+from omni.capabilities.risk import analyze_credit_risk, calculate_overall_risk_score
 from omni.capability.arguments import (
     Abstention,
     AnalysisOutputSpec,
@@ -58,13 +66,6 @@ from omni.capability.arguments import (
 )
 from omni.capability.derived import DERIVED
 from omni.capability.registry import Registry
-from omni.capabilities.macro import (
-    inflation_expectations,
-    pce_inflation,
-    recession_probability,
-    taylor_rule,
-)
-from omni.capabilities.risk import analyze_credit_risk, calculate_overall_risk_score
 from omni.fill.derived import DerivedCapability
 from omni.perception.divergence import resolve_derived_licence
 
@@ -304,6 +305,66 @@ async def _compute_pce_inflation(*, pce: Materialized) -> dict | None:
     return await pce_inflation(pce_values=pce.value)
 
 
+# ----------------------------------------------------------- labor_market_tightness
+#
+# The payroll-count case §6.4 flagged: ``labor_market_tightness`` takes
+# ``job_growth_3m_avg`` in JOBS and divides by 100000, but PAYEMS (the only FRED
+# payroll series) is in THOUSANDS of persons. ArgumentSpec's transform vocabulary
+# (level/log_return/simple_return/diff) can express a diff but not the x1000
+# unit conversion -- and rather than extend ArgumentSpec (a core-type change
+# touching every analysis), the conversion lives here in the compute adapter,
+# the same place ``compute_sahm_rule_signal_declared`` bridges its signature.
+#
+# PAYEMS is monthly; ``job_growth_3m_avg`` is the mean of the last 3 monthly
+# changes (each (level[i] - level[i-1]) * 1000). Three changes need >=4 levels,
+# so ``min_obs=4`` is the floor; ``window=13`` gives a year of context (12
+# changes, last 3 used) with margin for a missing month. ``min_calendar_days=90``
+# rejects a handful of daily observations satisfying the count: monthly spacing
+# over 3 changes spans ~3 months. UNRATE is a scalar latest read (min_obs=1).
+#
+# Non-claim (nothing consumes durable tightness coverage today); if a consumer
+# appears it can be promoted the way CPI -> inflation_signal was.
+_LABOR_MARKET_TIGHTNESS_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="unrate",
+        claim_type="macro_series_point",
+        key="UNRATE",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
+    ArgumentSpec(
+        name="payems",
+        claim_type="macro_series_point",
+        key="PAYEMS",
+        shape="series",
+        transform="level",
+        window=13,
+        min_obs=4,
+        min_calendar_days=90,
+    ),
+)
+
+
+async def _compute_labor_market_tightness(
+    *, unrate: Materialized, payems: Materialized
+) -> dict | None:
+    # PAYEMS is thousands of persons; the function wants jobs. Convert here, not
+    # in ArgumentSpec, so a missing x1000 is impossible to introduce silently --
+    # the test asserts a hand-computed tightness that only holds under the
+    # converted units (a forgotten conversion reads ~0.0006, not 0.625).
+    levels = list(payems.value)
+    changes = [
+        (levels[i] - levels[i - 1]) * 1000.0 for i in range(1, len(levels))
+    ]
+    last = changes[-3:]
+    job_growth_3m_avg = sum(last) / len(last)
+    return await labor_market_tightness(
+        unemployment_rate=unrate.value,
+        job_growth_3m_avg=job_growth_3m_avg,
+    )
+
+
 # ----------------------------------------------------------- taylor_rule
 #
 # The first composite that demonstrates coverage accumulation end to end: it
@@ -452,6 +513,11 @@ _NON_CLAIM_ANALYSES: dict[str, DeclaredAnalysis] = {
         name="macro.pce_inflation",
         arguments=_PCE_INFLATION_ARGUMENTS,
         compute=_compute_pce_inflation,
+    ),
+    "macro.labor_market_tightness": DeclaredAnalysis(
+        name="macro.labor_market_tightness",
+        arguments=_LABOR_MARKET_TIGHTNESS_ARGUMENTS,
+        compute=_compute_labor_market_tightness,
     ),
     "macro.taylor_rule": DeclaredAnalysis(
         name="macro.taylor_rule",

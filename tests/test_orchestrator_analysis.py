@@ -1206,7 +1206,7 @@ class TestPceInflation:
         )
 
     async def test_returns_yoy_vs_target_and_distance(self, db):
-        entity_id, ids = await self._seed(db)
+        entity_id, _ = await self._seed(db)
         result = await self._run(db, entity_id)
         assert not result.abstained, result.shortfalls
         # (104 - 100) / 100 * 100 = 4.0% YoY. Discriminates a MoM bug or a
@@ -1256,6 +1256,90 @@ class TestPceInflation:
         # No PCEPI claims at all.
         result = await self._run(db, entity_id)
         assert result.abstained
+
+
+class TestLaborMarketTightness:
+    """The 11th callable-by-name capability. The payroll-count case: PAYEMS is
+    in thousands of persons, labor_market_tightness wants jobs (÷100000), so the
+    x1000 conversion lives in the compute adapter -- not ArgumentSpec. The
+    hand-computed tightness only holds under converted units: a forgotten x1000
+    would read ~0.0006 (loose), not 0.625 (tight)."""
+
+    async def _seed(self, db, *, unrate, payems_levels):
+        entity_id = await _entity(db, symbol="US")
+        await _insert_signal(
+            db, entity_id, claim_type="macro_series_point", key="UNRATE",
+            value={"value": unrate},
+        )
+        n = len(payems_levels)
+        obs = [
+            (BASE + timedelta(days=31 * i), payems_levels[i]) for i in range(n)
+        ]
+        ids = await _insert_series(
+            db, entity_id, obs,
+            claim_type="macro_series_point", key="PAYEMS",
+            source="fred", redistributable="allowed", audience_user_id=None,
+        )
+        return entity_id, ids
+
+    async def _run(self, db, entity_id):
+        return await run_analysis(
+            default_registry(), db.pool,
+            name="macro.labor_market_tightness",
+            entity_id=entity_id, audience=None,
+        )
+
+    async def test_tightness_uses_the_payroll_count_not_thousands(self, db):
+        # PAYEMS stepping +250 (thousands) per month -> +250000 jobs/mo.
+        # job_growth_3m_avg = 250000. tightness = (1/4.0)*(250000/100000) = 0.625.
+        entity_id, _ = await self._seed(
+            db, unrate=4.0, payems_levels=[158000, 158250, 158500, 158750],
+        )
+        result = await self._run(db, entity_id)
+        assert not result.abstained, result.shortfalls
+        assert result.result["score"] == pytest.approx(0.625)
+        assert result.result["assessment"] == "tight"
+        assert result.result["wage_pressure"] == "high"
+
+    async def test_a_balanced_reading_is_balanced(self, db):
+        # +120 (thousands)/mo -> 120000 jobs. tightness = (1/4.0)*(1.2) = 0.3.
+        entity_id, _ = await self._seed(
+            db, unrate=4.0, payems_levels=[158000, 158120, 158240, 158360],
+        )
+        result = await self._run(db, entity_id)
+        assert result.result["score"] == pytest.approx(0.3)
+        assert result.result["assessment"] == "balanced"
+
+    async def test_licence_shareable_for_fred_inputs(self, db):
+        entity_id, _ = await self._seed(
+            db, unrate=4.0, payems_levels=[158000, 158250, 158500, 158750],
+        )
+        result = await self._run(db, entity_id)
+        assert result.redistributable == "allowed"
+        assert result.audience_user_id is None
+
+    async def test_abstains_when_payems_below_min_obs(self, db):
+        # 3 PAYEMS levels -> only 2 monthly changes; min_obs=4 needs >=4.
+        entity_id, _ = await self._seed(
+            db, unrate=4.0, payems_levels=[158000, 158250, 158500],
+        )
+        result = await self._run(db, entity_id)
+        assert result.abstained
+        reasons = {s.argument: s.reason for s in result.shortfalls}
+        assert "payems" in reasons
+
+    async def test_abstains_when_unrate_absent(self, db):
+        entity_id = await _entity(db, symbol="US")
+        obs = [(BASE + timedelta(days=31 * i), 158000 + 250 * i) for i in range(4)]
+        await _insert_series(
+            db, entity_id, obs,
+            claim_type="macro_series_point", key="PAYEMS",
+            source="fred", redistributable="allowed", audience_user_id=None,
+        )
+        result = await self._run(db, entity_id)
+        assert result.abstained
+        reasons = {s.argument: s.reason for s in result.shortfalls}
+        assert "unrate" in reasons
 
 
 # ----------------------------------------- taylor_rule (composite of two claims)
