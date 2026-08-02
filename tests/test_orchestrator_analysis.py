@@ -674,6 +674,29 @@ def _test_registry():
     return registry
 
 
+class TestCreditRiskDriftGuard:
+    """D13: market_risk.credit_risk is registered twice -- the extracted.py
+    descriptor (fn=risk.analyze_credit_risk) and the _NON_CLAIM_ANALYSES
+    invocation (_compute_credit_risk, which calls analyze_credit_risk). The two
+    could drift to different functions with no test noticing. This pins the
+    invoked declared compute to analyze_credit_risk (catching a silent
+    rebinding) and the descriptor's presence (catching a rename/removal)."""
+
+    async def test_declared_compute_is_analyze_credit_risk(self):
+        from omni.capabilities.risk import analyze_credit_risk
+        from omni.capability.arguments import Materialized
+        from omni.orchestrator.analysis import _compute_credit_risk
+
+        ig = Materialized(value=120.0, claim_ids=(), rows=())
+        hy = Materialized(value=450.0, claim_ids=(), rows=())
+        via_declared = await _compute_credit_risk(ig_spread=ig, hy_spread=hy)
+        assert via_declared == analyze_credit_risk(ig_spread=120.0, hy_spread=450.0)
+
+    async def test_extracted_registry_still_carries_the_capability(self):
+        cap = default_registry().get("market_risk.credit_risk")
+        assert cap is not None and cap.invocable
+
+
 # --------------------------------- test 1: all sub-scores resolvable
 
 
