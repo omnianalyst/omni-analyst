@@ -39,6 +39,13 @@ from omni.ingest.protocol import Unavailable
 
 _EULER_MASCHERONI = 0.5772156649015329
 
+# A flat market's returns are float noise (~1e-17), not exactly 0.0; an `== 0`
+# guard on the std does not fire and Sharpe explodes to a confident number that
+# means nothing. Tolerate float-noise-scale std with an absolute atol (returns
+# are dimensionless, O(0.01), so 1e-12 sits ~10 below any real variance and ~5
+# above float noise). The same idiom/constant attribution.py uses.
+_ZERO_STD_ATOL = 1e-12
+
 
 # --------------------------------------------------------------------------- #
 # Sharpe-ratio statistics
@@ -51,7 +58,7 @@ def sharpe_ratio(returns: Sequence[float], periods_per_year: int = 252) -> float
     if r.size < 2:
         return float("nan")
     sd = r.std(ddof=1)
-    if sd == 0:
+    if np.isclose(sd, 0.0, atol=_ZERO_STD_ATOL):
         return float("nan")
     return float(r.mean() / sd * np.sqrt(periods_per_year))
 
@@ -146,7 +153,7 @@ def evaluate_strategy_sharpe(
     r = np.asarray(returns, dtype=float)
     r = r[np.isfinite(r)]
     n = r.size
-    if n < 2 or r.std(ddof=1) == 0:
+    if n < 2 or np.isclose(r.std(ddof=1), 0.0, atol=_ZERO_STD_ATOL):
         return DeflatedSharpeReport(
             float("nan"), float("nan"), n, n_trials,
             float("nan"), float("nan"), float("nan"), float("nan"), False,

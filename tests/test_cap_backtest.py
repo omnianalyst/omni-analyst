@@ -45,6 +45,21 @@ def test_sharpe_ratio_basic():
     assert 0.5 < sr < 3.5
 
 
+def test_sharpe_ratio_flat_market_float_noise_is_nan():
+    # A flat market's returns are float noise (~1e-17), not exactly 0.0; an
+    # `== 0` guard does not fire and Sharpe explodes to a confident number that
+    # means nothing (~2.7 on this series). The economically-zero variance must
+    # return nan. Discriminates the old `sd == 0` guard, which returned 2.695.
+    import math
+
+    near = np.array([0.0, 1e-17, -1e-17, 2e-17, -1e-17] * 10)
+    assert math.isnan(sharpe_ratio(near))
+    # And the same guard carries into evaluate_strategy_sharpe (is_credible False).
+    rep = evaluate_strategy_sharpe(near)
+    assert math.isnan(rep.annualized_sharpe)
+    assert rep.is_credible is False
+
+
 def test_psr_increases_with_sharpe():
     low = probabilistic_sharpe_ratio(0.05, 252)
     high = probabilistic_sharpe_ratio(0.20, 252)
