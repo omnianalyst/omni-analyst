@@ -1,0 +1,33 @@
+-- The LEI signal: the fifth earned macro claim type after yield_curve_signal,
+-- sahm_rule_signal, inflation_signal and output_gap_signal. It is a derived
+-- STATE ("is the leading index falling over the last 6 months"), not a
+-- horizon-parameterized computation, so it passes the durability test:
+-- something consumes it (macro.recession_probability takes it as its LEI term,
+-- promoting the headline call from an honest 2-of-3 to a complete 3-of-3) and
+-- it has a meaningful freshness policy.
+--
+-- The enum addition is isolated here, ALONE, following 010/013/015/017 exactly.
+-- Postgres forbids using a new enum value in the same transaction that adds it
+-- ("unsafe use of new value ... New enum values must be committed before they
+-- can be used"), and the Neutron migrator wraps each migration's entire `up` in
+-- one transaction -- so a claim_type_policy INSERT that references 'lei_signal'
+-- cannot share this file. The policy row lands in 021 once this value is
+-- committed; this is the convention 010/011, 013/014, 015/016 and 017/018
+-- established and this follows rather than inventing a sixth one.
+--
+-- Source series: FRED USSLIND ("Leading Index for the United States", Monthly --
+-- verified against FRED directly via the API: id/title/frequency confirmed). The
+-- signal is the 6-month percent change of the index level; a decline (< 0) is
+-- the is_negative flag recession_probability reads.
+--
+-- Intended claim_type_policy row (staleness justification in 021): USSLIND is a
+-- MONTHLY FRED series, so the signal can change at most once per publication
+-- month. The macro_series_point default of 35 days is explicitly for monthly
+-- FRED series, so the derived signal matches its input's cadence: "only as
+-- fresh as its inputs."
+--
+--   INSERT INTO claim_type_policy (claim_type, default_staleness, note) VALUES
+--       ('lei_signal', INTERVAL '35 days',
+--        'derived from monthly USSLIND leading index; only as fresh as its inputs');
+
+ALTER TYPE claim_type ADD VALUE IF NOT EXISTS 'lei_signal';

@@ -173,7 +173,7 @@ class TestDefaultRegistry:
     def test_the_default_registry_is_everything_runnable(self):
         r = default_registry()
         assert len(r) == r.summary()["invocable"]
-        assert len(r) == 129
+        assert len(r) == 130
 
     def test_derived_capabilities_are_reachable_through_default_registry(self):
         # The defect this catches: build_derived_registry() was never merged, so
@@ -241,6 +241,18 @@ class TestDefaultRegistry:
         producers = r.producing("output_gap_signal")
         assert [c.name for c in producers] == ["macro.output_gap_signal"]
         capability = r.get("macro.output_gap_signal")
+        assert capability is not None
+        assert capability.call is not None
+        assert capability.invocable
+
+    def test_lei_signal_is_reachable_through_default_registry(self):
+        # 2.3's earned claim type must resolve through the registry the scheduler
+        # builds. This is the claim type macro.recession_probability consumes as
+        # its LEI term, so reachability here is what lets the third term fire.
+        r = default_registry()
+        producers = r.producing("lei_signal")
+        assert [c.name for c in producers] == ["macro.lei_signal"]
+        capability = r.get("macro.lei_signal")
         assert capability is not None
         assert capability.call is not None
         assert capability.invocable

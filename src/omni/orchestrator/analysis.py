@@ -205,16 +205,35 @@ _RECESSION_PROBABILITY_ARGUMENTS: tuple[ArgumentSpec, ...] = (
         transform="level",
         min_obs=1,
     ),
+    ArgumentSpec(
+        name="lei_negative",
+        claim_type="lei_signal",
+        value_field="is_negative",
+        shape="scalar",
+        transform="level",
+        min_obs=1,
+    ),
 )
 
 
 async def _compute_recession_probability(
-    *, yield_curve_inverted: Materialized, sahm_triggered: Materialized
+    *,
+    yield_curve_inverted: Materialized,
+    sahm_triggered: Materialized,
+    lei_negative: Materialized,
 ) -> dict | None:
+    # The LEI term is now wired (2.3): a single composite lei_signal claim whose
+    # is_negative flag becomes a one-element lei_signals list -- "negative" when
+    # the leading index is falling over 6 months, else "positive". This promotes
+    # recession_probability from an honest 2-of-3 (max 0.7) to a complete 3-of-3
+    # (max 1.0), and it abstains until all three signals exist -- the honest
+    # expression of "the LEI term contributes" under ArgumentSpec (optional is
+    # not expressible).
+    lei_signals = ["negative"] if bool(lei_negative.value) else ["positive"]
     return await recession_probability(
         yield_curve_inverted=bool(yield_curve_inverted.value),
         sahm_triggered=bool(sahm_triggered.value),
-        lei_signals=[],
+        lei_signals=lei_signals,
     )
 
 

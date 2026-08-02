@@ -719,6 +719,107 @@ OUTPUT_GAP = DerivedCapability(
 )
 
 
+# -------------------------------------------------------------- lei signal
+#
+# The fifth earned macro claim type, and the one 2.3 exists to land: it gives
+# macro.recession_probability its third input (lei_signals), promoting the
+# headline macro call from an honest 2-of-3 (max 0.7) to a complete 3-of-3
+# (max 1.0). A derived STATE -- "is the leading index falling" -- so it earns a
+# claim type: recession_probability consumes it, and the signal has a real
+# freshness policy.
+#
+# Source series: FRED USSLIND ("Leading Index for the United States", Monthly,
+# verified against FRED directly via the API: id/title/frequency confirmed). The
+# signal is the 6-month percent change of the index level: change_6m =
+# (level[-1] / level[-7] - 1) * 100. A decline (change_6m < 0) is the classic
+# recession warning the Conference Board's LEI carries, encoded here as the
+# boolean recession_probability reads. This is one defensible definition of "the
+# LEI is negative"; a diffusion-of-components or an annualized rate would be a
+# richer follow-up, but the composite index's own 6-mo direction is the standard
+# single-series read.
+#
+# Arithmetic (monthly):
+#   - ``min_obs = 7``: a 6-month change reads ``level[-1]`` and ``level[-7]``,
+#     so seven observations is the binding floor. The spec abstains at 6, so the
+#     compute never indexes past the materialized series.
+#   - ``window = 13``: ~one calendar year of monthly data + margin for a missing
+#     mid-series observation, so a single hole does not drop the count below 7.
+#     The compute reads only ``[-1]``/``[-7]``, so the extra observations are
+#     margin only.
+#   - ``min_calendar_days = 180``: seven MONTHLY observations span ~6 months;
+#     seven DAILY span ~6 days. The calendar floor rejects the daily case (the
+#     count-only limitation D14/inflation documented), so a daily series cannot
+#     satisfy a 6-month change spec.
+LEI_NAME = "macro.lei_signal"
+LEI_PRODUCES = "lei_signal"
+LEI_KEY = "usslind"
+LEI_SPEC_KEY = "USSLIND"
+
+LEI_MIN_OBS = 7
+LEI_WINDOW = 13
+LEI_MIN_CALENDAR_DAYS = 180
+
+LEI_ARGUMENTS: tuple[ArgumentSpec, ...] = (
+    ArgumentSpec(
+        name="lei",
+        claim_type="macro_series_point",
+        key=LEI_SPEC_KEY,
+        shape="series",
+        transform="level",
+        window=LEI_WINDOW,
+        min_obs=LEI_MIN_OBS,
+        min_calendar_days=LEI_MIN_CALENDAR_DAYS,
+    ),
+)
+
+LEI_CONSUMES = tuple(spec.claim_type for spec in LEI_ARGUMENTS)
+
+
+async def compute_lei_signal_declared(pool, gap, *, lei: Materialized):
+    """Declared-path compute: the 6-month percent change of USSLIND, as the
+    boolean ``is_negative`` recession_probability reads plus the raw change.
+
+    Returns a ``ClaimDraft`` of ``claim_type="lei_signal"`` whose ``value`` is
+    the durable state (``is_negative`` and ``change_6m``) and whose ``evidence``
+    carries the supporting current / six-months-prior levels and the input claim
+    ids. ``min_obs=7`` on the spec guarantees both ``[-1]`` and ``[-7]`` exist,
+    so no length check is needed here.
+    """
+    levels = [r.value for r in lei.rows]
+    current = levels[-1]
+    six_months_ago = levels[-7]
+    change_6m = ((current / six_months_ago) - 1.0) * 100.0
+
+    last_row = lei.rows[-1]
+    latest_knowledge = max(r.knowledge_date for r in lei.rows)
+
+    return ClaimDraft(
+        claim_type=LEI_PRODUCES,
+        key=LEI_KEY,
+        value={
+            "is_negative": bool(change_6m < 0),
+            "change_6m": float(change_6m),
+        },
+        event_date=last_row.event_date,
+        knowledge_date=latest_knowledge,
+        confidence=1.0,
+        unit="percent",
+        evidence={
+            "series": [LEI_SPEC_KEY],
+            "current": float(current),
+            "six_months_ago": float(six_months_ago),
+            "input_claim_ids": [str(r.id) for r in lei.rows],
+        },
+    )
+
+
+LEI = DerivedCapability(
+    name=LEI_NAME,
+    arguments=LEI_ARGUMENTS,
+    compute=compute_lei_signal_declared,
+)
+
+
 def build_derived_registry() -> Registry:
     """Register the derived capabilities that are wired and tested today."""
     registry = Registry()
@@ -737,6 +838,9 @@ def build_derived_registry() -> Registry:
 
     async def call_output_gap(pool, gap):
         return await fill_analysis(pool, gap, capability=OUTPUT_GAP)
+
+    async def call_lei(pool, gap):
+        return await fill_analysis(pool, gap, capability=LEI)
 
     registry.add(
         Capability(
@@ -827,6 +931,24 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capabilities.macro.output_gap",
             call=call_output_gap,
+        )
+    )
+    registry.add(
+        Capability(
+            name=LEI_NAME,
+            description=(
+                "Leading Economic Index signal: the 6-month percent change of "
+                "FRED USSLIND, as an is_negative flag (decline < 0) consumed by "
+                "macro.recession_probability as its LEI term."
+            ),
+            consumes=LEI_CONSUMES,
+            produces=(LEI_PRODUCES,),
+            touches_byo=False,
+            cost=0.1,
+            maturity=Maturity.WIRED,
+            callability=Callability.YES,
+            origin="omni.capability.derived.compute_lei_signal_declared",
+            call=call_lei,
         )
     )
     return registry

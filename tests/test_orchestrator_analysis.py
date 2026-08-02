@@ -975,7 +975,7 @@ async def _insert_signal(
 
 
 class TestRecessionProbability:
-    async def _seed(self, db, *, inverted: bool, triggered: bool):
+    async def _seed(self, db, *, inverted: bool, triggered: bool, lei_negative: bool):
         entity_id = await _entity(db, symbol="US")
         yc = await _insert_signal(
             db, entity_id, claim_type="yield_curve_signal", key="DGS10-DGS2",
@@ -986,7 +986,11 @@ class TestRecessionProbability:
             db, entity_id, claim_type="sahm_rule_signal", key="UNRATE",
             value={"triggered": triggered, "indicator": 0.53},
         )
-        return entity_id, yc, sahm
+        lei = await _insert_signal(
+            db, entity_id, claim_type="lei_signal", key="usslind",
+            value={"is_negative": lei_negative, "change_6m": -0.8},
+        )
+        return entity_id, yc, sahm, lei
 
     async def _run(self, db, entity_id):
         return await run_analysis(
@@ -995,31 +999,53 @@ class TestRecessionProbability:
             entity_id=entity_id, audience=None,
         )
 
-    async def test_both_signals_triggered_yields_70_percent(self, db):
-        entity_id, yc, sahm = await self._seed(db, inverted=True, triggered=True)
+    async def test_all_three_terms_contribute_yields_100_percent(self, db):
+        entity_id, yc, sahm, lei = await self._seed(
+            db, inverted=True, triggered=True, lei_negative=True
+        )
         result = await self._run(db, entity_id)
         assert not result.abstained, result.shortfalls
-        # 0.3 (yield curve) + 0.4 (sahm); the 0.3 LEI term is honestly absent
-        # (no producer), so 0.7 -- not 1.0.
-        assert result.result["probability"] == pytest.approx(0.7)
-        assert isinstance(result.result["assessment"], str)
-        assert set(result.evidence) == {str(yc), str(sahm)}
+        # 0.3 (yield curve) + 0.4 (sahm) + 0.3 (LEI negative) = 1.0. The LEI
+        # term lands (2.3); before it this was an honest 2-of-3 capped at 0.7.
+        assert result.result["probability"] == pytest.approx(1.0)
+        assert set(result.evidence) == {str(yc), str(sahm), str(lei)}
 
-    async def test_neither_signal_yields_zero(self, db):
-        entity_id, _, _ = await self._seed(db, inverted=False, triggered=False)
+    async def test_lei_negative_alone_contributes_its_term(self, db):
+        # The new third term in isolation: only the LEI signal is "on".
+        entity_id, _, _, _ = await self._seed(
+            db, inverted=False, triggered=False, lei_negative=True
+        )
         result = await self._run(db, entity_id)
-        assert not result.abstained
-        assert result.result["probability"] == pytest.approx(0.0)
+        assert result.result["probability"] == pytest.approx(0.3)
+
+    async def test_lei_positive_contributes_zero(self, db):
+        # yield curve + sahm on, LEI positive (not falling) -> 0.7, not 1.0.
+        entity_id, _, _, _ = await self._seed(
+            db, inverted=True, triggered=True, lei_negative=False
+        )
+        result = await self._run(db, entity_id)
+        assert result.result["probability"] == pytest.approx(0.7)
 
     async def test_yield_curve_only_contributes_its_term(self, db):
-        entity_id, _, _ = await self._seed(db, inverted=True, triggered=False)
+        entity_id, _, _, _ = await self._seed(
+            db, inverted=True, triggered=False, lei_negative=False
+        )
         result = await self._run(db, entity_id)
         assert result.result["probability"] == pytest.approx(0.3)
 
     async def test_sahm_only_contributes_its_term(self, db):
-        entity_id, _, _ = await self._seed(db, inverted=False, triggered=True)
+        entity_id, _, _, _ = await self._seed(
+            db, inverted=False, triggered=True, lei_negative=False
+        )
         result = await self._run(db, entity_id)
         assert result.result["probability"] == pytest.approx(0.4)
+
+    async def test_no_signals_yields_zero(self, db):
+        entity_id, _, _, _ = await self._seed(
+            db, inverted=False, triggered=False, lei_negative=False
+        )
+        result = await self._run(db, entity_id)
+        assert result.result["probability"] == pytest.approx(0.0)
 
     async def test_abstains_when_a_signal_claim_is_absent(self, db, monkeypatch):
         """With yield_curve_signal absent the call abstains naming
