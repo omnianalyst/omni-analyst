@@ -10,9 +10,11 @@ below is the proof the conviction gate can open at all.
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 
+from omni.capabilities.fundamentals import dcf_directional, dcf_valuation
 from omni.conviction.gate import (
     MIN_RESOLVED_FOR_CALIBRATION,
     Candidate,
@@ -24,7 +26,13 @@ from omni.conviction.ledger import (
     record_prediction,
     resolve_due_predictions,
 )
-from omni.conviction.publish import load_calibration
+from omni.conviction.predict import (
+    _first_passage_confidence,
+    produce_dcf_prediction,
+    produce_dcf_prediction_from_coverage,
+)
+from omni.conviction.publish import load_calibration, record, scorecard
+from omni.coverage.fundamentals import assemble_fundamentals
 
 NOW = datetime.now(UTC)
 
@@ -77,13 +85,15 @@ async def _seed_prediction(
     horizon_ends_at,
     claim_id=None,
     provenance=None,
+    audience_user_id=None,
 ):
     return await db.pool.fetchval(
         """
         INSERT INTO prediction (entity_id, claim_id, method, direction, confidence,
                                 entry_price, upper_barrier, lower_barrier,
-                                horizon_ends_at, provenance, created_at)
-        VALUES ($1,$2,$3,$4::prediction_direction,$5,$6,$7,$8,$9,$10::jsonb,$11)
+                                horizon_ends_at, provenance, created_at,
+                                audience_user_id)
+        VALUES ($1,$2,$3,$4::prediction_direction,$5,$6,$7,$8,$9,$10::jsonb,$11,$12)
         RETURNING id
         """,
         entity_id,
@@ -97,6 +107,7 @@ async def _seed_prediction(
         horizon_ends_at,
         json.dumps(provenance or {}),
         created_at,
+        audience_user_id,
     )
 
 
@@ -464,3 +475,494 @@ class TestSchedulerResolveLoop:
 
         assert outcome == "upper"
         assert scheduler.stats.resolved >= 1
+
+
+class TestCalibrationAudiencePartition:
+    """The Phase 1.1 acceptance test: a private (audience-owned) outcome cannot
+    move a shared finding's conviction threshold.
+
+    The defect (HANDOFF 6.5): calibration_bucket had no audience dimension, so a
+    prediction resolved on a byo_only price series -- a deterministic function of
+    audience-private data -- would land in the one global aggregate that
+    publish.load_calibration read and gate.assess used for every audience. The
+    fix (019) partitions the view by audience_user_id; this test proves the
+    partition holds end to end, through record -> resolve -> load_calibration."""
+
+    async def test_a_private_outcome_does_not_leak_into_shared_calibration(self, db):
+        from uuid import uuid4
+
+        owner = uuid4()
+        other = uuid4()
+        method = "fundamentals.dcf_valuation"
+        created = NOW - timedelta(days=20)
+        horizon = NOW - timedelta(days=1)
+
+        # Shared layer: shared predictions on a shared entity, resolved by a
+        # shared price crossing. These feed ONLY the shared bucket.
+        e_shared = await _entity(db, "AAPL")
+        for _ in range(MIN_RESOLVED_FOR_CALIBRATION + 1):
+            await _seed_prediction(
+                db, e_shared, direction="up", entry=100.0, upper=110.0,
+                lower=90.0, confidence=0.82, method=method,
+                created_at=created, horizon_ends_at=horizon,
+            )
+        await _price_claim(db, e_shared, 111.0, NOW - timedelta(days=5))
+
+        # Private layer: a SEPARATE entity whose only price in the window is the
+        # owner's byo_only series. Shared-network resolution finds no price for
+        # this entity, so the outcome is decided purely by audience-private
+        # data -- exactly the vector that must not reach the shared bucket.
+        e_priv = await _entity(db, "MSFT")
+        for _ in range(MIN_RESOLVED_FOR_CALIBRATION + 1):
+            await _seed_prediction(
+                db, e_priv, direction="up", entry=100.0, upper=110.0,
+                lower=90.0, confidence=0.82, method=method,
+                created_at=created, horizon_ends_at=horizon,
+                audience_user_id=owner,
+            )
+        await _price_claim(
+            db, e_priv, 111.0, NOW - timedelta(days=5), owner=owner
+        )
+
+        resolved = await resolve_due_predictions(db.pool)
+        assert resolved == 2 * (MIN_RESOLVED_FOR_CALIBRATION + 1)
+
+        per_audience = MIN_RESOLVED_FOR_CALIBRATION + 1
+
+        # Shared calibration sees ONLY the shared outcomes. Pre-019 the
+        # un-partitioned view would have aggregated the owner's private
+        # resolutions into this same bucket and reported 2x; that is the leak.
+        shared = await load_calibration(
+            db.pool, claim_type="fundamental_metric", method=method
+        )
+        assert sum(b.n for b in shared) == per_audience
+        assert sum(b.hits for b in shared) == per_audience
+
+        # The owner sees the shared network PLUS their own private outcomes,
+        # pooled -- the same 'shared + own' rule visibility.py enforces on
+        # claims. This is the only path that may read the private bucket.
+        pooled = await load_calibration(
+            db.pool, claim_type="fundamental_metric", method=method, audience=owner
+        )
+        assert sum(b.n for b in pooled) == 2 * per_audience
+        assert sum(b.hits for b in pooled) == 2 * per_audience
+
+        # A different audience sees the shared bucket alone; the owner's private
+        # resolutions are invisible to them, never pooled with their own.
+        stranger = await load_calibration(
+            db.pool, claim_type="fundamental_metric", method=method, audience=other
+        )
+        assert sum(b.n for b in stranger) == per_audience
+
+    async def test_a_private_prediction_resolves_on_private_prices_alone(self, db):
+        """The resolver is self-scoped: a prediction tagged to an audience
+        resolves on that audience's visible prices, and a shared prediction on
+        the same entity stays pending when the shared network has no price.
+
+        Proves the audience_user_id on the prediction row drives the resolution
+        scope (read back in _resolve_one), not a global parameter. A shared
+        resolver (the old default) would have left the private prediction
+        pending; the owner's prediction resolves, the shared one does not."""
+        from uuid import uuid4
+
+        owner = uuid4()
+        e = await _entity(db)
+        cross = NOW - timedelta(days=5)
+
+        shared_pid = await _seed_prediction(
+            db, e, direction="up", entry=100.0, upper=110.0, lower=90.0,
+            created_at=NOW - timedelta(days=10), horizon_ends_at=NOW - timedelta(days=1),
+        )
+        priv_pid = await _seed_prediction(
+            db, e, direction="up", entry=100.0, upper=110.0, lower=90.0,
+            created_at=NOW - timedelta(days=10), horizon_ends_at=NOW - timedelta(days=1),
+            audience_user_id=owner,
+        )
+        # The ONLY price in the window is the owner's byo series.
+        await _price_claim(db, e, 111.0, cross, owner=owner)
+
+        await resolve_due_predictions(db.pool)
+        assert await db.pool.fetchval(
+            "SELECT outcome FROM prediction WHERE id=$1", priv_pid
+        ) == "upper"
+        assert await db.pool.fetchval(
+            "SELECT outcome FROM prediction WHERE id=$1", shared_pid
+        ) == "pending"
+
+
+class TestEndToEndConviction:
+    """Phase 1.3 acceptance: the conviction gate closes end to end.
+
+    The chain: (seeded coverage) -> dcf_directional -> record_prediction ->
+    horizon elapses -> resolve -> calibration -> gate surfaces a finding with
+    its own calibrated hit rate -> that finding's prediction resolves ->
+    finding_hit_rate records it. The thesis -- 'show your own hit rate on the
+    things you chose to surface' -- produces a number.
+
+    Coverage assembly is seeded directly: fundamentals as a dict (the
+    fundamentals claim-assembler is the deferred follow-up, orthogonal to
+    proving the gate), and price_snapshot as REAL claims so resolution runs
+    through the real resolver and the visibility rule. The conviction half --
+    the producer, the ledger, the gate, the scorecard -- is the live machinery.
+    """
+
+    METHOD = "fundamentals.dcf_valuation"
+
+    def _fundamentals(self) -> dict:
+        return {
+            "income_statement": {
+                "eps": 10.0,
+                "earnings_growth_rate": 0.20,
+                "net_income": 1_000_000,
+                "revenue": 5_000_000,
+                "cost_of_revenue": 2_000_000,
+                "operating_income": 1_500_000,
+                "dividends_per_share": 2.0,
+                "revenue_growth_rate": 0.20,
+            },
+            "balance_sheet": {
+                "book_value_per_share": 50.0,
+                "total_equity": 4_000_000,
+                "total_assets": 10_000_000,
+                "total_debt": 2_000_000,
+                "current_assets": 3_000_000,
+                "current_liabilities": 1_500_000,
+                "inventory": 500_000,
+                "market_cap": 8_000_000,
+                "cash_and_equivalents": 500_000,
+                "shares_outstanding": 100_000,
+            },
+            "cash_flow": {
+                "operating_cash_flow": 1_200_000,
+                "capital_expenditures": 200_000,
+            },
+            "beta": 1.2,
+        }
+
+    async def test_resolved_dcf_predictions_open_the_gate_and_score_a_finding(self, db):
+        e = await _entity(db, "AAPL")
+        fundamentals = self._fundamentals()
+        created = NOW - timedelta(days=20)
+        horizon = NOW - timedelta(days=1)
+
+        # fair_value is price-independent, so compute base + bear to place an
+        # entry that yields a genuine up-call straddle (bear < entry < base).
+        # A current_price of 100 sits below even the bear case for this growth
+        # fixture, so dcf_directional would honestly refuse there; the midpoint
+        # guarantees the straddle the gate needs to calibrate.
+        base_out = await dcf_valuation(fundamentals, 100.0)
+        base_fv = float(base_out["fair_value_per_share"])
+        b_growth = base_out["assumptions"]["growth_rate"]
+        b_disc = base_out["assumptions"]["discount_rate"]
+        b_term = base_out["assumptions"]["terminal_growth_rate"]
+        bear_out = await dcf_valuation(
+            fundamentals, 100.0,
+            growth_rate=b_growth * 0.5, discount_rate=b_disc + 0.02,
+            terminal_growth_rate=b_term,
+        )
+        current_price = (float(bear_out["fair_value_per_share"]) + base_fv) / 2
+
+        # Learn the deterministic call so the test can place the resolving price
+        # on the target and use the producer's own confidence.
+        call = await dcf_directional(fundamentals, current_price)
+        assert call["direction"] == "up"  # pins the scenario
+        upper = call["upper_barrier"]
+        confidence = _first_passage_confidence(
+            "up", current_price, call["upper_barrier"], call["lower_barrier"]
+        )
+
+        # 1. Accrue resolved predictions for the method on the shared network.
+        for _ in range(MIN_RESOLVED_FOR_CALIBRATION + 1):
+            pid = await produce_dcf_prediction(
+                db.pool,
+                entity_id=e,
+                audience_user_id=None,
+                fundamentals=fundamentals,
+                current_price=current_price,
+                horizon_ends_at=horizon,
+                created_at=created,
+            )
+            assert pid is not None
+
+        # 2. A shared price path crossing the target resolves every up-call.
+        await _price_claim(db, e, upper * 1.01, NOW - timedelta(days=5))
+        resolved = await resolve_due_predictions(db.pool)
+        assert resolved == MIN_RESOLVED_FOR_CALIBRATION + 1
+
+        # 3. Calibration accrues; every resolved prediction is a hit.
+        buckets = await load_calibration(
+            db.pool, claim_type="fundamental_metric", method=self.METHOD
+        )
+        n_total = sum(b.n for b in buckets)
+        hits_total = sum(b.hits for b in buckets)
+        assert n_total == MIN_RESOLVED_FOR_CALIBRATION + 1
+        assert hits_total == n_total
+        assert any(b.n >= MIN_RESOLVED_FOR_CALIBRATION for b in buckets)
+
+        # 4. The gate derives a threshold from that calibration and surfaces a
+        #    finding at the producer's own confidence. The thesis made concrete:
+        #    the system says something only because its past self earned it.
+        candidate = Candidate(
+            claim_type="fundamental_metric",
+            method=self.METHOD,
+            confidence=confidence,
+            claim_id=None,
+            supporting=("dcf fair_value above the market price",),
+            searched_for_disconfirming=True,
+            falsifiable=True,
+        )
+        verdict = assess(candidate, buckets)
+        assert verdict.refusal is not Refusal.UNCALIBRATED
+        assert verdict.surfaced
+        assert verdict.threshold is not None
+        assert verdict.threshold <= confidence
+
+        # 5. Record the surfaced finding with its own falsifiable prediction,
+        #    resolve that prediction as a hit, and read the scorecard. A surfaced
+        #    finding without a resolvable prediction would let the published hit
+        #    rate drift from what was actually claimed -- the view prevents that
+        #    by joining finding -> prediction.
+        finding_pid = await _seed_prediction(
+            db, e, direction="up", entry=current_price,
+            upper=call["upper_barrier"], lower=call["lower_barrier"],
+            confidence=confidence, method=self.METHOD,
+            created_at=created, horizon_ends_at=horizon,
+        )
+        await record(
+            db.pool, verdict, entity_id=e, audience_user_id=None,
+            prediction_id=finding_pid,
+        )
+        await resolve_due_predictions(db.pool)
+
+        row = await db.pool.fetchrow(
+            "SELECT surfaced, resolved, hits FROM finding_hit_rate WHERE method=$1",
+            self.METHOD,
+        )
+        assert row is not None
+        assert row["surfaced"] == 1
+        assert row["resolved"] == 1
+        assert row["hits"] == 1
+
+        # 6. The scorecard stays honestly silent below its 10-resolved floor:
+        #    one surfaced finding is not enough to claim a hit rate. None, not
+        #    zero -- 'unknown', never a fake percentage.
+        score = next(
+            s for s in await scorecard(db.pool) if s["method"] == self.METHOD
+        )
+        assert score["surfaced"] == 1
+        assert score["resolved"] == 1
+        assert score["hit_rate"] is None
+
+
+class TestEndToEndFromCoverage:
+    """The live entry point: claims alone -> a prediction. No hand-fed dict.
+
+    Proves the seam the scheduler loop will call: read price + fundamentals from
+    coverage, assemble, produce. The fundamentals claim-assembler and the
+    producer are exercised together; the gate-surfacing half is already covered
+    by TestEndToEndConviction. Abstention (None) on missing price or incomplete
+    fundamentals is the honest outcome, not a failure.
+    """
+
+    METHOD = "fundamentals.dcf_valuation"
+
+    async def _seed_fundamentals(self, db, e) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        end = datetime(2024, 12, 31, tzinfo=UTC)
+        filed = end + timedelta(days=46)
+        prior_end = datetime(2023, 12, 31, tzinfo=UTC)
+        prior_filed = prior_end + timedelta(days=46)
+        pairs = [
+            ("NetCashProvidedByUsedInOperatingActivities", 1_200_000, end, filed),
+            ("PaymentsToAcquirePropertyPlantAndEquipment", 200_000, end, filed),
+            ("CommonStockSharesOutstanding", 100_000, end, filed),
+            ("CashAndCashEquivalentsAtCarryingValue", 500_000, end, filed),
+            ("StockholdersEquity", 4_000_000, end, filed),
+            ("LongTermDebt", 2_000_000, end, filed),
+            ("LongTermDebtCurrent", 100_000, end, filed),
+            ("Revenues", 5_000_000, end, filed),
+            ("Revenues", 4_000_000, prior_end, prior_filed),
+        ]
+        for concept, val, ev, kf in pairs:
+            await db.pool.execute(
+                """
+                INSERT INTO claim (entity_id, claim_type, key, value, source,
+                                   event_date, knowledge_date, confidence,
+                                   redistributable, audience_user_id, evidence)
+                VALUES ($1,'fundamental_metric',$2,$3::jsonb,'sec_edgar',
+                        $4,$5,1.0,'allowed',NULL,$6::jsonb)
+                """,
+                e, concept, json.dumps({"value": val}), ev, kf,
+                json.dumps({"cik": "0000320193", "form": "10-K", "fp": "FY"}),
+            )
+
+    async def test_complete_coverage_produces_a_resolvable_prediction(self, db):
+        e = await _entity(db, "AAPL")
+        await self._seed_fundamentals(db, e)
+        # Place the entry between the bear and base fair values (price-independent
+        # of current_price) so the up-call straddles. Computed from the assembled
+        # dict, not hard-coded, so a fixture change moves the entry with it.
+        fundamentals = await assemble_fundamentals(
+            db.pool, entity_id=e, as_of=NOW, current_price=100.0
+        )
+        base_fv = float((await dcf_valuation(fundamentals, 100.0))["fair_value_per_share"])
+        b_growth = 0.20
+        b_disc = (await dcf_valuation(fundamentals, 100.0))["assumptions"]["discount_rate"]
+        bear_fv = float((await dcf_valuation(
+            fundamentals, 100.0,
+            growth_rate=b_growth * 0.5, discount_rate=b_disc + 0.02,
+            terminal_growth_rate=0.03,
+        ))["fair_value_per_share"])
+        entry = (bear_fv + base_fv) / 2
+
+        await _price_claim(db, e, entry, NOW - timedelta(days=1))
+
+        pid = await produce_dcf_prediction_from_coverage(
+            db.pool, entity_id=e, audience_user_id=None,
+            as_of=NOW, horizon_ends_at=NOW + timedelta(days=30),
+        )
+        assert pid is not None
+        row = await db.pool.fetchrow(
+            "SELECT method, direction, entry_price, upper_barrier, lower_barrier, "
+            "outcome FROM prediction WHERE id=$1",
+            pid,
+        )
+        assert row["method"] == self.METHOD
+        assert row["direction"] == "up"
+        assert float(row["entry_price"]) == pytest.approx(entry)
+        assert float(row["upper_barrier"]) > float(row["entry_price"]) > float(row["lower_barrier"])
+        assert row["outcome"] == "pending"
+
+    async def test_no_visible_price_abstains(self, db):
+        e = await _entity(db, "AAPL")
+        await self._seed_fundamentals(db, e)
+        # No price_snapshot claim at all.
+        pid = await produce_dcf_prediction_from_coverage(
+            db.pool, entity_id=e, audience_user_id=None,
+            as_of=NOW, horizon_ends_at=NOW + timedelta(days=30),
+        )
+        assert pid is None
+        assert await db.pool.fetchval("SELECT count(*) FROM prediction") == 0
+
+    async def test_incomplete_fundamentals_abstains(self, db):
+        e = await _entity(db, "AAPL")
+        await self._seed_fundamentals(db, e)
+        await _price_claim(db, e, 100.0, NOW - timedelta(days=1))
+        # Remove an essential; coverage is now insufficient for an honest DCF.
+        await db.pool.execute(
+            "DELETE FROM claim WHERE entity_id=$1 "
+            "AND key='NetCashProvidedByUsedInOperatingActivities'",
+            e,
+        )
+        pid = await produce_dcf_prediction_from_coverage(
+            db.pool, entity_id=e, audience_user_id=None,
+            as_of=NOW, horizon_ends_at=NOW + timedelta(days=30),
+        )
+        assert pid is None
+        assert await db.pool.fetchval("SELECT count(*) FROM prediction") == 0
+
+
+class TestSchedulerPredictLoop:
+    """The fourth loop is wired: a demanded company entity with coverage gets a
+    directional call, deduped so the loop cannot flood the ledger. BYO by
+    design -- the price the call resolves against is the audience's own."""
+
+    async def test_the_predict_loop_writes_one_deduped_call(self, db):
+        from omni.scheduler.worker import Scheduler, SchedulerConfig, default_registry
+
+        owner = uuid4()
+        e = await _entity(db, "AAPL")
+        # Active demand from a specific audience is what makes the entity a
+        # prediction target (demand-driven, not whole-universe).
+        await db.pool.execute(
+            "INSERT INTO demand (entity_id, claim_type, channel, requested_by, active) "
+            "VALUES ($1,'fundamental_metric','test',$2,true)",
+            e, owner,
+        )
+        # Seed the same fundamentals the assembler test uses, then a BYO price
+        # owned by the audience, placed between bear and base for a straddle.
+        await self._seed_fundamentals(db, e)
+        fundamentals = await assemble_fundamentals(
+            db.pool, entity_id=e, as_of=NOW, current_price=100.0, audience=owner
+        )
+        base_out = await dcf_valuation(fundamentals, 100.0)
+        base_fv = float(base_out["fair_value_per_share"])
+        b_disc = base_out["assumptions"]["discount_rate"]
+        bear_fv = float((await dcf_valuation(
+            fundamentals, 100.0,
+            growth_rate=0.20 * 0.5, discount_rate=b_disc + 0.02,
+            terminal_growth_rate=0.03,
+        ))["fair_value_per_share"])
+        entry = (bear_fv + base_fv) / 2
+        await _price_claim(db, e, entry, NOW - timedelta(days=1), owner=owner)
+
+        scheduler = Scheduler(
+            db.pool,
+            default_registry(),
+            SchedulerConfig(
+                predict_interval=0.05, sweep_interval=999,
+                fill_interval=999, fill_workers=0, resolve_interval=999,
+            ),
+        )
+        await scheduler.start()
+        count = 0
+        try:
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + 30
+            while loop.time() < deadline:
+                count = await db.pool.fetchval(
+                    "SELECT count(*) FROM prediction "
+                    "WHERE entity_id=$1 AND method='fundamentals.dcf_valuation'",
+                    e,
+                )
+                if count >= 1:
+                    # Let the loop fire again to prove dedup holds: a second
+                    # cycle must NOT add a second pending call.
+                    await asyncio.sleep(0.15)
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            await scheduler.stop()
+
+        assert count >= 1
+        assert scheduler.stats.predicted >= 1
+        # Dedup: one pending DCF call per (entity, method, audience). The loop
+        # fires every 0.05s; after the first write it must skip, not stack rows.
+        final = await db.pool.fetchval(
+            "SELECT count(*) FROM prediction "
+            "WHERE entity_id=$1 AND method='fundamentals.dcf_valuation'",
+            e,
+        )
+        assert final == 1
+
+    async def _seed_fundamentals(self, db, e) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        end = datetime(2024, 12, 31, tzinfo=UTC)
+        filed = end + timedelta(days=46)
+        prior_end = datetime(2023, 12, 31, tzinfo=UTC)
+        prior_filed = prior_end + timedelta(days=46)
+        pairs = [
+            ("NetCashProvidedByUsedInOperatingActivities", 1_200_000, end, filed),
+            ("PaymentsToAcquirePropertyPlantAndEquipment", 200_000, end, filed),
+            ("CommonStockSharesOutstanding", 100_000, end, filed),
+            ("CashAndCashEquivalentsAtCarryingValue", 500_000, end, filed),
+            ("StockholdersEquity", 4_000_000, end, filed),
+            ("LongTermDebt", 2_000_000, end, filed),
+            ("LongTermDebtCurrent", 100_000, end, filed),
+            ("Revenues", 5_000_000, end, filed),
+            ("Revenues", 4_000_000, prior_end, prior_filed),
+        ]
+        for concept, val, ev, kf in pairs:
+            await db.pool.execute(
+                """
+                INSERT INTO claim (entity_id, claim_type, key, value, source,
+                                   event_date, knowledge_date, confidence,
+                                   redistributable, audience_user_id, evidence)
+                VALUES ($1,'fundamental_metric',$2,$3::jsonb,'sec_edgar',
+                        $4,$5,1.0,'allowed',NULL,$6::jsonb)
+                """,
+                e, concept, json.dumps({"value": val}), ev, kf,
+                json.dumps({"cik": "0000320193", "form": "10-K", "fp": "FY"}),
+            )

@@ -23,15 +23,16 @@ resolve path.
    fabricates a price path. If no price is visible for the window, the
    prediction stays `pending` -- an honest "cannot score" rather than a guess.
 
-Resolution reads `price_snapshot` claims scoped to an audience, applying the
-same rule `coverage/visibility.py` applies to every claim read. The scheduler's
-loop resolves against the shared network alone (`audience=None`), which means
-outcomes are decided only by redistributable prices. Why that matters is argued
-in the D15 report: an outcome decided by a `byo_only` price series is a function
-of audience-private data, and the global `calibration_bucket` has no audience
-dimension. Resolving on shared prices keeps the global calibration free of
-private data; resolving on a user's BYO prices would not, and that is a schema
-question (a migration), not something this module can fix.
+Resolution is **self-scoped**. Since 019 a prediction carries its own
+`audience_user_id`; `_resolve_one` reads it back and scopes the price path to
+it. A shared prediction (NULL) resolves on the shared network and feeds the
+shared calibration; an audience-owned prediction resolves on that audience's
+visible prices (shared + their byo) and feeds their calibration alone. The
+licence leak that motivated this -- an outcome decided by a `byo_only` price
+series moving a shared finding's threshold -- is closed structurally: a
+prediction's outcome and the calibration bucket it lands in share one audience,
+so private outcomes can never reach the shared aggregate. There is no global
+resolution audience to get right, which is the point.
 """
 
 from __future__ import annotations
@@ -58,8 +59,9 @@ class NonDirectionalResult(Exception):
 _INSERT_PREDICTION = """
 INSERT INTO prediction (
     entity_id, claim_id, method, direction, confidence,
-    entry_price, upper_barrier, lower_barrier, horizon_ends_at, provenance
-) VALUES ($1,$2,$3,$4::prediction_direction,$5,$6,$7,$8,$9,$10::jsonb)
+    entry_price, upper_barrier, lower_barrier, horizon_ends_at, provenance,
+    audience_user_id, created_at
+) VALUES ($1,$2,$3,$4::prediction_direction,$5,$6,$7,$8,$9,$10::jsonb,$11,$12)
 RETURNING id
 """
 
@@ -76,16 +78,19 @@ ORDER BY horizon_ends_at
 
 _LOCK_PREDICTION = """
 SELECT id, entity_id, direction, entry_price, upper_barrier, lower_barrier,
-       horizon_ends_at, created_at
+       horizon_ends_at, created_at, audience_user_id
 FROM prediction
 WHERE id = $1 AND outcome = 'pending'
 FOR UPDATE SKIP LOCKED
 """
 
 # The price path over the prediction's window, scoped by the visibility rule
-# from coverage/visibility.py: a user sees the shared network plus their own
-# private claims. `audience = None` selects the shared network alone -- the
-# scheduler's setting, which keeps resolution off private price series.
+# from coverage/visibility.py: an audience sees the shared network plus their
+# own private claims. The audience is the prediction's OWN audience_user_id
+# (read back in _resolve_one): a shared prediction resolves on the shared
+# network, an audience-owned prediction on that audience's visible set. Either
+# way the outcome lands in the calibration bucket of the same audience, so a
+# private price series can never move a shared threshold.
 #
 # The rule is COMPOSED from visibility.visible_claims_cte(), not restated here.
 # That module's docstring is explicit that it "exists once rather than at each
@@ -133,6 +138,8 @@ async def record_prediction(
     assumptions: dict | None = None,
     method: str | None = None,
     claim_id: UUID | None = None,
+    audience_user_id: UUID | None = None,
+    created_at: datetime | None = None,
 ) -> UUID:
     """Write a falsifiable prediction from a directional analysis result.
 
@@ -141,6 +148,21 @@ async def record_prediction(
     defaulted here: a result that asserts no price has none to give, and the
     caller passes `None`, which this function refuses with
     `NonDirectionalResult` rather than inventing a straddling triple.
+
+    `audience_user_id` is the access-control key, mirroring claim.audience_user
+    id: `None` is a shared prediction (resolves on the shared network, feeds the
+    shared calibration every audience reads); a user id is a private prediction
+    (resolves on that audience's visible prices, feeds their calibration alone).
+    The caller is the analysis, which knows which audience it ran for. The
+    licence class is implied by NULL-ness, exactly as 001's CHECK makes it
+    isomorphic with redistributable on claims -- there is no separate column to
+    drift against.
+
+    `created_at` defaults to now (a live call). A backtest replay passes the
+    historical decision time so the entry price -- which is point-in-time --
+    lines up with the window the resolver scores against. The entry/barriers are
+    still the caller's genuine values; only the timestamp is settable, and it is
+    a point-in-time attribute, not an outcome field.
 
     `method` is the calibration grouping key. It defaults to `capability`: the
     unit at which a hit rate is meaningful is the analysis itself, because two
@@ -173,6 +195,7 @@ async def record_prediction(
         "input_claims": [str(c) for c in input_claim_ids],
         "assumptions": assumptions or {},
     }
+    written_at = created_at if created_at is not None else datetime.now(UTC)
     return await pool.fetchval(
         _INSERT_PREDICTION,
         entity_id,
@@ -185,6 +208,8 @@ async def record_prediction(
         lower_f,
         horizon_ends_at,
         json.dumps(provenance),
+        audience_user_id,
+        written_at,
     )
 
 
@@ -286,7 +311,7 @@ def _miss_outcome(direction: str) -> str:
     return "upper"
 
 
-async def _resolve_one(pool, prediction_id: UUID, *, audience: UUID | None) -> bool:
+async def _resolve_one(pool, prediction_id: UUID) -> bool:
     """Resolve a single prediction under a row lock. Returns True if resolved.
 
     The SELECT ... FOR UPDATE SKIP LOCKED and the UPDATE share one transaction
@@ -295,6 +320,12 @@ async def _resolve_one(pool, prediction_id: UUID, *, audience: UUID | None) -> b
     the lock gets nothing back and skips -- the same `SKIP LOCKED` convention the
     fill path uses to lease gaps. No lease columns are needed because resolution
     is a fast, non-external computation done entirely inside the transaction.
+
+    The price path is scoped to the prediction's OWN audience_user_id (read back
+    from the locked row), not a global parameter: a shared prediction resolves
+    on the shared network, a private one on its owner's visible prices. The
+    outcome therefore always lands in the calibration bucket of the same
+    audience that decided it.
     """
     async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(_LOCK_PREDICTION, prediction_id)
@@ -306,7 +337,7 @@ async def _resolve_one(pool, prediction_id: UUID, *, audience: UUID | None) -> b
             row["entity_id"],
             row["created_at"],
             row["horizon_ends_at"],
-            audience,
+            row["audience_user_id"],
         )
         samples = []
         for rec in prices:
@@ -340,15 +371,16 @@ async def _resolve_one(pool, prediction_id: UUID, *, audience: UUID | None) -> b
 
 
 async def resolve_due_predictions(
-    pool, *, audience: UUID | None = None, now: datetime | None = None
+    pool, *, now: datetime | None = None
 ) -> int:
     """Resolve every pending prediction whose horizon has elapsed.
 
-    Returns the number resolved. Reads prices scoped to `audience` (default
-    `None` = the shared network alone, per coverage/visibility.py). A prediction
-    whose horizon has not elapsed is never returned by the candidate query and
-    so cannot be swept to `expiry` early; a prediction whose horizon has elapsed
-    but whose barriers were never touched resolves to `expiry`.
+    Returns the number resolved. Each prediction resolves against its own
+    audience's visible prices (read back from the row in `_resolve_one`): a
+    shared prediction on the shared network, a private one on its owner's. A
+    prediction whose horizon has not elapsed is never returned by the candidate
+    query and so cannot be swept to `expiry` early; a prediction whose horizon
+    has elapsed but whose barriers were never touched resolves to `expiry`.
     """
     if now is None:
         now = datetime.now(UTC)
@@ -356,6 +388,6 @@ async def resolve_due_predictions(
     due = await pool.fetch(_DUE_PREDICTIONS, now)
     resolved = 0
     for rec in due:
-        if await _resolve_one(pool, rec["id"], audience=audience):
+        if await _resolve_one(pool, rec["id"]):
             resolved += 1
     return resolved

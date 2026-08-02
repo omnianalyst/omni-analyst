@@ -14,6 +14,7 @@ from omni.capabilities.fundamentals import (
     benchmark_comparison,
     blend_position_returns,
     correlation_matrix,
+    dcf_directional,
     dcf_valuation,
     financial_ratios,
     max_drawdown,
@@ -221,6 +222,128 @@ class TestDcfValuation:
         assert out["assumptions"]["growth_rate"] == 0.10
         assert out["assumptions"]["discount_rate"] == 0.12
         assert len(out["projected_cash_flows"]) == 3
+
+
+class TestDcfDirectional:
+    """The directional DCF: a fair-value target plus an honest stressed barrier
+    on the invalidation side. fair_value_per_share is independent of
+    current_price (only upside_percentage uses price), so the fixtures precompute
+    base/bear/bull fair values once and place current_price between them to land
+    each path deterministically."""
+
+    def _fixture(self) -> dict:
+        return {
+            "income_statement": {
+                **FUNDAMENTALS["income_statement"],
+                "revenue_growth_rate": 0.20,
+            },
+            "balance_sheet": {
+                **FUNDAMENTALS["balance_sheet"],
+                "market_cap": 8_000_000,
+                "cash_and_equivalents": 500_000,
+                "shares_outstanding": 100_000,
+            },
+            "cash_flow": FUNDAMENTALS["cash_flow"],
+            "beta": 1.2,
+        }
+
+    async def _fair_values(self) -> tuple[float, float, float, float, float]:
+        """Return (base, bear, bull, base_growth, base_discount) for the fixture.
+
+        Computed by running dcf_valuation directly under each scenario's
+        assumptions (the stress magnitudes restated literally, NOT imported, so
+        a change to a constant in fundamentals.py shows up here as a divergence
+        to catch rather than a silent mirror); current_price is irrelevant to
+        fair_value. The test then asserts dcf_directional's barrier equals an
+        independently-computed model output under the same documented stress.
+        """
+        fixture = self._fixture()
+        base = await dcf_valuation(fixture, CURRENT_PRICE)
+        b_growth = base["assumptions"]["growth_rate"]
+        b_disc = base["assumptions"]["discount_rate"]
+        b_term = base["assumptions"]["terminal_growth_rate"]
+        bear = await dcf_valuation(
+            fixture, CURRENT_PRICE,
+            growth_rate=b_growth * 0.5,
+            discount_rate=b_disc + 0.02,
+            terminal_growth_rate=b_term,
+        )
+        bull = await dcf_valuation(
+            fixture, CURRENT_PRICE,
+            growth_rate=min(b_growth * 1.5, 0.20),
+            discount_rate=b_disc - 0.02,
+            terminal_growth_rate=b_term,
+        )
+        return (
+            float(base["fair_value_per_share"]),
+            float(bear["fair_value_per_share"]),
+            float(bull["fair_value_per_share"]),
+            b_growth,
+            b_disc,
+        )
+
+    async def test_an_up_call_uses_base_as_upper_and_bear_as_lower(self):
+        base, bear, _, b_growth, b_disc = await self._fair_values()
+        # Entry between bear and base -> a genuine up-call straddle.
+        entry = (bear + base) / 2
+        out = await dcf_directional(self._fixture(), entry)
+
+        assert out["direction"] == "up"
+        assert out["entry_price"] == pytest.approx(entry)
+        assert out["upper_barrier"] == pytest.approx(base)
+        assert out["lower_barrier"] == pytest.approx(bear)
+        # The schema's invariant, checked at the producer before the ledger.
+        assert out["upper_barrier"] > out["entry_price"] > out["lower_barrier"]
+        assert out["scenario"] == "bear"
+        assert out["scenario_assumptions"]["growth_rate"] == pytest.approx(
+            b_growth * 0.5
+        )
+        assert out["scenario_assumptions"]["discount_rate"] == pytest.approx(
+            b_disc + 0.02
+        )
+
+    async def test_a_down_call_uses_base_as_lower_and_bull_as_upper(self):
+        base, _, bull, _, _ = await self._fair_values()
+        # Entry between base and bull -> a genuine down-call straddle.
+        entry = (base + bull) / 2
+        out = await dcf_directional(self._fixture(), entry)
+
+        assert out["direction"] == "down"
+        assert out["lower_barrier"] == pytest.approx(base)
+        assert out["upper_barrier"] == pytest.approx(bull)
+        assert out["upper_barrier"] > out["entry_price"] > out["lower_barrier"]
+        assert out["scenario"] == "bull"
+
+    async def test_no_direction_when_fair_value_equals_the_entry(self):
+        base, _, _, _, _ = await self._fair_values()
+        # Entry exactly at fair_value -> upside 0 -> no direction asserted.
+        with pytest.raises(Unavailable, match="no meaningful direction"):
+            await dcf_directional(self._fixture(), base)
+
+    async def test_an_up_call_refuses_when_bear_does_not_drop_below_entry(self):
+        _, bear, _, _, _ = await self._fair_values()
+        # Entry below the bear case: even the stressed valuation sits above the
+        # market, so the model asserts no honest lower barrier. The producer
+        # must refuse rather than manufacture a stop below a very low price.
+        entry = bear * 0.5
+        with pytest.raises(Unavailable, match="bear-case fair value does not sit"):
+            await dcf_directional(self._fixture(), entry)
+
+    async def test_a_down_call_refuses_when_bull_does_not_rise_above_entry(self):
+        _, _, bull, _, _ = await self._fair_values()
+        # Entry above the bull case: the stressed valuation cannot top the
+        # market, so no honest upper barrier for the down-call.
+        entry = bull * 1.5
+        with pytest.raises(Unavailable, match="bull-case fair value does not sit"):
+            await dcf_directional(self._fixture(), entry)
+
+    async def test_missing_fundamentals_raises(self):
+        with pytest.raises(Unavailable, match="no fundamental data"):
+            await dcf_directional({}, CURRENT_PRICE)
+
+    async def test_non_positive_price_raises(self):
+        with pytest.raises(Unavailable, match="positive current_price"):
+            await dcf_directional(self._fixture(), 0.0)
 
 
 class TestPeerComparison:

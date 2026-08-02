@@ -28,16 +28,28 @@ _BUCKETS = """
 SELECT method, bucket_low, bucket_high, n, hits
 FROM calibration_bucket
 WHERE method = $1
+  AND (audience_user_id IS NULL OR audience_user_id = $2)
 """
 
 
-async def load_calibration(pool, *, claim_type: str, method: str) -> list[Calibration]:
+async def load_calibration(
+    pool, *, claim_type: str, method: str, audience: UUID | None = None
+) -> list[Calibration]:
     """Read the ledger's own record of how this class has performed.
 
     The gate derives its threshold from these. Nothing here invents a number:
     an unproven class returns an empty list and the gate refuses on that basis.
+
+    Scoped to an audience the same way coverage is (coverage/visibility.py): a
+    user's calibration is the shared network's record PLUS their own private
+    outcomes, pooled -- 'a user sees the shared network plus their own private
+    claims'. `audience=None` collapses to the shared buckets alone, which is the
+    only view a shared (network) finding may use. This is the close on the
+    calibration licence leak: a byo_only-resolved outcome lives in an
+    audience-owned bucket that the shared query (audience_user_id IS NULL) can
+    never read, so it cannot move a shared finding's threshold.
     """
-    rows = await pool.fetch(_BUCKETS, method)
+    rows = await pool.fetch(_BUCKETS, method, audience)
     return [
         Calibration(
             claim_type=claim_type,

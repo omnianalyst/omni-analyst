@@ -28,9 +28,16 @@ CLAIM_TYPE = "fundamental_metric"
 
 EDGAR_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
 
-# The us-gaap concepts the factor library needs (value, quality, investment).
-# Lifted verbatim from v1 fundamentals.DEFAULT_CONCEPTS -- do not invent here.
+# The us-gaap concepts collected from companyfacts. The first eight (value,
+# quality, investment) are lifted verbatim from v1 fundamentals.DEFAULT_CONCEPTS.
+# The remainder feed the DCF directional producer (dcf_valuation needs operating
+# cash flow, capex, shares and debt, which the original eight omit). Candidate
+# concept names cross-checked against v1 sec_edgar_service gaap_mappings
+# (Revenues, OperatingCashFlow -> NetCashProvidedByUsedInOperatingActivities,
+# Cash, StockholdersEquity, NetIncomeLoss) and the us-gaap taxonomy for capex,
+# shares and debt, which v1's simplified map did not carry.
 DEFAULT_CONCEPTS = (
+    # --- value / quality / investment (v1) ---
     "Assets",
     "StockholdersEquity",
     "Revenues",
@@ -39,6 +46,12 @@ DEFAULT_CONCEPTS = (
     "LiabilitiesAndStockholdersEquity",
     "CashAndCashEquivalentsAtCarryingValue",
     "Liabilities",
+    # --- DCF inputs (operating free cash flow, per-share, capital structure) ---
+    "NetCashProvidedByUsedInOperatingActivities",
+    "PaymentsToAcquirePropertyPlantAndEquipment",
+    "CommonStockSharesOutstanding",
+    "LongTermDebt",
+    "LongTermDebtCurrent",
 )
 
 # SEC throttles at 10 requests/second and 403s a backfill. The live path

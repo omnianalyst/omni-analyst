@@ -308,6 +308,159 @@ async def dcf_valuation(
     }
 
 
+# --- Directional DCF -> falsifiable triple-barrier -------------------------
+#
+# The conviction apparatus needs a Class A directional call (D13): a genuine
+# future-price assertion the barrier schema can score. dcf_valuation asserts a
+# fair_value target but NO downside, and the triple-barrier schema requires
+# lower < entry < upper, all genuine (D11: never synthesize a barrier the
+# analysis did not assert). The honest source of the missing barrier is a
+# second DCF run under stressed assumptions on the invalidation side -- a bear
+# case for an up-call's lower barrier, a bull case for a down-call's upper
+# barrier. Every level stays model output under declared assumptions; the
+# assumptions travel in the result so they reach the prediction's provenance.
+#
+# The DCF is explicitly assumption-contingent (D13: "model output contingent on
+# declared assumptions"), so a stressed scenario is legitimate sensitivity
+# analysis, not fabrication -- the magnitudes are named constants below so a
+# reader can challenge them. Growth and the discount rate are stressed (the two
+# most material, most uncertain inputs); terminal_growth_rate is held at the
+# base value so the stressed denominator (discount - terminal) stays safely
+# positive without a separate well-posedness guard on the bear side.
+_BEAR_GROWTH_FACTOR = 0.5      # halve the base growth rate
+_BEAR_DISCOUNT_BUMP = 0.02     # +200bps cost of capital
+_BULL_GROWTH_FACTOR = 1.5      # 1.5x the base growth rate
+_BULL_GROWTH_CAP = 0.20        # the same cap the base derivation applies
+_BULL_DISCOUNT_CUT = 0.02      # -200bps cost of capital
+# The bull case lowers the discount rate; the DCF terminal term diverges as
+# discount approaches terminal_growth, so require a 1pp margin after the cut.
+# Below it the bull scenario is ill-posed and the down-call is refused (no
+# honest upper barrier) rather than producing a near-singular absurd value.
+_BULL_MIN_DISCOUNT_TERMINAL_SPREAD = 0.01
+# A fair value within this absolute distance from the entry asserts no
+# direction; a target that equals the entry is not a call.
+_DIRECTION_EPSILON = 1e-9
+
+
+async def dcf_directional(
+    fundamentals: dict[str, Any],
+    current_price: float,
+    *,
+    growth_rate: float | None = None,
+    terminal_growth_rate: float = 0.03,
+    discount_rate: float | None = None,
+    years: int = 5,
+) -> dict[str, Any]:
+    """A DCF valuation as a falsifiable triple-barrier directional call.
+
+    The base DCF fixes the fair-value target and the direction. The barrier on
+    the invalidation side is a second DCF run under stressed assumptions: a bear
+    case for an up-call (the lower barrier), a bull case for a down-call (the
+    upper barrier). Every barrier is genuine model output under declared
+    assumptions; no level is synthesized.
+
+    - up call (fair_value > current_price): upper = fair_value_base (the
+      target), lower = fair_value under bear assumptions (the invalidation).
+    - down call (fair_value < current_price): lower = fair_value_base (the
+      target), upper = fair_value under bull assumptions (the invalidation).
+
+    Raises ``Unavailable`` when the model cannot make an honest directional
+    call: missing/ill-formed fundamentals (re-raised from ``dcf_valuation``), a
+    fair value within ``_DIRECTION_EPSILON`` of the entry (no direction
+    asserted), an ill-posed bull scenario (discount would breach the terminal
+    margin), or a stressed scenario that does not straddle the entry (the model
+    offers no honest invalidation level on that side). Each is the honest "no
+    falsifiable prediction" rather than a manufactured barrier.
+
+    Note: ``fair_value_per_share`` is independent of ``current_price`` (price
+    feeds only ``upside_percentage``), so the caller may place the entry
+    freely; the direction and the straddle are what vary with it.
+    """
+    if not current_price or current_price <= 0:
+        raise Unavailable("dcf_directional requires a positive current_price")
+
+    base = await dcf_valuation(
+        fundamentals, current_price,
+        growth_rate=growth_rate,
+        terminal_growth_rate=terminal_growth_rate,
+        discount_rate=discount_rate,
+        years=years,
+    )
+    fair_base = base["fair_value_per_share"]
+    if not fair_base:
+        raise Unavailable("dcf produced no fair_value_per_share")
+
+    base_growth = base["assumptions"]["growth_rate"]
+    base_discount = base["assumptions"]["discount_rate"]
+    base_terminal = base["assumptions"]["terminal_growth_rate"]
+
+    upside = (fair_base - current_price) / current_price
+    if abs(upside) < _DIRECTION_EPSILON:
+        raise Unavailable(
+            f"dcf fair_value {float(fair_base):.6f} ~ current_price "
+            f"{current_price:.6f}; no meaningful direction asserted"
+        )
+
+    if upside > 0:  # up-call: target above entry, bear invalidation below
+        bear = await dcf_valuation(
+            fundamentals, current_price,
+            growth_rate=base_growth * _BEAR_GROWTH_FACTOR,
+            discount_rate=base_discount + _BEAR_DISCOUNT_BUMP,
+            terminal_growth_rate=base_terminal,
+            years=years,
+        )
+        bear_value = bear["fair_value_per_share"]
+        if not bear_value or bear_value >= current_price:
+            raise Unavailable(
+                "bear-case fair value does not sit below the entry; no honest "
+                "lower barrier for an up-call"
+            )
+        return {
+            "direction": "up",
+            "entry_price": current_price,
+            "upper_barrier": float(fair_base),
+            "lower_barrier": float(bear_value),
+            "fair_value_base": float(fair_base),
+            "fair_value_stressed": float(bear_value),
+            "scenario": "bear",
+            "upside_percentage": base["upside_percentage"],
+            "base_assumptions": base["assumptions"],
+            "scenario_assumptions": bear["assumptions"],
+        }
+
+    # down-call: target below entry, bull invalidation above
+    if base_discount - _BULL_DISCOUNT_CUT - base_terminal < _BULL_MIN_DISCOUNT_TERMINAL_SPREAD:
+        raise Unavailable(
+            "bull-case discount would breach the terminal margin; no honest "
+            "upper barrier for a down-call"
+        )
+    bull = await dcf_valuation(
+        fundamentals, current_price,
+        growth_rate=min(base_growth * _BULL_GROWTH_FACTOR, _BULL_GROWTH_CAP),
+        discount_rate=base_discount - _BULL_DISCOUNT_CUT,
+        terminal_growth_rate=base_terminal,
+        years=years,
+    )
+    bull_value = bull["fair_value_per_share"]
+    if not bull_value or bull_value <= current_price:
+        raise Unavailable(
+            "bull-case fair value does not sit above the entry; no honest "
+            "upper barrier for a down-call"
+        )
+    return {
+        "direction": "down",
+        "entry_price": current_price,
+        "upper_barrier": float(bull_value),
+        "lower_barrier": float(fair_base),
+        "fair_value_base": float(fair_base),
+        "fair_value_stressed": float(bull_value),
+        "scenario": "bull",
+        "upside_percentage": base["upside_percentage"],
+        "base_assumptions": base["assumptions"],
+        "scenario_assumptions": bull["assumptions"],
+    }
+
+
 async def peer_comparison(
     symbol: str,
     industry: str,
