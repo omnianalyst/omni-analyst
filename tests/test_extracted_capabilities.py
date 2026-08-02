@@ -1099,15 +1099,16 @@ def _cases():
         "microstructure.effective_spread": (
             _effective_spread_inputs(),
             lambda r: r["effective_spread"] == pytest.approx(0.02)
-            and r["realized_spread"] == pytest.approx(-0.02)
+            and r["realized_spread"] == pytest.approx(0.02)
             and r["price_improvement"] == pytest.approx(-0.01),
         ),
         "microstructure.kyle_lambda": (
             _kyle_lambda_inputs(),
-            # price_change == 1e-4 * signed_volume, so the slope is 1e-4. The
-            # function mixes np.cov (ddof=1) with np.var (ddof=0), adding an
-            # n/(n-1) factor (n=10 price-changes): lambda = 1e-4 * 1e4 * 10/9.
-            lambda r: r == pytest.approx(10.0 / 9.0),
+            # price_change == 1e-4 * signed_volume, so the OLS slope is exactly
+            # 1e-4 (ddof-independent); scaled by 1e4 -> 1.0. The prior
+            # np.cov(ddof=1)/np.var(ddof=0) form added an n/(n-1) factor and
+            # returned 10/9; this asserts the corrected regression coefficient.
+            lambda r: r == pytest.approx(1.0),
         ),
         "microstructure.order_flow_toxicity": (
             _vpin_inputs(),

@@ -46,10 +46,13 @@ Sign conventions (stated once, kept everywhere):
   doubled to express it on a round-trip basis.
 - Price improvement: signed. Positive is good for the trader (better than
   mid). A buy below mid is positive; a sell above mid is positive.
-- Realised spread: signed by side. For a buy, `2 * (future_mid -
-  trade_price)`; for a sell, `2 * (trade_price - future_mid)`. A buy whose
-  price reverts to a lower future mid shows a positive realised spread (the
-  paid impact was temporary, not permanent).
+- Realised spread: signed by side, as the liquidity-provider's round-trip
+  revenue. For a buy, `2 * (trade_price - future_mid)`; for a sell,
+  `2 * (future_mid - trade_price)`. A buy whose price reverts to a lower
+  future mid shows a *positive* realised spread (the MM sold high at the ask
+  and bought back lower -- the paid impact was temporary, not permanent). This
+  is the standard convention; the prior sign was flipped and contradicted this
+  docstring's own interpretation.
 - Kyle's lambda: signed. Positive lambda means signed buy flow pushes prices
   up (the usual sign); a negative lambda would mean flow predicts price in
   the wrong direction.
@@ -264,10 +267,13 @@ async def effective_spread(
         except Unavailable:
             continue
         future_mid = (future_quote["bid"] + future_quote["ask"]) / 2
+        # MM-revenue sign: buy unwinds at the future mid (sold at trade price),
+        # sell unwinds at the future mid (bought at trade price). Reversion
+        # after a buy (future mid below the paid ask) is positive revenue.
         if side == "buy":
-            realized_spreads.append(2 * (future_mid - trade["price"]))
-        else:
             realized_spreads.append(2 * (trade["price"] - future_mid))
+        else:
+            realized_spreads.append(2 * (future_mid - trade["price"]))
 
     if not realized_spreads:
         raise Unavailable(
@@ -338,8 +344,14 @@ async def kyle_lambda(trades: Sequence[dict]) -> float:
         )
 
     y = np.asarray(price_changes, dtype=float)
-    slope = np.cov(x, y)[0, 1] / np.var(x)
-    return float(slope * 1e4)
+    # OLS slope is ddof-independent by definition: Σ(x-x̄)(y-ȳ) / Σ(x-x̄)². The
+    # prior np.cov(x,y)[0,1] / np.var(x) mixed ddof (cov=1, var=0) and
+    # overstated the slope by n/(n-1) -- ~11% at the 10-trade floor -- and the
+    # test had encoded that bias. Compute it directly so it is exactly the
+    # regression coefficient regardless of sample size.
+    x_dev = x - x.mean()
+    slope = float(np.dot(x_dev, y - y.mean()) / np.dot(x_dev, x_dev))
+    return slope * 1e4
 
 
 async def order_flow_toxicity(

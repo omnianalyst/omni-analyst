@@ -221,8 +221,11 @@ class TestEffectiveSpread:
     async def test_realized_spread_when_future_mid_reverts(self):
         # Buy at ask 101, mid 100. With quotes every 1s and a 5s horizon, the
         # prevailing quote 5s after each trade is still bid 99 / ask 101 ->
-        # future_mid = 100. realized (buy) = 2 * (future_mid - trade_price)
-        # = 2 * (100 - 101) = -2.
+        # future_mid = 100. The MM sold at 101 and the fair value (future mid)
+        # is 100, so the MM kept the half-spread: realized (buy) =
+        # 2 * (trade_price - future_mid) = 2 * (101 - 100) = +2. Positive, per
+        # the standard MM-revenue convention the docstring states (the prior
+        # sign was flipped and returned -2, contradicting that interpretation).
         t0 = datetime(2026, 1, 1, 9, 30, tzinfo=UTC)
         quotes = [_quote(t0 + timedelta(seconds=i)) for i in range(10)]
         trades = [
@@ -230,7 +233,7 @@ class TestEffectiveSpread:
             for i in range(5)
         ]
         out = await effective_spread(trades, quotes, horizon=timedelta(seconds=5))
-        assert out["realized_spread"] == pytest.approx(-2.0)
+        assert out["realized_spread"] == pytest.approx(2.0)
 
     async def test_too_few_trades_raises(self):
         t0 = datetime(2026, 1, 1, 9, 30, tzinfo=UTC)
@@ -282,31 +285,31 @@ def _kyle_trades(prices: list[float], volumes: list[float]) -> list[dict]:
 class TestKyleLambda:
     async def test_known_slope(self):
         # price[i] = price[i-1] + k * volume[i]  -> each price_change = k * vol.
-        # All up-ticks, so signed_volume = +vol, and y = k * x exactly.
-        # slope = cov_sample(x, kx) / var_pop(x) = k * n / (n-1).
-        # With k = 1e-3, n = 9 (one fewer than the trades): slope = 1.125e-3,
-        # scaled by 1e4 -> 11.25 exactly.
+        # All up-ticks, so signed_volume = +vol, and y = k * x exactly. The OLS
+        # slope of y on x is exactly k (ddof-independent by definition), scaled
+        # by 1e4 -> 10.0. The prior cov(ddof=1)/var(ddof=0) form returned
+        # k * n/(n-1) = 11.25 instead -- the bias this test had encoded.
         volumes = [100, 200, 50, 150, 80, 120, 60, 90, 110, 70]
         k = 0.001
         prices = [100.0]
         for v in volumes[1:]:
             prices.append(prices[-1] + k * v)
         out = await kyle_lambda(_kyle_trades(prices, volumes))
-        assert out == pytest.approx(11.25)
+        assert out == pytest.approx(10.0)
 
     async def test_slope_unchanged_when_price_and_flow_flip_together(self):
         # Mirror of test_known_slope: monotonically falling prices -> signed
         # volume is -|vol|, price_change = -k * |vol| = k * signed_vol. Both
-        # signed_volume and price_change flip sign together, so cov and var
-        # each flip sign and the slope is unchanged. Confirms lambda reflects
-        # the cov(x, y) sign, not the direction of price movement alone.
+        # signed_volume and price_change flip sign together, so the OLS slope is
+        # unchanged (k * 1e4 = 10.0). Confirms lambda reflects the cov(x, y)
+        # sign, not the direction of price movement alone.
         volumes = [100, 200, 50, 150, 80, 120, 60, 90, 110, 70]
         k = 0.001
         prices = [100.0]
         for v in volumes[1:]:
             prices.append(prices[-1] - k * v)
         out = await kyle_lambda(_kyle_trades(prices, volumes))
-        assert out == pytest.approx(11.25)
+        assert out == pytest.approx(10.0)
 
     async def test_too_few_trades_raises(self):
         trades = _kyle_trades(
