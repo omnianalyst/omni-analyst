@@ -13,6 +13,12 @@ export interface WatchlistsResponse {
   watchlists: Watchlist[];
 }
 
+export interface CreatedWatchlist {
+  id: string;
+  name: string;
+  created_at: string | null;
+}
+
 export interface WatchlistEntry {
   entity_id: string;
   kind: string;
@@ -33,6 +39,9 @@ export interface CreatedEntry {
 
 export const listWatchlists = (): Promise<WatchlistsResponse> =>
   authedGetJson<WatchlistsResponse>("/watchlists");
+
+export const createWatchlist = (name: string): Promise<CreatedWatchlist> =>
+  authedSendJson<CreatedWatchlist>("POST", "/watchlists", { name });
 
 export const listEntries = (watchlistId: string): Promise<EntriesResponse> =>
   authedGetJson<EntriesResponse>(

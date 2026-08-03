@@ -15,6 +15,13 @@ export default function Layout({ children }: { children?: preact.ComponentChildr
           Omni Analyst
           <span class="brand-sub">coverage</span>
         </a>
+        <nav class="topnav">
+          <a href="/">Search</a>
+          <a href="/watchlist">Watchlists</a>
+          <a href="/alerts">Alerts</a>
+          <a href="/briefing">Briefing</a>
+          <a href="/login" class="topnav-auth">Sign in</a>
+        </nav>
       </header>
       <main class="content">{children}</main>
     </div>

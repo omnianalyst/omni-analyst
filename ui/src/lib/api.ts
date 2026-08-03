@@ -10,6 +10,22 @@ export function getAuthToken(): string | null {
   }
 }
 
+export function setAuthToken(token: string): void {
+  try {
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+  } catch {
+    /* storage unavailable; auth cannot persist across reloads */
+  }
+}
+
+export function clearAuthToken(): void {
+  try {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 export class ApiUnavailableError extends Error {
   constructor(
     public url: string,
@@ -91,7 +107,7 @@ export interface ClaimsResponse {
   claims: Claim[];
 }
 
-async function request<T>(
+export async function request<T>(
   path: string,
   headers: Record<string, string> = {},
 ): Promise<T> {
@@ -109,7 +125,35 @@ async function request<T>(
   return res.json() as Promise<T>;
 }
 
-function authHeaderIfPresent(): Record<string, string> {
+export async function sendJson<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  headers: Record<string, string> = {},
+): Promise<T> {
+  const url = API_BASE_URL + path;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        ...headers,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new ApiUnavailableError(url, err);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ApiHttpError(res.status, url, text);
+  }
+  return res.json() as Promise<T>;
+}
+
+export function authHeaderIfPresent(): Record<string, string> {
   const token = getAuthToken();
   return token ? { authorization: `Bearer ${token}` } : {};
 }

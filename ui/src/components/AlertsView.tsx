@@ -70,8 +70,10 @@ export function AlertsView() {
               token is refused with 401, and rendering an empty list would
               pretend the server answered with your alerts when it did not.
             </p>
-            <p class="mono" style={{ marginTop: "12px" }}>
-              {`Set a token to test: localStorage.setItem("omni.auth.token", "<jwt>")`}
+            <p style={{ marginTop: "12px" }}>
+              <a class="search-btn" href="/login" style={{ textDecoration: "none" }}>
+                Sign in
+              </a>
             </p>
           </div>
         ) : null}

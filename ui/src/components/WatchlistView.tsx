@@ -1,7 +1,11 @@
 import { useEffect, useState } from "preact/hooks";
 import { describeError } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
-import { listWatchlists, type Watchlist } from "../lib/watchlist";
+import {
+  createWatchlist,
+  listWatchlists,
+  type Watchlist,
+} from "../lib/watchlist";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 import { WatchlistPanel } from "./WatchlistPanel";
@@ -14,28 +18,49 @@ type State =
 
 export function WatchlistView() {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  async function reload() {
+    setState({ kind: "loading" });
+    try {
+      const res = await listWatchlists();
+      setState({ kind: "ok", watchlists: res.watchlists });
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        setState({ kind: "auth" });
+      } else {
+        const { message, detail } = describeError(err);
+        setState({ kind: "error", message, detail });
+      }
+    }
+  }
 
   useEffect(() => {
-    let cancelled = false;
-    setState({ kind: "loading" });
-    void (async () => {
-      try {
-        const res = await listWatchlists();
-        if (!cancelled) setState({ kind: "ok", watchlists: res.watchlists });
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof AuthRequiredError) {
-          setState({ kind: "auth" });
-        } else {
-          const { message, detail } = describeError(err);
-          setState({ kind: "error", message, detail });
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    void reload();
   }, []);
+
+  async function onCreate(e: Event) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed || creating) return;
+    setCreateError(null);
+    setCreating(true);
+    try {
+      await createWatchlist(trimmed);
+      setName("");
+      await reload();
+    } catch (err) {
+      setCreateError(
+        err instanceof AuthRequiredError
+          ? "Authentication required."
+          : describeError(err).message,
+      );
+    } finally {
+      setCreating(false);
+    }
+  }
 
   return (
     <div class="watchlist-view">
@@ -54,18 +79,39 @@ export function WatchlistView() {
       {state.kind === "error" ? (
         <ErrorState message={state.message} detail={state.detail} />
       ) : null}
-      {state.kind === "ok" && state.watchlists.length === 0 ? (
-        <p class="empty">
-          You have no watchlists. The API answered and the list is genuinely
-          empty &mdash; an empty list here is the truth, not a loaded view that
-          forgot to render.
-        </p>
-      ) : null}
-      {state.kind === "ok" && state.watchlists.length > 0
-        ? state.watchlists.map((w) => (
+
+      {state.kind === "ok" ? (
+        <>
+          <section class="panel">
+            <h2 class="panel-title">New watchlist</h2>
+            <form class="auth-form" onSubmit={onCreate}>
+              <input
+                class="search-input"
+                type="text"
+                placeholder="e.g. Mega-cap tech, Macro indicators"
+                value={name}
+                onInput={(e) => setName((e.target as HTMLInputElement).value)}
+                aria-label="Watchlist name"
+              />
+              {createError ? <p class="auth-error">{createError}</p> : null}
+              <button class="search-btn" type="submit" disabled={creating}>
+                {creating ? "Creating\u2026" : "Create watchlist"}
+              </button>
+            </form>
+          </section>
+
+          {state.watchlists.length === 0 ? (
+            <p class="empty">
+              You have no watchlists. The API answered and the list is genuinely
+              empty &mdash; an empty list here is the truth, not a loaded view
+              that forgot to render.
+            </p>
+          ) : null}
+          {state.watchlists.map((w) => (
             <WatchlistPanel key={w.id} watchlist={w} />
-          ))
-        : null}
+          ))}
+        </>
+      ) : null}
     </div>
   );
 }
@@ -80,8 +126,10 @@ function AuthRequired() {
           token is refused with 401, and rendering an empty list here would
           pretend the server answered with your data when it did not.
         </p>
-        <p class="mono" style={{ marginTop: "12px" }}>
-          {`Set a token to test: localStorage.setItem("omni.auth.token", "<jwt>")`}
+        <p style={{ marginTop: "12px" }}>
+          <a class="search-btn" href="/login" style={{ textDecoration: "none" }}>
+            Sign in
+          </a>
         </p>
       </div>
     </section>

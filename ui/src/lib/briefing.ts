@@ -1,5 +1,4 @@
-import { API_BASE_URL } from "../config";
-import { ApiHttpError, ApiUnavailableError } from "./api";
+import { authHeaderIfPresent, request } from "./api";
 
 export interface BriefingEntity {
   id: string;
@@ -32,29 +31,19 @@ export interface ScorecardRow {
 
 export type RefusalCounts = Record<string, number>;
 
-async function getJson<T>(path: string): Promise<T> {
-  const url = API_BASE_URL + path;
-  let res: Response;
-  try {
-    res = await fetch(url, { headers: { accept: "application/json" } });
-  } catch (err) {
-    throw new ApiUnavailableError(url, err);
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new ApiHttpError(res.status, url, body);
-  }
-  return res.json() as Promise<T>;
-}
-
+// /briefing is audience-scoped server-side: a byo-derived finding belongs to
+// its owner. Attach the token when present so a logged-in viewer sees their
+// private findings; anonymous falls through to the shared feed only. The
+// scorecard and refusals endpoints are not audience-scoped, so they stay
+// anonymous.
 export const getBriefing = (): Promise<BriefingFinding[]> =>
-  getJson<BriefingFinding[]>("/briefing");
+  request<BriefingFinding[]>("/briefing", authHeaderIfPresent());
 
 export const getScorecard = (): Promise<ScorecardRow[]> =>
-  getJson<ScorecardRow[]>("/briefing/scorecard");
+  request<ScorecardRow[]>("/briefing/scorecard");
 
 export const getRefusals = (): Promise<RefusalCounts> =>
-  getJson<RefusalCounts>("/briefing/refusals");
+  request<RefusalCounts>("/briefing/refusals");
 
 export function formatHitRate(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) {
