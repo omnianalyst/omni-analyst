@@ -116,6 +116,12 @@ a:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
+button.topnav-signout {
+  font: inherit;
+  font-size: 14px;
+  background: transparent;
+  cursor: pointer;
+}
 
 .content {
   flex: 1;
