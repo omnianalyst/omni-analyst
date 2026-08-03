@@ -313,6 +313,52 @@ tr.row.tier-unknown td:first-child {
   box-shadow: inset 3px 0 0 var(--tier-unknown);
 }
 
+/* drill-down: the selected claim-type row holds its highlight, and the claims
+   table's value column is mono so a JSON value reads as data, not prose. */
+.coverage tbody tr.selected {
+  background: var(--panel-2);
+}
+.coverage tbody tr.selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.coverage td.claim-type a {
+  color: inherit;
+}
+.coverage td.claim-type a:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+.claim-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--muted);
+  word-break: break-all;
+}
+.conflict-pill {
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--tier-dead);
+  border: 1px solid var(--tier-dead);
+  background: rgba(239, 68, 68, 0.08);
+}
+.panel-clear {
+  float: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+.panel-clear:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
 /* ---------- gaps ---------- */
 .gaps {
   list-style: none;
@@ -346,6 +392,14 @@ tr.row.tier-unknown td:first-child {
   border: 1px solid var(--border-strong);
   color: var(--muted);
   white-space: nowrap;
+}
+/* contradictory is the gap engine's rank-1 class (weight 1000 vs unverified's
+   1): two sources disagree on the same fact. It must read as the most urgent
+   thing in the list, not identical to the gentlest class. */
+.gap-class.cls-contradictory {
+  color: var(--tier-dead);
+  border-color: var(--tier-dead);
+  background: rgba(239, 68, 68, 0.1);
 }
 .gap-meta {
   margin-top: 6px;

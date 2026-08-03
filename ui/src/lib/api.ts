@@ -1,5 +1,15 @@
 import { API_BASE_URL } from "../config";
 
+export const AUTH_TOKEN_KEY = "omni.auth.token";
+
+export function getAuthToken(): string | null {
+  try {
+    return localStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
 export class ApiUnavailableError extends Error {
   constructor(
     public url: string,
@@ -35,6 +45,7 @@ export interface EntitiesResponse {
 export interface CoverageGroup {
   claim_type: string;
   count: number;
+  private_count: number;
   newest_knowledge_date: string | null;
   age_seconds: number | null;
   source_count: number;
@@ -62,11 +73,32 @@ export interface GapsResponse {
   gaps: Gap[];
 }
 
-async function getJson<T>(path: string): Promise<T> {
+export interface Claim {
+  id: string;
+  claim_type: string;
+  key: string | null;
+  value: unknown;
+  unit: string | null;
+  source: string;
+  event_date: string | null;
+  knowledge_date: string | null;
+  confidence: number | null;
+  redistributable: string;
+}
+export interface ClaimsResponse {
+  entity_id: string;
+  limit: number;
+  claims: Claim[];
+}
+
+async function request<T>(
+  path: string,
+  headers: Record<string, string> = {},
+): Promise<T> {
   const url = API_BASE_URL + path;
   let res: Response;
   try {
-    res = await fetch(url, { headers: { accept: "application/json" } });
+    res = await fetch(url, { headers: { accept: "application/json", ...headers } });
   } catch (err) {
     throw new ApiUnavailableError(url, err);
   }
@@ -77,14 +109,35 @@ async function getJson<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export const searchEntities = (q: string): Promise<EntitiesResponse> =>
-  getJson<EntitiesResponse>(`/entities?q=${encodeURIComponent(q)}`);
+function authHeaderIfPresent(): Record<string, string> {
+  const token = getAuthToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
 
+export const searchEntities = (q: string): Promise<EntitiesResponse> =>
+  request<EntitiesResponse>(`/entities?q=${encodeURIComponent(q)}`);
+
+// Coverage and gaps are audience-scoped server-side: an absent token reads as
+// the shared network, a present token adds this viewer's own BYO claims. Attach
+// the token when the client holds one so a logged-in user sees their private
+// coverage; anonymous falls through unchanged.
 export const getCoverage = (id: string): Promise<CoverageResponse> =>
-  getJson<CoverageResponse>(`/coverage/${encodeURIComponent(id)}`);
+  request<CoverageResponse>(
+    `/coverage/${encodeURIComponent(id)}`,
+    authHeaderIfPresent(),
+  );
 
 export const getGaps = (id: string): Promise<GapsResponse> =>
-  getJson<GapsResponse>(`/gaps/${encodeURIComponent(id)}`);
+  request<GapsResponse>(
+    `/gaps/${encodeURIComponent(id)}`,
+    authHeaderIfPresent(),
+  );
+
+export const getClaims = (id: string, claimType: string): Promise<ClaimsResponse> =>
+  request<ClaimsResponse>(
+    `/coverage/${encodeURIComponent(id)}/claims?claim_type=${encodeURIComponent(claimType)}`,
+    authHeaderIfPresent(),
+  );
 
 export function describeError(err: unknown): {
   message: string;

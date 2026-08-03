@@ -6,7 +6,17 @@ function formatConfidence(value: number | null): string {
   return Number(value).toFixed(2);
 }
 
-export function CoverageTable({ groups }: { groups: CoverageGroup[] }) {
+export function CoverageTable({
+  groups,
+  entityId,
+  selectedType,
+  contradictionTypes,
+}: {
+  groups: CoverageGroup[];
+  entityId: string;
+  selectedType?: string | null;
+  contradictionTypes?: Set<string>;
+}) {
   if (groups.length === 0) {
     return (
       <p class="empty">
@@ -29,10 +39,36 @@ export function CoverageTable({ groups }: { groups: CoverageGroup[] }) {
       <tbody>
         {groups.map((g) => {
           const tier = stalenessTier(g.age_seconds);
+          const selected = g.claim_type === selectedType;
           return (
-            <tr class={`row tier-${tier}`} key={g.claim_type}>
-              <td class="claim-type">{g.claim_type}</td>
-              <td class="num">{g.count}</td>
+            <tr
+              class={`row tier-${tier}${selected ? " selected" : ""}`}
+              key={g.claim_type}
+            >
+              <td class="claim-type">
+                <a href={`/entity/${entityId}?type=${encodeURIComponent(g.claim_type)}`}>
+                  {g.claim_type}
+                </a>
+                {contradictionTypes?.has(g.claim_type) ? (
+                  <span
+                    class="conflict-pill"
+                    title="Two sources disagree on a value for this type (see Open gaps)"
+                  >
+                    conflict
+                  </span>
+                ) : null}
+              </td>
+              <td class="num">
+                {g.count}
+                {g.private_count > 0 ? (
+                  <span
+                    class="byo"
+                    title={`${g.private_count} of these are visible only via your credential`}
+                  >
+                    {" "}incl. {g.private_count}
+                  </span>
+                ) : null}
+              </td>
               <td class="age">
                 <span class={`dot tier-${tier}`} aria-hidden="true" />
                 <span class={`age-text tier-${tier}`}>

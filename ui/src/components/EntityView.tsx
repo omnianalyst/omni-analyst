@@ -1,12 +1,16 @@
 import { useEffect, useState } from "preact/hooks";
-import { useParams } from "@neutron-build/core/client";
+import { useParams, useSearchParams } from "@neutron-build/core/client";
 import {
   describeError,
+  getClaims,
   getCoverage,
   getGaps,
+  type ClaimsResponse,
   type CoverageResponse,
   type GapsResponse,
 } from "../lib/api";
+import { contradictionTypes } from "../lib/gaps";
+import { ClaimsTable } from "./ClaimsTable";
 import { CoverageTable } from "./CoverageTable";
 import { GapsList } from "./GapsList";
 import { ErrorState } from "./ErrorState";
@@ -21,10 +25,13 @@ type Async<T> =
 export function EntityView() {
   const params = useParams();
   const id = params.id;
+  const [searchParams] = useSearchParams();
+  const selectedType = searchParams.get("type");
   const [coverage, setCoverage] = useState<Async<CoverageResponse>>({
     kind: "idle",
   });
   const [gaps, setGaps] = useState<Async<GapsResponse>>({ kind: "idle" });
+  const [claims, setClaims] = useState<Async<ClaimsResponse>>({ kind: "idle" });
 
   useEffect(() => {
     if (!id) return;
@@ -61,6 +68,34 @@ export function EntityView() {
     };
   }, [id]);
 
+  useEffect(() => {
+    if (!id || !selectedType) {
+      setClaims({ kind: "idle" });
+      return;
+    }
+    let cancelled = false;
+    setClaims({ kind: "loading" });
+
+    void (async () => {
+      try {
+        const data = await getClaims(id, selectedType);
+        if (!cancelled) setClaims({ kind: "ok", data });
+      } catch (err) {
+        if (!cancelled) {
+          const { message, detail } = describeError(err);
+          setClaims({ kind: "error", message, detail });
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [id, selectedType]);
+
+  const conflictTypes =
+    gaps.kind === "ok" ? contradictionTypes(gaps.data.gaps) : new Set<string>();
+
   if (!id) {
     return (
       <div class="entity-view">
@@ -91,8 +126,33 @@ export function EntityView() {
         {coverage.kind === "error" && (
           <ErrorState message={coverage.message} detail={coverage.detail} />
         )}
-        {coverage.kind === "ok" && <CoverageTable groups={coverage.data.groups} />}
+        {coverage.kind === "ok" && (
+          <CoverageTable
+            groups={coverage.data.groups}
+            entityId={id}
+            selectedType={selectedType}
+            contradictionTypes={conflictTypes}
+          />
+        )}
       </section>
+
+      {selectedType ? (
+        <section class="panel">
+          <h2 class="panel-title">
+            {selectedType} claims
+            <a class="panel-clear" href={`/entity/${id}`}>
+              all types
+            </a>
+          </h2>
+          {claims.kind === "loading" || claims.kind === "idle" ? (
+            <Loading label={`Loading ${selectedType} claims…`} />
+          ) : null}
+          {claims.kind === "error" && (
+            <ErrorState message={claims.message} detail={claims.detail} />
+          )}
+          {claims.kind === "ok" && <ClaimsTable claims={claims.data.claims} />}
+        </section>
+      ) : null}
 
       <section class="panel">
         <h2 class="panel-title">Open gaps</h2>

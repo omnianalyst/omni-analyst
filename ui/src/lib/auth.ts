@@ -1,20 +1,12 @@
 import { API_BASE_URL } from "../config";
-import { ApiHttpError, ApiUnavailableError } from "./api";
+import { ApiHttpError, ApiUnavailableError, getAuthToken } from "./api";
 
-export const AUTH_TOKEN_KEY = "omni.auth.token";
+export { AUTH_TOKEN_KEY, getAuthToken } from "./api";
 
 export class AuthRequiredError extends Error {
   constructor() {
     super("Authentication required");
     this.name = "AuthRequiredError";
-  }
-}
-
-export function getAuthToken(): string | null {
-  try {
-    return localStorage.getItem(AUTH_TOKEN_KEY);
-  } catch {
-    return null;
   }
 }
 

@@ -375,3 +375,86 @@ async def test_claims_can_be_filtered_to_one_series(db, database_url):
 
     assert {c["key"] for c in both.json()["claims"]} == {"GDP", "UNRATE"}
     assert {c["key"] for c in one.json()["claims"]} == {"GDP"}
+
+
+async def test_claim_type_filter_accepts_every_earned_type_and_rejects_unknown(
+    db, database_url
+):
+    """The claim_type filter validated against a local 6-value copy while the
+    enum grew to 19, so every earned signal type (yield_curve_signal,
+    sahm_rule_signal, inflation_signal, output_gap_signal, lei_signal, ...)
+    400'd on the read API. The validator now reads the single source the
+    capability registry pins to the migrations."""
+    entity_id = await _entity(db, symbol="US", name="United States")
+    await _claim(
+        db, entity_id, key="USSLIND", claim_type="lei_signal",
+        value='{"is_negative": true}',
+    )
+    await _claim(
+        db, entity_id, key="Revenues", claim_type="fundamental_metric",
+    )
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r_earned = await client.get(
+            f"/coverage/{entity_id}/claims?claim_type=lei_signal"
+        )
+        r_unknown = await client.get(
+            f"/coverage/{entity_id}/claims"
+            "?claim_type=not_a_real_claim_type"
+        )
+
+    # The earned type passes validation and filters to its one claim.
+    assert r_earned.status_code == 200, r_earned.text
+    earned = r_earned.json()["claims"]
+    assert len(earned) == 1
+    assert earned[0]["claim_type"] == "lei_signal"
+
+    # An unknown type is still a 400 problem detail, not a 500 cast failure.
+    assert r_unknown.status_code == 400
+    assert r_unknown.headers["content-type"].startswith(
+        "application/problem+json"
+    )
+    assert "Unknown claim_type" in r_unknown.json()["detail"]
+
+
+async def test_summary_private_count_is_audience_scoped(db, database_url):
+    """The summary's private_count is the viewer's own BYO claim count per group
+    -- the audience dimension made visible, not just enforced. A's private claim
+    lifts A's private_count; it must reach neither B's nor anonymous' count nor
+    their private_count, which is the redistribution invariant again."""
+    entity_id = await _entity(db, symbol="MIX", name="Mixed")
+    owner_a = uuid4()
+    owner_b = uuid4()
+
+    await _claim(
+        db, entity_id, key="Revenues", source="pubsrc",
+        value='{"amount": 1}', audience=None,
+    )
+    await _claim(
+        db, entity_id, key="Revenues", source="privsrc",
+        value='{"amount": 2}', audience=owner_a,
+    )
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r_a = await client.get(f"/coverage/{entity_id}", headers=_auth(owner_a))
+        r_b = await client.get(f"/coverage/{entity_id}", headers=_auth(owner_b))
+        r_anon = await client.get(f"/coverage/{entity_id}")
+
+    def group(resp):
+        return next(
+            g for g in resp.json()["groups"]
+            if g["claim_type"] == "fundamental_metric"
+        )
+
+    # A sees both claims; one of them is private to A.
+    assert group(r_a)["count"] == 2
+    assert group(r_a)["private_count"] == 1
+
+    # B and anonymous see only the shared claim. A's private claim contributes
+    # nothing to their total or their private_count.
+    assert group(r_b)["count"] == 1
+    assert group(r_b)["private_count"] == 0
+    assert group(r_anon)["count"] == 1
+    assert group(r_anon)["private_count"] == 0

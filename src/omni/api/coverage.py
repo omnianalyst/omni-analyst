@@ -21,18 +21,8 @@ from pydantic import BaseModel
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
+from omni.capability.extracted import CLAIM_TYPES
 from omni.coverage.visibility import visible_claims_cte
-
-# Mirrors the claim_type enum in migrations/001_core_schema.sql. Kept here so an
-# unknown value is a 400, not a 500 from a failed SQL cast.
-_CLAIM_TYPES = {
-    "price_snapshot",
-    "fundamental_metric",
-    "filing_event",
-    "macro_series_point",
-    "news_event",
-    "manipulation_signal",
-}
 
 PAGE_SIZE_DEFAULT = 100
 PAGE_SIZE_MAX = 1000
@@ -64,9 +54,14 @@ def _audience(request: Request) -> UUID | None:
 
 
 def _claim_type_or_400(value: str | None) -> str | None:
+    # Validate against omni.capability.extracted.CLAIM_TYPES, the canonical
+    # Python mirror of the claim_type enum that
+    # test_claim_types_frozenset_mirrors_the_migration_enum pins to the
+    # migrations. A local copy here drifted to 6 values while the enum grew to
+    # 19, so every earned claim type 400'd. One source, not three.
     if value is None:
         return None
-    if value not in _CLAIM_TYPES:
+    if value not in CLAIM_TYPES:
         raise bad_request(f"Unknown claim_type: {value}")
     return value
 
@@ -101,6 +96,14 @@ def build_router(app: App) -> Router:
         sql = f"""
             SELECT v.claim_type::text AS claim_type,
                    count(*)::int                       AS count,
+                   -- visible_claims_cte returns shared claims (audience_user_id
+                   -- IS NULL) plus this viewer's own BYO claims (audience_user_id
+                   -- = the audience). A non-null audience_user_id in the result
+                   -- is therefore exactly "the viewer's private claim"; for an
+                   -- anonymous caller the CTE returns none, so private_count is 0.
+                   (count(*) FILTER (
+                       WHERE v.audience_user_id IS NOT NULL
+                   ))::int                             AS private_count,
                    max(v.knowledge_date)               AS newest_knowledge_date,
                    extract(epoch FROM (now() - max(v.knowledge_date))
                            )::double precision         AS age_seconds,
@@ -121,6 +124,7 @@ def build_router(app: App) -> Router:
             {
                 "claim_type": r["claim_type"],
                 "count": r["count"],
+                "private_count": r["private_count"],
                 "newest_knowledge_date": _iso(r["newest_knowledge_date"]),
                 "age_seconds": r["age_seconds"],
                 "source_count": r["source_count"],
