@@ -13,6 +13,7 @@ from omni.scheduler.worker import (
     SchedulerConfig,
     default_registry,
     fill_once,
+    surface_once,
     sweep_once,
 )
 
@@ -256,3 +257,61 @@ class TestDefaultRegistry:
         assert capability is not None
         assert capability.call is not None
         assert capability.invocable
+
+
+async def _seed_resolved(db, entity_id, *, n, outcome, confidence=0.7):
+    for _ in range(n):
+        await db.pool.execute(
+            "INSERT INTO prediction (entity_id, method, direction, confidence, "
+            "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
+            "resolved_at, provenance, created_at) "
+            "VALUES ($1,'test.surface','up',$2,100.0,110.0,90.0, now(), $3::prediction_outcome, "
+            "now(), '{}'::jsonb, now() - interval '30 days')",
+            entity_id, confidence, outcome,
+        )
+
+
+async def test_surface_once_surfaces_a_calibrated_candidate(db):
+    """A candidate whose method has a strong calibration (the 0.7 bucket hits
+    100%) clears the derived threshold and is surfaced as a finding."""
+    e = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('company','S','S') RETURNING id"
+    )
+    await _seed_resolved(db, e, n=11, outcome="upper")  # 11 hits at conf 0.7
+    cand = await db.pool.fetchval(
+        "INSERT INTO prediction (entity_id, method, direction, confidence, "
+        "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
+        "provenance, created_at) "
+        "VALUES ($1,'test.surface','up',0.7,100.0,110.0,90.0, now()+interval '30 days', "
+        "'pending', '{}'::jsonb, now()) RETURNING id",
+        e,
+    )
+    n = await surface_once(db.pool)
+    assert n >= 1
+    status = await db.pool.fetchval(
+        "SELECT status FROM finding WHERE prediction_id=$1", cand
+    )
+    assert status == "surfaced"
+
+
+async def test_surface_once_refuses_a_below_threshold_candidate(db):
+    """When the candidate's method has no calibration bucket reaching the target
+    (11 misses at 0.7 -> hit_rate 0), no threshold can be derived and the
+    candidate is recorded as a refusal -- the denominator stays visible."""
+    e = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('company','S','S') RETURNING id"
+    )
+    await _seed_resolved(db, e, n=11, outcome="lower")  # 11 misses at conf 0.7
+    cand = await db.pool.fetchval(
+        "INSERT INTO prediction (entity_id, method, direction, confidence, "
+        "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
+        "provenance, created_at) "
+        "VALUES ($1,'test.surface','up',0.7,100.0,110.0,90.0, now()+interval '30 days', "
+        "'pending', '{}'::jsonb, now()) RETURNING id",
+        e,
+    )
+    await surface_once(db.pool)
+    status = await db.pool.fetchval(
+        "SELECT status FROM finding WHERE prediction_id=$1", cand
+    )
+    assert status == "refused"
