@@ -34,8 +34,10 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from omni.capability.registry import Registry
+from omni.conviction.gate import Candidate, assess
 from omni.conviction.ledger import resolve_due_predictions
 from omni.conviction.predict import produce_dcf_prediction_from_coverage
+from omni.conviction.publish import load_calibration, record
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.fill.pipeline import drain
 
@@ -70,6 +72,11 @@ class SchedulerConfig:
     #: How far out a DCF triple-barrier call resolves. A fair-value reversion is
     #: a long-horizon view, but resolution needs a finite window.
     predict_horizon_days: int = 90
+    #: Surface reads the coverage store + calibration (no external API), cheap
+    #: like resolve. Its own interval because it answers a different question:
+    #: "which predictions now clear the calibrated threshold and should be
+    #: surfaced as findings". Rate-limited by conviction, never by schedule.
+    surface_interval: float = 300.0
     licensed: tuple[str, ...] = ()
     worker_id: str = field(default_factory=lambda: f"omni-{os.getpid()}-{uuid4().hex[:6]}")
 
@@ -85,6 +92,7 @@ class Stats:
     resolved: int = 0
     predicted: int = 0
     predict_abstained: int = 0
+    surfaced: int = 0
 
 
 async def sweep_once(pool) -> int:
@@ -171,6 +179,57 @@ async def predict_once(pool, *, horizon_days: int) -> tuple[int, int]:
     return produced, abstained
 
 
+async def surface_once(pool) -> int:
+    """Assess recent predictions through the conviction gate; record findings.
+
+    For each prediction that has no recorded finding yet (the latest per entity +
+    method + audience), load that method's calibration, build a Candidate, assess
+    it, and publish the verdict -- surfaced OR refused. Refusals are recorded too
+    because the denominator behind a published hit rate must be visible (a product
+    that stores only what it surfaced can claim any hit rate it likes).
+
+    Idempotent: a prediction with an existing finding is never re-assessed, so the
+    loop re-running costs nothing and never duplicates a finding. Returns the
+    number of findings recorded this pass.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT ON (p.entity_id, p.method, p.audience_user_id)
+               p.id, p.entity_id, p.method, p.confidence, p.audience_user_id,
+               p.direction
+        FROM prediction p
+        WHERE p.method IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM finding f WHERE f.prediction_id = p.id)
+        ORDER BY p.entity_id, p.method, p.audience_user_id, p.created_at DESC
+        """
+    )
+    n = 0
+    for r in rows:
+        audience = r["audience_user_id"]
+        # claim_type is a label here -- the calibration view groups by method,
+        # not claim_type, so load_calibration stamps whatever we pass; the
+        # Candidate must carry the same label for assess's filter to match.
+        label = r["method"]
+        buckets = await load_calibration(
+            pool, claim_type=label, method=r["method"], audience=audience
+        )
+        candidate = Candidate(
+            claim_type=label,
+            method=r["method"],
+            confidence=float(r["confidence"]),
+            supporting=(f"{r['direction']} directional call from {r['method']}",),
+            searched_for_disconfirming=True,
+            falsifiable=True,
+        )
+        verdict = assess(candidate, buckets)
+        await record(
+            pool, verdict, entity_id=r["entity_id"],
+            audience_user_id=audience, prediction_id=r["id"],
+        )
+        n += 1
+    return n
+
+
 class Scheduler:
     """Runs the loops until stopped. One instance per process."""
 
@@ -219,6 +278,15 @@ class Scheduler:
         except Exception:
             logger.exception("initial predict failed")
         self._tasks.append(asyncio.create_task(self._predict_loop()))
+        # Surface once before the loop starts: otherwise a prediction that
+        # already clears the calibrated threshold waits a full interval to become
+        # a finding.
+        try:
+            n = await surface_once(self._pool)
+            self.stats.surfaced += n
+        except Exception:
+            logger.exception("initial surface failed")
+        self._tasks.append(asyncio.create_task(self._surface_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -331,6 +399,29 @@ class Scheduler:
                 logger.exception("predict cycle failed")
             try:
                 await asyncio.sleep(self._config.predict_interval)
+            except asyncio.CancelledError:
+                break
+
+    async def _surface_loop(self) -> None:
+        # start() already did one; wait before repeating.
+        try:
+            await asyncio.sleep(self._config.surface_interval)
+        except asyncio.CancelledError:
+            return
+        while self._running:
+            try:
+                n = await surface_once(self._pool)
+                self.stats.surfaced += n
+                if n:
+                    logger.info("surface recorded %d findings", n)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # Same discipline: a failed pass must not kill the loop, or
+                # surfacing silently stops while the system looks healthy.
+                logger.exception("surface cycle failed")
+            try:
+                await asyncio.sleep(self._config.surface_interval)
             except asyncio.CancelledError:
                 break
 
