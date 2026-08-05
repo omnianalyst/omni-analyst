@@ -36,10 +36,15 @@ def jwt_secret() -> str:
 
     A signing key that shipped in the source would not be a signing key, so
     there is no default here: the operator sets ``OMNI_JWT_SECRET`` (or
-    ``JWT_SECRET``). Missing or too short is a configuration error raised at
-    the point a token must be issued.
+    ``JWT_SECRET``) in the process environment (systemd EnvironmentFile, docker
+    env, or an export) -- the standard home for a signing key, not .env. Missing
+    or too short is a configuration error raised at the point a token must be
+    issued.
     """
     raw = os.environ.get("OMNI_JWT_SECRET") or os.environ.get("JWT_SECRET")
+    if not raw:
+        from omni.config import settings
+        raw = settings.omni_jwt_secret
     if not raw:
         raise internal_error("OMNI_JWT_SECRET is not configured")
     if len(raw) < _MIN_SECRET_LENGTH:

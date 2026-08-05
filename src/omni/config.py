@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     # Format: "Organisation contact@example.com".
     sec_user_agent: str = ""
 
+    # HS256 signing key for auth tokens. Read os.environ FIRST (so tests that
+    # setdefault the env still match their own tokens), then fall back to .env
+    # here so local/dev and deploy without an explicit export still work.
+    omni_jwt_secret: str = ""
+
     #: Providers for which this operator holds a redistribution licence, so
     #: their data may enter shared coverage. Comma-separated provider keys.
     licensed_redistribution_providers: str = ""
