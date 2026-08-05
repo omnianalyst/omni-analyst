@@ -107,6 +107,7 @@ async def briefing(pool, *, audience: UUID | None = None, limit: int = 20) -> li
         SELECT f.id, f.claim_id, f.entity_id, f.method, f.confidence,
                f.threshold, f.calibrated_hit_rate, f.supporting,
                f.disconfirming, f.prediction_id, f.created_at,
+               f.deduction_chain,
                e.symbol, e.name
         FROM finding f
         JOIN entity e ON e.id = f.entity_id

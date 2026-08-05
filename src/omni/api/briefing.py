@@ -72,6 +72,7 @@ def _finding_to_dict(row) -> dict:
         "prediction_id": (
             str(row["prediction_id"]) if row["prediction_id"] else None
         ),
+        "deduction_chain": _jsonb(row.get("deduction_chain") or "[]"),
         "created_at": _iso(row["created_at"]),
     }
 
