@@ -93,16 +93,19 @@ class AutonomousRunner:
         logger.info("autonomous runner started: 5 loops")
 
     async def _bootstrap_macro_demand(self) -> None:
-        """Create autonomous demand for the FRED series + derived signals.
+        """Create autonomous demand for the FRED series + derived signals + ETF prices.
 
         The macro loop reads five derived signal claims (yield_curve_signal,
         sahm_rule_signal, etc.). Those signals are produced by derived
         capabilities that consume raw macro_series_point claims (DGS2, DGS10,
-        UNRATE, ...). Nobody else creates demand for either layer, so the chain
-        never starts. This step breaks the chicken-and-egg: it demands the raw
-        FRED data AND the derived signals on the macro entity, the sweep loop
-        detects the gaps, and the fill loop fetches the data and runs the
-        derivations.
+        UNRATE, ...). The sector scanner reads ETF price_snapshot claims. Nobody
+        else creates demand for any of these, so the chain never starts. This
+        step breaks the chicken-and-egg.
+
+        FRED is allowed-class (free, redistributable), so its demand fills
+        without a user. ETF prices are byo_only (Polygon), so their demand
+        carries the operator's user_id -- without it the fill pipeline raises
+        MissingCredentialOwner.
 
         Idempotent: checks for existing active demand before creating.
         """
@@ -164,10 +167,33 @@ class AutonomousRunner:
             )
             created += 1
 
+        # Sector ETF + index prices (byo_only Polygon). The operator must
+        # exist for the fill pipeline to attribute these.
+        if self._operator_user_id is not None:
+            etf_rows = await self._pool.fetch(
+                "SELECT id, symbol FROM entity "
+                "WHERE kind IN ('sector_etf', 'index') ORDER BY symbol"
+            )
+            for row in etf_rows:
+                exists = await self._pool.fetchval(
+                    "SELECT 1 FROM demand WHERE entity_id = $1 "
+                    "AND claim_type = 'price_snapshot' "
+                    "AND channel = 'autonomous' AND active",
+                    row["id"],
+                )
+                if exists:
+                    continue
+                await autonomous_attention(
+                    self._pool, entity_id=row["id"],
+                    claim_type="price_snapshot",
+                    requested_by=self._operator_user_id,
+                )
+                created += 1
+
         if created:
             logger.info(
                 "bootstrap: created %d autonomous demand rows "
-                "(7 FRED series + 5 derived signals) on US_MACRO", created,
+                "(FRED series + derived signals + ETF/index prices)", created,
             )
 
     async def stop(self) -> None:
