@@ -224,7 +224,8 @@ class AutonomousRunner:
 
         return [
             ("macro", lambda: assess_macro_regime(self._pool)),
-            ("sector", lambda: scan_sectors(self._pool)),
+            ("sector", lambda: scan_sectors(
+                self._pool, operator_user_id=self._operator_user_id)),
             ("demand", lambda: create_autonomous_demand(
                 self._pool, operator_user_id=self._operator_user_id)),
             ("synthesis", lambda: enrich_findings(self._pool)),
@@ -260,7 +261,8 @@ class AutonomousRunner:
         from omni.autonomous.sector import scan_sectors
         await self._loop(
             "sector",
-            lambda: scan_sectors(self._pool),
+            lambda: scan_sectors(
+                self._pool, operator_user_id=self._operator_user_id),
             self._config.sector_interval,
         )
 

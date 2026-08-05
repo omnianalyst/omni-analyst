@@ -66,6 +66,48 @@ async def latest_shared_claim(
     return _decode_row(row) if row else None
 
 
+async def macro_series_values(
+    pool,
+    *,
+    key: str,
+    limit: int = 25,
+    as_of: datetime | None = None,
+) -> list[tuple[datetime, float]]:
+    """Trailing macro_series_point values for a FRED series key, oldest-first.
+
+    Returns ``(event_date, value)`` tuples. Null-valued observations (FRED's
+    "." placeholder for "not published yet") are included -- a null in the
+    window is a fact about the data, not a gap to fill.
+    """
+    clauses = [
+        "claim_type = 'macro_series_point'",
+        "key = $1",
+        "audience_user_id IS NULL",
+        "redistributable = 'allowed'",
+        "superseded_by IS NULL",
+    ]
+    params: list[Any] = [key]
+    if as_of is not None:
+        params.append(as_of)
+        clauses.append(f"knowledge_date <= ${len(params)}")
+    sql = (
+        "SELECT event_date, value FROM claim WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY event_date DESC LIMIT $" + str(len(params) + 1)
+    )
+    params.append(limit)
+    rows = await pool.fetch(sql, *params)
+    vals: list[tuple[datetime, float]] = []
+    for r in rows:
+        raw = r["value"]
+        if isinstance(raw, (str, bytes)):
+            raw = json.loads(raw)
+        v = raw.get("value") if isinstance(raw, dict) else None
+        vals.append((r["event_date"], v))
+    vals.reverse()
+    return vals
+
+
 async def latest_claim_for_entity(
     pool,
     *,

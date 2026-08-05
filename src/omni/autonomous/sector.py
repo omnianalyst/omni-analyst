@@ -104,7 +104,7 @@ def _trailing_return(closes: list[float]) -> float | None:
 
 
 async def scan_sectors(
-    pool, *, as_of: datetime | None = None
+    pool, *, as_of: datetime | None = None, operator_user_id=None
 ) -> SectorScanReport:
     """Score every sector ETF, writing ``sector_score`` claims.
 
@@ -240,13 +240,26 @@ async def scan_sectors(
         if regime_claim_id is not None:
             input_ids.append(regime_claim_id)
 
+        # Resolve licence from inputs: Polygon prices are byo_only, so a
+        # sector_score derived from them must also be byo_only under the
+        # operator's audience (migration 002 licence propagation). A
+        # sector_score with no price inputs (only regime) stays allowed.
+        price_licence = await pool.fetchval(
+            "SELECT redistributable::text FROM claim WHERE id = $1", price_cid)
+        if price_licence == "byo_only":
+            redistributable = "byo_only"
+            audience = operator_user_id
+        else:
+            redistributable = "allowed"
+            audience = None
+
         await write_derived(
             pool,
             draft,
             entity_id=entity_id,
             input_claim_ids=input_ids,
-            audience_user_id=None,
-            redistributable="allowed",
+            audience_user_id=audience,
+            redistributable=redistributable,
             source=SOURCE,
         )
         scored += 1

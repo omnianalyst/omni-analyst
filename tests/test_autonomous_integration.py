@@ -38,6 +38,26 @@ async def _seed_signal(db, entity_id, claim_type, key, value):
     )
 
 
+async def _seed_fred(db, entity_id, key, values, *, interval_days=30):
+    """Seed raw macro_series_point claims for a FRED series."""
+    now = datetime.now(UTC)
+    base = now - timedelta(days=len(values) * interval_days + interval_days)
+    for i, v in enumerate(values):
+        event = base + timedelta(days=i * interval_days)
+        knowledge = event + timedelta(days=1)
+        await db.pool.execute(
+            """
+            INSERT INTO claim (entity_id, claim_type, key, value, source,
+                               event_date, knowledge_date, confidence,
+                               redistributable, audience_user_id, derivation)
+            VALUES ($1, 'macro_series_point', $2, $3::jsonb, 'fred',
+                    $4, $5, 1.0, 'allowed', NULL, 'ingested')
+            ON CONFLICT DO NOTHING
+            """,
+            entity_id, key, json.dumps({"value": v}), event, knowledge,
+        )
+
+
 async def _seed_prices(db, entity_id, n, start=100.0, drift=0.003):
     rng = random.Random(42)
     base = datetime.now(UTC) - timedelta(days=n + 50)
@@ -111,20 +131,19 @@ class TestFullDeductionChain:
             "VALUES ($1, $2, 'member_of_sector', 'test')", pg, xlp
         )
 
-        # -- Layer 1: macro signals -> regime assessment --
-        for ct, key, val in [
-            ("yield_curve_signal", "yield_curve",
-             {"current_spread": 0.5, "is_inverted": False, "days_inverted_90d": 0}),
-            ("sahm_rule_signal", "unrate",
-             {"indicator": 0.1, "triggered": False}),
-            ("inflation_signal", "cpi_all",
-             {"yoy": 2.5, "mom_annualized": 0.3, "3m_annualized": 0.3}),
-            ("output_gap_signal", "gdpc1_gdppot",
-             {"output_gap": 0.5}),
-            ("lei_signal", "usslind",
-             {"is_negative": False, "change_6m": 1.0}),
-        ]:
-            await _seed_signal(db, macro_e, ct, key, val)
+        # -- Layer 1: raw FRED data -> regime assessment --
+        # The macro loop reads macro_series_point claims and computes signals
+        # inline (yield curve, Sahm, inflation, output gap, LEI).
+        for key, vals in {
+            "DGS2": [4.0] * 5,
+            "DGS10": [4.2] * 5,
+            "UNRATE": [3.8, 3.9, 3.9, 4.0, 4.0, 4.1, 4.0, 3.9, 3.8, 3.8, 3.9, 4.0],
+            "CPIAUCSL": [300.0 + i * 0.5 for i in range(13)],
+            "GDPC1": [23000.0],
+            "GDPPOT": [22500.0],
+            "USSLIND": [100.0 + i * 0.1 for i in range(7)],
+        }.items():
+            await _seed_fred(db, macro_e, key, vals)
 
         regime_id = await assess_macro_regime(db.pool)
         assert regime_id is not None
