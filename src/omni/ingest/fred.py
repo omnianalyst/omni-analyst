@@ -13,7 +13,7 @@ later.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from omni.ingest.protocol import ClaimDraft, Unavailable
@@ -24,9 +24,18 @@ CLAIM_TYPE = "macro_series_point"
 
 ALFRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 
-# The full vintage history. Without this ALFRED returns only current values
-# and the point-in-time guarantee is gone.
-ALL_VINTAGES = {"realtime_start": "1776-07-04", "realtime_end": "9999-12-31"}
+# ALFRED returns every vintage (revision), not just current values. Each
+# observation carries both `date` (the period = event_date) and
+# `realtime_start` (when that figure became public = knowledge_date), which is
+# what lets a backtest see the first print rather than a later revision.
+#
+# FRED caps each request at 2,000 vintage dates. A daily series like DGS10
+# publishes ~252 vintages/year, so the full range (1776 onward) blows the limit
+# at ~5,000+ vintages. A 5-year window (~1,260 for daily, ~60 for monthly) is
+# comfortably under the ceiling and carries more point-in-time history than any
+# analysis the system runs today (yield curve needs 252 obs, Sahm needs 12,
+# CPI needs 13, backfill needs ~50).
+_VINTAGE_LOOKBACK_DAYS = 1825
 
 ObsFetcher = Callable[[str], Awaitable[list[dict]]]
 
@@ -88,6 +97,20 @@ def parse_observations(
     return drafts
 
 
+def _vintage_params() -> dict[str, str]:
+    """The realtime window for ALFRED vintage queries.
+
+    Computed per-call so the window is always relative to now. 5 years of
+    lookback stays under FRED's 2,000-vintage ceiling even for daily series
+    (~1,260 trading days) while preserving enough history for every analysis
+    the system runs.
+    """
+    start = (datetime.now(UTC) - timedelta(days=_VINTAGE_LOOKBACK_DAYS)).strftime(
+        "%Y-%m-%d"
+    )
+    return {"realtime_start": start, "realtime_end": "9999-12-31"}
+
+
 async def _fetch_alfred(
     series_id: str, *, api_key: str, vintages: bool = True
 ) -> list[dict]:
@@ -101,13 +124,13 @@ async def _fetch_alfred(
     """
     import httpx
 
-    params = {
+    params: dict[str, Any] = {
         "series_id": series_id,
         "api_key": api_key,
         "file_type": "json",
     }
     if vintages:
-        params.update(ALL_VINTAGES)
+        params.update(_vintage_params())
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(ALFRED_URL, params=params)
