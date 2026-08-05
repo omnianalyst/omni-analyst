@@ -38,6 +38,7 @@ from omni.conviction.gate import Candidate, assess
 from omni.conviction.ledger import resolve_due_predictions
 from omni.conviction.predict import produce_dcf_prediction_from_coverage
 from omni.conviction.publish import load_calibration, record
+from omni.conviction.trend import produce_trend_prediction_from_coverage
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.fill.pipeline import drain
 
@@ -48,6 +49,8 @@ logger = logging.getLogger(__name__)
 # produce_dcf_prediction defaults its method to the capability name, which is
 # this string. A second producer would carry its own constant the same way.
 _DCF_METHOD = "fundamentals.dcf_valuation"
+# The trend producer's method, literal for the same reason as _DCF_METHOD.
+_TREND_METHOD = "trend.sma"
 
 
 @dataclass
@@ -130,15 +133,15 @@ async def resolve_once(pool) -> int:
 
 
 async def predict_once(pool, *, horizon_days: int) -> tuple[int, int]:
-    """Make a DCF directional call for each demanded company entity.
+    """Make a directional call for each demanded company entity.
 
-    Demand-driven (the system predicts for entities under active attention, not
-    for the whole universe), per-audience (each audience's own price feeds their
-    own prediction), and deduped -- one pending call per (entity, method,
-    audience), so the loop cannot flood the ledger by re-firing each cycle.
-    Returns ``(produced, abstained)``: abstain is the honest outcome when
-    coverage is short (no visible price, incomplete fundamentals, or the model
-    asserts no honest barrier), never a manufactured prediction.
+    Two producers run, each demand-driven (the system predicts for entities
+    under active attention), per-audience, and deduped -- one pending call per
+    (entity, method, audience), so neither producer can flood the ledger by
+    re-firing each cycle. DCF needs fundamentals + a BYO price; trend needs a
+    price window. Either may abstain honestly (no key, short coverage, or the
+    model asserts no honest barrier) -- abstention is the correct outcome when
+    coverage is insufficient, never a manufactured prediction.
     """
     now = datetime.now(UTC)
     horizon = now + timedelta(days=horizon_days)
@@ -149,33 +152,43 @@ async def predict_once(pool, *, horizon_days: int) -> tuple[int, int]:
         WHERE d.active AND e.kind = 'company'
         """
     )
+    producers = (
+        (_DCF_METHOD, produce_dcf_prediction_from_coverage),
+        (_TREND_METHOD, produce_trend_prediction_from_coverage),
+    )
     produced = 0
     abstained = 0
     for r in rows:
         entity_id: UUID = r["entity_id"]
         audience: UUID | None = r["requested_by"]
-        pending = await pool.fetchval(
-            "SELECT 1 FROM prediction "
-            "WHERE entity_id = $1 AND method = $2 "
-            "AND audience_user_id IS NOT DISTINCT FROM $3 "
-            "AND outcome = 'pending' LIMIT 1",
-            entity_id,
-            _DCF_METHOD,
-            audience,
-        )
-        if pending:
-            continue
-        pid = await produce_dcf_prediction_from_coverage(
-            pool,
-            entity_id=entity_id,
-            audience_user_id=audience,
-            as_of=now,
-            horizon_ends_at=horizon,
-        )
-        if pid is None:
-            abstained += 1
-        else:
-            produced += 1
+        for method, producer in producers:
+            pending = await pool.fetchval(
+                "SELECT 1 FROM prediction "
+                "WHERE entity_id = $1 AND method = $2 "
+                "AND audience_user_id IS NOT DISTINCT FROM $3 "
+                "AND outcome = 'pending' LIMIT 1",
+                entity_id,
+                method,
+                audience,
+            )
+            if pending:
+                continue
+            try:
+                pid = await producer(
+                    pool,
+                    entity_id=entity_id,
+                    audience_user_id=audience,
+                    as_of=now,
+                    horizon_ends_at=horizon,
+                )
+            except Exception:
+                # A producer raising is an honest refusal (e.g. DCF on negative
+                # FCF, or incomplete coverage); count it as abstain, not error.
+                pid = None
+            if pid is None:
+                abstained += 1
+            else:
+                produced += 1
     return produced, abstained
 
 
