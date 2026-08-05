@@ -68,6 +68,7 @@ async def backfill_trend_predictions(
     window: int = _DEFAULT_WINDOW,
     target_k: float = _DEFAULT_TARGET_K,
     method_suffix: str = "",
+    audience_user_id=None,
     entity_ids: list[UUID] | None = None,
 ) -> BackfillReport:
     """Replay the trend producer across history for instant calibration.
@@ -118,7 +119,7 @@ async def backfill_trend_predictions(
                 pid = await produce_trend_prediction_from_coverage(
                     pool,
                     entity_id=entity_id,
-                    audience_user_id=None,
+                    audience_user_id=audience_user_id,
                     as_of=ts,
                     horizon_ends_at=ts + horizon,
                     created_at=ts,

@@ -79,6 +79,7 @@ class AutonomousRunner:
                 await backfill_trend_predictions(
                     self._pool,
                     lookback_days=self._config.backfill_lookback_days,
+                    audience_user_id=self._operator_user_id,
                 )
             except Exception:
                 logger.exception("autonomous backfill failed at startup")
