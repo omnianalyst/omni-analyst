@@ -65,6 +65,14 @@ class AutonomousRunner:
                 "(Polygon prices) will be unfillable until a user exists"
             )
 
+        # Bootstrap demand for the FRED macro series the deduction chain
+        # depends on. Without this, the macro loop abstains forever -- it reads
+        # signal claims that are derived from raw FRED data, and nobody else
+        # creates the demand that makes the fill loop fetch that data. FRED is
+        # allowed-class (free, redistributable), so this demand fills without a
+        # user, unlike Polygon prices.
+        await self._bootstrap_macro_demand()
+
         if self._config.backfill_enabled:
             try:
                 from omni.autonomous.backfill import backfill_trend_predictions
@@ -83,6 +91,84 @@ class AutonomousRunner:
         self._tasks.append(asyncio.create_task(self._synthesis_loop()))
         self._tasks.append(asyncio.create_task(self._meta_loop()))
         logger.info("autonomous runner started: 5 loops")
+
+    async def _bootstrap_macro_demand(self) -> None:
+        """Create autonomous demand for the FRED series + derived signals.
+
+        The macro loop reads five derived signal claims (yield_curve_signal,
+        sahm_rule_signal, etc.). Those signals are produced by derived
+        capabilities that consume raw macro_series_point claims (DGS2, DGS10,
+        UNRATE, ...). Nobody else creates demand for either layer, so the chain
+        never starts. This step breaks the chicken-and-egg: it demands the raw
+        FRED data AND the derived signals on the macro entity, the sweep loop
+        detects the gaps, and the fill loop fetches the data and runs the
+        derivations.
+
+        Idempotent: checks for existing active demand before creating.
+        """
+        from omni.demand.ledger import autonomous_attention
+
+        macro_id = await self._pool.fetchval(
+            "SELECT id FROM entity WHERE kind = 'macro' AND symbol = 'US_MACRO'"
+        )
+        if macro_id is None:
+            logger.warning("bootstrap: US_MACRO entity not found, skipping")
+            return
+
+        # The raw FRED series the derived capabilities' ArgumentSpecs read.
+        fred_series = (
+            "DGS2", "DGS10",      # yield curve
+            "UNRATE",              # Sahm rule
+            "CPIAUCSL",            # inflation
+            "GDPC1", "GDPPOT",    # output gap
+            "USSLIND",             # LEI
+        )
+
+        # The derived signal types the macro loop consumes.
+        signal_types = (
+            "yield_curve_signal",
+            "sahm_rule_signal",
+            "inflation_signal",
+            "output_gap_signal",
+            "lei_signal",
+        )
+
+        created = 0
+        for key in fred_series:
+            exists = await self._pool.fetchval(
+                "SELECT 1 FROM demand WHERE entity_id = $1 "
+                "AND claim_type = 'macro_series_point' AND key = $2 "
+                "AND channel = 'autonomous' AND active",
+                macro_id, key,
+            )
+            if exists:
+                continue
+            await autonomous_attention(
+                self._pool, entity_id=macro_id,
+                claim_type="macro_series_point", key=key,
+            )
+            created += 1
+
+        for signal_type in signal_types:
+            exists = await self._pool.fetchval(
+                "SELECT 1 FROM demand WHERE entity_id = $1 "
+                "AND claim_type = $2::claim_type AND key IS NULL "
+                "AND channel = 'autonomous' AND active",
+                macro_id, signal_type,
+            )
+            if exists:
+                continue
+            await autonomous_attention(
+                self._pool, entity_id=macro_id,
+                claim_type=signal_type, key=None,
+            )
+            created += 1
+
+        if created:
+            logger.info(
+                "bootstrap: created %d autonomous demand rows "
+                "(7 FRED series + 5 derived signals) on US_MACRO", created,
+            )
 
     async def stop(self) -> None:
         self._running = False
