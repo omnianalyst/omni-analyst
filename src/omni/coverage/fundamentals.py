@@ -48,7 +48,8 @@ _CONCEPT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
         ("NetCashProvidedByUsedInOperatingActivities",),
     ("cash_flow", "capital_expenditures"):
         ("PaymentsToAcquirePropertyPlantAndEquipment",
-         "PaymentsToAcquireProductiveAssets"),
+         "PaymentsToAcquireProductiveAssets",
+         "CapitalExpenditures"),
     ("balance_sheet", "shares_outstanding"):
         ("CommonStockSharesOutstanding",
          "EntityCommonStockOutstandingShare"),
@@ -57,6 +58,22 @@ _CONCEPT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
     ("balance_sheet", "total_equity"):
         ("StockholdersEquity",),
 }
+
+# Shares outstanding -- read LATEST-AVAILABLE, not point-in-time (see
+# _latest_shares). EDGAR reports shares as-filed with no retroactive split
+# adjustment, while the price basis is Polygon's split-adjusted (today's) basis;
+# the latest count is on today's split basis, matching the price.
+_SHARES_CONCEPTS = ("CommonStockSharesOutstanding", "EntityCommonStockOutstandingShare")
+
+# Cash-flow (duration) concepts that must be the ANNUAL fact, not a 10-Q's
+# YTD/quarterly figure (a different-period base would mis-state FCF). The
+# assembler overlays these with an annual-duration filter.
+_FLOW_CONCEPTS = (
+    "NetCashProvidedByUsedInOperatingActivities",
+    "PaymentsToAcquirePropertyPlantAndEquipment",
+    "PaymentsToAcquireProductiveAssets",
+    "CapitalExpenditures",
+)
 
 _DEBT_CONCEPTS = ("LongTermDebt", "LongTermDebtCurrent")
 # Revenue concepts in preference order. The ASC 606 concept covers most filers
@@ -228,6 +245,87 @@ async def _latest_annual_revenues(
     return annual
 
 
+async def _latest_shares(pool, *, entity_id: UUID, audience: UUID | None) -> float | None:
+    """The latest-available shares outstanding, ignoring `as_of`.
+
+    EDGAR reports shares as-filed -- no retroactive split adjustment -- while
+    the price basis is Polygon's split-adjusted (today's) basis. Reading the
+    point-in-time count mixes a pre-split count with a post-split price: NVDA's
+    10:1 split made fair-value-per-share 10x too high the quarter the latest
+    10-K predated the split. The latest count is on today's split basis, matching
+    the adjusted price. Buyback drift between the latest report and `as_of` is a
+    small consistent bias, far smaller than the split error this avoids, and the
+    conviction gate calibrates from barrier outcomes (which a consistent share
+    bias shifts together), not from absolute share precision.
+    """
+    rows = await pool.fetch(
+        f"""
+        WITH visible AS (
+        {visible_claims_cte("$3")}
+        )
+        SELECT c.value, c.knowledge_date
+        FROM visible c
+        WHERE c.entity_id = $1
+          AND c.claim_type = '{CLAIM_TYPE}'::claim_type
+          AND c.key = ANY($2)
+        ORDER BY c.knowledge_date DESC
+        """,
+        entity_id,
+        list(_SHARES_CONCEPTS),
+        audience,
+    )
+    for r in rows:  # newest first; first positive parseable wins
+        v = _scalar(r)
+        if v is not None and v > 0:
+            return v
+    return None
+
+
+async def _latest_annual_flow(
+    pool, *, entity_id: UUID, audience: UUID | None, as_of: datetime,
+    concepts: tuple[str, ...],
+) -> dict[str, float]:
+    """The latest ANNUAL value per cash-flow concept, knowable as-of.
+
+    Cash-flow facts are flows over a period. A 10-Q reports a 3/6/9-month YTD
+    figure; using it as the FCF base (because it is the latest-knowable) mis-
+    states FCF and swings fair value as different period types rotate in.
+    Only facts whose period spans at least `_MIN_ANNUAL_DURATION_DAYS` count;
+    a fact without `start` cannot be confirmed annual and is skipped.
+    """
+    rows = await pool.fetch(
+        f"""
+        WITH visible AS (
+        {visible_claims_cte("$3")}
+        )
+        SELECT c.key, c.value, c.event_date, c.knowledge_date, c.evidence
+        FROM visible c
+        WHERE c.entity_id = $1
+          AND c.claim_type = '{CLAIM_TYPE}'::claim_type
+          AND c.key = ANY($2)
+          AND c.knowledge_date <= $4
+        ORDER BY c.event_date DESC, c.knowledge_date DESC
+        """,
+        entity_id,
+        list(concepts),
+        audience,
+        as_of,
+    )
+    out: dict[str, float] = {}
+    for r in rows:
+        start = _period_start(r)
+        if start is None:
+            continue
+        if (r["event_date"] - start).days < _MIN_ANNUAL_DURATION_DAYS:
+            continue
+        if r["key"] in out:
+            continue  # most-recent-event annual fact per concept already chosen
+        v = _scalar(r)
+        if v is not None:
+            out[r["key"]] = v
+    return out
+
+
 async def assemble_fundamentals(
     pool,
     *,
@@ -278,6 +376,39 @@ async def assemble_fundamentals(
                 debt_seen = True
     if debt_seen:
         fundamentals["balance_sheet"]["total_debt"] = debt_total
+
+    # --- Overlays for real-EDGAR shape (the point-in-time `latest` above is the
+    # fallback; these correct three defects the seeded fixtures never exercised) ---
+    # Shares: latest-available, on the price's split-adjusted basis. A point-in-
+    # time count can predate a stock split (NVDA's 10:1 -> 10x fair-value error).
+    shares_latest = await _latest_shares(
+        pool, entity_id=entity_id, audience=audience
+    )
+    if shares_latest is not None:
+        fundamentals["balance_sheet"]["shares_outstanding"] = shares_latest
+
+    # Cash flow: the ANNUAL ocf/capex, not a 10-Q's YTD figure (a different-
+    # period base swings FCF as period types rotate in). If no annual fact is
+    # knowable the field is removed and the essentials check refuses, rather
+    # than falling back to a quarterly figure that silently mis-states FCF.
+    flow = await _latest_annual_flow(
+        pool, entity_id=entity_id, audience=audience, as_of=as_of,
+        concepts=_FLOW_CONCEPTS,
+    )
+    ocf = flow.get("NetCashProvidedByUsedInOperatingActivities")
+    capex = (
+        flow.get("PaymentsToAcquirePropertyPlantAndEquipment")
+        or flow.get("PaymentsToAcquireProductiveAssets")
+        or flow.get("CapitalExpenditures")
+    )
+    if ocf is not None:
+        fundamentals["cash_flow"]["operating_cash_flow"] = ocf
+    else:
+        fundamentals["cash_flow"].pop("operating_cash_flow", None)
+    if capex is not None:
+        fundamentals["cash_flow"]["capital_expenditures"] = capex
+    else:
+        fundamentals["cash_flow"].pop("capital_expenditures", None)
 
     missing = [
         f"{section}.{key}"

@@ -181,6 +181,7 @@ class TestAssembleFundamentals:
         await _fclaim(
             db, e, "NetCashProvidedByUsedInOperatingActivities", 1_500_000,
             event_date=_fy(2024), knowledge_date=_fy(2025, 3, 15),
+            start=_iso(_fy(2024) - timedelta(days=365)),
         )
         f = await assemble_fundamentals(
             db.pool, entity_id=e, as_of=_fy(2025, 6, 1), current_price=100.0
@@ -261,6 +262,7 @@ class TestAssembleFundamentals:
         await _fclaim(
             db, e, "PaymentsToAcquireProductiveAssets", 250_000,
             event_date=_fy(2024), knowledge_date=_fy(2025, 2, 15),
+            start=_iso(_fy(2024) - timedelta(days=365)),
         )
         f = await assemble_fundamentals(
             db.pool, entity_id=e, as_of=_fy(2025, 6, 1), current_price=100.0
@@ -287,8 +289,49 @@ class TestAssembleFundamentals:
         f = await assemble_fundamentals(
             db.pool, entity_id=e, as_of=_fy(2025, 6, 1), current_price=100.0
         )
-        # 5M/4M - 1, NOT 5M/1.2M - 1: the quarter is excluded by duration.
         assert f["income_statement"]["revenue_growth_rate"] == pytest.approx(0.25)
+
+    async def test_shares_use_latest_available_not_point_in_time(self, db):
+        """Shares are read latest-available, not as-of. EDGAR reports shares as-
+        filed (no retroactive split adjustment) while the price basis is split-
+        adjusted, so a point-in-time count can predate a split (NVDA's 10:1 made
+        fair-value-per-share 10x too high). The latest count -- on today's split
+        basis -- is used regardless of as_of."""
+        e = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name) VALUES ('company','AAPL','AAPL') RETURNING id"
+        )
+        await _seed_essentials(db, e, fiscal_year=2023, shares=10_000)
+        # A later (post-split) share count filed AFTER as_of.
+        await _fclaim(
+            db, e, "CommonStockSharesOutstanding", 100_000,
+            event_date=_fy(2024), knowledge_date=_fy(2025, 2, 15),
+        )
+        f = await assemble_fundamentals(
+            db.pool, entity_id=e, as_of=_fy(2024, 6, 1), current_price=100.0
+        )
+        # Latest-available (100_000), NOT the as-of point-in-time count (10_000).
+        assert f["balance_sheet"]["shares_outstanding"] == pytest.approx(100_000)
+
+    async def test_operating_cash_flow_uses_annual_not_quarterly(self, db):
+        """ocf is the ANNUAL fact, not a 10-Q's YTD figure. A later-filed 10-Q
+        with a 91-day period must NOT override the annual: it is a different-
+        period base that would swing FCF as period types rotate in."""
+        e = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name) VALUES ('company','AAPL','AAPL') RETURNING id"
+        )
+        await _full_set(db, e)  # annual ocf=1_200_000 at FY2024 (filed 2025-02)
+        # A 10-Q ocf filed LATER than the annual, but a 91-day (quarterly) period.
+        q_end = _fy(2024, 9, 30)
+        await _fclaim(
+            db, e, "NetCashProvidedByUsedInOperatingActivities", 999_999_999,
+            event_date=q_end, knowledge_date=_fy(2025, 3, 15),
+            start=_iso(q_end - timedelta(days=91)),
+        )
+        f = await assemble_fundamentals(
+            db.pool, entity_id=e, as_of=_fy(2025, 6, 1), current_price=100.0
+        )
+        # Annual 1_200_000, NOT the later-filed quarterly 999_999_999.
+        assert f["cash_flow"]["operating_cash_flow"] == pytest.approx(1_200_000)
 
     async def test_revenue_growth_spans_a_concept_rename(self, db):
         """A filer that moved from `Revenues` (legacy) to the ASC 606 concept
