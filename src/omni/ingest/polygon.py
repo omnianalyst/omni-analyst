@@ -24,6 +24,8 @@ backtest peek at prices that had not happened yet.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -39,7 +41,30 @@ AGGREGATES_URL = (
     "/range/{multiplier}/{timespan}/{from_date}/{to_date}"
 )
 
+# Polygon's free tier allows 5 API calls/min. Space consecutive calls at least
+# this far apart so the fill loop cannot burst past the limit when it processes
+# multiple price gaps in one cycle. Paid tiers can lower this via the env var.
+_MIN_REQUEST_INTERVAL = float(
+    __import__("os").environ.get("OMNI_POLYGON_MIN_INTERVAL", "13.0")
+)
+
 AggFetcher = Callable[[str], Awaitable[dict[str, Any]]]
+
+_rate_lock = asyncio.Lock()
+_last_request_ts = 0.0
+
+
+async def _respect_rate_limit() -> None:
+    """At most one Polygon request starts per _MIN_REQUEST_INTERVAL. The lock
+    guards only the timing decision, not the network call, so a slow response
+    does not block the next caller beyond the interval."""
+    global _last_request_ts
+    async with _rate_lock:
+        elapsed = time.monotonic() - _last_request_ts
+        remaining = _MIN_REQUEST_INTERVAL - elapsed
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        _last_request_ts = time.monotonic()
 
 
 def _event_date(bar: dict[str, Any]) -> datetime | None:
@@ -141,6 +166,7 @@ async def _fetch_aggregates(
     )
     headers = {"Authorization": f"Bearer {api_key}"}
     params = {"adjusted": "true", "sort": "asc", "limit": 50000}
+    await _respect_rate_limit()
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(url, params=params, headers=headers)
         if response.status_code != 200:
