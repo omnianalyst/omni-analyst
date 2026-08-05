@@ -40,6 +40,12 @@ DEFAULT_CONCEPTS = (
     # --- value / quality / investment (v1) ---
     "Assets",
     "StockholdersEquity",
+    # Revenue: the ASC 606 concept most filers use from ~2018, then the legacy
+    # pre-ASC-606 name. Both are collected so the assembler can derive YoY
+    # growth across a filer that switched concepts mid-history (a single-name
+    # collection goes stale the year they rename -- observed on AAPL, whose
+    # `Revenues` facts stop in 2018).
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
     "Revenues",
     "NetIncomeLoss",
     "GrossProfit",
@@ -135,6 +141,15 @@ def parse_companyfacts(
                             "form": entry.get("form"),
                             "fy": entry.get("fy"),
                             "fp": entry.get("fp"),
+                            # The period start. Duration concepts (income
+                            # statement, cash flow) carry it; instant concepts
+                            # (balance sheet) do not. The fundamentals assembler
+                            # uses (end - start) to tell an annual fact from a
+                            # quarter, because `fp` is unreliable: EDGAR tags
+                            # quarterly facts fp='FY' when they appear in a 10-K,
+                            # which made the growth calc read two adjacent
+                            # quarters as a year.
+                            "start": entry.get("start"),
                         },
                     )
                 )

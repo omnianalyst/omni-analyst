@@ -29,6 +29,7 @@ async def _fclaim(
     knowledge_date,
     fp="FY",
     form="10-K",
+    start=None,
 ):
     await db.pool.execute(
         """
@@ -43,7 +44,7 @@ async def _fclaim(
         json.dumps({"value": value}),
         event_date,
         knowledge_date,
-        json.dumps({"cik": "0000320193", "form": form, "fp": fp}),
+        json.dumps({"cik": "0000320193", "form": form, "fp": fp, "start": start}),
     )
 
 
@@ -51,10 +52,46 @@ def _fy(year, month=12, day=31):
     return datetime(year, month, day, tzinfo=UTC)
 
 
+def _iso(dt):
+    return dt.date().isoformat()
+
+
 @pytest.fixture(autouse=True)
 async def _clean(db):
     await db.pool.execute("TRUNCATE entity CASCADE")
     yield
+
+
+async def _seed_essentials(
+    db,
+    e,
+    *,
+    fiscal_year=2024,
+    ocf=1_200_000,
+    capex=200_000,
+    shares=100_000,
+    cash=500_000,
+    equity=4_000_000,
+    long_term_debt=2_000_000,
+    current_debt=100_000,
+):
+    """The non-revenue essentials the DCF refuses without. Balance-sheet items
+    are instant (no period `start`); cash-flow items are duration and carry one
+    to mirror real EDGAR shape."""
+    end = _fy(fiscal_year)
+    filed = end + timedelta(days=46)
+    year_start = _iso(end - timedelta(days=365))
+    pairs = [
+        ("NetCashProvidedByUsedInOperatingActivities", ocf, year_start),
+        ("PaymentsToAcquirePropertyPlantAndEquipment", capex, year_start),
+        ("CommonStockSharesOutstanding", shares, None),
+        ("CashAndCashEquivalentsAtCarryingValue", cash, None),
+        ("StockholdersEquity", equity, None),
+        ("LongTermDebt", long_term_debt, None),
+        ("LongTermDebtCurrent", current_debt, None),
+    ]
+    for concept, val, start in pairs:
+        await _fclaim(db, e, concept, val, event_date=end, knowledge_date=filed, start=start)
 
 
 async def _full_set(
@@ -73,24 +110,27 @@ async def _full_set(
     prior_revenue=4_000_000,
 ):
     """Seed one fiscal year of the concepts the DCF needs, plus the prior year's
-    Revenues so revenue_growth_rate is derivable. Filed ~7 weeks after year end."""
+    Revenues so revenue_growth_rate is derivable. Filed ~7 weeks after year end.
+    Revenue and cash-flow facts carry a period `start` (annual = end-365d) so
+    the assembler's duration-based annual filter classifies them correctly."""
     end = _fy(fiscal_year)
     filed = end + timedelta(days=46)
     prior_end = _fy(fiscal_year - 1)
     prior_filed = prior_end + timedelta(days=46)
-    pairs = [
-        ("NetCashProvidedByUsedInOperatingActivities", ocf, end, filed),
-        ("PaymentsToAcquirePropertyPlantAndEquipment", capex, end, filed),
-        ("CommonStockSharesOutstanding", shares, end, filed),
-        ("CashAndCashEquivalentsAtCarryingValue", cash, end, filed),
-        ("StockholdersEquity", equity, end, filed),
-        ("LongTermDebt", long_term_debt, end, filed),
-        ("LongTermDebtCurrent", current_debt, end, filed),
-        ("Revenues", revenue, end, filed),
-        ("Revenues", prior_revenue, prior_end, prior_filed),
-    ]
-    for concept, val, ev, kf in pairs:
-        await _fclaim(db, e, concept, val, event_date=ev, knowledge_date=kf)
+    await _seed_essentials(
+        db, e, fiscal_year=fiscal_year, ocf=ocf, capex=capex, shares=shares,
+        cash=cash, equity=equity, long_term_debt=long_term_debt,
+        current_debt=current_debt,
+    )
+    await _fclaim(
+        db, e, "Revenues", revenue,
+        event_date=end, knowledge_date=filed, start=_iso(end - timedelta(days=365)),
+    )
+    await _fclaim(
+        db, e, "Revenues", prior_revenue,
+        event_date=prior_end, knowledge_date=prior_filed,
+        start=_iso(prior_end - timedelta(days=365)),
+    )
 
 
 class TestAssembleFundamentals:
@@ -226,3 +266,67 @@ class TestAssembleFundamentals:
             db.pool, entity_id=e, as_of=_fy(2025, 6, 1), current_price=100.0
         )
         assert f["cash_flow"]["capital_expenditures"] == pytest.approx(250_000)
+
+    async def test_a_mis_tagged_quarter_does_not_inflate_growth(self, db):
+        """The annual filter is period duration, not the `fp` tag. EDGAR tags a
+        quarterly fact fp='FY' when it is filed inside a 10-K, so the old
+        fp-based filter admitted two adjacent quarters as 'consecutive years'
+        and computed growth as a quarter-over-quarter ratio (~4x on AAPL). The
+        duration filter excludes the 91-day quarter and reads the real annuals."""
+        e = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name) VALUES ('company','AAPL','AAPL') RETURNING id"
+        )
+        await _full_set(db, e, revenue=5_000_000, prior_revenue=4_000_000)
+        # A quarter filed inside the 10-K: fp='FY' but a 91-day period.
+        q_end = _fy(2024, 9, 30)
+        await _fclaim(
+            db, e, "Revenues", 1_200_000,
+            event_date=q_end, knowledge_date=_fy(2025, 2, 15),
+            start=_iso(q_end - timedelta(days=91)),
+        )
+        f = await assemble_fundamentals(
+            db.pool, entity_id=e, as_of=_fy(2025, 6, 1), current_price=100.0
+        )
+        # 5M/4M - 1, NOT 5M/1.2M - 1: the quarter is excluded by duration.
+        assert f["income_statement"]["revenue_growth_rate"] == pytest.approx(0.25)
+
+    async def test_revenue_growth_spans_a_concept_rename(self, db):
+        """A filer that moved from `Revenues` (legacy) to the ASC 606 concept
+        still gets a YoY rate: the prior year under the legacy name and the
+        current year under the modern name are both total annual revenue."""
+        e = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name) VALUES ('company','AAPL','AAPL') RETURNING id"
+        )
+        await _seed_essentials(db, e, fiscal_year=2024)
+        await _fclaim(
+            db, e, "RevenueFromContractWithCustomerExcludingAssessedTax", 5_000_000,
+            event_date=_fy(2024), knowledge_date=_fy(2025, 2, 15),
+            start=_iso(_fy(2024) - timedelta(days=365)),
+        )
+        await _fclaim(
+            db, e, "Revenues", 4_000_000,
+            event_date=_fy(2023), knowledge_date=_fy(2024, 2, 15),
+            start=_iso(_fy(2023) - timedelta(days=365)),
+        )
+        f = await assemble_fundamentals(
+            db.pool, entity_id=e, as_of=_fy(2025, 6, 1), current_price=100.0
+        )
+        assert f["income_statement"]["revenue_growth_rate"] == pytest.approx(0.25)
+
+    async def test_a_revenue_fact_without_start_is_skipped(self, db):
+        """A revenue fact with no period start cannot be confirmed annual and is
+        skipped rather than guessed -- so it neither counts toward the two-
+        period growth minimum nor distorts the ratio."""
+        e = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name) VALUES ('company','AAPL','AAPL') RETURNING id"
+        )
+        await _full_set(db, e, revenue=5_000_000, prior_revenue=4_000_000)
+        # An extra revenue fact with no start (unconfirmable duration).
+        await _fclaim(
+            db, e, "Revenues", 999_999_999,
+            event_date=_fy(2024, 6, 30), knowledge_date=_fy(2025, 2, 15), start=None,
+        )
+        f = await assemble_fundamentals(
+            db.pool, entity_id=e, as_of=_fy(2025, 6, 1), current_price=100.0
+        )
+        assert f["income_statement"]["revenue_growth_rate"] == pytest.approx(0.25)

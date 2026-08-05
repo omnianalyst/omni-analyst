@@ -31,7 +31,7 @@ Honest gaps, by design (each is a known incompleteness, not a silent default):
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from omni.coverage.visibility import visible_claims_cte
@@ -59,14 +59,27 @@ _CONCEPT_MAP: dict[tuple[str, str], tuple[str, ...]] = {
 }
 
 _DEBT_CONCEPTS = ("LongTermDebt", "LongTermDebtCurrent")
-_REVENUE_CONCEPT = "Revenues"
+# Revenue concepts in preference order. The ASC 606 concept covers most filers
+# from ~2018; the legacy names cover older history and filers that never moved.
+# All are collected so the YoY growth calc can span a filer that renamed mid-
+# history (a single-name collection goes stale the year they rename).
+_REVENUE_CONCEPTS = (
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "Revenues",
+    "SalesRevenueNet",
+)
+# An annual fact spans a fiscal year (~365d); a quarter ~90d. The `fp` tag is
+# NOT a reliable annual signal: EDGAR tags a quarterly fact `fp='FY'` when it is
+# filed inside a 10-K, which admitted adjacent quarters and computed "growth" as
+# a quarter-over-quarter ratio. Period duration is unambiguous.
+_MIN_ANNUAL_DURATION_DAYS = 300
 
 # Every concept the assembler reads, in one set so a single query fetches them.
 _ALL_CONCEPTS: tuple[str, ...] = tuple(
     dict.fromkeys(
         [c for concepts in _CONCEPT_MAP.values() for c in concepts]
         + list(_DEBT_CONCEPTS)
-        + [_REVENUE_CONCEPT]
+        + list(_REVENUE_CONCEPTS)
     )
 )
 
@@ -142,14 +155,38 @@ async def _latest_per_concept(
     return latest
 
 
+def _period_start(row) -> datetime | None:
+    """The fact's period start from evidence, when the source recorded one.
+
+    Duration concepts (Revenues, cash flow) carry `start`; instant concepts
+    (balance sheet) do not. Returns None when absent or unparseable.
+    """
+    raw = _evidence(row).get("start")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw)[:10]).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
 async def _latest_annual_revenues(
     pool, *, entity_id: UUID, audience: UUID | None, as_of: datetime, limit: int = 2
 ) -> list[tuple[datetime, float]]:
-    """The most recent annual (``fp='FY'``) Revenues values, oldest-first.
+    """The most recent annual Revenues values across the revenue concepts,
+    oldest-first.
 
-    Two consecutive annual filings yield a year-over-year growth rate. Fewer
-    than two means the growth rate is genuinely unknown from EDGAR history; the
-    caller passes ``growth_rate`` explicitly or the DCF abstains.
+    A fact is annual when its period spans at least ``_MIN_ANNUAL_DURATION_DAYS``
+    (``end - start``). The ``fp`` tag is deliberately NOT used: EDGAR tags a
+    quarterly fact ``fp='FY'`` when it is filed inside a 10-K, so filtering on
+    ``fp`` admitted two adjacent quarters as "consecutive years" and computed
+    growth as a quarter-over-quarter ratio (observed: ~4x on AAPL). Duration is
+    unambiguous and does not depend on how the filer tagged the form.
+
+    A fact with no ``start`` cannot be confirmed annual and is skipped rather
+    than guessed. Two consecutive annual periods yield a YoY growth rate;
+    fewer than two leaves growth unset, and the caller passes ``growth_rate``
+    explicitly or the DCF abstains.
     """
     rows = await pool.fetch(
         f"""
@@ -160,19 +197,22 @@ async def _latest_annual_revenues(
         FROM visible c
         WHERE c.entity_id = $1
           AND c.claim_type = '{CLAIM_TYPE}'::claim_type
-          AND c.key = $2
+          AND c.key = ANY($2)
           AND c.knowledge_date <= $4
         ORDER BY c.event_date DESC, c.knowledge_date DESC
         """,
         entity_id,
-        _REVENUE_CONCEPT,
+        list(_REVENUE_CONCEPTS),
         audience,
         as_of,
     )
     annual: list[tuple[datetime, float]] = []
     seen_periods: set[str] = set()
     for r in rows:
-        if _evidence(r).get("fp") != "FY":
+        start = _period_start(r)
+        if start is None:
+            continue
+        if (r["event_date"] - start).days < _MIN_ANNUAL_DURATION_DAYS:
             continue
         val = _scalar(r)
         if val is None or val <= 0:

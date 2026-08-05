@@ -773,18 +773,20 @@ class TestEndToEndFromCoverage:
         filed = end + timedelta(days=46)
         prior_end = datetime(2023, 12, 31, tzinfo=UTC)
         prior_filed = prior_end + timedelta(days=46)
+        year_start = (end - timedelta(days=365)).date().isoformat()
+        prior_year_start = (prior_end - timedelta(days=365)).date().isoformat()
         pairs = [
-            ("NetCashProvidedByUsedInOperatingActivities", 1_200_000, end, filed),
-            ("PaymentsToAcquirePropertyPlantAndEquipment", 200_000, end, filed),
-            ("CommonStockSharesOutstanding", 100_000, end, filed),
-            ("CashAndCashEquivalentsAtCarryingValue", 500_000, end, filed),
-            ("StockholdersEquity", 4_000_000, end, filed),
-            ("LongTermDebt", 2_000_000, end, filed),
-            ("LongTermDebtCurrent", 100_000, end, filed),
-            ("Revenues", 5_000_000, end, filed),
-            ("Revenues", 4_000_000, prior_end, prior_filed),
+            ("NetCashProvidedByUsedInOperatingActivities", 1_200_000, end, filed, year_start),
+            ("PaymentsToAcquirePropertyPlantAndEquipment", 200_000, end, filed, year_start),
+            ("CommonStockSharesOutstanding", 100_000, end, filed, None),
+            ("CashAndCashEquivalentsAtCarryingValue", 500_000, end, filed, None),
+            ("StockholdersEquity", 4_000_000, end, filed, None),
+            ("LongTermDebt", 2_000_000, end, filed, None),
+            ("LongTermDebtCurrent", 100_000, end, filed, None),
+            ("Revenues", 5_000_000, end, filed, year_start),
+            ("Revenues", 4_000_000, prior_end, prior_filed, prior_year_start),
         ]
-        for concept, val, ev, kf in pairs:
+        for concept, val, ev, kf, start in pairs:
             await db.pool.execute(
                 """
                 INSERT INTO claim (entity_id, claim_type, key, value, source,
@@ -794,7 +796,7 @@ class TestEndToEndFromCoverage:
                         $4,$5,1.0,'allowed',NULL,$6::jsonb)
                 """,
                 e, concept, json.dumps({"value": val}), ev, kf,
-                json.dumps({"cik": "0000320193", "form": "10-K", "fp": "FY"}),
+                json.dumps({"cik": "0000320193", "form": "10-K", "fp": "FY", "start": start}),
             )
 
     async def test_complete_coverage_produces_a_resolvable_prediction(self, db):
@@ -943,18 +945,20 @@ class TestSchedulerPredictLoop:
         filed = end + timedelta(days=46)
         prior_end = datetime(2023, 12, 31, tzinfo=UTC)
         prior_filed = prior_end + timedelta(days=46)
+        year_start = (end - timedelta(days=365)).date().isoformat()
+        prior_year_start = (prior_end - timedelta(days=365)).date().isoformat()
         pairs = [
-            ("NetCashProvidedByUsedInOperatingActivities", 1_200_000, end, filed),
-            ("PaymentsToAcquirePropertyPlantAndEquipment", 200_000, end, filed),
-            ("CommonStockSharesOutstanding", 100_000, end, filed),
-            ("CashAndCashEquivalentsAtCarryingValue", 500_000, end, filed),
-            ("StockholdersEquity", 4_000_000, end, filed),
-            ("LongTermDebt", 2_000_000, end, filed),
-            ("LongTermDebtCurrent", 100_000, end, filed),
-            ("Revenues", 5_000_000, end, filed),
-            ("Revenues", 4_000_000, prior_end, prior_filed),
+            ("NetCashProvidedByUsedInOperatingActivities", 1_200_000, end, filed, year_start),
+            ("PaymentsToAcquirePropertyPlantAndEquipment", 200_000, end, filed, year_start),
+            ("CommonStockSharesOutstanding", 100_000, end, filed, None),
+            ("CashAndCashEquivalentsAtCarryingValue", 500_000, end, filed, None),
+            ("StockholdersEquity", 4_000_000, end, filed, None),
+            ("LongTermDebt", 2_000_000, end, filed, None),
+            ("LongTermDebtCurrent", 100_000, end, filed, None),
+            ("Revenues", 5_000_000, end, filed, year_start),
+            ("Revenues", 4_000_000, prior_end, prior_filed, prior_year_start),
         ]
-        for concept, val, ev, kf in pairs:
+        for concept, val, ev, kf, start in pairs:
             await db.pool.execute(
                 """
                 INSERT INTO claim (entity_id, claim_type, key, value, source,
@@ -964,5 +968,5 @@ class TestSchedulerPredictLoop:
                         $4,$5,1.0,'allowed',NULL,$6::jsonb)
                 """,
                 e, concept, json.dumps({"value": val}), ev, kf,
-                json.dumps({"cik": "0000320193", "form": "10-K", "fp": "FY"}),
+                json.dumps({"cik": "0000320193", "form": "10-K", "fp": "FY", "start": start}),
             )
