@@ -26,6 +26,7 @@ from typing import Any
 # `direct_attention` is the one demand channel Slice 0 supports; the column is
 # NOT NULL, so every row carries the channel that produced it.
 _DIRECT_CHANNEL = "direct"
+_AUTONOMOUS_CHANNEL = "autonomous"
 
 _INSERT_DEMAND = """
 INSERT INTO demand (entity_id, claim_type, key, channel, requested_by,
@@ -58,6 +59,46 @@ async def direct_attention(
         claim_type,
         key,
         _DIRECT_CHANNEL,
+        requested_by,
+        weight,
+        max_staleness,
+        min_confidence,
+    )
+
+
+async def autonomous_attention(
+    pool,
+    *,
+    entity_id: Any,
+    claim_type: str,
+    key: str | None = None,
+    requested_by: Any | None = None,
+    weight: float = 0.5,
+    max_staleness: Any | None = None,
+    min_confidence: float | None = None,
+):
+    """Record autonomous demand -- the system's own attention, not a user's.
+
+    The autonomous layer (AUTONOMOUS_PLAN.md Loop 8) directs the system at
+    sectors and stocks it finds interesting, creating demand the existing
+    sweep/fill/predict chain closes. The channel distinguishes system curiosity
+    from a user's explicit ask, and the default weight (0.5) is below a user's
+    (1.0) so autonomous work never starves user-directed work in the fill queue.
+
+    ``requested_by`` should be the operator's user_id on a single-operator
+    deployment. Without it, byo_only providers (Polygon) cannot attribute the
+    fetched data and the gap stays unfillable -- the fill pipeline resolves
+    ``credential_owner`` from the demand's ``requested_by``, and a NULL there
+    means ``MissingCredentialOwner``. The AutonomousRunner resolves the
+    operator at startup and passes it through. If None (no users yet), the
+    demand is still recorded but only fillable by ``allowed``-class providers.
+    """
+    return await pool.fetchval(
+        _INSERT_DEMAND,
+        entity_id,
+        claim_type,
+        key,
+        _AUTONOMOUS_CHANNEL,
         requested_by,
         weight,
         max_staleness,

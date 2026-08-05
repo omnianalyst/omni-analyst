@@ -22,6 +22,30 @@ CATEGORY_NEWS = "news"
 CATEGORY_AI = "ai"
 CATEGORY_BLOCKCHAIN = "blockchain"
 
+# --- Wired providers ---------------------------------------------------------
+#
+# A provider is "wired" when an adapter exists in capability/builtin.py and
+# the settings field it references exists in config.py. The catalog lists
+# providers that are NOT wired yet (alpha_vantage, the AI providers, etc.)
+# because the licensing resolver needs to classify them -- `redistribution_for`
+# must return "byo_only" for polygon even if polygon's adapter is temporarily
+# removed, and it must return "prohibited" for yahoo whose terms bind whether
+# or not anything calls it. But the Settings UI must not render a provider the
+# operator cannot use, and a reader must not mistake a licensing placeholder
+# for a working integration. The `wired` field, applied below, is that signal.
+#
+# When you add an adapter to builtin.py, add the provider_key here and add the
+# settings field to config.py. The test test_wired_providers_have_adapters
+# catches the drift if you forget.
+_WIRED_PROVIDERS = frozenset({
+    "fred",
+    "sec_edgar",
+    "polygon",
+    "coingecko",
+    "etherscan",
+    "rss",
+})
+
 # --- Server-credential fallback policy -------------------------------------
 #
 # Whether this deployment's own credential may serve a user who has not
@@ -269,6 +293,12 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "fallback": FALLBACK_ALLOWED,
     },
 }
+
+# Annotate each entry with its implementation status. `redistribution_for`
+# works for every entry regardless; `wired` tells the Settings UI and any
+# reader whether an adapter and config field actually exist today.
+for _pk, _entry in PROVIDER_CATALOG.items():
+    _entry["wired"] = _pk in _WIRED_PROVIDERS
 
 
 def redistribution_for(provider_key: str, licensed=()) -> str:

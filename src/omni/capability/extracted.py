@@ -60,6 +60,8 @@ CLAIM_TYPES = frozenset(
         "inflation_signal",
         "output_gap_signal",
         "lei_signal",
+        "regime_assessment",
+        "sector_score",
     }
 )
 

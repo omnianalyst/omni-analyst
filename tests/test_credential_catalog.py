@@ -9,14 +9,21 @@ writable at all per migrations/001_core_schema.sql).
 Unknown sources must raise, not default. v1's catalog defaulted unvetted
 sources to ``byo_only``; v2 rejects them loud, because a quiet default is how
 unvetted data enters the store.
+
+The ``wired`` field (TestWiredField, TestWiredProvidersHaveConfigFields) is the
+implementation-honesty layer: the catalog lists ~27 providers for licensing
+classification, but only 6 have adapters today. ``wired`` tells the Settings UI
+which entries are real integrations vs forward-looking placeholders.
 """
 import pytest
 
+from omni.config import Settings
 from omni.credentials.catalog import (
     FALLBACK_ALLOWED,
     FALLBACK_BYO_ONLY,
     FALLBACK_PROHIBITED,
     PROVIDER_CATALOG,
+    _WIRED_PROVIDERS,
     redistribution_for,
 )
 
@@ -126,3 +133,84 @@ class TestIexCloudDeliberatelyAbsent:
     def test_iex_cloud_lookup_raises(self):
         with pytest.raises(KeyError):
             redistribution_for("iex_cloud")
+
+
+# -- Wired vs catalog-only ----------------------------------------------------
+#
+# The catalog lists providers that have no adapter yet (AI providers, extra
+# market-data feeds) because the licensing resolver must classify them. The
+# `wired` field separates "classified for licensing" from "has a working
+# integration." The Settings UI renders only wired providers; a reader who sees
+# an unwired entry knows it is a placeholder, not a feature.
+
+
+class TestWiredField:
+    def test_every_entry_has_a_wired_flag(self):
+        for key, entry in PROVIDER_CATALOG.items():
+            assert "wired" in entry, f"{key} missing 'wired' field"
+
+    def test_ai_providers_are_not_wired(self):
+        for key, entry in PROVIDER_CATALOG.items():
+            if entry["category"] == "ai":
+                assert entry["wired"] is False, (
+                    f"{key} is marked wired but no LLM client exists"
+                )
+
+    def test_wired_providers_are_the_expected_six(self):
+        for pk in ("fred", "polygon", "sec_edgar", "coingecko", "etherscan", "rss"):
+            assert PROVIDER_CATALOG[pk]["wired"] is True
+
+
+class TestWiredProvidersHaveConfigFields:
+    """A wired provider's settings_field must exist in Settings, or it must be
+    keyless. A wired entry that references a nonexistent settings field is the
+    exact dishonesty this test prevents."""
+
+    def test_wired_providers_have_real_settings_fields(self):
+        field_names = set(Settings.model_fields.keys())
+        for pk in _WIRED_PROVIDERS:
+            entry = PROVIDER_CATALOG[pk]
+            sf = entry["settings_field"]
+            if not sf:
+                assert not entry["key_required"], (
+                    f"{pk} is wired and key_required but has no settings_field"
+                )
+                continue
+            assert sf in field_names, (
+                f"{pk} is wired but settings_field {sf!r} does not exist in "
+                f"Settings. Add it to config.py or mark the provider unwired."
+            )
+
+    def test_unwired_providers_settings_fields_dont_exist(self):
+        field_names = set(Settings.model_fields.keys())
+        for pk, entry in PROVIDER_CATALOG.items():
+            if entry["wired"]:
+                continue
+            sf = entry["settings_field"]
+            if sf:
+                assert sf not in field_names, (
+                    f"{pk} is unwired but its settings_field {sf!r} exists in "
+                    f"Settings -- the operator can set a key that does nothing"
+                )
+
+
+class TestWiredMatchesBuiltinRegistry:
+    """The wired set must match the adapters actually registered in builtin.py.
+    If someone adds an adapter but forgets to add the provider to
+    _WIRED_PROVIDERS, this test fails."""
+
+    def test_every_builtin_adapter_provider_is_marked_wired(self):
+        from omni.capability.builtin import build_builtin_registry
+
+        registry = build_builtin_registry(settings=Settings())
+        builtin_providers = set()
+        for name in registry._by_name:
+            cap = registry.get(name)
+            if cap.provider_key:
+                builtin_providers.add(cap.provider_key)
+
+        for pk in builtin_providers:
+            assert pk in _WIRED_PROVIDERS, (
+                f"{pk} has an adapter in builtin.py but is not in "
+                f"_WIRED_PROVIDERS. Add it to credentials/catalog.py."
+            )
