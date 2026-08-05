@@ -233,11 +233,20 @@ async def assign_company_ciks(
         symbol = row["symbol"]
         status, cik, reason = _classify(index, symbol)
         if status == RESOLVED and cik is not None:
+            # Polygon indexes equities by ticker, which IS the entity's symbol.
+            # Setting it here (alongside the CIK) lets the fill pipeline's
+            # key_for reach the Polygon adapter for price ingestion without a
+            # separate seeding step. Crypto assets are a different kind and are
+            # not processed here (their Polygon key is a coin slug, not symbol).
+            updates = {CIK_KEY: cik}
+            symbol = row["symbol"]
+            if symbol:
+                updates["polygon"] = symbol
             await pool.execute(
                 "UPDATE entity "
                 "SET identifiers = identifiers || $1::jsonb "
                 "WHERE id = $2",
-                json.dumps({CIK_KEY: cik}),
+                json.dumps(updates),
                 row["id"],
             )
         outcomes.append(

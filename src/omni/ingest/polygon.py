@@ -123,10 +123,15 @@ async def _fetch_aggregates(
 ) -> dict[str, Any]:
     import httpx
 
-    if not from_date or not to_date:
-        raise Unavailable(
-            "Polygon aggregates need from_date and to_date to build the range"
-        )
+    # Default to a trailing 2-year window when the caller specifies no range.
+    # The fill pipeline constructs the adapter with an API key but no dates
+    # (it is not a backfill); a live first-time ingest wants available history,
+    # and 2 years is the free-tier depth. Explicit dates (backfills, tests)
+    # override this.
+    if not from_date:
+        from_date = (datetime.now(UTC) - timedelta(days=730)).strftime("%Y-%m-%d")
+    if not to_date:
+        to_date = datetime.now(UTC).strftime("%Y-%m-%d")
     url = AGGREGATES_URL.format(
         symbol=symbol,
         multiplier=multiplier,
