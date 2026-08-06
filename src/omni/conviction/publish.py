@@ -122,15 +122,32 @@ async def briefing(pool, *, audience: UUID | None = None, limit: int = 20) -> li
     return [dict(r) for r in rows]
 
 
-async def scorecard(pool) -> list[dict]:
+async def scorecard(pool, *, audience: UUID | None = None) -> list[dict]:
     """Accuracy on what was surfaced, per method.
 
     Nobody publishes this, which is exactly why it is worth publishing. It also
     only counts resolved predictions — an unresolved one is not a win.
+
+    Scoped the same way coverage is: an operator's published accuracy is over
+    the shared network's surfaced findings PLUS their own private ones, never
+    another operator's -- a byo-derived hit rate is a deterministic function of
+    that operator's licensed demand, and serving it to a second operator would
+    make this deployment the redistributor. The view carries audience_user_id
+    through its GROUP BY (migration 028) so this query can re-aggregate the
+    shared row plus the caller's own.
     """
     rows = await pool.fetch(
-        "SELECT method, surfaced, resolved, hits FROM finding_hit_rate "
-        "ORDER BY surfaced DESC"
+        """
+        SELECT method,
+               COALESCE(SUM(surfaced), 0)::bigint AS surfaced,
+               COALESCE(SUM(resolved), 0)::bigint AS resolved,
+               COALESCE(SUM(hits), 0)::bigint AS hits
+        FROM finding_hit_rate
+        WHERE audience_user_id IS NULL OR audience_user_id = $1
+        GROUP BY method
+        ORDER BY surfaced DESC
+        """,
+        audience,
     )
     out = []
     for r in rows:
@@ -144,10 +161,16 @@ async def scorecard(pool) -> list[dict]:
     return out
 
 
-async def refusal_counts(pool) -> dict[str, int]:
-    """Why the system stayed quiet. The denominator behind the scorecard."""
+async def refusal_counts(pool, *, audience: UUID | None = None) -> dict[str, int]:
+    """Why the system stayed quiet. The denominator behind the scorecard.
+
+    Scoped the same way as the scorecard: an operator sees the shared refusal
+    mix plus their own, never another operator's.
+    """
     rows = await pool.fetch(
         "SELECT refusal, count(*) n FROM finding WHERE status = 'refused' "
-        "GROUP BY refusal ORDER BY n DESC"
+        "AND (audience_user_id IS NULL OR audience_user_id = $1) "
+        "GROUP BY refusal ORDER BY n DESC",
+        audience,
     )
     return {r["refusal"]: r["n"] for r in rows}

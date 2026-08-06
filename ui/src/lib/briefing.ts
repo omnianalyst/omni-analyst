@@ -53,18 +53,18 @@ export interface ScorecardRow {
 export type RefusalCounts = Record<string, number>;
 
 // /briefing is audience-scoped server-side: a byo-derived finding belongs to
-// its owner. Attach the token when present so a logged-in viewer sees their
-// private findings; anonymous falls through to the shared feed only. The
-// scorecard and refusals endpoints are not audience-scoped, so they stay
-// anonymous.
+// its owner. The scorecard and refusals are operator-only AND audience-scoped
+// (an operator sees the shared network's record plus their own, never another
+// operator's byo-derived rate), so all three attach the token when present and
+// the server refuses an anonymous caller on scorecard/refusals.
 export const getBriefing = (): Promise<BriefingFinding[]> =>
   request<BriefingFinding[]>("/briefing", authHeaderIfPresent());
 
 export const getScorecard = (): Promise<ScorecardRow[]> =>
-  request<ScorecardRow[]>("/briefing/scorecard");
+  request<ScorecardRow[]>("/briefing/scorecard", authHeaderIfPresent());
 
 export const getRefusals = (): Promise<RefusalCounts> =>
-  request<RefusalCounts>("/briefing/refusals");
+  request<RefusalCounts>("/briefing/refusals", authHeaderIfPresent());
 
 export function formatHitRate(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) {

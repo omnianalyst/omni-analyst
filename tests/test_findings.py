@@ -248,6 +248,45 @@ class TestScorecard:
         assert counts[Refusal.UNCALIBRATED.value] == 1
         assert counts[Refusal.NOT_FALSIFIABLE.value] == 1
 
+    async def test_an_operators_byo_findings_do_not_leak_into_another_scorecard(self, db):
+        """The redistribution rule reaches the scorecard. A second operator's
+        byo-derived hit rate is a deterministic function of their licensed
+        demand; aggregating it into another operator's published accuracy would
+        make this deployment the redistributor -- the leak migration 028 closes.
+        """
+        e = await _entity(db)
+        c = await _claim(db, e)
+        owner = uuid4()
+        other = uuid4()
+        for _ in range(12):
+            p = await _prediction(db, e, direction="up", outcome="upper")
+            await record(db.pool, assess(_candidate(c), [_bucket(0.7, 40, 34)]),
+                         entity_id=e, audience_user_id=owner, prediction_id=p)
+
+        owner_card = (await scorecard(db.pool, audience=owner))[0]
+        assert owner_card["surfaced"] == 12
+        assert owner_card["hits"] == 12
+
+        # A different operator sees none of the owner's byo-derived findings,
+        # and so does an anonymous caller. A global aggregate (the pre-028
+        # behaviour) would surface 12 to both.
+        assert await scorecard(db.pool, audience=other) == []
+        assert await scorecard(db.pool) == []
+
+    async def test_an_operators_refusals_do_not_leak_to_another_operator(self, db):
+        e = await _entity(db)
+        c = await _claim(db, e)
+        owner = uuid4()
+        other = uuid4()
+        await record(db.pool, assess(_candidate(c), []),
+                     entity_id=e, audience_user_id=owner)
+
+        assert await refusal_counts(db.pool, audience=owner) == {
+            Refusal.UNCALIBRATED.value: 1
+        }
+        assert await refusal_counts(db.pool, audience=other) == {}
+        assert await refusal_counts(db.pool) == {}
+
 
 class TestClaimlessFindings:
     """A finding need not be anchored to a single claim. The schema now allows

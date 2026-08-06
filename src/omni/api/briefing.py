@@ -98,14 +98,18 @@ def build_router(app: App) -> Router:
         were sourced under the operator's BYO credentials, so it is private
         intelligence, not a public stat. An anonymous caller gets nothing.
 
+        Scoped to the caller's audience (shared network plus their own private
+        findings); a second operator's byo-derived rate never enters the sum.
+
         ``hit_rate`` is null below the ten-resolution floor, not zero: a rate
         computed from a handful of resolutions is noise wearing a percentage
         sign. The floor is applied in ``publish.scorecard``; this layer carries
         it through rather than re-deriving it.
         """
-        if resolve_audience_from_request(request) is None:
+        audience = resolve_audience_from_request(request)
+        if audience is None:
             raise unauthorized("Authentication required")
-        return await scorecard(app.db.pool)
+        return await scorecard(app.db.pool, audience=audience)
 
     @router.get("/briefing/refusals")
     async def get_refusals(request: Request) -> dict[str, int]:
@@ -114,11 +118,13 @@ def build_router(app: App) -> Router:
         Operator-only, for the same licensing reason as the scorecard: the
         refusal mix is a function of which BYO-sourced demand was attempted.
 
-        The denominator behind the scorecard, and the endpoint that makes the
-        published hit rate believable.
+        Scoped to the caller's audience, same as the scorecard. The denominator
+        behind the scorecard, and the endpoint that makes the published hit rate
+        believable.
         """
-        if resolve_audience_from_request(request) is None:
+        audience = resolve_audience_from_request(request)
+        if audience is None:
             raise unauthorized("Authentication required")
-        return await refusal_counts(app.db.pool)
+        return await refusal_counts(app.db.pool, audience=audience)
 
     return router
