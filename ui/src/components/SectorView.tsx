@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { describeError } from "../lib/api";
 import { getSectors, type SectorEntry } from "../lib/autonomous";
 import { Loading } from "./Loading";
 import { ErrorState } from "./ErrorState";
@@ -34,7 +35,10 @@ export function SectorView() {
       .catch((e) => setError(e));
   }, []);
 
-  if (error) return <ErrorState error={error} />;
+  if (error) {
+    const { message, detail } = describeError(error);
+    return <ErrorState message={message} detail={detail} />;
+  }
   if (!sectors) return <Loading />;
   if (sectors.length === 0) {
     return (

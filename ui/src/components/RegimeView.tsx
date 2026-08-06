@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { describeError } from "../lib/api";
 import { getRegime, type RegimeResponse } from "../lib/autonomous";
 import { Loading } from "./Loading";
 import { ErrorState } from "./ErrorState";
@@ -32,7 +33,10 @@ export function RegimeView() {
       .catch((e) => setError(e));
   }, []);
 
-  if (error) return <ErrorState error={error} />;
+  if (error) {
+    const { message, detail } = describeError(error);
+    return <ErrorState message={message} detail={detail} />;
+  }
   if (!regime) return <Loading />;
   if (!regime.value || !regime.value.cycle_phase) {
     return (

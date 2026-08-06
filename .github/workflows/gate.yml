@@ -36,3 +36,19 @@ jobs:
       - run: uv sync --extra dev
       - run: uv run ruff check src/
       - run: uv run pytest -q
+
+  ui:
+    # The Preact app's typecheck, tests, and build were entirely outside CI;
+    # a broken UI merge reached main undetected and was discovered at deploy.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci --prefix ui
+      - run: npm --prefix ui run typecheck
+      - run: npm --prefix ui run test
+      - run: npm --prefix ui run build

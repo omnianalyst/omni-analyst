@@ -15,6 +15,20 @@
 {$OMNI_HOST} {
 	encode gzip zstd
 
+	# Browser hardening. Safe headers that cannot break the SPA. A Content-
+	# Security-Policy is deliberately omitted for now: the built asset graph
+	# (vite modulepreload, any residual inline style) needs validating against a
+	# real build before a script-src restriction lands, and a misconfigured CSP
+	# takes the app down. HSTS is a no-op over plain HTTP (OMNI_HOST unset) and
+	# activates automatically once TLS is on.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+	}
+
 	# Framework-provided + API routers. Listed explicitly so a static asset
 	# path can never shadow a route. Add new top-level routers here.
 	@api path /health /openapi.json /docs /redoc \

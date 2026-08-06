@@ -9,7 +9,8 @@
     "preview": "neutron-ts preview",
     "start": "neutron-ts start",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@neutron-build/cli": "latest",
