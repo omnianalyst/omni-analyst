@@ -265,7 +265,7 @@ async def test_a_method_below_the_sample_floor_reports_hit_rate_null(
 
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
-        r = await client.get("/briefing/scorecard")
+        r = await client.get("/briefing/scorecard", headers=_auth(uuid4()))
 
     assert r.status_code == 200, r.text
     card = r.json()[0]
@@ -289,7 +289,7 @@ async def test_refusals_are_counted_by_reason(db, database_url):
 
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
-        r = await client.get("/briefing/refusals")
+        r = await client.get("/briefing/refusals", headers=_auth(uuid4()))
 
     assert r.status_code == 200, r.text
     counts = r.json()
@@ -308,3 +308,16 @@ async def test_an_empty_feed_returns_an_empty_list_not_a_placeholder(
 
     assert r.status_code == 200
     assert r.json() == []
+
+
+async def test_scorecard_and_refusals_refuse_anonymous_callers(db, database_url):
+    """The scorecard and refusal mix are operator intelligence derived from
+    BYO-sourced findings, not public stats. An anonymous caller on the public
+    domain must not receive them."""
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r_card = await client.get("/briefing/scorecard")
+        r_ref = await client.get("/briefing/refusals")
+
+    assert r_card.status_code == 401
+    assert r_ref.status_code == 401

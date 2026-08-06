@@ -6,8 +6,9 @@ these endpoints give it one.
 
 Audience scoping is the same rule the coverage API enforces, for the same
 reason: a finding derived from a user's licensed data belongs to that user, and
-serving it to anyone else makes this deployment the redistributor. ``X-User-Id``
-is the access-control hint; absent means the shared feed only.
+serving it to anyone else makes this deployment the redistributor. Identity
+comes from a verified JWT (``resolve_audience_from_request``); absent means the
+shared feed only.
 
 The router closes over the Neutron ``App`` for ``app.db``, the same closure
 trick the coverage and objective routers use -- the inner Starlette request has
@@ -21,6 +22,7 @@ from typing import Any
 from uuid import UUID
 
 from neutron import App, Router
+from neutron.error import unauthorized
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
@@ -28,12 +30,10 @@ from omni.conviction.publish import briefing, refusal_counts, scorecard
 
 
 def _audience(request: Request) -> UUID | None:
-    """Who is asking, from a verified token — never from a header.
+    """Who is asking, from a verified token.
 
-    This read X-User-Id, so any caller could name any user and read their
-    licensed claims. The store's constraints were sound and the identity
-    in front of them was a claim. An absent or invalid token is an
-    anonymous caller, which means shared coverage only.
+    An absent or invalid token is an anonymous caller, which on the read paths
+    that return findings means shared coverage only.
     """
     return resolve_audience_from_request(request)
 
@@ -91,23 +91,34 @@ def build_router(app: App) -> Router:
         return [_finding_to_dict(r) for r in rows]
 
     @router.get("/briefing/scorecard")
-    async def get_scorecard() -> list[dict]:
+    async def get_scorecard(request: Request) -> list[dict]:
         """Accuracy per method on surfaced findings.
+
+        Operator-only: the hit rate is computed from findings whose predictions
+        were sourced under the operator's BYO credentials, so it is private
+        intelligence, not a public stat. An anonymous caller gets nothing.
 
         ``hit_rate`` is null below the ten-resolution floor, not zero: a rate
         computed from a handful of resolutions is noise wearing a percentage
         sign. The floor is applied in ``publish.scorecard``; this layer carries
         it through rather than re-deriving it.
         """
+        if resolve_audience_from_request(request) is None:
+            raise unauthorized("Authentication required")
         return await scorecard(app.db.pool)
 
     @router.get("/briefing/refusals")
-    async def get_refusals() -> dict[str, int]:
+    async def get_refusals(request: Request) -> dict[str, int]:
         """Refused findings counted by reason.
+
+        Operator-only, for the same licensing reason as the scorecard: the
+        refusal mix is a function of which BYO-sourced demand was attempted.
 
         The denominator behind the scorecard, and the endpoint that makes the
         published hit rate believable.
         """
+        if resolve_audience_from_request(request) is None:
+            raise unauthorized("Authentication required")
         return await refusal_counts(app.db.pool)
 
     return router

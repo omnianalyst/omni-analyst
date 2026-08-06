@@ -15,10 +15,10 @@ Three endpoints over the planner and executor:
 
 The router closes over the Neutron ``App`` (for ``app.db``) and over
 ``default_registry()``, so the endpoints see everything runnable rather than
-only the built-in adapters. The audience header is ``X-User-Id``, the same
-hint the coverage API uses; a ``shareable`` objective ignores it because the
-answer is destined for the shared network, which forbids licensed inputs
-regardless of who is asking.
+only the built-in adapters. The audience comes from a verified JWT
+(``resolve_audience_from_request``), the same identity the coverage API uses;
+a ``shareable`` objective ignores it because the answer is destined for the
+shared network, which forbids licensed inputs regardless of who is asking.
 """
 
 from __future__ import annotations
@@ -60,12 +60,10 @@ class AnalysisRequest(BaseModel):
 
 
 def _audience(request: Request) -> UUID | None:
-    """Who is asking, from a verified token — never from a header.
+    """Who is asking, from a verified token.
 
-    This read X-User-Id, so any caller could name any user and read their
-    licensed claims. The store's constraints were sound and the identity
-    in front of them was a claim. An absent or invalid token is an
-    anonymous caller, which means shared coverage only.
+    An absent or invalid token is an anonymous caller, which on the read paths
+    that resolve licensed inputs means shared coverage only.
     """
     return resolve_audience_from_request(request)
 
