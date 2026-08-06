@@ -20,6 +20,7 @@ from neutron.auth.jwt import create_token
 from neutron.test import TestClient
 
 from omni.alerts.rules import KNOWN_KINDS, InvalidCondition, evaluate, validate_condition
+from omni.scheduler.worker import evaluate_alerts_once
 from omni.api.alerts import build_router
 from omni.main import create_app
 
@@ -684,3 +685,59 @@ class TestHttp:
             leak = await client.get(f"/alerts/{alert['id']}/firings", headers=_token(other))
             assert leak.status_code == 200
             assert leak.json()["firings"] == []
+
+
+class TestSchedulerEvaluation:
+    """The scheduler-level loader that turns the inert alerts feature into a
+    live one. Without it, /alerts/{id}/firings was always empty -- the evaluate
+    function existed but no loop called it."""
+
+    async def test_evaluate_alerts_once_fires_every_active_alert_against_coverage(self, db):
+        from omni.alerts.rules import evaluate  # noqa: F811 (clarity at call site)
+
+        user = await _user(db, "op@example.com")
+        entity = await _entity(db)
+        claim = await _claim(db, entity, "close", value={"value": 150})
+        await _alert(
+            db,
+            user_id=user,
+            entity_id=entity,
+            claim_type="price_snapshot",
+            condition={"kind": "value_above", "threshold": 100},
+        )
+
+        fired = await evaluate_alerts_once(db.pool)
+        assert fired == 1
+        recorded = await db.pool.fetchval(
+            "SELECT count(*) FROM alert_firing WHERE claim_id = $1", claim
+        )
+        assert recorded == 1
+
+    async def test_a_failing_alert_does_not_stop_the_others(self, db):
+        # One alert with a malformed condition (the loader does not validate at
+        # load time) must not suppress a sibling that would fire.
+        user = await _user(db, "op@example.com")
+        entity = await _entity(db)
+        good_claim = await _claim(db, entity, "close", value={"value": 150})
+        await _alert(
+            db,
+            user_id=user,
+            entity_id=entity,
+            claim_type="price_snapshot",
+            condition={"kind": "value_above", "threshold": 100},
+        )
+        await _alert(
+            db,
+            user_id=user,
+            entity_id=entity,
+            claim_type="price_snapshot",
+            condition={"kind": "totally_unknown_kind"},
+        )
+
+        fired = await evaluate_alerts_once(db.pool)
+        # The good alert fired; the malformed one was skipped, not fatal.
+        assert fired == 1
+        recorded = await db.pool.fetchval(
+            "SELECT count(*) FROM alert_firing WHERE claim_id = $1", good_claim
+        )
+        assert recorded == 1

@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from omni.alerts.rules import evaluate
 from omni.capability.registry import Registry
 from omni.conviction.gate import Candidate, assess
 from omni.conviction.ledger import resolve_due_predictions
@@ -80,6 +81,12 @@ class SchedulerConfig:
     #: "which predictions now clear the calibrated threshold and should be
     #: surfaced as findings". Rate-limited by conviction, never by schedule.
     surface_interval: float = 300.0
+    #: Alerts read only the coverage store (no external API), cheap like
+    #: resolve. Each active alert is evaluated against its owner's audience, so
+    #: a watched condition fires the moment coverage satisfies it rather than
+    #: waiting for a human to poll. Without this loop /alerts/{id}/firings is
+    #: always empty -- the feature read as live but was inert.
+    alerts_interval: float = 60.0
     licensed: tuple[str, ...] = ()
     worker_id: str = field(default_factory=lambda: f"omni-{os.getpid()}-{uuid4().hex[:6]}")
 
@@ -96,6 +103,7 @@ class Stats:
     predicted: int = 0
     predict_abstained: int = 0
     surfaced: int = 0
+    alerts_fired: int = 0
 
 
 async def sweep_once(pool) -> int:
@@ -243,6 +251,29 @@ async def surface_once(pool) -> int:
     return n
 
 
+_ACTIVE_ALERTS = "SELECT id, user_id, entity_id, claim_type, condition FROM alert WHERE active"
+
+
+async def evaluate_alerts_once(pool) -> int:
+    """Evaluate every active alert against current coverage, recording new
+    firings. Returns the count of new firings.
+
+    Each alert is evaluated against its owner's audience -- ``evaluate`` reads
+    through ``visible_claims`` scoped to ``user_id`` -- so an alert never sees a
+    claim its owner may not. A single failing alert is logged and skipped; one
+    bad condition must not stop the others from firing.
+    """
+    alerts = await pool.fetch(_ACTIVE_ALERTS)
+    fired = 0
+    for a in alerts:
+        try:
+            new = await evaluate(pool, a, audience=a["user_id"])
+            fired += len(new)
+        except Exception:
+            logger.exception("alert %s evaluation failed", a["id"])
+    return fired
+
+
 class Scheduler:
     """Runs the loops until stopped. One instance per process."""
 
@@ -300,6 +331,14 @@ class Scheduler:
         except Exception:
             logger.exception("initial surface failed")
         self._tasks.append(asyncio.create_task(self._surface_loop()))
+        # Alerts once before the loop starts: a watched condition already met by
+        # current coverage fires immediately rather than after a full interval.
+        try:
+            n = await evaluate_alerts_once(self._pool)
+            self.stats.alerts_fired += n
+        except Exception:
+            logger.exception("initial alerts evaluation failed")
+        self._tasks.append(asyncio.create_task(self._alerts_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -435,6 +474,28 @@ class Scheduler:
                 logger.exception("surface cycle failed")
             try:
                 await asyncio.sleep(self._config.surface_interval)
+            except asyncio.CancelledError:
+                break
+
+    async def _alerts_loop(self) -> None:
+        # start() already did one; wait before repeating. Same discipline as the
+        # other coverage-only loops: a failed pass is logged, not fatal.
+        try:
+            await asyncio.sleep(self._config.alerts_interval)
+        except asyncio.CancelledError:
+            return
+        while self._running:
+            try:
+                n = await evaluate_alerts_once(self._pool)
+                self.stats.alerts_fired += n
+                if n:
+                    logger.info("alerts fired %d new", n)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("alerts cycle failed")
+            try:
+                await asyncio.sleep(self._config.alerts_interval)
             except asyncio.CancelledError:
                 break
 
