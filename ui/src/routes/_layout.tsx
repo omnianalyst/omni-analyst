@@ -11,6 +11,8 @@ export function head() {
 const NAV = [
   { href: "/", label: "Search" },
   { href: "/objective", label: "Objective" },
+  { href: "/regime", label: "Regime" },
+  { href: "/sectors", label: "Sectors" },
   { href: "/watchlist", label: "Watchlists" },
   { href: "/alerts", label: "Alerts" },
   { href: "/briefing", label: "Briefing" },

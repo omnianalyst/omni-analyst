@@ -2,6 +2,7 @@ import {
   formatConfidence,
   formatHitRate,
   type BriefingFinding,
+  type DeductionLayer,
 } from "../lib/briefing";
 
 function asStrings(value: unknown): string[] {
@@ -9,6 +10,17 @@ function asStrings(value: unknown): string[] {
   return value.map((entry) =>
     typeof entry === "string" ? entry : JSON.stringify(entry),
   );
+}
+
+function chainSummary(chain: DeductionLayer[]): string {
+  return chain
+    .map((c) => {
+      if (c.layer === "macro") return `${c.cycle_phase}/${c.risk_regime?.replace("_", " ")}`;
+      if (c.layer === "sector") return `${c.etf_symbol} ${c.trend}/${c.macro_alignment}`;
+      if (c.layer === "stock") return `${c.direction} @ ${formatConfidence(c.confidence)}`;
+      return c.layer;
+    })
+    .join(" -> ");
 }
 
 // One column shape, rendered for both supporting and disconfirming, so neither
@@ -124,6 +136,32 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
           emptyText="none found"
         />
       </div>
+      {finding.deduction_chain && finding.deduction_chain.length > 1 ? (
+        <div
+          style={{
+            marginTop: "12px",
+            padding: "10px 12px",
+            background: "var(--bg)",
+            border: "1px solid var(--border)",
+            borderRadius: "8px",
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 4px",
+              fontSize: "12px",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: "var(--faint)",
+            }}
+          >
+            Deduction chain
+          </p>
+          <p style={{ margin: 0, fontFamily: "var(--mono)", fontSize: "13px", color: "var(--muted)" }}>
+            {chainSummary(finding.deduction_chain)}
+          </p>
+        </div>
+      ) : null}
     </li>
   );
 }

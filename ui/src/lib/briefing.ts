@@ -6,6 +6,26 @@ export interface BriefingEntity {
   name: string | null;
 }
 
+export interface DeductionLayer {
+  layer: string;
+  claim_id?: string;
+  etf_symbol?: string;
+  cycle_phase?: string;
+  risk_regime?: string;
+  inflation_regime?: string;
+  policy_stance?: string;
+  recession_probability?: number;
+  rs_percentile?: number;
+  trend?: string;
+  macro_alignment?: string;
+  entity_id?: string;
+  prediction_id?: string;
+  direction?: string;
+  confidence?: number;
+  method?: string;
+  sector_etf?: string;
+}
+
 export interface BriefingFinding {
   id: string;
   claim_id: string;
@@ -18,6 +38,7 @@ export interface BriefingFinding {
   supporting: string[];
   disconfirming: string[];
   prediction_id: string | null;
+  deduction_chain?: DeductionLayer[];
   created_at: string | null;
 }
 
