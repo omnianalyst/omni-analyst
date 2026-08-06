@@ -137,12 +137,21 @@ def _compute_inflation(cpi: list) -> float | None:
 
 
 def _compute_output_gap(gdp: list, pot: list) -> float | None:
-    """GDP output gap: (actual / potential - 1) * 100."""
+    """GDP output gap: (actual / potential - 1) * 100.
+
+    Returns None when data is insufficient or the gap is extreme (>10%), which
+    indicates a GDPPOT vintage conflict (CBO methodology change produces
+    conflicting values for the same period). An extreme gap is economically
+    implausible and should not drive the policy_stance.
+    """
     gdp_v = next((v for _, v in reversed(gdp) if v is not None), None)
     pot_v = next((v for _, v in reversed(pot) if v is not None), None)
     if gdp_v is None or pot_v is None or pot_v == 0:
         return None
-    return (gdp_v / pot_v - 1.0) * 100.0
+    gap = (gdp_v / pot_v - 1.0) * 100.0
+    if abs(gap) > 10.0:
+        return None
+    return gap
 
 
 def _compute_lei(lei: list) -> tuple[bool, float | None]:
@@ -209,13 +218,18 @@ async def assess_macro_regime(
     else:
         lei_negative, lei_change = False, None
 
-    if inf_yoy is None or og is None:
+    if inf_yoy is None:
         logger.info(
-            "macro regime abstained: insufficient data "
-            "(cpi=%d obs, gdp=%d, pot=%d, unrate=%d, dgs2=%d, dgs10=%d, lei=%d)",
-            len(cpi), len(gdp), len(pot), len(unrate), len(dgs2), len(dgs10), len(lei),
+            "macro regime abstained: insufficient CPI data (cpi=%d obs)",
+            len(cpi),
         )
         return None
+
+    # Output gap may be None if GDPPOT vintages conflict (extreme gap guarded).
+    # Proceed without it — policy_stance becomes "unknown", risk_regime skips
+    # the stagflation check, but the regime still assesses from other signals.
+    og_for_stance = og if og is not None else 0.0
+    og_known = og is not None
 
     # Recession probability with conditional weighting.
     if lei_available:
@@ -223,10 +237,15 @@ async def assess_macro_regime(
     else:
         prob = _W_YC_NO_LEI * float(yc_inverted) + _W_SAHM_NO_LEI * float(sahm_triggered)
         prob_band = "high" if prob >= 0.7 else "elevated" if prob >= 0.4 else "moderate" if prob >= 0.2 else "low"
+
     phase = cycle_phase(yc_inverted, sahm_triggered, lei_negative)
-    risk = risk_regime(prob, inf_yoy, og)
+    risk = risk_regime(prob, inf_yoy, og_for_stance) if og_known else (
+        "risk_off" if prob >= 0.4 else
+        "risk_on" if prob <= 0.15 and inf_yoy <= 3.0 else
+        "transition"
+    )
     inf_regime = inflation_regime(inf_yoy)
-    stance = policy_stance(inf_yoy, og)
+    stance = policy_stance(inf_yoy, og_for_stance) if og_known else "unknown"
 
     # Collect the latest claim per series for provenance edges. One per series
     # (7 total) -- the regime assessment traces to the data it read, not every
@@ -275,7 +294,8 @@ async def assess_macro_regime(
         "inflation_regime": inf_regime,
         "policy_stance": stance,
         "inflation_yoy": round(inf_yoy, 4),
-        "output_gap": round(og, 4),
+        "output_gap": round(og, 4) if og is not None else None,
+        "output_gap_known": og_known,
         "yield_curve_inverted": yc_inverted,
         "yield_curve_spread": round(yc_spread, 4) if yc_spread is not None else None,
         "sahm_triggered": sahm_triggered,
