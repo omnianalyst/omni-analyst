@@ -90,8 +90,8 @@ def _check_min_len(n: int, minimum: int) -> None:
 
 def _check_finite(*arrs: np.ndarray) -> None:
     for a in arrs:
-        if np.isnan(a).any():
-            raise Unavailable("input contains NaN")
+        if not np.isfinite(a).all():
+            raise Unavailable("input contains NaN or inf")
 
 
 def _check_equal_len(*arrs: np.ndarray) -> None:

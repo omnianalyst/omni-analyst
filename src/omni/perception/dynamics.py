@@ -206,9 +206,19 @@ class SentimentDynamicsModel:
             if col not in prices.columns:
                 continue
 
-            # Normalize data for comparison
-            sentiment_norm = (sentiment[col] - sentiment[col].rolling(window).mean()) / sentiment[col].rolling(window).std()
-            price_norm = (prices[col] - prices[col].rolling(window).mean()) / prices[col].rolling(window).std()
+            # Normalize data for comparison. Guard the rolling std: a
+            # near-constant series (e.g. a flat 0.05 baseline that is not
+            # exactly representable) yields std ~1e-17, which would divide
+            # noise by noise and fabricate z-scores of magnitude ~1e17 -- a
+            # full-confidence divergence from pure noise. Where the std is
+            # not meaningfully above zero the z-score is undefined; NaN it
+            # so no divergence is flagged rather than a confident fake one.
+            sent_std = sentiment[col].rolling(window).std()
+            price_std = prices[col].rolling(window).std()
+            sent_std = sent_std.where(sent_std > 1e-9)
+            price_std = price_std.where(price_std > 1e-9)
+            sentiment_norm = (sentiment[col] - sentiment[col].rolling(window).mean()) / sent_std
+            price_norm = (prices[col] - prices[col].rolling(window).mean()) / price_std
 
             # Calculate divergence
             divergence = sentiment_norm - price_norm

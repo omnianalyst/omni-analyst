@@ -470,6 +470,41 @@ class TestNanInInput:
             obv([1.0, float("nan"), 3.0], [1.0, 1.0, 1.0])
 
 
+class TestInfInInput:
+    # The NaN guard's twin: inf must be refused too. A feed or upstream
+    # division can produce inf, and without this every indicator returns a
+    # confidently-labelled value computed from inf/NaN. _check_finite must
+    # honour its name.
+    def test_sma(self):
+        with pytest.raises(Unavailable, match="inf"):
+            sma([1.0, float("inf")] + [1.0] * 20, period=10)
+
+    def test_rsi(self):
+        with pytest.raises(Unavailable, match="inf"):
+            rsi([1.0, float("inf")] + [1.0] * 20, period=10)
+
+    def test_bollinger(self):
+        with pytest.raises(Unavailable, match="inf"):
+            bollinger_bands([1.0, float("inf")] + [1.0] * 20, period=10)
+
+    def test_atr(self):
+        with pytest.raises(Unavailable, match="inf"):
+            atr(
+                [1.0, float("inf")] + [1.0] * 15,
+                [1.0] * 17,
+                [1.0] * 17,
+                period=10,
+            )
+
+    def test_vwap(self):
+        with pytest.raises(Unavailable, match="inf"):
+            vwap([1.0, float("inf"), 3.0], [1.0, 1.0, 1.0])
+
+    def test_obv(self):
+        with pytest.raises(Unavailable, match="inf"):
+            obv([1.0, float("inf"), 3.0], [1.0, 1.0, 1.0])
+
+
 class TestNegativeVolume:
     def test_vwap(self):
         with pytest.raises(Unavailable, match="negative volume"):

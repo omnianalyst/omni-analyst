@@ -182,6 +182,57 @@ class TestSynthesis:
         report2 = await enrich_findings(db.pool)
         assert report2.findings_enriched == 0
 
+    async def test_byo_only_sector_score_does_not_leak_into_shared_finding(self, db):
+        # The licensing invariant: a byo_only claim (audience = operator X,
+        # redistributable = byo_only) must never land in a SHARED finding's
+        # deduction_chain -- a shared finding is served to anonymous callers on
+        # the public domain via /briefing. The synthesis query must scope the
+        # sector_score to the finding's own audience. (Before the fix the sector
+        # query had no audience filter and the byo_only value leaked.)
+        company = await _seed_entity(db, "company", "AAPL")
+        etf = await _seed_entity(db, "sector_etf", "XLK")
+        await db.pool.execute(
+            "INSERT INTO entity_edge (from_entity, to_entity, relation, source) "
+            "VALUES ($1, $2, 'member_of_sector', 'test')",
+            company, etf,
+        )
+        from uuid import uuid4
+        operator = await db.pool.fetchval(
+            "INSERT INTO users (email, password_hash) "
+            "VALUES ($1, 'x') RETURNING id",
+            f"synth-op-{uuid4().hex}@example.com",
+        )
+        now = datetime.now(UTC)
+        # A byo_only sector_score attributed to the operator -- private.
+        await db.pool.execute(
+            """
+            INSERT INTO claim (entity_id, claim_type, key, value, source,
+                               event_date, knowledge_date, confidence,
+                               redistributable, audience_user_id, derivation)
+            VALUES ($1, 'sector_score', 'xlk', $2::jsonb, 'polygon',
+                    $3, $4, 1.0, 'byo_only', $5, 'ingested')
+            """,
+            etf,
+            json.dumps({"rs_percentile": 0.85, "trend": "uptrend",
+                        "macro_alignment": "favorable"}),
+            now - timedelta(days=2), now - timedelta(days=1), operator,
+        )
+        # A SHARED finding (audience_user_id NULL) on the company.
+        pid = await _seed_prediction(db, entity_id=company)
+        await _seed_finding(db, entity_id=company, prediction_id=pid)
+
+        await enrich_findings(db.pool)
+
+        chain_raw = await db.pool.fetchval(
+            "SELECT deduction_chain FROM finding WHERE prediction_id = $1", pid
+        )
+        chain = json.loads(chain_raw) if isinstance(chain_raw, str) else chain_raw
+        layers = [c["layer"] for c in chain]
+        # The byo_only sector_score is invisible to a shared finding, so the
+        # sector layer is absent -- the chain carries only stock.
+        assert "sector" not in layers
+        assert layers == ["stock"]
+
 
 # -- Phase F: meta-calibration ------------------------------------------------
 

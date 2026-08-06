@@ -35,7 +35,8 @@ class SynthesisReport:
 
 
 _FINDINGS_TO_ENRICH = """
-SELECT f.id, f.prediction_id, f.entity_id, p.direction, p.confidence, p.method
+SELECT f.id, f.prediction_id, f.entity_id, f.audience_user_id,
+       p.direction, p.confidence, p.method
 FROM finding f JOIN prediction p ON p.id = f.prediction_id
 WHERE f.status = 'surfaced'
   AND COALESCE(f.deduction_chain, '[]'::jsonb) = '[]'::jsonb
@@ -54,6 +55,10 @@ SELECT c.id, c.value
 FROM claim c
 WHERE c.entity_id = $1 AND c.claim_type = 'sector_score'
   AND c.superseded_by IS NULL
+  AND (
+    (c.audience_user_id IS NULL AND c.redistributable = 'allowed')
+    OR ($2::uuid IS NOT NULL AND c.audience_user_id = $2)
+  )
 ORDER BY c.knowledge_date DESC LIMIT 1
 """
 
@@ -102,7 +107,7 @@ async def enrich_findings(pool) -> SynthesisReport:
         sector_row = await pool.fetchrow(_SECTOR_OF_COMPANY, f["entity_id"])
         if sector_row is not None:
             score_row = await pool.fetchrow(
-                _LATEST_SECTOR_SCORE, sector_row["id"]
+                _LATEST_SECTOR_SCORE, sector_row["id"], f["audience_user_id"]
             )
             if score_row is not None:
                 sv = _decode(score_row["value"])
