@@ -56,6 +56,14 @@ class TestCalculateTrend:
     def test_zero_mean_returns_stable(self):
         assert calculate_trend([0.0, 0.0, 0.0]) == "stable"
 
+    def test_near_zero_mean_noise_is_stable_not_misclassified(self):
+        # A series centred on zero with float noise has a mean of ~1e-17, not
+        # 0.0; a `== 0` guard never fires and slope/mean classifies the noise as
+        # rising/falling sharply. The honest read of a flat-ish zero-centred
+        # series is "stable".
+        noisy = [-1e-10, 1e-10, -1e-10, 1e-10, -1e-10, 1e-10]
+        assert calculate_trend(noisy) == "stable"
+
 
 class TestGenerateSimpleForecast:
     def test_forecast_is_exponential_smoothing_flat_level(self):

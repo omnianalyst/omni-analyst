@@ -36,7 +36,11 @@ def calculate_trend(values: Sequence[float]) -> str:
     slope = np.polyfit(x, values, 1)[0]
 
     mean_val = np.mean(values)
-    if mean_val == 0:
+    # `np.isclose`, not `== 0`: a near-zero mean from a series centred on zero
+    # with float noise (mean ~1e-17, not 0.0) would otherwise divide a near-zero
+    # slope by it and classify the noise as rising/falling sharply. A flat or
+    # zero-centred series is "stable" -- the honest classification, not a guess.
+    if np.isclose(mean_val, 0.0):
         return "stable"
 
     normalized_slope = slope / mean_val
