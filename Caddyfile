@@ -1,0 +1,43 @@
+# Omni Analyst v2 edge: serves the built UI and reverse-proxies the API.
+#
+# Same-origin deploy. The UI is built with an empty API base (see ui/src/config.ts:
+# production builds default to same-origin), so the browser calls relative paths
+# and Caddy routes them by prefix. Set {$OMNI_HOST} to serve HTTPS on a domain,
+# or leave it unset for HTTP on the Tailscale interface (no public DNS -> no ACME).
+#
+#   OMNI_HOST=omni.example.com   -> automatic HTTPS via Let's Encrypt
+#   OMNI_HOST=                   -> http://{$OMNI_ADDR:-:80}, no TLS
+#
+# Build the UI before bringing this up:
+#   npm --prefix ui run build
+# Mount ui/dist at /srv/ui (see docker-compose.prod.yml).
+
+{$OMNI_HOST} {
+	encode gzip zstd
+
+	# Framework-provided + API routers. Listed explicitly so a static asset
+	# path can never shadow a route. Add new top-level routers here.
+	@api path /health /openapi.json /docs /redoc \
+	          /alerts/* /analysis/* /auth/* /autonomous/* /briefing/* \
+	          /capabilities/* /coverage/* /entities/* /gaps/* \
+	          /objective/* /watchlists/*
+	handle @api {
+		reverse_proxy {$OMNI_API_UPSTREAM:-api:8000}
+	}
+
+	# Static UI assets (hashed files under /assets).
+	handle /assets/* {
+		header Cache-Control "public, max-age=31536000, immutable"
+		root * /srv/ui
+		try_files {path} =404
+		file_server
+	}
+
+	# Everything else: serve the SPA, falling back to index.html for
+	# client-side routing.
+	handle {
+		root * /srv/ui
+		try_files {path} /index.html
+		file_server
+	}
+}
