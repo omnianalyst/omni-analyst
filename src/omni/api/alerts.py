@@ -225,6 +225,7 @@ def build_router(app: App) -> Router:
             JOIN claim c ON c.id = f.claim_id
             JOIN alert a ON a.id = f.alert_id
             WHERE f.alert_id = $1 AND a.user_id = $2
+              AND (c.audience_user_id IS NULL OR c.audience_user_id = $2)
             ORDER BY f.fired_at DESC
             """,
             alert_id,
