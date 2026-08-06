@@ -58,7 +58,7 @@ export function RegimeView() {
       <div class="metric-grid">
         <Metric label="Recession probability" value={`${(v.recession_probability * 100).toFixed(0)}%`} sub={v.recession_assessment} />
         <Metric label="CPI YoY" value={`${v.inflation_yoy.toFixed(1)}%`} />
-        <Metric label="Output gap" value={`${v.output_gap.toFixed(1)}%`} />
+        <Metric label="Output gap" value={v.output_gap != null ? `${v.output_gap.toFixed(1)}%` : "—"} sub={v.output_gap_known === false ? "unknown" : undefined} />
         <Metric label="Yield curve spread" value={v.yield_curve_spread != null ? `${v.yield_curve_spread.toFixed(2)}%` : "—"} sub={v.yield_curve_inverted ? "inverted" : "normal"} />
         <Metric label="Sahm indicator" value={v.sahm_indicator != null ? v.sahm_indicator.toFixed(2) : "—"} sub={v.sahm_triggered ? "triggered" : "quiet"} />
         <Metric label="LEI 6m change" value={v.lei_change_6m != null ? `${v.lei_change_6m.toFixed(1)}%` : "—"} sub={v.lei_negative ? "declining" : "rising"} />

@@ -14,7 +14,8 @@ export interface RegimeValue {
   sahm_indicator: number | null;
   lei_negative: boolean;
   lei_change_6m: number | null;
-  output_gap: number;
+  output_gap: number | null;
+  output_gap_known: boolean;
 }
 
 export interface RegimeResponse {

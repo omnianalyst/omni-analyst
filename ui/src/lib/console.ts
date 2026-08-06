@@ -67,7 +67,7 @@ export function regimeMetrics(v: RegimeValue): RegimeMetric[] {
       value: v.yield_curve_spread != null ? `${v.yield_curve_spread.toFixed(2)}%` : "\u2014",
       sub: v.yield_curve_inverted ? "inverted" : "normal",
     },
-    { label: "Output gap", value: `${v.output_gap.toFixed(1)}%` },
+    { label: "Output gap", value: v.output_gap != null ? `${v.output_gap.toFixed(1)}%` : "\u2014" },
   ];
 }
 

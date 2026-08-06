@@ -26,6 +26,7 @@ function regime(overrides: Partial<RegimeValue> = {}): RegimeValue {
     lei_negative: false,
     lei_change_6m: 1.2,
     output_gap: 0.4,
+    output_gap_known: true,
     ...overrides,
   };
 }
