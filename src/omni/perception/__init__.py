@@ -1,21 +1,14 @@
 """
-Behavioural-finance perception engines: sentiment/price dynamics, herding, FOMO.
+Behavioural-finance perception engine: sentiment/price dynamics.
 
-Pure functions on DataFrames; no IO, no framework coupling.
+herding.py and fomo.py were removed -- both were orphan (no capability
+registration) and carried the float-zero / fillna-as-signal fabrication defects
+the project refuses. The one live behavioural concept, perception-vs-fundamentals
+divergence, lives in divergence.py (and reads this module's _analyze_sentiment_divergence).
 """
-__all__ = ['FOMODetector', 'HerdingAnalyzer', 'SentimentDynamicsModel']
+__all__ = ["SentimentDynamicsModel"]
 
 try:
     from .dynamics import SentimentDynamicsModel
-except ImportError:
-    pass
-
-try:
-    from .fomo import FOMODetector
-except ImportError:
-    pass
-
-try:
-    from .herding import HerdingAnalyzer
 except ImportError:
     pass
