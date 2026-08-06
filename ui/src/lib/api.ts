@@ -26,6 +26,25 @@ export function clearAuthToken(): void {
   }
 }
 
+// A request that carried a token and came back 401 means the session is dead
+// (expired or rejected). Left unhandled, every authed panel fills with 401
+// errors and the app reads as broken; clearing the stale token and redirecting
+// to /login once turns a silent expiry into "sign in again". Anonymous 401s --
+// a request that sent no token -- are left alone, because "auth required" there
+// is a real condition (e.g. a wrong password on /auth/login), not a stale
+// session, and redirecting would loop or mask it.
+function handleStaleSession(status: number, headers: Record<string, string>): void {
+  if (status !== 401) return;
+  const hadToken = Boolean(
+    headers["authorization"] || headers["Authorization"],
+  );
+  if (!hadToken) return;
+  clearAuthToken();
+  if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+    window.location.replace("/login");
+  }
+}
+
 export class ApiUnavailableError extends Error {
   constructor(
     public url: string,
@@ -119,6 +138,7 @@ export async function request<T>(
     throw new ApiUnavailableError(url, err);
   }
   if (!res.ok) {
+    handleStaleSession(res.status, headers);
     const body = await res.text().catch(() => "");
     throw new ApiHttpError(res.status, url, body);
   }
@@ -147,6 +167,7 @@ export async function sendJson<T>(
     throw new ApiUnavailableError(url, err);
   }
   if (!res.ok) {
+    handleStaleSession(res.status, headers);
     const text = await res.text().catch(() => "");
     throw new ApiHttpError(res.status, url, text);
   }
