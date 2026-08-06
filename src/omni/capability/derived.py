@@ -858,6 +858,7 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.perception.divergence",
             call=call,
+            is_derived=True,
         )
     )
     registry.add(
@@ -876,6 +877,7 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capabilities.macro.yield_curve_inversion",
             call=call_yield_curve,
+            is_derived=True,
         )
     )
     registry.add(
@@ -894,6 +896,7 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capabilities.macro.sahm_rule",
             call=call_sahm,
+            is_derived=True,
         )
     )
     registry.add(
@@ -912,6 +915,7 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capabilities.macro.inflation_measures",
             call=call_inflation,
+            is_derived=True,
         )
     )
     registry.add(
@@ -931,6 +935,7 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capabilities.macro.output_gap",
             call=call_output_gap,
+            is_derived=True,
         )
     )
     registry.add(
@@ -949,6 +954,7 @@ def build_derived_registry() -> Registry:
             callability=Callability.YES,
             origin="omni.capability.derived.compute_lei_signal_declared",
             call=call_lei,
+            is_derived=True,
         )
     )
     return registry

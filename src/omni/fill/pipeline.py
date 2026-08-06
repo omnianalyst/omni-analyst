@@ -163,6 +163,31 @@ async def fill_gap(
     entity = await _load_entity(pool, gap["entity_id"]) if needs_entity else None
 
     for registration in candidates:
+        if registration.is_derived:
+            # A derived capability produces a claim from coverage already in the
+            # store, not from a fetch: its call is (pool, gap) and returns a
+            # self-contained FillResult -- fill_analysis records the attempt,
+            # writes the claim with its input edges, resolves/releases the gap
+            # and resolves the licence from the materialized inputs itself. So
+            # this branch returns directly; it must not fall through to the
+            # adapter's write_claims path (which would double-record and expects
+            # drafts, not a FillResult). The earlier code handed every candidate
+            # the single-key adapter arg, which is a TypeError for a derived
+            # call -- so derived gaps never closed under the scheduler.
+            try:
+                return await registration.call(pool, gap)
+            except Unavailable as exc:
+                failures.append(f"{registration.name}: {exc}")
+                continue
+            except (ProhibitedSource, MissingCredentialOwner) as exc:
+                failures.append(f"{registration.name}: {exc}")
+                continue
+            except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+                reason = f"{registration.name} raised {type(exc).__name__}: {exc}"
+                await _record(pool, gap_id, registration.name, "error", None, reason)
+                await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
+                return FillResult(gap_id, "error", registration.name, [], reason)
+
         try:
             if registration.provider_key in _PROVIDER_IDENTIFIER:
                 if entity is None:

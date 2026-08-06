@@ -83,6 +83,14 @@ class Capability:
     origin: str = ""
     call: Callable[..., Awaitable[object]] | None = None
 
+    # A derived capability produces a claim from coverage already in the store
+    # (its `call` is `(pool, gap)` and returns a self-contained FillResult via
+    # fill_analysis), as opposed to an adapter that fetches from a provider
+    # (`call(arg)` -> drafts). The fill dispatcher branches on this: handing a
+    # derived capability the adapter's single-key arg is a TypeError, which is
+    # how derived gaps silently failed to close under the scheduler.
+    is_derived: bool = False
+
     @property
     def invocable(self) -> bool:
         """Whether the planner may actually schedule this.

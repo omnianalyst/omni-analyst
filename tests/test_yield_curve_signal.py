@@ -28,11 +28,11 @@ from uuid import UUID
 import pytest
 
 from omni.capability.arguments import Materialized, materialize
-from omni.capability.derived import YC_ARGUMENTS, YC_KEY, YIELD_CURVE
+from omni.capability.derived import YC_ARGUMENTS, YC_KEY, YIELD_CURVE, build_derived_registry
 from omni.coverage.visibility import visible_claims
 from omni.demand.ledger import direct_attention
 from omni.fill.derived import fill_analysis
-from omni.fill.pipeline import claim_next_gap
+from omni.fill.pipeline import claim_next_gap, drain
 from omni.perception.divergence import resolve_derived_licence
 from omni.scheduler.worker import sweep_once
 
@@ -326,3 +326,53 @@ class TestEvidenceShape:
         assert len(evidence["input_claim_ids"]) == 2 * N
         for s in evidence["input_claim_ids"]:
             UUID(s)  # raises if not a valid uuid string
+
+
+class TestSchedulerDispatch:
+    """The fix this guards: derived gaps must close through the scheduler's real
+    fill path (drain -> fill_gap), not only through fill_analysis called by hand.
+
+    Before is_derived routing, fill_gap handed the derived capability the
+    adapter's single-key arg, which is a TypeError against call(pool, gap) -- so
+    every derived gap recorded 'error' and stayed open forever under the
+    deployed scheduler, while every test passed because tests called
+    fill_analysis directly. This is the quietly-broken pattern, at the layer
+    every earned claim type depends on."""
+
+    async def test_a_derived_gap_closes_through_drain_not_fill_analysis(self, db):
+        entity_id = await _entity(db)
+        dates = [BASE + timedelta(days=i) for i in range(N)]
+        await _insert_series(db, entity_id, dates, [4.5] * N, key="DGS2")
+        await _insert_series(db, entity_id, dates, [4.0] * N, key="DGS10")
+
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="yield_curve_signal",
+            key=YC_KEY,
+        )
+        assert await sweep_once(db.pool) > 0, "sweep recorded no gap"
+
+        # drain is the scheduler's path: run_once -> fill_gap. With the fix,
+        # fill_gap routes the derived capability through call(pool, gap) and the
+        # gap closes. Without it, fill_gap raised TypeError -> one 'error'
+        # attempt and the gap left open.
+        results = await drain(
+            db.pool, registry=build_derived_registry(), worker_id="sched-test"
+        )
+
+        filled = [r for r in results if r.outcome == "filled"]
+        assert len(filled) == 1, [r.outcome for r in results]
+        assert filled[0].capability == "macro.yield_curve_signal"
+        assert filled[0].claim_ids, "filled result must carry the new claim id"
+
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM claim WHERE claim_type = 'yield_curve_signal'"
+        ) == 1
+        assert await db.pool.fetchval(
+            "SELECT resolved_at IS NOT NULL FROM gap"
+        )
+        # The old failure mode recorded an 'error' attempt every cycle; the fix
+        # records none. This assertion is what the wrong implementation cannot
+        # satisfy (it left exactly one 'error' row).
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM fill_attempt WHERE outcome = 'error'"
+        ) == 0
