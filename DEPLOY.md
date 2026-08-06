@@ -198,3 +198,24 @@ container self-reports health.
 
 **On macOS, `--network host` shares the VM's network, not the Mac's.** Publish
 a port instead, and reach host services at `host.containers.internal`.
+
+## Backups
+
+The Postgres volume is the source of truth for irreplaceable provenance
+(bitemporal claims, the prediction ledger, calibration buckets). A single
+volume loss is total. `ops/backup.sh` takes a custom-format `pg_dump` to
+`/opt/omni-backups` with a rolling 14-day window, and ships it off-box when
+`OMNI_RSYNC_TARGET` is set.
+
+Run nightly from the host (the stack's postgres publishes on 5434):
+
+```
+17 4 * * *  OMNI_RSYNC_TARGET=tyler@<other-node>:/opt/omni-backups  /path/to/app-v2/ops/backup.sh >> /var/log/omni-backup.log 2>&1
+```
+
+Without `OMNI_RSYNC_TARGET` the backup protects against deletion and corruption
+but not the box dying -- set it to a second Proxmox node's address for site
+resilience. **Test the restore** before relying on it: stop the stack,
+`pg_restore --clean --if-exists -d omni_v2 <file>.dump` into the postgres
+container, then bring the stack back up. An untested backup is a hope, not a
+recovery.
