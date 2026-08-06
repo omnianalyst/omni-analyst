@@ -7,6 +7,15 @@ output, read straight from the tables it writes. A prediction loop that last
 wrote an hour ago is either idle or stuck; this endpoint surfaces the age so a
 caller can tell.
 
+The ``loops`` array is that effect-derived view. The ``health`` object is the
+process view, read from ``loop_health`` (written by the scheduler each
+iteration): it carries the two signals the effect view cannot give -- a
+chronically-failing loop's ``consecutive_failures`` and ``last_error`` (an
+iterating-but-failing loop stops writing output, so its age looks like idle),
+and an alive-but-idle loop's fresh ``last_success_at`` (sweep finding no gaps
+writes nothing, yet is healthy). ``health.overall`` is the worst per-loop
+verdict so a glance is enough: ok / stale / failing.
+
 Read-only. Any authenticated user (there is no operator/admin role yet, so the
 auth model's "any signed-in principal" is the strongest gate available). It
 reveals loop freshness, demand volume and provider fill rates. The public
@@ -22,6 +31,16 @@ from neutron.error import unauthorized
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
+
+# A loop is stale when its last success is older than this many times its own
+# scheduled interval -- a loop missing several consecutive beats is stuck, not
+# idle. The multiplier is generous on purpose: a healthy loop that takes an
+# occasional slow cycle should not read as stale.
+_STALE_INTERVAL_MULTIPLIER = 5.0
+
+# Severity ordering for the overall verdict. Higher == worse.
+_SEVERITY = {"ok": 0, "stale": 1, "failing": 2}
+
 
 
 def build_router(app: App) -> Router:
@@ -93,9 +112,63 @@ def build_router(app: App) -> Router:
             """
         )
 
+        # Process health per loop, from the state rows the scheduler writes each
+        # iteration. Complements the effect-derived `loops` above: this is where
+        # a chronically-failing or never-yet-succeeded loop becomes visible, and
+        # where an alive-but-idle loop reads healthy rather than ambiguously
+        # aged. No rows (a fresh deployment) is honest emptiness, not "ok" -- the
+        # effect-derived loops already report never_run for that case.
+        health_rows = await pool.fetch(
+            """
+            SELECT loop_name, last_success_at, last_failure_at,
+                   consecutive_failures, last_error, expected_interval_seconds
+            FROM loop_health
+            """
+        )
+        health_loops = []
+        worst_severity = -1
+        worst_state: str | None = None
+        for r in health_rows:
+            consec = int(r["consecutive_failures"])
+            last_success = r["last_success_at"]
+            interval = r["expected_interval_seconds"]
+            # A loop with open failures is failing even if it succeeded recently
+            # -- the current iteration raised. last_success NULL means it has
+            # only ever failed, which is failing too.
+            if consec > 0 or last_success is None:
+                state = "failing"
+            elif interval is not None and interval > 0 and (
+                now - last_success
+            ).total_seconds() > _STALE_INTERVAL_MULTIPLIER * float(interval):
+                state = "stale"
+            else:
+                state = "ok"
+            health_loops.append(
+                {
+                    "loop": r["loop_name"],
+                    "state": state,
+                    "last_success_at": last_success.isoformat()
+                    if last_success
+                    else None,
+                    "last_failure_at": r["last_failure_at"].isoformat()
+                    if r["last_failure_at"]
+                    else None,
+                    "consecutive_failures": consec,
+                    "last_error": r["last_error"],
+                }
+            )
+            sev = _SEVERITY[state]
+            if sev > worst_severity:
+                worst_severity = sev
+                worst_state = state
+
         return {
             "now": now.isoformat(),
             "loops": loops,
+            "health": {
+                "overall": worst_state,
+                "loops": health_loops,
+            },
             "demand": {
                 "active": demand["active_demand"],
                 "total": demand["total_demand"],

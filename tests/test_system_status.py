@@ -145,3 +145,78 @@ async def test_a_loop_that_has_written_reports_an_age_and_not_never_run(
     # a value the pre-fix shape-only tests could have caught.
     assert demand["age_seconds"] is not None
     assert demand["age_seconds"] > 7000
+
+
+async def test_health_overall_is_none_on_a_fresh_deployment(db, database_url):
+    # No loop has ever iterated, so loop_health is empty. overall is None (honest
+    # "no data yet"), not a fake "ok" -- the effect-derived `loops` array already
+    # carries the never_run signal for this case.
+    await db.pool.execute("TRUNCATE loop_health")
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_token(client)
+        r = await client.get(
+            "/system/status", headers={"authorization": f"Bearer {token}"}
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["health"]["overall"] is None
+    assert body["health"]["loops"] == []
+
+
+async def test_health_grades_each_loop_from_its_recorded_state(db, database_url):
+    # Seed three loop_health rows that exercise every verdict branch:
+    #  - 'fill':    recent success, no failures                 -> ok
+    #  - 'predict': recent success but consecutive_failures > 0 -> failing
+    #  - 'sweep':   success long ago (>5x its interval)         -> stale
+    await db.pool.execute(
+        """
+        INSERT INTO loop_health
+            (loop_name, last_success_at, last_failure_at,
+             consecutive_failures, last_error, expected_interval_seconds)
+        VALUES
+            ('fill',    now(),                              NULL, 0, NULL, 30),
+            ('predict', now(),                              now(), 2, 'NoCoverage', 300),
+            ('sweep',   now() - interval '2 hours',         NULL, 0, NULL, 300)
+        """
+    )
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_token(client)
+        r = await client.get(
+            "/system/status", headers={"authorization": f"Bearer {token}"}
+        )
+    assert r.status_code == 200, r.text
+    health = r.json()["health"]
+    by_loop = {h["loop"]: h for h in health["loops"]}
+    assert by_loop["fill"]["state"] == "ok"
+    assert by_loop["predict"]["state"] == "failing"
+    assert "NoCoverage" in by_loop["predict"]["last_error"]
+    # A 2h-old success vs a 300s interval (stale threshold 5x = 1500s) is stale.
+    assert by_loop["sweep"]["state"] == "stale"
+    # overall is the worst present -> failing outranks stale outranks ok.
+    assert health["overall"] == "failing"
+
+
+async def test_health_marks_a_loop_that_only_ever_failed_as_failing(db, database_url):
+    # last_success_at NULL + consecutive_failures > 0: a loop that has never
+    # succeeded. This is the quietly-broken case the feature exists to catch --
+    # it must not grade 'stale' (which implies a prior success) or 'ok'.
+    await db.pool.execute(
+        """
+        INSERT INTO loop_health
+            (loop_name, last_success_at, last_failure_at,
+             consecutive_failures, last_error, expected_interval_seconds)
+        VALUES ('resolve', NULL, now(), 5, 'always raises', 60)
+        """
+    )
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_token(client)
+        r = await client.get(
+            "/system/status", headers={"authorization": f"Bearer {token}"}
+        )
+    assert r.status_code == 200
+    by_loop = {h["loop"]: h for h in r.json()["health"]["loops"]}
+    assert by_loop["resolve"]["state"] == "failing"
+    assert r.json()["health"]["overall"] == "failing"

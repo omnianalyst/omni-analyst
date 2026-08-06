@@ -53,6 +53,81 @@ _DCF_METHOD = "fundamentals.dcf_valuation"
 # The trend producer's method, literal for the same reason as _DCF_METHOD.
 _TREND_METHOD = "trend.sma"
 
+# A loop is "degraded" once it has failed this many times in a row. The point is
+# to surface a chronically-failing loop (every cycle raises) above the per-error
+# exception log, so an unattended operator notices the loop is stuck rather than
+# just flaky. Below this, a transient failure stays a single exception line.
+_DEGRADED_THRESHOLD = 3
+
+
+async def record_loop_health(
+    pool,
+    *,
+    loop_name: str,
+    ok: bool,
+    error: str | None = None,
+    expected_interval_seconds: float | None = None,
+) -> int:
+    """Record one loop iteration's outcome into the loop_health state row.
+
+    A success stamps last_success_at and resets consecutive_failures; a failure
+    stamps last_failure_at, captures the error and increments consecutive
+    failures. Returns the resulting consecutive_failures count. When that count
+    reaches ``_DEGRADED_THRESHOLD`` a WARNING is logged -- the one push signal
+    that a chronically-failing loop is stuck, since the loops themselves only
+    log per-error tracebacks that are easy to miss in volume.
+
+    Cancellation is not a failure and is never recorded here; callers re-raise
+    ``CancelledError`` before reaching this path.
+    """
+    if ok:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO loop_health
+                (loop_name, last_success_at, last_failure_at,
+                 consecutive_failures, last_error, expected_interval_seconds)
+            VALUES ($1, now(), NULL, 0, NULL, $2)
+            ON CONFLICT (loop_name) DO UPDATE SET
+                last_success_at           = now(),
+                consecutive_failures      = 0,
+                last_error                = NULL,
+                expected_interval_seconds = EXCLUDED.expected_interval_seconds,
+                updated_at                = now()
+            RETURNING consecutive_failures
+            """,
+            loop_name,
+            expected_interval_seconds,
+        )
+        return int(row["consecutive_failures"])
+
+    row = await pool.fetchrow(
+        """
+        INSERT INTO loop_health
+            (loop_name, last_success_at, last_failure_at,
+             consecutive_failures, last_error, expected_interval_seconds)
+        VALUES ($1, NULL, now(), 1, $2, $3)
+        ON CONFLICT (loop_name) DO UPDATE SET
+            last_failure_at           = now(),
+            consecutive_failures      = loop_health.consecutive_failures + 1,
+            last_error                = EXCLUDED.last_error,
+            expected_interval_seconds = EXCLUDED.expected_interval_seconds,
+            updated_at                = now()
+        RETURNING consecutive_failures
+        """,
+        loop_name,
+        error,
+        expected_interval_seconds,
+    )
+    consecutive = int(row["consecutive_failures"])
+    if consecutive >= _DEGRADED_THRESHOLD:
+        logger.warning(
+            "loop '%s' degraded: %d consecutive failures (last: %s)",
+            loop_name,
+            consecutive,
+            error,
+        )
+    return consecutive
+
 
 @dataclass
 class SchedulerConfig:
@@ -285,13 +360,47 @@ class Scheduler:
         self._running = False
         self.stats = Stats()
 
+    async def _do(
+        self, loop_name: str, interval: float, fn, *args, **kwargs
+    ):
+        """Run one loop iteration, recording its outcome to loop_health.
+
+        Success and failure are both recorded; the underlying exception is
+        re-raised so the loop's own ``except`` keeps logging the full traceback
+        and applying its per-loop discipline (e.g. ``continue`` vs sleep).
+        ``asyncio.CancelledError`` is never recorded as a failure -- shutdown is
+        not a fault.
+        """
+        try:
+            result = await fn(*args, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            await record_loop_health(
+                self._pool,
+                loop_name=loop_name,
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                expected_interval_seconds=interval,
+            )
+            raise
+        await record_loop_health(
+            self._pool,
+            loop_name=loop_name,
+            ok=True,
+            expected_interval_seconds=interval,
+        )
+        return result
+
     async def start(self) -> None:
         self._running = True
         # Sweep once before the fill workers exist. Otherwise they start
         # against an empty queue, find nothing, and sleep out the whole poll
         # interval while work appears milliseconds later.
         try:
-            n = await sweep_once(self._pool)
+            n = await self._do(
+                "sweep", self._config.sweep_interval, sweep_once, self._pool
+            )
             self.stats.sweeps += 1
             self.stats.gaps_detected += n
         except Exception:
@@ -305,7 +414,9 @@ class Scheduler:
         # otherwise the loop sleeps a full interval before clearing predictions
         # whose horizons already elapsed while the process was down.
         try:
-            n = await resolve_once(self._pool)
+            n = await self._do(
+                "resolve", self._config.resolve_interval, resolve_once, self._pool
+            )
             self.stats.resolved += n
         except Exception:
             logger.exception("initial resolve failed")
@@ -314,8 +425,12 @@ class Scheduler:
         # demanded entity with complete coverage waits a full interval for its
         # first directional call.
         try:
-            produced, abstained = await predict_once(
-                self._pool, horizon_days=self._config.predict_horizon_days
+            produced, abstained = await self._do(
+                "predict",
+                self._config.predict_interval,
+                predict_once,
+                self._pool,
+                horizon_days=self._config.predict_horizon_days,
             )
             self.stats.predicted += produced
             self.stats.predict_abstained += abstained
@@ -326,7 +441,9 @@ class Scheduler:
         # already clears the calibrated threshold waits a full interval to become
         # a finding.
         try:
-            n = await surface_once(self._pool)
+            n = await self._do(
+                "surface", self._config.surface_interval, surface_once, self._pool
+            )
             self.stats.surfaced += n
         except Exception:
             logger.exception("initial surface failed")
@@ -334,7 +451,12 @@ class Scheduler:
         # Alerts once before the loop starts: a watched condition already met by
         # current coverage fires immediately rather than after a full interval.
         try:
-            n = await evaluate_alerts_once(self._pool)
+            n = await self._do(
+                "alerts",
+                self._config.alerts_interval,
+                evaluate_alerts_once,
+                self._pool,
+            )
             self.stats.alerts_fired += n
         except Exception:
             logger.exception("initial alerts evaluation failed")
@@ -359,7 +481,9 @@ class Scheduler:
             return
         while self._running:
             try:
-                n = await sweep_once(self._pool)
+                n = await self._do(
+                    "sweep", self._config.sweep_interval, sweep_once, self._pool
+                )
                 self.stats.sweeps += 1
                 self.stats.gaps_detected += n
                 if n:
@@ -379,8 +503,14 @@ class Scheduler:
     async def _fill_loop(self, worker_id: str) -> None:
         while self._running:
             try:
-                results = await fill_once(
-                    self._pool, self._registry, self._config, worker_id=worker_id
+                results = await self._do(
+                    "fill",
+                    self._config.fill_interval,
+                    fill_once,
+                    self._pool,
+                    self._registry,
+                    self._config,
+                    worker_id=worker_id,
                 )
                 self.stats.cycles += 1
                 for r in results:
@@ -412,7 +542,9 @@ class Scheduler:
             return
         while self._running:
             try:
-                n = await resolve_once(self._pool)
+                n = await self._do(
+                    "resolve", self._config.resolve_interval, resolve_once, self._pool
+                )
                 self.stats.resolved += n
                 if n:
                     logger.info("resolve closed %d predictions", n)
@@ -435,8 +567,12 @@ class Scheduler:
             return
         while self._running:
             try:
-                produced, abstained = await predict_once(
-                    self._pool, horizon_days=self._config.predict_horizon_days
+                produced, abstained = await self._do(
+                    "predict",
+                    self._config.predict_interval,
+                    predict_once,
+                    self._pool,
+                    horizon_days=self._config.predict_horizon_days,
                 )
                 self.stats.predicted += produced
                 self.stats.predict_abstained += abstained
@@ -462,7 +598,9 @@ class Scheduler:
             return
         while self._running:
             try:
-                n = await surface_once(self._pool)
+                n = await self._do(
+                    "surface", self._config.surface_interval, surface_once, self._pool
+                )
                 self.stats.surfaced += n
                 if n:
                     logger.info("surface recorded %d findings", n)
@@ -486,7 +624,12 @@ class Scheduler:
             return
         while self._running:
             try:
-                n = await evaluate_alerts_once(self._pool)
+                n = await self._do(
+                    "alerts",
+                    self._config.alerts_interval,
+                    evaluate_alerts_once,
+                    self._pool,
+                )
                 self.stats.alerts_fired += n
                 if n:
                     logger.info("alerts fired %d new", n)
