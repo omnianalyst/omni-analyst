@@ -64,11 +64,17 @@ def _validate_option_type(option_type: Any) -> None:
         raise Unavailable(f"unrecognised option_type: {option_type!r}")
 
 
-def _check_inputs(T: float, sigma: float) -> None:
+def _check_inputs(S: float, K: float, T: float, r: float, sigma: float, q: float) -> None:
     if T < 0.0:
         raise Unavailable(f"negative time to expiry: T={T}")
     if T > 0.0 and sigma <= 0.0:
         raise Unavailable(f"volatility must be positive for live options; sigma={sigma}")
+    if not (S > 0.0) or not np.isfinite(S):
+        raise Unavailable(f"spot price must be positive and finite; S={S}")
+    if not (K > 0.0) or not np.isfinite(K):
+        raise Unavailable(f"strike must be positive and finite; K={K}")
+    if not np.isfinite(r) or not np.isfinite(q):
+        raise Unavailable(f"rates must be finite; r={r}, q={q}")
 
 
 def black_scholes(
@@ -89,7 +95,7 @@ def black_scholes(
     (``/100``).
     """
     _validate_option_type(option_type)
-    _check_inputs(T, sigma)
+    _check_inputs(S, K, T, r, sigma, q)
     is_call = option_type == "call"
 
     if T == 0.0:
@@ -229,7 +235,7 @@ def monte_carlo(
     reproducible via an isolated generator.
     """
     _validate_option_type(option_type)
-    _check_inputs(T, sigma)
+    _check_inputs(S, K, T, r, sigma, q)
     if T == 0.0:
         payoff = max((S - K) if option_type == "call" else (K - S), 0.0)
         return {
