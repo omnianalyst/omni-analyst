@@ -164,6 +164,7 @@ async def backfill_parameter_sweep(
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
     interval_days: int = _DEFAULT_INTERVAL_DAYS,
     horizon_days: int = _DEFAULT_HORIZON_DAYS,
+    audience_user_id=None,
 ) -> list[tuple[int, BackfillReport]]:
     """A/B test: backfill at multiple window sizes, each in its own calibration bucket.
 
@@ -195,6 +196,7 @@ async def backfill_parameter_sweep(
             horizon_days=horizon_days,
             window=w,
             method_suffix=f".w{w}",
+            audience_user_id=audience_user_id,
         )
         reports.append((w, r))
     return reports
