@@ -28,3 +28,13 @@ async def db():
         yield client
     finally:
         await client.close()
+
+
+# The auth rate limiter is module-level in-memory state; reset it before each
+# test so a suite that logs in many times does not flake on the per-IP ceiling.
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    from omni.auth.ratelimit import reset_for_test
+
+    reset_for_test()
+    yield

@@ -99,6 +99,39 @@ async def _clean(db):
     yield
 
 
+async def test_login_is_rate_limited_per_client_ip(db, database_url):
+    # The front door has no other lock; an unthrottled /auth/login lets a
+    # guesser hammer it at network speed. After the per-IP ceiling the next
+    # attempt is refused with 429, not 401 (so a brute-forcer cannot tell
+    # ceiling from a wrong-password).
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        # First provision so login can actually authenticate -- the limit counts
+        # attempts regardless of correctness.
+        await client.post(
+            "/auth/setup",
+            json={"email": "op@example.com", "password": "a" * 16},
+        )
+        # The autouse conftest reset cleared the setup attempt; flush the window
+        # again so only the logins below count.
+        from omni.auth.ratelimit import reset_for_test
+
+        reset_for_test()
+
+        for _ in range(5):
+            r = await client.post(
+                "/auth/login",
+                json={"email": "op@example.com", "password": "wrong"},
+            )
+            assert r.status_code == 401, r.text
+
+        r_limited = await client.post(
+            "/auth/login",
+            json={"email": "op@example.com", "password": "wrong"},
+        )
+        assert r_limited.status_code == 429
+
+
 async def test_setup_then_login_round_trips_to_the_same_user(db, database_url):
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:

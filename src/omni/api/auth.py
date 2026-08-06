@@ -23,11 +23,12 @@ from typing import Any
 
 from neutron import App, Router
 from neutron.auth.jwt import create_token
-from neutron.error import bad_request, conflict, unauthorized
+from neutron.error import bad_request, conflict, rate_limited, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
 from omni.auth import jwt_secret, resolve_audience_from_request
+from omni.auth.ratelimit import check_rate_limit
 from omni.auth.users import (
     MIN_PASSWORD_LENGTH,
     PasswordTooShort,
@@ -39,6 +40,10 @@ from omni.auth.users import (
 )
 
 TOKEN_EXPIRES_IN = 3600
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "anonymous"
 
 
 class RegisterIn(BaseModel):
@@ -77,11 +82,14 @@ def build_router(app: App) -> Router:
         return {"setup_required": await user_count(app.db.pool) == 0}
 
     @router.post("/auth/setup", status_code=200)
-    async def setup(body: RegisterIn) -> dict:
+    async def setup(body: RegisterIn, request: Request) -> dict:
         # First-run operator provisioning. Refuses once any user exists, so the
         # endpoint cannot be used to take over or backdoor a deployment that has
         # already been claimed. Reaching it after setup returns 409, not a new
-        # account.
+        # account. Rate-limited per client IP -- it is a credential endpoint
+        # reachable during the first-run window.
+        if not check_rate_limit(_client_ip(request)):
+            raise rate_limited("Too many attempts; wait a minute and try again.")
         if await user_count(app.db.pool) > 0:
             raise conflict("setup is already complete")
         try:
@@ -124,7 +132,12 @@ def build_router(app: App) -> Router:
         return _user_dict(row)
 
     @router.post("/auth/login", status_code=200)
-    async def login(body: LoginIn) -> dict:
+    async def login(body: LoginIn, request: Request) -> dict:
+        # Rate-limited per client IP: the front door has no other lock, and an
+        # unthrottled endpoint lets a guesser hammer it at network speed. The
+        # uniform 401 below still applies to the credential check itself.
+        if not check_rate_limit(_client_ip(request)):
+            raise rate_limited("Too many attempts; wait a minute and try again.")
         row = await authenticate_user(
             app.db.pool, email=body.email, password=body.password
         )
