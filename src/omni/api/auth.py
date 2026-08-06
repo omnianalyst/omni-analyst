@@ -23,7 +23,7 @@ from typing import Any
 
 from neutron import App, Router
 from neutron.auth.jwt import create_token
-from neutron.error import bad_request, unauthorized
+from neutron.error import bad_request, conflict, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
@@ -32,8 +32,10 @@ from omni.auth.users import (
     MIN_PASSWORD_LENGTH,
     PasswordTooShort,
     authenticate_user,
+    change_password,
     create_user,
     get_user,
+    user_count,
 )
 
 TOKEN_EXPIRES_IN = 3600
@@ -49,6 +51,11 @@ class LoginIn(BaseModel):
     password: str
 
 
+class ChangePasswordIn(BaseModel):
+    old_password: str
+    new_password: str
+
+
 def _user_dict(row: Any) -> dict:
     created_at: datetime | None = row["created_at"]
     return {
@@ -62,8 +69,50 @@ def _user_dict(row: Any) -> dict:
 def build_router(app: App) -> Router:
     router = Router()
 
+    @router.get("/auth/setup-status")
+    async def setup_status() -> dict:
+        # Anonymous on purpose: the UI needs to know whether to send a first-run
+        # visitor to /setup or /login before any identity exists. It reveals only
+        # a boolean, never which emails are registered.
+        return {"setup_required": await user_count(app.db.pool) == 0}
+
+    @router.post("/auth/setup", status_code=200)
+    async def setup(body: RegisterIn) -> dict:
+        # First-run operator provisioning. Refuses once any user exists, so the
+        # endpoint cannot be used to take over or backdoor a deployment that has
+        # already been claimed. Reaching it after setup returns 409, not a new
+        # account.
+        if await user_count(app.db.pool) > 0:
+            raise conflict("setup is already complete")
+        try:
+            row = await create_user(
+                app.db.pool, email=body.email, password=body.password
+            )
+        except PasswordTooShort:
+            raise bad_request(
+                f"password must be at least {MIN_PASSWORD_LENGTH} characters"
+            )
+        token = create_token(
+            {"sub": str(row["id"])},
+            jwt_secret(),
+            expires_in=TOKEN_EXPIRES_IN,
+        )
+        return {
+            "token": token,
+            "token_type": "bearer",
+            "expires_in": TOKEN_EXPIRES_IN,
+            "user": _user_dict(row),
+        }
+
     @router.post("/auth/register")
-    async def register(body: RegisterIn) -> dict:
+    async def register(body: RegisterIn, request: Request) -> dict:
+        # Adding a second user is an operator action, not an open one. The first
+        # user is provisioned through /auth/setup; further accounts require a
+        # signed-in operator. This keeps registration off the public surface --
+        # app.omnianalyst.com is internet-reachable, and an open register would
+        # let anyone create an account that sees its own audience-scoped slice.
+        if resolve_audience_from_request(request) is None:
+            raise unauthorized("Authentication required")
         try:
             row = await create_user(
                 app.db.pool, email=body.email, password=body.password
@@ -101,6 +150,29 @@ def build_router(app: App) -> Router:
         if row is None:
             raise unauthorized("Authentication required")
         return _user_dict(row)
+
+    @router.post("/auth/change-password", status_code=204)
+    async def change_pw(body: ChangePasswordIn, request: Request) -> None:
+        # Rotate the signed-in operator's own password. Requires the current
+        # password (re-verification) so a stolen token alone cannot lock the
+        # operator out. The old-password failure renders identically to a wrong
+        # login, so the endpoint cannot be used to confirm a guess.
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+        try:
+            ok = await change_password(
+                app.db.pool,
+                user_id=audience,
+                old_password=body.old_password,
+                new_password=body.new_password,
+            )
+        except PasswordTooShort:
+            raise bad_request(
+                f"password must be at least {MIN_PASSWORD_LENGTH} characters"
+            )
+        if not ok:
+            raise unauthorized("Current password is incorrect")
 
     return router
 

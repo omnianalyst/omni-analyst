@@ -84,3 +84,35 @@ async def get_user(pool: asyncpg.Pool, user_id: UUID) -> Any | None:
         "SELECT id, email, created_at, active FROM users WHERE id = $1",
         user_id,
     )
+
+
+async def change_password(
+    pool: asyncpg.Pool, *, user_id: UUID, old_password: str, new_password: str
+) -> bool:
+    """Rotate a user's password after verifying the current one.
+
+    Returns True on success, False when the old password does not match (the
+    caller renders the same response as a wrong login -- no enumeration). Raises
+    PasswordTooShort before touching the row if the new password is weak.
+    """
+    if len(new_password) < MIN_PASSWORD_LENGTH:
+        raise PasswordTooShort
+    row = await pool.fetchrow(
+        "SELECT password_hash FROM users WHERE id = $1", user_id
+    )
+    if row is None or not verify_password(old_password, row["password_hash"]):
+        return False
+    await pool.execute(
+        "UPDATE users SET password_hash = $1 WHERE id = $2",
+        hash_password(new_password),
+        user_id,
+    )
+    return True
+
+
+async def user_count(pool: asyncpg.Pool) -> int:
+    """Number of registered users. Drives the first-run setup gate: the
+    ``/auth/setup`` endpoint is the only way to create the first user, and
+    it refuses once any user exists, so an open deployment cannot be claimed
+    by a stranger."""
+    return await pool.fetchval("SELECT count(*) FROM users")

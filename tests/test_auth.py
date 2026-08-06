@@ -76,6 +76,17 @@ def _make_app(database_url):
     return app
 
 
+async def _setup_first_user(client, email="op@example.com", password="a" * 16):
+    """Provision the operator through the first-run /auth/setup endpoint and
+    return the issued token. Every test that needs a user starts here now that
+    open /auth/register is gated behind a signed-in operator."""
+    r = await client.post(
+        "/auth/setup", json={"email": email, "password": password}
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["token"]
+
+
 @pytest.fixture(autouse=True)
 def _secret(monkeypatch):
     monkeypatch.setenv("OMNI_JWT_SECRET", GOOD_SECRET)
@@ -88,15 +99,17 @@ async def _clean(db):
     yield
 
 
-async def test_register_then_login_round_trips_to_the_same_user(db, database_url):
+async def test_setup_then_login_round_trips_to_the_same_user(db, database_url):
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
-        r_reg = await client.post(
-            "/auth/register",
+        r_setup = await client.post(
+            "/auth/setup",
             json={"email": "alice@example.com", "password": "a" * 16},
         )
-        assert r_reg.status_code == 201, r_reg.text
-        registered_id = r_reg.json()["id"]
+        assert r_setup.status_code == 200, r_setup.text
+        registered_id = r_setup.json()["user"]["id"]
+        # setup returns a token already; prove it resolves to the new user.
+        setup_token = r_setup.json()["token"]
 
         r_login = await client.post(
             "/auth/login",
@@ -112,9 +125,75 @@ async def test_register_then_login_round_trips_to_the_same_user(db, database_url
     assert resolved is not None
     assert str(resolved) == registered_id
 
+    # The setup-issued token is equally valid.
+    assert (
+        str(resolve_audience_from_request(_Req(_bearer(setup_token))))
+        == registered_id
+    )
+
     assert r_me.status_code == 200
     assert r_me.json()["id"] == registered_id
     assert r_me.json()["email"] == "alice@example.com"
+
+
+async def test_setup_status_reflects_user_count(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        # Empty deployment: setup is required.
+        r_empty = await client.get("/auth/setup-status")
+        assert r_empty.status_code == 200
+        assert r_empty.json()["setup_required"] is True
+
+        await _setup_first_user(client)
+
+        r_done = await client.get("/auth/setup-status")
+        assert r_done.json()["setup_required"] is False
+
+
+async def test_setup_refuses_once_any_user_exists(db, database_url):
+    """The anti-backdoor invariant. Once the deployment is claimed, /auth/setup
+    must not create another account -- otherwise anyone hitting the public
+    domain could provision a second operator."""
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        await _setup_first_user(client, email="first@example.com")
+
+        r = await client.post(
+            "/auth/setup",
+            json={"email": "stranger@example.com", "password": "a" * 16},
+        )
+    assert r.status_code == 409, r.text
+
+    # And no stranger row was written.
+    count = await db.pool.fetchval(
+        "SELECT count(*) FROM users WHERE lower(email) = $1",
+        "stranger@example.com",
+    )
+    assert count == 0
+
+
+async def test_register_requires_a_signed_in_operator(db, database_url):
+    """Open registration on an internet-reachable domain lets anyone create an
+    account that sees its own audience-scoped slice. After setup, /auth/register
+    must demand a token; the anonymous call is refused."""
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_first_user(client)
+
+        # Anonymous (no token) -> refused.
+        r_anon = await client.post(
+            "/auth/register",
+            json={"email": "intruder@example.com", "password": "a" * 16},
+        )
+        assert r_anon.status_code == 401
+
+        # Authenticated operator may add a second user.
+        r_authed = await client.post(
+            "/auth/register",
+            json={"email": "second@example.com", "password": "b" * 16},
+            headers=_bearer(token),
+        )
+        assert r_authed.status_code == 201, r_authed.text
 
 
 async def test_forged_or_tampered_token_resolves_to_none_not_the_named_user(
@@ -195,10 +274,7 @@ async def test_wrong_password_and_unknown_email_produce_identical_responses(
 ):
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
-        await client.post(
-            "/auth/register",
-            json={"email": "real@example.com", "password": "correct-horse-12"},
-        )
+        await _setup_first_user(client, email="real@example.com", password="correct-horse-12")
 
         r_wrong_pw = await client.post(
             "/auth/login",
@@ -221,7 +297,7 @@ async def test_password_under_12_characters_is_refused(db, database_url):
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
         r = await client.post(
-            "/auth/register",
+            "/auth/setup",
             json={"email": "short@example.com", "password": "only11chars"},
         )
         assert r.status_code == 400, r.text
@@ -237,15 +313,14 @@ async def test_password_under_12_characters_is_refused(db, database_url):
 async def test_duplicate_email_refused_case_insensitively(db, database_url):
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
-        r_first = await client.post(
-            "/auth/register",
-            json={"email": "User@Example.COM", "password": "a" * 16},
+        token = await _setup_first_user(
+            client, email="User@Example.COM", password="a" * 16
         )
-        assert r_first.status_code == 201
 
         r_dup = await client.post(
             "/auth/register",
             json={"email": "user@example.com", "password": "b" * 16},
+            headers=_bearer(token),
         )
         assert r_dup.status_code == 409, r_dup.text
         assert r_dup.headers["content-type"].startswith("application/problem+json")
@@ -261,12 +336,12 @@ async def test_duplicate_email_refused_case_insensitively(db, database_url):
 async def test_inactive_user_cannot_log_in(db, database_url):
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
-        r_reg = await client.post(
-            "/auth/register",
+        r_setup = await client.post(
+            "/auth/setup",
             json={"email": "frozen@example.com", "password": "a" * 16},
         )
-        assert r_reg.status_code == 201
-        user_id = r_reg.json()["id"]
+        assert r_setup.status_code == 200
+        user_id = r_setup.json()["user"]["id"]
 
     await db.pool.execute("UPDATE users SET active = FALSE WHERE id = $1", user_id)
 
@@ -278,3 +353,68 @@ async def test_inactive_user_cannot_log_in(db, database_url):
     assert r_login.status_code == 401
     # No token is handed to a deactivated principal.
     assert "token" not in r_login.json()
+
+
+async def test_change_password_rotates_then_new_password_logs_in(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_first_user(client, password="old-password-123")
+
+        r = await client.post(
+            "/auth/change-password",
+            json={"old_password": "old-password-123", "new_password": "new-password-456"},
+            headers=_bearer(token),
+        )
+        assert r.status_code == 204, r.text
+
+        # Old password no longer works.
+        r_old = await client.post(
+            "/auth/login",
+            json={"email": "op@example.com", "password": "old-password-123"},
+        )
+        assert r_old.status_code == 401
+        # New one does.
+        r_new = await client.post(
+            "/auth/login",
+            json={"email": "op@example.com", "password": "new-password-456"},
+        )
+        assert r_new.status_code == 200
+
+
+async def test_change_password_wrong_old_password_is_refused(db, database_url):
+    # A stolen token alone must not be enough to lock the operator out: the
+    # current password is re-verified. The failure is indistinguishable from a
+    # wrong login so the endpoint cannot confirm a password guess.
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_first_user(client, password="real-old-pass-1")
+
+        r = await client.post(
+            "/auth/change-password",
+            json={"old_password": "wrong-old-pass-1", "new_password": "newpass123456"},
+            headers=_bearer(token),
+        )
+    assert r.status_code == 401
+
+
+async def test_change_password_weak_new_password_refused(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_first_user(client, password="real-old-pass-1")
+
+        r = await client.post(
+            "/auth/change-password",
+            json={"old_password": "real-old-pass-1", "new_password": "tooshort"},
+            headers=_bearer(token),
+        )
+    assert r.status_code == 400
+
+
+async def test_change_password_requires_auth(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post(
+            "/auth/change-password",
+            json={"old_password": "x", "new_password": "y" * 16},
+        )
+    assert r.status_code == 401
