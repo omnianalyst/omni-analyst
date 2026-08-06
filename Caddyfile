@@ -32,9 +32,12 @@
 	# Framework-provided + API routers. Listed explicitly so a static asset
 	# path can never shadow a route. Add new top-level routers here.
 	@api path /health /openapi.json /docs /redoc \
-	          /alerts/* /analysis/* /auth/* /autonomous/* /briefing/* \
-	          /capabilities/* /coverage/* /entities/* /gaps/* \
-	          /objective/* /watchlists/*
+	          /alerts /alerts/* /analysis /analysis/* /auth /auth/* \
+	          /autonomous /autonomous/* /briefing /briefing/* \
+	          /capabilities /capabilities/* /coverage /coverage/* \
+	          /entities /entities/* /gaps /gaps/* \
+	          /objective /objective/* /watchlists /watchlists/* \
+	          /system /system/*
 	handle @api {
 		reverse_proxy {$OMNI_API_UPSTREAM:-api:8000}
 	}
