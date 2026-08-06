@@ -134,7 +134,9 @@ async def backfill_trend_predictions(
                         )
                     entity_written += 1
             except Exception:
-                pass
+                logger.exception(
+                    "backfill abstain at entity=%s ts=%s", entity_id, ts.isoformat()
+                )
             ts += timedelta(days=interval_days)
 
         if entity_written > 0:
