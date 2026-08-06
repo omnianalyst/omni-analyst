@@ -270,10 +270,18 @@ class TestMetaCalibration:
 
     async def test_sector_resolved(self, db):
         etf = await _seed_entity(db, "sector_etf", "XLK")
+        # Peers: priced for the cross-section but carrying no sector_score -- only
+        # XLK is scored here. XLK leads them over the window.
+        xle = await _seed_entity(db, "sector_etf", "XLE")
+        xlf = await _seed_entity(db, "sector_etf", "XLF")
         await _seed_claim(db, entity_id=etf, claim_type="sector_score",
                           value={"rs_percentile": 0.8, "trend": "uptrend", "macro_alignment": "favorable"},
                           days_ago=40)
-        await _seed_price_path(db, etf, start_price=100.0, end_price=104.0,
+        await _seed_price_path(db, etf, start_price=100.0, end_price=108.0,
+                               start_days_ago=45, days=45)
+        await _seed_price_path(db, xle, start_price=100.0, end_price=101.0,
+                               start_days_ago=45, days=45)
+        await _seed_price_path(db, xlf, start_price=100.0, end_price=104.0,
                                start_days_ago=45, days=45)
 
         report = await resolve_meta(db.pool, horizon_days=30)
@@ -281,7 +289,33 @@ class TestMetaCalibration:
         correct = await db.pool.fetchval(
             "SELECT correct FROM meta_resolution WHERE claim_type = 'sector_score'"
         )
-        assert correct is True
+        assert correct is True  # top-rs sector that genuinely led its peers
+
+    async def test_top_sector_that_only_rose_with_the_market_is_wrong(self, db):
+        # The defect this guards: a top-ranked sector that rose but lagged its
+        # peers must score WRONG, not correct. The old absolute-return logic
+        # scored it correct (return > 0) -- measuring market beta, not
+        # leadership, so every sector in a bull market scored a hit. XLK rises
+        # 2% (positive) but XLE leads at 10% and XLF at 5%; median ~5%; XLK
+        # (rs=0.8, top) underperformed the median -> wrong.
+        xlk = await _seed_entity(db, "sector_etf", "XLK")
+        xle = await _seed_entity(db, "sector_etf", "XLE")
+        xlf = await _seed_entity(db, "sector_etf", "XLF")
+        await _seed_claim(db, entity_id=xlk, claim_type="sector_score",
+                          value={"rs_percentile": 0.8, "trend": "uptrend", "macro_alignment": "favorable"},
+                          days_ago=40)
+        await _seed_price_path(db, xlk, start_price=100.0, end_price=102.0,
+                               start_days_ago=45, days=45)
+        await _seed_price_path(db, xle, start_price=100.0, end_price=110.0,
+                               start_days_ago=45, days=45)
+        await _seed_price_path(db, xlf, start_price=100.0, end_price=105.0,
+                               start_days_ago=45, days=45)
+
+        await resolve_meta(db.pool, horizon_days=30)
+        correct = await db.pool.fetchval(
+            "SELECT correct FROM meta_resolution WHERE claim_type = 'sector_score'"
+        )
+        assert correct is False  # rose with the market but did not lead
 
     async def test_meta_hit_rate_returns_none_below_floor(self, db):
         etf = await _seed_entity(db, "sector_etf", "XLK")

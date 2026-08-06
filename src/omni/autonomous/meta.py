@@ -68,6 +68,28 @@ async def _index_return(pool, *, entity_id, event_date, horizon):
     return vals[-1] / vals[0] - 1.0
 
 
+async def _sector_forward_returns(pool, *, event_date, horizon, etf_ids):
+    """Forward return over [event_date, event_date+horizon] for every sector ETF.
+
+    The cross-section leadership is scored against. ETFs without enough price
+    data in the window are omitted (they cannot be ranked). Returns a mapping
+    ``{entity_id: return}``; the caller takes the median of its values.
+    """
+    out: dict = {}
+    for eid in etf_ids:
+        r = await _index_return(
+            pool, entity_id=eid, event_date=event_date, horizon=horizon
+        )
+        if r is not None:
+            out[eid] = r
+    return out
+
+
+def _median(values: list[float]) -> float:
+    s = sorted(values)
+    return s[len(s) // 2]
+
+
 _DUE_REGIMES = """
 SELECT c.id, c.entity_id, c.value, c.event_date
 FROM claim c
@@ -99,9 +121,13 @@ async def resolve_meta(pool, *, horizon_days: int = _META_HORIZON_DAYS) -> MetaR
 
     For each regime_assessment older than ``horizon_days``: reads the SPY return
     over the window; risk_on is correct if the market rose, risk_off if it fell.
-    For each sector_score: reads the ETF return over the window; a top-half
-    sector (rs_percentile >= 0.5) is correct if it outperformed zero (the
-    zero-return floor -- a sector that scored high but declined was wrong).
+    For each sector_score: reads the ETF return over the window AND the cross-
+    sectional median of all sector ETFs' returns over the same window; a top-
+    half sector (rs_percentile >= 0.5) is correct if it outperformed the median
+    -- led its peers -- not merely if it rose. Scoring against absolute return
+    scored market beta rather than leadership: in a bull market every sector
+    rises, so every top-half call scored correct regardless of whether the
+    ranking actually held. The median makes the meta-hit-rate measure judgment.
 
     Idempotent: meta_resolution PKs on claim_id, so re-running scores only
     claims that are newly due.
@@ -148,24 +174,49 @@ async def resolve_meta(pool, *, horizon_days: int = _META_HORIZON_DAYS) -> MetaR
 
     sectors_n = 0
     due_sectors = await pool.fetch(_DUE_SECTORS, cutoff)
+
+    # The cross-section of sector ETFs, scored once per assessment date so the
+    # 11 ETFs' forward returns are queried once per date, not once per due
+    # score (scores from one scan share a date). Leadership, not beta: a
+    # top-ranked sector is correct only if it outperformed the median peer.
+    etf_ids = [
+        r["id"]
+        for r in await pool.fetch("SELECT id FROM entity WHERE kind = 'sector_etf'")
+    ]
+    xsec_by_date: dict = {}
+
     for s in due_sectors:
         sv = s["value"]
         if isinstance(sv, (str, bytes)):
             sv = json.loads(sv)
         rs = float(sv.get("rs_percentile", 0))
+        ed = s["event_date"]
         etf_ret = await _index_return(
-            pool, entity_id=s["entity_id"], event_date=s["event_date"], horizon=horizon
+            pool, entity_id=s["entity_id"], event_date=ed, horizon=horizon
         )
         if etf_ret is None:
             continue
 
+        if ed not in xsec_by_date:
+            xsec_by_date[ed] = await _sector_forward_returns(
+                pool, event_date=ed, horizon=horizon, etf_ids=etf_ids,
+            )
+        peer_returns = list(xsec_by_date[ed].values())
+        if s["entity_id"] not in xsec_by_date[ed]:
+            peer_returns.append(etf_ret)
+        if len(peer_returns) < 2:
+            # A single-sector cross-section has no median to lead; abstain
+            # rather than score against nothing.
+            continue
+        median = _median(peer_returns)
+
         is_top = rs >= 0.5
         if is_top:
-            correct = etf_ret > 0
-            outcome = f"top_sector_return={etf_ret:.4f}"
+            correct = etf_ret >= median
+            outcome = f"top_sector_return={etf_ret:.4f}_median={median:.4f}"
         else:
-            correct = etf_ret < 0
-            outcome = f"bottom_sector_return={etf_ret:.4f}"
+            correct = etf_ret < median
+            outcome = f"bottom_sector_return={etf_ret:.4f}_median={median:.4f}"
 
         await pool.execute(
             _INSERT_META,
@@ -173,7 +224,11 @@ async def resolve_meta(pool, *, horizon_days: int = _META_HORIZON_DAYS) -> MetaR
             "sector_score",
             correct,
             outcome,
-            json.dumps({"rs_percentile": rs, "sector_return": round(etf_ret, 6)}),
+            json.dumps({
+                "rs_percentile": rs,
+                "sector_return": round(etf_ret, 6),
+                "cross_section_median": round(median, 6),
+            }),
         )
         sectors_n += 1
 
