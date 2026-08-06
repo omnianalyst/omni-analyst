@@ -177,9 +177,7 @@ def score_portfolio_impact(
     affected_tickers: list[str],
 ) -> dict:
     base_impact = sentiment_score * 100
-    if sentiment == "bullish":
-        impact_score = base_impact * (1 + len(affected_tickers) * 0.1)
-    elif sentiment == "bearish":
+    if sentiment == "bullish" or sentiment == "bearish":
         impact_score = base_impact * (1 + len(affected_tickers) * 0.1)
     else:
         impact_score = 0

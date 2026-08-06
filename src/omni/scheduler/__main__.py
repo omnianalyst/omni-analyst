@@ -13,11 +13,11 @@ import asyncio
 import logging
 import signal
 
+from omni.autonomous.runner import AutonomousRunner
 from omni.config import settings
 from omni.db import connect, migrate
 from omni.entities.identify import run as populate_identifiers
 from omni.entities.seed import run as seed_market_universe
-from omni.autonomous.runner import AutonomousRunner
 from omni.scheduler.worker import Scheduler, SchedulerConfig, default_registry
 
 logging.basicConfig(

@@ -19,7 +19,7 @@ from uuid import UUID
 
 import asyncpg
 from neutron.auth.password import hash_password, verify_password
-from neutron.error import bad_request, conflict
+from neutron.error import conflict
 
 MIN_PASSWORD_LENGTH = 12
 

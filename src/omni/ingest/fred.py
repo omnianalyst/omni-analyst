@@ -78,11 +78,10 @@ def parse_observations(
         knowledge_date = _to_datetime(obs.get("realtime_start"))
         if event_date is None or knowledge_date is None:
             continue
-        if knowledge_date < event_date:
-            # ALFRED publishes some series with a realtime_start before the
-            # period closes. The schema forbids knowing a fact before it
-            # happened, so the period is the earliest defensible knowledge date.
-            knowledge_date = event_date
+        # ALFRED publishes some series with a realtime_start before the
+        # period closes. The schema forbids knowing a fact before it
+        # happened, so the period is the earliest defensible knowledge date.
+        knowledge_date = max(knowledge_date, event_date)
         drafts.append(
             ClaimDraft(
                 claim_type=CLAIM_TYPE,

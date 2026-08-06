@@ -24,8 +24,8 @@ Silence is the honest outcome in both cases.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID
 
 from omni.autonomous.reading import (

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from uuid import UUID
 
 from neutron import App, Router
 from neutron.auth.jwt import create_token

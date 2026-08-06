@@ -24,7 +24,6 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 from omni.autonomous.reading import price_closes
 

@@ -38,7 +38,6 @@ from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
-from omni.capabilities.news import extract_ticker_entities
 from omni.ingest.news import FEEDS, FeedFetcher, _fetch_feed, parse_feed
 from omni.ingest.protocol import ClaimDraft, Unavailable
 

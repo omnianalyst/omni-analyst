@@ -39,11 +39,7 @@ def _touches_byo(credential_path: str, router: str) -> bool:
     Guessing wrong in this direction over-restricts a plan. Guessing wrong the
     other way redistributes somebody's licensed data.
     """
-    if credential_path == "keyless":
-        return False
-    if credential_path == "n/a":
-        return False
-    return True
+    return credential_path not in {"keyless", "n/a"}
 
 
 def load_census(path: Path | None = None) -> list[dict]:

@@ -47,8 +47,8 @@ async def visible_claims(
     """Claims this audience may see, most recently knowable first."""
     conditions = [
         "c.superseded_by IS NULL",
-        "((c.audience_user_id IS NULL AND c.redistributable = 'allowed')"
-        " OR (c.audience_user_id IS NOT NULL AND c.audience_user_id = $1))",
+        ("((c.audience_user_id IS NULL AND c.redistributable = 'allowed')"
+         " OR (c.audience_user_id IS NOT NULL AND c.audience_user_id = $1))"),
     ]
     params: list = [audience]
 

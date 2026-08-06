@@ -222,7 +222,7 @@ class FOMODetector:
     def detect_fomo_events(
         self,
         fomo_scores: pd.DataFrame,
-        threshold: float = None
+        threshold: float | None = None
     ) -> list[dict[str, Any]]:
         """
         Detect specific FOMO events from scores

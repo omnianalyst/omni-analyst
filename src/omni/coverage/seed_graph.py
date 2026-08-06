@@ -47,22 +47,22 @@ _CROSS_DOMAIN: tuple[tuple[str, str, str, str], ...] = (
         "BTC",
         "COIN",
         "influences",
-        "Coinbase trading revenue tracks crypto volume; BTC is the largest "
-        "driver of that volume.",
+        ("Coinbase trading revenue tracks crypto volume; BTC is the largest "
+         "driver of that volume."),
     ),
     (
         "BTC",
         "MSTR",
         "influences",
-        "MicroStrategy holds BTC on its balance sheet, so its book value "
-        "moves with the BTC price.",
+        ("MicroStrategy holds BTC on its balance sheet, so its book value "
+         "moves with the BTC price."),
     ),
     (
         "ETH",
         "COIN",
         "influences",
-        "ETH is a leading share of Coinbase's listed crypto volume and thus "
-        "of its trading revenue.",
+        ("ETH is a leading share of Coinbase's listed crypto volume and thus "
+         "of its trading revenue."),
     ),
 )
 

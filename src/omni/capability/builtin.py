@@ -57,10 +57,10 @@ def _adapter(
 def build_builtin_registry(settings=None) -> Registry:
     from omni.ingest.coingecko import CoinGeckoAdapter
     from omni.ingest.edgar import EdgarAdapter
-    from omni.ingest.fred import FredAdapter
-    from omni.ingest.macro_perception import MacroPerceptionAdapter
     from omni.ingest.entity_news import EntityNewsAdapter
     from omni.ingest.filings import FilingsAdapter
+    from omni.ingest.fred import FredAdapter
+    from omni.ingest.macro_perception import MacroPerceptionAdapter
     from omni.ingest.news import NewsAdapter
     from omni.ingest.onchain import OnChainAdapter
     from omni.ingest.polygon import PolygonAdapter

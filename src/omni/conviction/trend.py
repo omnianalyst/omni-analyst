@@ -38,7 +38,6 @@ import numpy as np
 from omni.conviction.ledger import record_prediction
 from omni.conviction.predict import _first_passage_confidence
 from omni.coverage.visibility import visible_claims_cte
-from omni.ingest.protocol import Unavailable
 
 _CAPABILITY = "trend.sma"
 METHOD = "trend.sma"

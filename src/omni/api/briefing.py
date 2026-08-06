@@ -21,7 +21,6 @@ from typing import Any
 from uuid import UUID
 
 from neutron import App, Router
-from neutron.error import bad_request
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
