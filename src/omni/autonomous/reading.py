@@ -92,9 +92,9 @@ async def macro_series_values(
         params.append(as_of)
         clauses.append(f"knowledge_date <= ${len(params)}")
     sql = (
-        "SELECT event_date, value FROM claim WHERE "
+        "SELECT DISTINCT ON (event_date) event_date, value FROM claim WHERE "
         + " AND ".join(clauses)
-        + " ORDER BY event_date DESC LIMIT $" + str(len(params) + 1)
+        + " ORDER BY event_date DESC, knowledge_date DESC LIMIT $" + str(len(params) + 1)
     )
     params.append(limit)
     rows = await pool.fetch(sql, *params)
