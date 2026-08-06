@@ -124,14 +124,11 @@ class AutonomousRunner:
             "USSLIND",             # LEI
         )
 
-        # The derived signal types the macro loop consumes.
-        signal_types = (
-            "yield_curve_signal",
-            "sahm_rule_signal",
-            "inflation_signal",
-            "output_gap_signal",
-            "lei_signal",
-        )
+        # The derived signal types (yield_curve_signal, etc.) are NOT demanded
+        # because the fill pipeline can't route derived-capability gaps (NULL
+        # key + series-fetched convention). The macro loop reads raw FRED data
+        # directly and computes signals inline. Demanding the signal types just
+        # creates unfillable gaps that retry forever and waste fill cycles.
 
         created = 0
         for key in fred_series:
@@ -149,20 +146,14 @@ class AutonomousRunner:
             )
             created += 1
 
-        for signal_type in signal_types:
-            exists = await self._pool.fetchval(
-                "SELECT 1 FROM demand WHERE entity_id = $1 "
-                "AND claim_type = $2::claim_type AND key IS NULL "
-                "AND channel = 'autonomous' AND active",
-                macro_id, signal_type,
-            )
-            if exists:
-                continue
-            await autonomous_attention(
-                self._pool, entity_id=macro_id,
-                claim_type=signal_type, key=None,
-            )
-            created += 1
+        # Also deactivate any stale signal-type demand from earlier bootstraps
+        # (the macro loop no longer needs these — it reads raw data directly).
+        await self._pool.execute(
+            "UPDATE demand SET active = false "
+            "WHERE channel = 'autonomous' AND claim_type != 'macro_series_point' "
+            "AND claim_type != 'price_snapshot' AND entity_id = $1",
+            macro_id,
+        )
 
         # Sector ETF + index prices (byo_only Polygon). The operator must
         # exist for the fill pipeline to attribute these.
