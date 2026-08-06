@@ -54,3 +54,9 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+
+# The execution tier is deliberately unwired (policy: analysis describes,
+# execution acts). Its blind-except patterns never run in production, so the
+# broad catches are documented isolation rather than swallowed bugs.
+[tool.ruff.lint.per-file-ignores]
+"src/omni/execution/*" = ["BLE001", "S110"]

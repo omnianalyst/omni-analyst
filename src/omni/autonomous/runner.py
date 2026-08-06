@@ -191,7 +191,7 @@ class AutonomousRunner:
         for task in self._tasks:
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001,S110 - shutdown teardown
                 pass
         self._tasks.clear()
 

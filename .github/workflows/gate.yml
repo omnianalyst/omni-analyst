@@ -1,0 +1,38 @@
+name: gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Matches the prod/dev compose image so migration behaviour is identical.
+        image: timescale/timescaledb:2.17.2-pg17
+        env:
+          POSTGRES_DB: omni_v2_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d omni_v2_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5434/omni_v2_test
+      OMNI_JWT_SECRET: ci-secret-at-least-thirty-two-characters-long
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --extra dev
+      - run: uv run ruff check src/
+      - run: uv run pytest -q

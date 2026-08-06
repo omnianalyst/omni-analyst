@@ -140,7 +140,7 @@ async def _fetch_alfred(
             detail = ""
             try:
                 detail = response.json().get("error_message", "")
-            except Exception:
+            except Exception:  # noqa: BLE001 - JSON parse fallback to raw text; never fatal
                 detail = response.text[:200]
             raise Unavailable(
                 f"ALFRED returned HTTP {response.status_code} for {series_id}"

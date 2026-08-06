@@ -414,7 +414,7 @@ class SentimentDynamicsModel:
     ) -> dict[str, Any]:
         """Analyze how sentiment spreads across assets"""
         # Calculate rolling correlations
-        rolling_corr = sentiment.rolling(window).corr()
+        rolling_corr = sentiment.rolling(window).corr()  # noqa: F841 - retained for future contagion analysis (orphan method)
 
         # Extract current correlations
         current_corr = sentiment.iloc[-window:].corr()
@@ -523,7 +523,7 @@ class SentimentDynamicsModel:
                 'trend_forecast': 'improving' if forecast.iloc[-1] > sentiment_history.iloc[-1] else 'deteriorating'
             }
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - orphan forecast method; logs and degrades, slated for extraction
             logger.error(f"Failed to predict sentiment evolution: {e}")
 
             # Fallback to simple forecast

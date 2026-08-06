@@ -20,9 +20,9 @@ database. ``fetch_for_walk_forward`` is the single DB touchpoint.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Sequence
 
 # Must match gate.MIN_RESOLVED_FOR_CALIBRATION: a bucket below this floor has
 # no statistically meaningful rate, so it must not move the threshold.

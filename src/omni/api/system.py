@@ -15,13 +15,13 @@ reveals loop freshness, demand volume and provider fill rates. The public
 
 from __future__ import annotations
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 from neutron import App, Router
+from neutron.error import unauthorized
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
-from neutron.error import unauthorized
 
 
 def build_router(app: App) -> Router:

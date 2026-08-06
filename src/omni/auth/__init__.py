@@ -70,7 +70,7 @@ def resolve_audience_from_request(request: Request) -> UUID | None:
         return None
     try:
         payload = decode_token(token, secret)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any decode failure = not authenticated, never a 500
         return None
     sub = payload.get("sub")
     if not sub:

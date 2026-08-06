@@ -181,7 +181,7 @@ async def predict_once(pool, *, horizon_days: int) -> tuple[int, int]:
                     as_of=now,
                     horizon_ends_at=horizon,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - a producer raising is an honest refusal (abstain, not error)
                 # A producer raising is an honest refusal (e.g. DCF on negative
                 # FCF, or incomplete coverage); count it as abstain, not error.
                 pid = None
@@ -308,7 +308,7 @@ class Scheduler:
         for task in self._tasks:
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001,S110 - shutdown: never let one task's error block teardown
                 pass
         self._tasks.clear()
 
