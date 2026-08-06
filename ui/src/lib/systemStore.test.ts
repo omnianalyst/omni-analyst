@@ -25,6 +25,7 @@ const fetchStatus = vi.mocked(getSystemStatus);
 const OK = {
   now: "2026-01-01T00:00:00Z",
   loops: [],
+  health: { overall: null, loops: [] },
   demand: { active: 0, total: 0 },
   fill_last_hour: {},
   production_24h: { predictions: 0, findings: 0 },

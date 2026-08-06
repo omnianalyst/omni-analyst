@@ -9,9 +9,34 @@ export interface LoopStatus {
   never_run: boolean;
 }
 
+// The process view of each loop, written by the scheduler each iteration. This
+// is the signal the effect-derived `loops` array above cannot give: a loop that
+// is iterating but failing every cycle stops writing output, so its age looks
+// like idle -- `consecutive_failures` and `last_error` are how that becomes
+// visible without waiting for staleness to accumulate. The loop names here are
+// the scheduler's loops (sweep/fill/resolve/predict/surface/alerts), which do
+// not line up one-to-one with the output-table names in `loops`, so the two are
+// kept as separate views rather than joined.
+export interface LoopHealthEntry {
+  loop: string;
+  state: "ok" | "stale" | "failing";
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  consecutive_failures: number;
+  last_error: string | null;
+}
+
+export interface SystemHealth {
+  // null means no loop has iterated yet (a fresh deployment) -- honest emptiness,
+  // not "ok".
+  overall: "ok" | "stale" | "failing" | null;
+  loops: LoopHealthEntry[];
+}
+
 export interface SystemStatus {
   now: string;
   loops: LoopStatus[];
+  health: SystemHealth;
   demand: { active: number; total: number };
   fill_last_hour: Record<string, number>;
   production_24h: { predictions: number; findings: number };
@@ -143,4 +168,32 @@ export function engineStatusWord(tier: StalenessTier): EngineStatusWord {
 export function loopAgeLabel(loop: LoopStatus): string {
   if (loop.never_run) return "never run";
   return formatAge(loop.age_seconds);
+}
+
+// The loops a glance at the rail needs to flag: those currently failing (raised
+// last iteration) or stale (no success in many cycles). Healthy loops are
+// omitted so the panel stays a signal, not a directory. Failing sorts above
+// stale because a failing loop needs attention now; a stale one may recover on
+// its next tick.
+export type HealthFlag = "failing" | "stale";
+
+export function unhealthyLoops(health: SystemHealth | undefined): {
+  loop: string;
+  flag: HealthFlag;
+  detail: string;
+}[] {
+  if (!health || !health.loops) return [];
+  const out: { loop: string; flag: HealthFlag; detail: string }[] = [];
+  for (const h of health.loops) {
+    if (h.state === "failing") {
+      const streak =
+        h.consecutive_failures > 1 ? ` (${h.consecutive_failures}x in a row)` : "";
+      const reason = h.last_error ? `: ${h.last_error}` : "";
+      out.push({ loop: h.loop, flag: "failing", detail: `failing${streak}${reason}` });
+    } else if (h.state === "stale") {
+      out.push({ loop: h.loop, flag: "stale", detail: "no recent success" });
+    }
+  }
+  out.sort((a, b) => (a.flag === b.flag ? a.loop.localeCompare(b.loop) : a.flag === "failing" ? -1 : 1));
+  return out;
 }

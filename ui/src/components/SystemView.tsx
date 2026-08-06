@@ -6,6 +6,7 @@ import {
   loopAgeLabel,
   loopCadence,
   scheduledLoopTier,
+  unhealthyLoops,
   worstScheduledTier,
   type EngineStatusWord,
   type LoopStatus,
@@ -93,6 +94,7 @@ export function SystemView() {
   const word = engineStatusWord(worst);
   const tierClass = WORD_TIER[word];
   const fillEntries = Object.entries(s.fill_last_hour).sort((a, b) => b[1] - a[1]);
+  const unhealthy = unhealthyLoops(s.health);
   const sortedLoops = [...s.loops].sort((a, b) => {
     const order = (l: LoopStatus) => (loopCadence(l.loop) === "scheduled" ? 0 : 1);
     if (order(a) !== order(b)) return order(a) - order(b);
@@ -153,6 +155,27 @@ export function SystemView() {
             </div>
           </div>
         </div>
+      </section>
+
+      <section class="panel">
+        <h2 class="panel-title">Loop health</h2>
+        {unhealthy.length === 0 ? (
+          <p class="empty">
+            {s.health.overall === null
+              ? "No loop has run yet -- health appears after the first iteration."
+              : "All loops healthy. A failing or stale loop surfaces here with its reason."}
+          </p>
+        ) : (
+          <ul class="health-list">
+            {unhealthy.map((u) => (
+              <li class={`health-item tier-${u.flag === "failing" ? "dead" : "stale"}`}>
+                <span class={`engine-dot tier-${u.flag === "failing" ? "dead" : "stale"}`} aria-hidden="true" />
+                <span class="claim-type">{u.loop}</span>
+                <span class="mono">{u.detail}</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section class="panel">

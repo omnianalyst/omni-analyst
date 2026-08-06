@@ -401,6 +401,31 @@ tr.row.tier-unknown td:first-child {
   color: var(--accent);
   text-decoration: none;
 }
+.health-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.health-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-left: 3px solid currentColor;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+.health-item .claim-type {
+  font-weight: 600;
+  min-width: 92px;
+}
+.health-item .mono {
+  font-size: 13px;
+  color: var(--muted);
+  word-break: break-word;
+}
 .claim-value {
   font-family: var(--mono);
   font-size: 13px;

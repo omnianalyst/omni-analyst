@@ -5,8 +5,10 @@ import {
   loopAgeLabel,
   loopCadence,
   scheduledLoopTier,
+  unhealthyLoops,
   worstScheduledTier,
   type LoopStatus,
+  type SystemHealth,
 } from "./system";
 
 const MIN = 60;
@@ -145,5 +147,45 @@ describe("engineStatusWord", () => {
     expect(engineStatusWord("aging")).toBe("degraded");
     expect(engineStatusWord("stale")).toBe("stalled");
     expect(engineStatusWord("dead")).toBe("down");
+  });
+});
+
+describe("unhealthyLoops", () => {
+  function health(loops: SystemHealth["loops"]): SystemHealth {
+    return { overall: "ok", loops };
+  }
+
+  it("returns nothing when every loop is ok or the view is empty", () => {
+    expect(unhealthyLoops(undefined)).toEqual([]);
+    expect(unhealthyLoops(health([]))).toEqual([]);
+    expect(
+      unhealthyLoops(
+        health([{ loop: "sweep", state: "ok", last_success_at: "t", last_failure_at: null, consecutive_failures: 0, last_error: null }]),
+      ),
+    ).toEqual([]);
+  });
+
+  it("flags a failing loop with its error and streak, failing above stale", () => {
+    const out = unhealthyLoops(
+      health([
+        { loop: "sweep", state: "ok", last_success_at: "t", last_failure_at: null, consecutive_failures: 0, last_error: null },
+        { loop: "predict", state: "stale", last_success_at: "old", last_failure_at: null, consecutive_failures: 0, last_error: null },
+        { loop: "fill", state: "failing", last_success_at: "t", last_failure_at: "t2", consecutive_failures: 3, last_error: "RuntimeError: NoCoverage" },
+      ]),
+    );
+    // Failing sorts first; the streak count and error text are both carried --
+    // a wrong impl that dropped either would fail this assertion.
+    expect(out[0]).toEqual({ loop: "fill", flag: "failing", detail: "failing (3x in a row): RuntimeError: NoCoverage" });
+    expect(out[1].flag).toBe("stale");
+    expect(out).toHaveLength(2);
+  });
+
+  it("omits the streak when a loop has failed exactly once", () => {
+    const out = unhealthyLoops(
+      health([
+        { loop: "resolve", state: "failing", last_success_at: null, last_failure_at: "t", consecutive_failures: 1, last_error: "boom" },
+      ]),
+    );
+    expect(out[0].detail).toBe("failing: boom");
   });
 });
