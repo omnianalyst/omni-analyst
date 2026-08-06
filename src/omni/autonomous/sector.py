@@ -205,8 +205,7 @@ async def scan_sectors(
             "SELECT id FROM claim "
             "WHERE entity_id = $1 AND claim_type = 'sector_score' "
             "AND key = $2 AND source = $3 "
-            "AND event_date = $4 AND knowledge_date = $5 "
-            "AND audience_user_id IS NULL",
+            "AND event_date = $4 AND knowledge_date = $5",
             entity_id, symbol.lower(), SOURCE, event_date, knowledge_date,
         )
         if existing is not None:
