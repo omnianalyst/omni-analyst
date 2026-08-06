@@ -35,6 +35,10 @@ export interface BriefingFinding {
   confidence: number;
   threshold: number | null;
   calibrated_hit_rate: number | null;
+  direction: "up" | "down" | null;
+  entry_price: number | null;
+  upper_barrier: number | null;
+  lower_barrier: number | null;
   supporting: string[];
   disconfirming: string[];
   prediction_id: string | null;

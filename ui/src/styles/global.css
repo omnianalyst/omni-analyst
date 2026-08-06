@@ -1190,3 +1190,237 @@ tr.row.tier-unknown td:first-child {
     display: none;
   }
 }
+
+/* -- Living brief: market banner, claim cards, confidence ------------------ */
+
+.market-banner {
+  margin: 0 0 20px;
+  padding: 22px 24px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+.market-banner-loading,
+.market-banner-none {
+  border-left-color: var(--tier-unknown);
+}
+.market-headline {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.market-implication {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.market-date {
+  margin: 10px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.track-strip {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 13px;
+  color: var(--muted);
+}
+.track-strip strong {
+  color: var(--text);
+}
+
+.panel-sub {
+  margin: -6px 0 14px;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+.claims-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* The claim card: direction · confidence · chain · invalidation · evidence.
+   Border-left tinted by direction so a glance sorts up from down. */
+.claim-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.claim-up {
+  border-left: 3px solid var(--tier-fresh);
+}
+.claim-down {
+  border-left: 3px solid var(--tier-dead);
+}
+.claim-flat {
+  border-left: 3px solid var(--tier-unknown);
+}
+
+.claim-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.claim-dir {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.claim-dir-up {
+  color: var(--tier-fresh);
+  background: rgba(45, 212, 191, 0.1);
+}
+.claim-dir-down {
+  color: var(--tier-dead);
+  background: rgba(239, 68, 68, 0.1);
+}
+.claim-dir-flat {
+  color: var(--tier-unknown);
+  background: rgba(100, 116, 139, 0.1);
+}
+.claim-glyph {
+  font-size: 11px;
+}
+.claim-ticker {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text);
+}
+.claim-name {
+  font-size: 13px;
+}
+.claim-method {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+}
+
+/* Confidence: a bar plus the felt word plus the inverse-odds plus the track
+   record. The point is that 0.74 and "~1 in 4 wrong" render together. */
+.claim-confidence {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.conf-bar {
+  flex: 1 1 140px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-elev);
+  overflow: hidden;
+  min-width: 80px;
+}
+.conf-fill {
+  height: 100%;
+  border-radius: 4px;
+}
+.conf-fill-up {
+  background: var(--tier-fresh);
+}
+.conf-fill-down {
+  background: var(--tier-dead);
+}
+.conf-fill-flat {
+  background: var(--tier-unknown);
+}
+.conf-word {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.conf-wrong {
+  font-size: 12px;
+  color: var(--faint);
+}
+.conf-track {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* The deduction chain as plain-English steps. Each layer glyph-tinted so the
+   macro -> sector -> stock shape is visible at a glance. */
+.claim-chain {
+  list-style: none;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.chain-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.chain-glyph {
+  font-size: 10px;
+}
+.chain-macro .chain-glyph {
+  color: var(--tier-unknown);
+}
+.chain-sector .chain-glyph {
+  color: var(--tier-stale);
+}
+.chain-stock .chain-glyph {
+  color: var(--accent);
+}
+.chain-stock .chain-text {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.claim-invalidation {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.claim-invalidation strong {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.claim-evidence-toggle {
+  align-self: flex-start;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.claim-evidence-toggle:hover {
+  border-color: var(--accent);
+}

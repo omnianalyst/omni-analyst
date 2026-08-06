@@ -1,11 +1,11 @@
-import { ConsoleView } from "../components/ConsoleView";
+import { BriefView } from "../components/BriefView";
 
 export const config = { mode: "app", hydrate: true };
 
 export function head() {
-  return { title: "Console | Omni Analyst" };
+  return { title: "Omni Analyst — today's read" };
 }
 
 export default function HomePage() {
-  return <ConsoleView />;
+  return <BriefView />;
 }

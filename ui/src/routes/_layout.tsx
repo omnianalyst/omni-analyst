@@ -14,13 +14,14 @@ export function head() {
 }
 
 const NAV = [
+  { href: "/briefing", label: "Briefing" },
+  { href: "/console", label: "Console" },
   { href: "/search", label: "Search" },
   { href: "/objective", label: "Objective" },
   { href: "/regime", label: "Regime" },
   { href: "/sectors", label: "Sectors" },
   { href: "/watchlist", label: "Watchlists" },
   { href: "/alerts", label: "Alerts" },
-  { href: "/briefing", label: "Briefing" },
   { href: "/system", label: "System" },
 ];
 

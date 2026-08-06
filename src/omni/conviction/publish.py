@@ -108,9 +108,11 @@ async def briefing(pool, *, audience: UUID | None = None, limit: int = 20) -> li
                f.threshold, f.calibrated_hit_rate, f.supporting,
                f.disconfirming, f.prediction_id, f.created_at,
                f.deduction_chain,
-               e.symbol, e.name
+               e.symbol, e.name,
+               p.direction, p.entry_price, p.upper_barrier, p.lower_barrier
         FROM finding f
         JOIN entity e ON e.id = f.entity_id
+        LEFT JOIN prediction p ON p.id = f.prediction_id
         WHERE f.status = 'surfaced'
           AND (f.audience_user_id IS NULL OR f.audience_user_id = $1)
         ORDER BY f.created_at DESC

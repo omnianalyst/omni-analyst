@@ -66,6 +66,10 @@ def _finding_to_dict(row) -> dict:
         "confidence": row["confidence"],
         "threshold": row["threshold"],
         "calibrated_hit_rate": row["calibrated_hit_rate"],
+        "direction": row["direction"],
+        "entry_price": float(row["entry_price"]) if row.get("entry_price") is not None else None,
+        "upper_barrier": float(row["upper_barrier"]) if row.get("upper_barrier") is not None else None,
+        "lower_barrier": float(row["lower_barrier"]) if row.get("lower_barrier") is not None else None,
         "supporting": _jsonb(row["supporting"]),
         "disconfirming": _jsonb(row["disconfirming"]),
         "prediction_id": (

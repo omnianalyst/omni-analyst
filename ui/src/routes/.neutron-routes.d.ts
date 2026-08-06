@@ -5,6 +5,7 @@ declare module "@neutron-build/core" {
     | "/"
     | "/alerts"
     | "/briefing"
+    | "/console"
     | `/entity/${string}`
     | "/login"
     | "/objective"

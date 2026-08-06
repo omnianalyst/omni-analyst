@@ -1,26 +1,25 @@
+import { useState } from "preact/hooks";
 import {
   formatConfidence,
-  formatHitRate,
   type BriefingFinding,
   type DeductionLayer,
 } from "../lib/briefing";
+import {
+  chainSteps,
+  confidenceWord,
+  directionGlyph,
+  directionWord,
+  hitRateFelt,
+  invalidationLevel,
+  oddsOfWrong,
+  priceLabel,
+} from "../lib/explain";
 
 function asStrings(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((entry) =>
     typeof entry === "string" ? entry : JSON.stringify(entry),
   );
-}
-
-function chainSummary(chain: DeductionLayer[]): string {
-  return chain
-    .map((c) => {
-      if (c.layer === "macro") return `${c.cycle_phase}/${c.risk_regime?.replace("_", " ")}`;
-      if (c.layer === "sector") return `${c.etf_symbol} ${c.trend}/${c.macro_alignment}`;
-      if (c.layer === "stock") return `${c.direction} @ ${formatConfidence(c.confidence)}`;
-      return c.layer;
-    })
-    .join(" -> ");
 }
 
 // One column shape, rendered for both supporting and disconfirming, so neither
@@ -53,50 +52,77 @@ function EvidenceColumn({
   );
 }
 
+const CHAIN_GLYPH: Record<string, string> = {
+  macro: "\u25CF",
+  sector: "\u25B7",
+  stock: "\u2605",
+};
+
 export function FindingCard({ finding }: { finding: BriefingFinding }) {
+  const [showEvidence, setShowEvidence] = useState(false);
   const supporting = asStrings(finding.supporting);
   const disconfirming = asStrings(finding.disconfirming);
+  const dir = finding.direction;
+  const dirClass = dir === "up" ? "up" : dir === "down" ? "down" : "flat";
+  const confPct = Math.max(0, Math.min(100, Math.round((finding.confidence || 0) * 100)));
+  const invalidation = invalidationLevel(dir, finding.upper_barrier, finding.lower_barrier);
+  const wrong = oddsOfWrong(finding.confidence);
+  const steps = chainSteps(finding.deduction_chain as DeductionLayer[] | undefined);
+
   return (
-    <li class="gap-row" key={finding.id}>
-      <div class="gap-head">
-        <span class="gap-type">
-          {finding.entity.symbol ?? "\u2014"}
-          {finding.entity.name ? (
-            <span class="gap-key"> &middot; {finding.entity.name}</span>
-          ) : null}
+    <li class={`claim-card claim-${dirClass}`} key={finding.id}>
+      <div class="claim-head">
+        <span class={`claim-dir claim-dir-${dirClass}`} aria-label={`trend ${directionWord(dir)}`}>
+          <span class="claim-glyph" aria-hidden="true">{directionGlyph(dir)}</span>
+          {directionWord(dir)}
         </span>
-        <span class="gap-class">{finding.method}</span>
-      </div>
-      <div class="gap-meta">
-        <span>
-          confidence <strong>{formatConfidence(finding.confidence)}</strong>
-        </span>
-        <span>
-          threshold <strong>{formatConfidence(finding.threshold)}</strong>
-        </span>
-        <span>
-          hit rate <strong>{formatHitRate(finding.calibrated_hit_rate)}</strong>
-        </span>
-        {finding.created_at ? (
-          <span class="faint">surfaced {finding.created_at.slice(0, 10)}</span>
+        <span class="claim-ticker">{finding.entity.symbol ?? "\u2014"}</span>
+        {finding.entity.name ? (
+          <span class="claim-name muted">{finding.entity.name}</span>
         ) : null}
+        <span class="claim-method">{finding.method}</span>
       </div>
-      <div class="evidence-grid">
-        <EvidenceColumn
-          title="Supporting"
-          items={supporting}
-          emptyText="none cited"
-        />
-        <EvidenceColumn
-          title="Disconfirming"
-          items={disconfirming}
-          emptyText="none found"
-        />
+
+      <div class="claim-confidence">
+        <div class="conf-bar" aria-hidden="true">
+          <div class={`conf-fill conf-fill-${dirClass}`} style={{ width: `${confPct}%` }} />
+        </div>
+        <span class="conf-word">{confidenceWord(finding.confidence)}</span>
+        {wrong ? <span class="conf-wrong">{wrong}</span> : null}
+        <span class="conf-track">{hitRateFelt(finding.calibrated_hit_rate)}</span>
       </div>
-      {finding.deduction_chain && finding.deduction_chain.length > 1 ? (
-        <div class="deduction-box">
-          <p class="deduction-title">Deduction chain</p>
-          <p class="deduction-summary">{chainSummary(finding.deduction_chain)}</p>
+
+      {steps.length > 0 ? (
+        <ol class="claim-chain">
+          {steps.map((s, i) => (
+            <li key={i} class={`chain-step chain-${s.layer}`}>
+              <span class="chain-glyph" aria-hidden="true">{CHAIN_GLYPH[s.layer] || "\u2022"}</span>
+              <span class="chain-text">{s.text}</span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+
+      {invalidation !== null ? (
+        <p class="claim-invalidation">
+          Proven wrong {dir === "up" ? "below" : dir === "down" ? "above" : "at"}{" "}
+          <strong>{priceLabel(invalidation)}</strong>
+          <span class="muted"> &middot; entry {priceLabel(finding.entry_price)}</span>
+        </p>
+      ) : null}
+
+      <button
+        type="button"
+        class="claim-evidence-toggle"
+        onClick={() => setShowEvidence((v) => !v)}
+        aria-expanded={showEvidence}
+      >
+        {showEvidence ? "Hide evidence" : `Evidence (${supporting.length} for, ${disconfirming.length} against)`}
+      </button>
+      {showEvidence ? (
+        <div class="evidence-grid">
+          <EvidenceColumn title="Supporting" items={supporting} emptyText="none cited" />
+          <EvidenceColumn title="Disconfirming" items={disconfirming} emptyText="none found" />
         </div>
       ) : null}
     </li>
