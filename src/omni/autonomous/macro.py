@@ -231,6 +231,22 @@ async def assess_macro_regime(
         )
         return None
 
+    # The other core recession signals: a missing yield-curve or Sahm series
+    # must not default to "not inverted" / "not triggered" and produce a
+    # confident low-recession regime from absent data. That is the silent-
+    # default fabrication vector the no-fallback rule exists to prevent. The
+    # compute functions return a None indicator exactly when the series was too
+    # short to compute -- distinct from a genuine False, which carries a real
+    # (possibly zero) indicator value. LEI is the exception: it is conditionally
+    # reweighted below, so its absence is handled rather than fatal.
+    if yc_spread is None or sahm_indicator is None:
+        logger.info(
+            "macro regime abstained: insufficient core recession data "
+            "(dgs2=%d dgs10=%d unrate=%d)",
+            len(dgs2), len(dgs10), len(unrate),
+        )
+        return None
+
     # Output gap may be None if GDPPOT vintages conflict (extreme gap guarded).
     # Proceed without it — policy_stance becomes "unknown", risk_regime skips
     # the stagflation check, but the regime still assesses from other signals.

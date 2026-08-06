@@ -190,6 +190,38 @@ class TestAssessMacroRegime:
         result = await assess_macro_regime(db.pool)
         assert result is None
 
+    async def test_abstains_when_yield_curve_data_missing(self, db):
+        # The fabrication vector this guards: a missing yield-curve series must
+        # not default yc_inverted to False and emit a confident low-recession
+        # regime from absent data. It must abstain, like CPI. The double
+        # assertion (None AND no claim) discriminates against the old behaviour,
+        # which wrote a default-False regime.
+        entity = await _seed_macro_entity(db)
+        setup = _full_fred_setup()
+        setup["DGS2"] = []
+        setup["DGS10"] = []
+        await _seed_all_fred(db, entity, setup)
+
+        result = await assess_macro_regime(db.pool)
+        assert result is None
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM claim WHERE claim_type = 'regime_assessment'"
+        ) == 0
+
+    async def test_abstains_when_sahm_data_missing(self, db):
+        # Sahm needs a 12-month low; two observations cannot compute it. A
+        # missing unemployment series must not default to "not triggered".
+        entity = await _seed_macro_entity(db)
+        setup = _full_fred_setup()
+        setup["UNRATE"] = [3.8, 3.9]  # 2 obs, need 12
+        await _seed_all_fred(db, entity, setup)
+
+        result = await assess_macro_regime(db.pool)
+        assert result is None
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM claim WHERE claim_type = 'regime_assessment'"
+        ) == 0
+
     async def test_writes_regime_with_full_data(self, db):
         entity = await _seed_macro_entity(db)
         await _seed_all_fred(db, entity, _full_fred_setup(dgs2=4.0, dgs10=4.2))
