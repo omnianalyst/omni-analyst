@@ -41,7 +41,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from omni.ingest.protocol import ClaimDraft, Unavailable
+from omni.ingest.protocol import ClaimDraft, Unavailable, get_json
 
 SOURCE = "coingecko"
 PROVIDER_KEY = "coingecko"
@@ -248,7 +248,7 @@ async def _fetch_market_chart(
     params = {"vs_currency": vs_currency, "days": days}
     headers = {"x-cg-demo-api-key": api_key} if api_key else None
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(url, params=params, headers=headers)
+        response = await get_json(client, url, params=params, headers=headers)
         if response.status_code == 429:
             raise Unavailable(
                 f"CoinGecko returned HTTP 429 for {coin_id}"

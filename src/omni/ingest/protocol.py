@@ -65,3 +65,23 @@ class Adapter(Protocol):
 
 
 Fetcher = Callable[..., Awaitable[Any]]
+
+
+async def get_json(client, url: str, *, params=None, headers=None):
+    """``client.get`` wrapper that translates every httpx transport failure
+    into ``Unavailable`` -- the single source-failure signal the fill pipeline
+    catches and records as ``unfillable``.
+
+    Without this, a ``ConnectError`` / ``ReadTimeout`` from a provider outage
+    bubbles as a bare ``Exception``, which the pipeline records as ``error``
+    (a bug, not an honest refusal) and which burns the full 30s timeout per
+    gap. Centralizing the translation means every adapter classifies a
+    down provider the same way. httpx is imported lazily so the ingest package
+    stays importable without it installed.
+    """
+    import httpx
+
+    try:
+        return await client.get(url, params=params, headers=headers)
+    except httpx.HTTPError as exc:
+        raise Unavailable(f"transport failure for {url}: {exc}") from exc

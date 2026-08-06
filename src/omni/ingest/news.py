@@ -25,7 +25,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 from xml.etree import ElementTree as ET
 
-from omni.ingest.protocol import ClaimDraft, Unavailable
+from omni.ingest.protocol import ClaimDraft, Unavailable, get_json
 
 SOURCE = "rss"
 PROVIDER_KEY = "rss"
@@ -219,7 +219,7 @@ async def _fetch_feed(url: str) -> str:
     async with httpx.AsyncClient(
         timeout=REQUEST_TIMEOUT, follow_redirects=True
     ) as client:
-        response = await client.get(url, headers={"User-Agent": USER_AGENT})
+        response = await get_json(client, url, headers={"User-Agent": USER_AGENT})
         if response.status_code != 200:
             raise Unavailable(
                 f"feed {url} returned HTTP {response.status_code}"

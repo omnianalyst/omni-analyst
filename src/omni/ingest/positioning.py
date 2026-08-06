@@ -37,7 +37,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from omni.ingest.protocol import ClaimDraft, Unavailable
+from omni.ingest.protocol import ClaimDraft, Unavailable, get_json
 
 SOURCE = "polygon"
 PROVIDER_KEY = "polygon"
@@ -182,7 +182,7 @@ async def _fetch_options_snapshot(
     headers = {"Authorization": f"Bearer {api_key}"}
     params = {"limit": 250}
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(url, params=params, headers=headers)
+        response = await get_json(client, url, params=params, headers=headers)
         if response.status_code != 200:
             raise Unavailable(
                 f"Polygon returned HTTP {response.status_code} for options snapshot {symbol}"

@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from omni.ingest.protocol import ClaimDraft, Unavailable
+from omni.ingest.protocol import ClaimDraft, Unavailable, get_json
 
 SOURCE = "fred"
 PROVIDER_KEY = "fred"
@@ -132,7 +132,7 @@ async def _fetch_alfred(
         params.update(_vintage_params())
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(ALFRED_URL, params=params)
+        response = await get_json(client, ALFRED_URL, params=params)
         if response.status_code != 200:
             # Carry FRED's own explanation. A bare status code sends whoever
             # reads the fill_attempt row back to the API docs; the message

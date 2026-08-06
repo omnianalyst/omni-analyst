@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from omni.ingest.protocol import ClaimDraft, Unavailable
+from omni.ingest.protocol import ClaimDraft, Unavailable, get_json
 
 SOURCE = "sec_edgar"
 PROVIDER_KEY = "sec_edgar"
@@ -96,7 +96,7 @@ async def _fetch_submissions(cik: str, *, user_agent: str) -> dict | None:
 
     url = SUBMISSIONS_URL.format(cik10=cik.zfill(10))
     async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(url, headers={"User-Agent": user_agent})
+        response = await get_json(client, url, headers={"User-Agent": user_agent})
         if response.status_code == 404:
             return None
         if response.status_code != 200:

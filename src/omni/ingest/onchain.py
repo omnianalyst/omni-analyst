@@ -35,7 +35,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from omni.ingest.protocol import ClaimDraft, Unavailable
+from omni.ingest.protocol import ClaimDraft, Unavailable, get_json
 
 SOURCE = "etherscan"
 PROVIDER_KEY = "etherscan"
@@ -235,7 +235,7 @@ async def _fetch_latest_block(api_key: str) -> dict[str, Any]:
     import httpx
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        num_resp = await client.get(
+        num_resp = await get_json(client,
             ETHERSCAN_URL,
             params={"module": "proxy", "action": "eth_blockNumber", "apikey": api_key},
         )
@@ -246,7 +246,7 @@ async def _fetch_latest_block(api_key: str) -> dict[str, Any]:
         latest = _hex_to_int((num_resp.json() or {}).get("result", "0x0"))
         if latest <= 0:
             raise Unavailable("Etherscan returned no latest block")
-        blk_resp = await client.get(
+        blk_resp = await get_json(client,
             ETHERSCAN_URL,
             params={
                 "module": "proxy",
@@ -268,7 +268,7 @@ async def _fetch_tvl(slug: str) -> dict[str, Any]:
 
     url = DEFILLAMA_PROTOCOL_URL.format(slug=slug)
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url)
+        resp = await get_json(client,url)
         if resp.status_code != 200:
             raise Unavailable(
                 f"DefiLlama returned HTTP {resp.status_code} for {slug}"
@@ -280,7 +280,7 @@ async def _fetch_supply(api_key: str, token: str, decimals: int) -> dict[str, An
     import httpx
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        num_resp = await client.get(
+        num_resp = await get_json(client,
             ETHERSCAN_URL,
             params={"module": "proxy", "action": "eth_blockNumber", "apikey": api_key},
         )
@@ -289,7 +289,7 @@ async def _fetch_supply(api_key: str, token: str, decimals: int) -> dict[str, An
                 f"Etherscan blockNumber returned HTTP {num_resp.status_code}"
             )
         tag = (num_resp.json() or {}).get("result", "0x0")
-        blk_resp = await client.get(
+        blk_resp = await get_json(client,
             ETHERSCAN_URL,
             params={
                 "module": "proxy",
@@ -306,13 +306,13 @@ async def _fetch_supply(api_key: str, token: str, decimals: int) -> dict[str, An
         block_timestamp = (blk_resp.json() or {}).get("result", {}).get("timestamp")
 
         if token.upper() == "ETH":
-            supply_resp = await client.get(
+            supply_resp = await get_json(client,
                 ETHERSCAN_URL,
                 params={"module": "stats", "action": "ethsupply", "apikey": api_key},
             )
             supply = (supply_resp.json() or {}).get("result")
         else:
-            supply_resp = await client.get(
+            supply_resp = await get_json(client,
                 ETHERSCAN_URL,
                 params={
                     "module": "stats",
