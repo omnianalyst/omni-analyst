@@ -26,7 +26,7 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from omni.autonomous.reading import latest_shared_claim, macro_series_values
+from omni.autonomous.reading import macro_series_values
 from omni.ingest.protocol import ClaimDraft
 from omni.perception.divergence import write_derived
 
@@ -139,19 +139,25 @@ def _compute_inflation(cpi: list) -> float | None:
 def _compute_output_gap(gdp: list, pot: list) -> float | None:
     """GDP output gap: (actual / potential - 1) * 100.
 
-    Returns None when data is insufficient or the gap is extreme (>10%), which
-    indicates a GDPPOT vintage conflict (CBO methodology change produces
+    Pairs actual and potential GDP on the latest quarter both report --
+    comparing different quarters folds a growth differential into the level
+    gap. Returns None when data is insufficient or the gap is extreme (>10%),
+    which indicates a GDPPOT vintage conflict (CBO methodology change produces
     conflicting values for the same period). An extreme gap is economically
     implausible and should not drive the policy_stance.
     """
-    gdp_v = next((v for _, v in reversed(gdp) if v is not None), None)
-    pot_v = next((v for _, v in reversed(pot) if v is not None), None)
-    if gdp_v is None or pot_v is None or pot_v == 0:
-        return None
-    gap = (gdp_v / pot_v - 1.0) * 100.0
-    if abs(gap) > 10.0:
-        return None
-    return gap
+    pot_by_date = {d: v for d, v in pot if v is not None}
+    for d, gdp_v in reversed(gdp):
+        if gdp_v is None or d not in pot_by_date:
+            continue
+        pot_v = pot_by_date[d]
+        if pot_v == 0:
+            return None
+        gap = (gdp_v / pot_v - 1.0) * 100.0
+        if abs(gap) > 10.0:
+            return None
+        return gap
+    return None
 
 
 def _compute_lei(lei: list) -> tuple[bool, float | None]:

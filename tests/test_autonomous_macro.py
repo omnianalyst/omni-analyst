@@ -15,6 +15,7 @@ import pytest
 
 from omni.autonomous.macro import (
     CLAIM_TYPE,
+    _compute_output_gap,
     assess_macro_regime,
     cycle_phase,
     inflation_regime,
@@ -144,6 +145,35 @@ class TestComposition:
 
     def test_dovish_on_slack(self):
         assert policy_stance(1.0, -1.0) == "dovish"
+
+
+class TestOutputGapPairing:
+    def test_pairs_on_latest_common_quarter_not_cross_quarter(self):
+        # GDP grew Q1->Q2; POT only has Q1. The cross-quarter comparison
+        # (110 vs 100) would trip the >10% guard and abstain. Pairing on the
+        # shared Q1 yields the correct 0% gap.
+        q1 = datetime(2026, 1, 1, tzinfo=UTC)
+        q2 = datetime(2026, 4, 1, tzinfo=UTC)
+        gdp = [(q1, 100.0), (q2, 110.0)]
+        pot = [(q1, 100.0)]
+        assert _compute_output_gap(gdp, pot) == 0.0
+
+    def test_returns_none_when_no_common_quarter(self):
+        q1 = datetime(2026, 1, 1, tzinfo=UTC)
+        q2 = datetime(2026, 4, 1, tzinfo=UTC)
+        gdp = [(q2, 110.0)]
+        pot = [(q1, 100.0)]
+        assert _compute_output_gap(gdp, pot) is None
+
+    def test_abstains_on_extreme_gap(self):
+        q1 = datetime(2026, 1, 1, tzinfo=UTC)
+        # Same quarter, but a 15% gap -- vintage/base conflict, not real.
+        assert _compute_output_gap([(q1, 115.0)], [(q1, 100.0)]) is None
+
+    def test_aligned_quarters_compute_real_gap(self):
+        q1 = datetime(2026, 1, 1, tzinfo=UTC)
+        gap = _compute_output_gap([(q1, 102.0)], [(q1, 100.0)])
+        assert gap is not None and abs(gap - 2.0) < 1e-9
 
 
 class TestAssessMacroRegime:
