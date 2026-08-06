@@ -85,6 +85,7 @@ async def macro_series_values(
         "audience_user_id IS NULL",
         "redistributable = 'allowed'",
         "superseded_by IS NULL",
+        "event_date <= now()",
     ]
     params: list[Any] = [key]
     if as_of is not None:

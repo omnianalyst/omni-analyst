@@ -23,7 +23,7 @@ nothing. Silence is the honest outcome when coverage is incomplete.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from omni.autonomous.reading import latest_shared_claim, macro_series_values
@@ -39,6 +39,10 @@ KEY = "us_macro"
 _W_YC = 0.3
 _W_SAHM = 0.4
 _W_LEI = 0.3
+# When LEI data is stale, reweight to 2-of-3 (YC + Sahm only).
+_W_YC_NO_LEI = 0.5
+_W_SAHM_NO_LEI = 0.5
+_LEI_STALE_DAYS = 730  # data older than 2 years is unreliable
 
 
 # -- Pure composition (same logic as the macro capabilities) -----------------
@@ -175,7 +179,8 @@ async def assess_macro_regime(
     if macro_entity is None:
         return None
 
-    # Read raw FRED series.
+    # Read raw FRED series. macro_series_values filters event_date <= now()
+    # so future projections (e.g. GDPPOT 2036 CBO estimates) are excluded.
     dgs2 = await macro_series_values(pool, key="DGS2", limit=300, as_of=as_of)
     dgs10 = await macro_series_values(pool, key="DGS10", limit=300, as_of=as_of)
     unrate = await macro_series_values(pool, key="UNRATE", limit=18, as_of=as_of)
@@ -184,12 +189,25 @@ async def assess_macro_regime(
     pot = await macro_series_values(pool, key="GDPPOT", limit=4, as_of=as_of)
     lei = await macro_series_values(pool, key="USSLIND", limit=13, as_of=as_of)
 
+    # Check LEI freshness: USSLIND may be stale or discontinued. If the latest
+    # observation is older than _LEI_STALE_DAYS, drop the LEI term and reweight.
+    lei_available = False
+    if lei:
+        latest_lei_date = lei[-1][0]
+        if latest_lei_date.tzinfo is None:
+            latest_lei_date = latest_lei_date.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - latest_lei_date).days
+        lei_available = age <= _LEI_STALE_DAYS
+
     # Compute signals from raw data.
     yc_inverted, yc_spread = _compute_yield_curve(dgs2, dgs10)
     sahm_triggered, sahm_indicator = _compute_sahm(unrate)
     inf_yoy = _compute_inflation(cpi)
     og = _compute_output_gap(gdp, pot)
-    lei_negative, lei_change = _compute_lei(lei)
+    if lei_available:
+        lei_negative, lei_change = _compute_lei(lei)
+    else:
+        lei_negative, lei_change = False, None
 
     if inf_yoy is None or og is None:
         logger.info(
@@ -199,7 +217,12 @@ async def assess_macro_regime(
         )
         return None
 
-    prob, prob_band = recession_probability(yc_inverted, sahm_triggered, lei_negative)
+    # Recession probability with conditional weighting.
+    if lei_available:
+        prob, prob_band = recession_probability(yc_inverted, sahm_triggered, lei_negative)
+    else:
+        prob = _W_YC_NO_LEI * float(yc_inverted) + _W_SAHM_NO_LEI * float(sahm_triggered)
+        prob_band = "high" if prob >= 0.7 else "elevated" if prob >= 0.4 else "moderate" if prob >= 0.2 else "low"
     phase = cycle_phase(yc_inverted, sahm_triggered, lei_negative)
     risk = risk_regime(prob, inf_yoy, og)
     inf_regime = inflation_regime(inf_yoy)
@@ -224,13 +247,22 @@ async def assess_macro_regime(
     if not input_ids:
         return None
 
-    event_date = datetime.now(datetime.now().astimezone().tzinfo)
-    knowledge_date = event_date
+    # Bitemporal dates from the data, not the clock: the assessment is about
+    # the latest FRED observation, published when the latest vintage arrived.
+    # Using now() would let a future backtest see the assessment as knowable
+    # at a different time than it actually was.
+    all_event_dates = [d for series in (dgs2, dgs10, unrate, cpi, gdp, pot, lei) for d, _ in series]
+    event_date = max(all_event_dates) if all_event_dates else datetime.now(UTC)
+    latest_knowledge = await pool.fetchval(
+        "SELECT MAX(knowledge_date) FROM claim "
+        "WHERE claim_type = 'macro_series_point' AND source = 'fred' "
+        "AND audience_user_id IS NULL AND redistributable = 'allowed' "
+        "AND superseded_by IS NULL AND event_date <= now()"
+    )
+    knowledge_date = latest_knowledge or event_date
 
     existing = await pool.fetchval(
-        _EXISTING, macro_entity, CLAIM_TYPE, KEY, SOURCE,
-        event_date.replace(hour=0, minute=0, second=0, microsecond=0),
-        knowledge_date.replace(hour=0, minute=0, second=0, microsecond=0),
+        _EXISTING, macro_entity, CLAIM_TYPE, KEY, SOURCE, event_date, knowledge_date
     )
     if existing is not None:
         return existing
@@ -250,6 +282,7 @@ async def assess_macro_regime(
         "sahm_indicator": round(sahm_indicator, 4) if sahm_indicator is not None else None,
         "lei_negative": lei_negative,
         "lei_change_6m": round(lei_change, 4) if lei_change is not None else None,
+        "lei_available": lei_available,
     }
 
     draft = ClaimDraft(

@@ -73,16 +73,12 @@ class AutonomousRunner:
         # user, unlike Polygon prices.
         await self._bootstrap_macro_demand()
 
+        # Backfill runs as a background task so the sweep/fill/predict loops
+        # start immediately. The backfill produces ~100 predictions per entity
+        # across the universe; running it synchronously would block the loops
+        # for 30+ minutes on every restart.
         if self._config.backfill_enabled:
-            try:
-                from omni.autonomous.backfill import backfill_trend_predictions
-                await backfill_trend_predictions(
-                    self._pool,
-                    lookback_days=self._config.backfill_lookback_days,
-                    audience_user_id=self._operator_user_id,
-                )
-            except Exception:
-                logger.exception("autonomous backfill failed at startup")
+            self._tasks.append(asyncio.create_task(self._run_backfill()))
 
         await self._run_all()
 
@@ -232,6 +228,18 @@ class AutonomousRunner:
             ("synthesis", lambda: enrich_findings(self._pool)),
             ("meta", lambda: resolve_meta(self._pool)),
         ]
+
+    async def _run_backfill(self) -> None:
+        """Background backfill for instant calibration. Non-blocking."""
+        try:
+            from omni.autonomous.backfill import backfill_trend_predictions
+            await backfill_trend_predictions(
+                self._pool,
+                lookback_days=self._config.backfill_lookback_days,
+                audience_user_id=self._operator_user_id,
+            )
+        except Exception:
+            logger.exception("autonomous backfill failed")
 
     async def _loop(self, name: str, fn, interval: float) -> None:
         try:
