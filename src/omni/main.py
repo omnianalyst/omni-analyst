@@ -33,6 +33,7 @@ def create_app(database_url: str | None = None) -> App:
     from omni.api.briefing import build_router as briefing_router
     from omni.api.coverage import build_router as coverage_router
     from omni.api.objective import build_router as objective_router
+    from omni.api.system import build_router as system_router
     from omni.api.watchlist import build_router as watchlist_router
 
     app.include_router(coverage_router(app))
@@ -42,6 +43,7 @@ def create_app(database_url: str | None = None) -> App:
     app.include_router(auth_router(app))
     app.include_router(watchlist_router(app))
     app.include_router(alerts_router(app))
+    app.include_router(system_router(app))
     return app
 
 
