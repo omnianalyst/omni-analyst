@@ -18,8 +18,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from omni.capability.registry import Callability, Capability, Maturity, Registry
-from omni.fill.pipeline import run_once
-from omni.ingest.protocol import ClaimDraft
+from omni.fill.pipeline import MAX_ATTEMPTS, NO_NEW_DATA_COOLDOWN_SECONDS, run_once
+from omni.ingest.protocol import ClaimDraft, Unavailable
 
 NOW = datetime(2026, 7, 27, tzinfo=UTC)
 
@@ -171,3 +171,91 @@ class TestSeriesRouting:
         )
         assert attempt["outcome"] == "unfillable"
         assert attempt["claim_id"] is None
+
+
+class TestNoNewDataCooldown:
+    """The "all already held" branch: a correct source re-queried for data that
+    cannot have changed. This is the rate-budget protection (a daily-bar source
+    re-queried every sweep burned ~the entire free tier). It must cool down
+    WITHOUT counting as a failure -- attempts not incremented, gap stays open --
+    or a regression to _RELEASE would both penalize the source and let
+    detect_gaps reopen a fresh gap each sweep."""
+
+    async def test_all_already_held_cooldowns_without_incrementing_or_resolving(
+        self, db
+    ):
+        entity_id = await _entity(db)
+        # A claim identical to what the capability will draft, so write_claims
+        # inserts nothing (ON CONFLICT DO NOTHING) -> "all already held".
+        await db.pool.execute(
+            "INSERT INTO claim (entity_id, claim_type, key, value, source, "
+            "event_date, knowledge_date, confidence, redistributable, "
+            "audience_user_id, derivation) "
+            "VALUES ($1,'macro_series_point'::claim_type,'GDP',"
+            "'{\"amount\": 1}'::jsonb,'fred',$2,$3,1.0,'allowed',NULL,'ingested')",
+            entity_id,
+            NOW - timedelta(days=1),
+            NOW,
+        )
+        gap_id = await _gap(db, entity_id, claim_type="macro_series_point", key="GDP")
+
+        rec = Recorder([_draft("macro_series_point", "GDP")])
+        registry = Registry()
+        registry.add(_cap("fred", ("macro_series_point",), rec))
+
+        result = await run_once(db.pool, registry=registry, worker_id="w1")
+        assert result.outcome == "unfillable"
+        assert result.reason is not None and "already held" in result.reason
+
+        gap = await db.pool.fetchrow(
+            "SELECT attempts, resolved_at, next_attempt_at FROM gap WHERE id = $1",
+            gap_id,
+        )
+        # Not a failure: attempts stays at 0 and the gap stays OPEN. A regression
+        # to _RELEASE would increment attempts and/or resolve.
+        assert gap["attempts"] == 0
+        assert gap["resolved_at"] is None
+        # Retry scheduled ~6h out, not immediately.
+        assert gap["next_attempt_at"] is not None
+        delta = (gap["next_attempt_at"].replace(tzinfo=UTC)
+                 - datetime.now(UTC)).total_seconds()
+        assert NO_NEW_DATA_COOLDOWN_SECONDS - 600 < delta < NO_NEW_DATA_COOLDOWN_SECONDS + 600
+
+
+class TestUnreachableSourceExhaustsAndResolves:
+    """A source that keeps failing backs off exponentially and, after
+    MAX_ATTEMPTS, resolves the gap -- an unreachable source is a fact about the
+    world, recorded in fill_attempt, not retried forever."""
+
+    async def test_a_persistently_failing_source_resolves_after_max_attempts(
+        self, db
+    ):
+        entity_id = await _entity(db)
+        gap_id = await _gap(db, entity_id, claim_type="macro_series_point", key="GDP")
+
+        async def always_unavailable(key):
+            raise Unavailable("source unreachable")
+
+        registry = Registry()
+        registry.add(_cap("fred", ("macro_series_point",), always_unavailable))
+
+        for _ in range(MAX_ATTEMPTS):
+            # The real scheduler waits out the backoff between attempts; the
+            # exhaustion path is what's under test here, so force the gap back
+            # to leasable each cycle.
+            await db.pool.execute(
+                "UPDATE gap SET lease_owner = NULL, lease_expires_at = NULL, "
+                "next_attempt_at = NULL WHERE id = $1",
+                gap_id,
+            )
+            result = await run_once(db.pool, registry=registry, worker_id="w1")
+            assert result is not None
+            assert result.outcome == "unfillable"
+
+        gap = await db.pool.fetchrow(
+            "SELECT attempts, resolved_at FROM gap WHERE id = $1", gap_id
+        )
+        assert gap["attempts"] == MAX_ATTEMPTS
+        # Exhausted -> resolved, not retried forever. The pre-fix path retried
+        # indefinitely; pin that the door closes.
+        assert gap["resolved_at"] is not None
