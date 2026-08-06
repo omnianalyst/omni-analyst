@@ -149,7 +149,13 @@ def _recompute_z(series: pd.Series, window: int) -> float:
 
     mean = series.rolling(window).mean().iloc[-1]
     std = series.rolling(window).std().iloc[-1]
-    if pd.isna(std) or std == 0:
+    # Exact-constant guard, not `std == 0`: a constant series that is not
+    # exactly representable (e.g. 0.05) yields a rolling std of ~1e-17, so a
+    # `std == 0` check never fires and the division below returns a large
+    # meaningless z-score from 0/0-style noise. `max == min` is exact on stored
+    # values regardless of magnitude (the np.ptp == 0 idiom AGENTS.md endorses).
+    window_vals = series.iloc[-window:]
+    if pd.isna(std) or pd.isna(mean) or window_vals.max() == window_vals.min():
         return 0.0
     return float((series.iloc[-1] - mean) / std)
 

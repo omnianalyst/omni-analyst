@@ -419,3 +419,42 @@ class TestDerivedClaimRequiresInputs:
             "SELECT count(*) FROM claim_input WHERE claim_id = $1", claim_id
         )
         assert edge_count == len(perc_ids) + len(fact_ids)
+
+
+# ----------------------------------------------------------- the std==0 defect
+
+
+class TestRecomputeZAbstainsOnConstantSeries:
+    """The exact float-`==0` fabrication defect AGENTS.md dedicates a section to.
+
+    A constant series that is not exactly representable (0.05) yields a rolling
+    std of ~1e-17, so a `std == 0` guard never fires and the z-score divides
+    noise by noise, returning a large confident number from 0/0. The guard must
+    abstain (return 0.0) on such a series.
+    """
+
+    def test_a_constant_unrepresentable_series_abstains_not_fabricates(self):
+        import pandas as pd
+
+        from omni.perception.divergence import _recompute_z
+
+        # 0.05 is the AGENTS.md example: not exactly representable in binary64,
+        # so rolling.std() returns ~1e-17, not 0.0.
+        const = pd.Series([0.05] * 30)
+        z = _recompute_z(const, window=20)
+        assert z == 0.0
+        # The fabrication it replaces would return a large meaningless number
+        # (last - mean ~0 divided by ~1e-17). Pin both sides so a regression
+        # that drops the guard flips this assertion.
+        assert abs(z) < 1.0
+
+    def test_a_genuinely_varying_series_returns_a_real_z_score(self):
+        import pandas as pd
+
+        from omni.perception.divergence import _recompute_z
+
+        varying = pd.Series(list(range(40)), dtype=float)
+        z = _recompute_z(varying, window=20)
+        # A monotonically rising series: the last point is well above the
+        # rolling mean, so the z-score is real and positive, not the abstain 0.0.
+        assert z > 1.0

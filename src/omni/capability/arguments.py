@@ -282,10 +282,17 @@ async def _levels_for_entity(pool, spec: ArgumentSpec, *, entity_id, audience):
         key=spec.key,
     )
     latest: dict = {}  # align_on -> (knowledge_date, ProvenanceRow)
+    # Distinct claim `key` values among the extracted observations. A spec that
+    # does not pin `key` over a multi-key claim_type would silently blend
+    # unrelated series (Revenues into Earnings) into one -- the fabrication
+    # vector TODO(D9) named. Surfacing the distinct set lets the materializer
+    # abstain on ambiguity rather than emit a confident, wrong input.
+    distinct_keys: set = set()
     for r in rows:
         level = _extract_scalar(r["value"], spec.value_field)
         if level is None:
             continue
+        distinct_keys.add(r["key"])
         key = r[spec.align_on]
         kdate = r["knowledge_date"]
         existing = latest.get(key)
@@ -305,7 +312,26 @@ async def _levels_for_entity(pool, spec: ArgumentSpec, *, entity_id, audience):
     keys = [kv[0] for kv in ordered]
     levels = [kv[1][1].value for kv in ordered]
     prov = [kv[1][1] for kv in ordered]
-    return keys, levels, prov
+    return keys, levels, prov, distinct_keys
+
+
+def _multi_key_abstention(spec: ArgumentSpec, distinct_keys: set) -> Abstention | None:
+    """Refuse to blend when an unpinned spec gathered more than one series key.
+
+    Only fires when the spec left ``key=None`` -- a spec that explicitly pins a
+    key has already chosen its series, and a single-key claim_type only ever
+    yields one distinct key (or NULL). A multi-key type with no pin is the
+    ambiguous case: blending it produces a series that means nothing, so the
+    honest move is to abstain and name the missing decision.
+    """
+    if spec.key is not None or len(distinct_keys) <= 1:
+        return None
+    return Abstention(
+        spec.name,
+        f"{spec.name}: {len(distinct_keys)} distinct keys present for "
+        f"{spec.claim_type!r}; set `key` on the ArgumentSpec to choose one "
+        f"series rather than blend them",
+    )
 
 
 def _apply_transform(keys, levels, prov, transform: str):
@@ -398,9 +424,12 @@ def _shape_series(vals, prov) -> Materialized:
 
 
 async def _materialize_one(spec, pool, *, entity_id, audience):
-    keys, levels, prov = await _levels_for_entity(
+    keys, levels, prov, distinct_keys = await _levels_for_entity(
         pool, spec, entity_id=entity_id, audience=audience
     )
+    ambiguous = _multi_key_abstention(spec, distinct_keys)
+    if ambiguous is not None:
+        return ambiguous
     t_keys, t_vals, t_prov = _apply_transform(keys, levels, prov, spec.transform)
     _w_keys, w_vals, w_prov = _apply_window(t_keys, t_vals, t_prov, spec.window)
 
@@ -436,9 +465,12 @@ async def _materialize_related(spec, pool, *, entity_id, audience):
 
     per: dict[UUID, tuple[list, list[float], list[ProvenanceRow]]] = {}
     for eid in eids:
-        keys, levels, prov = await _levels_for_entity(
+        keys, levels, prov, distinct_keys = await _levels_for_entity(
             pool, spec, entity_id=eid, audience=audience
         )
+        ambiguous = _multi_key_abstention(spec, distinct_keys)
+        if ambiguous is not None:
+            return ambiguous
         per[eid] = _apply_transform(keys, levels, prov, spec.transform)
 
     if spec.shape == "list":

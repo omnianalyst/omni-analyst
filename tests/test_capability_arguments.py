@@ -539,7 +539,7 @@ class TestKeySpecNarrowsToOneSeries:
         # Only the Revenues observations -- actual values, not just a count.
         assert result.value == rev
 
-    async def test_no_key_blends_every_series_sharing_the_type(self, db):
+    async def test_no_key_over_multi_key_abstains_rather_than_blends(self, db):
         entity_id = await _entity(db)
         rev = [100.0, 110.0, 120.0, 130.0]
         nil = [10.0, 12.0, 14.0, 16.0]
@@ -551,10 +551,12 @@ class TestKeySpecNarrowsToOneSeries:
             key="NetIncomeLoss", knowledge_offset=2,
         )
 
-        # No key: today's behaviour, unchanged for any spec that does not set
-        # it. The two series share every event_date; the latest-knowable dedup
-        # collapses them, and NetIncomeLoss (the later-knowable series) silently
-        # wins every date while Revenues is dropped entirely -- the landmine.
+        # No key over a multi-key type used to be the landmine: the two series
+        # share every event_date, the latest-knowable dedup silently collapsed
+        # them, and NetIncomeLoss (later-knowable) won every date while
+        # Revenues was dropped entirely -- a blended input that means nothing.
+        # materialize now refuses this: it abstains and names the missing key
+        # decision rather than emit a confident, wrong input.
         spec = ArgumentSpec(
             name="fundamentals",
             claim_type="fundamental_metric",
@@ -566,9 +568,9 @@ class TestKeySpecNarrowsToOneSeries:
             spec, db.pool, entity_id=entity_id, audience=None
         )
 
-        assert isinstance(result, Materialized)
-        assert result.value != rev
-        assert result.value == nil
+        assert isinstance(result, Abstention)
+        assert not isinstance(result, Materialized)
+        assert "key" in result.reason
 
     async def test_a_key_matching_nothing_abstains_via_min_obs(self, db):
         entity_id = await _entity(db)
@@ -635,4 +637,66 @@ class TestAnalysisOutputSpec:
         spec = AnalysisOutputSpec(name="x", capability="y")
         with pytest.raises(FrozenInstanceError):
             spec.name = "z"
+
+
+# ----------------------------------------------- the multi-key blending guard
+
+
+class TestMultiKeyAbstention:
+    """An unpinned spec over a multi-key claim_type must abstain, not blend.
+
+    The fabrication vector: divergence (and any future derived capability) over
+    a type like ``fundamental_metric`` -- which carries several keys per entity
+    (Revenues, Earnings, ...) -- with no ``key`` set would silently collapse the
+    distinct series into one meaningless input and emit a confident, wrong
+    claim. The honest move is to abstain and name the missing key decision.
+    """
+
+    async def test_an_unpinned_spec_over_two_keys_abstains_not_blends(self, db):
+        entity_id = await _entity(db)
+        await _seed_levels(
+            db, entity_id, [10.0, 11.0, 12.0, 13.0],
+            claim_type="fundamental_metric", key="Revenues",
+        )
+        await _seed_levels(
+            db, entity_id, [1.0, 1.1, 1.2, 1.3],
+            claim_type="fundamental_metric", key="Earnings",
+        )
+
+        spec = ArgumentSpec(
+            name="fundamental_metric",
+            claim_type="fundamental_metric",
+            shape="series",
+            transform="level",
+        )
+        result = await materialize(spec, db.pool, entity_id=entity_id, audience=None)
+
+        assert isinstance(result, Abstention)
+        # A Materialized here is the fabrication path; pin the negative.
+        assert not isinstance(result, Materialized)
+        assert "key" in result.reason
+
+    async def test_a_pinned_key_materializes_only_that_series(self, db):
+        entity_id = await _entity(db)
+        await _seed_levels(
+            db, entity_id, [10.0, 11.0, 12.0, 13.0],
+            claim_type="fundamental_metric", key="Revenues",
+        )
+        await _seed_levels(
+            db, entity_id, [1.0, 1.1, 1.2, 1.3],
+            claim_type="fundamental_metric", key="Earnings",
+        )
+
+        spec = ArgumentSpec(
+            name="fundamental_metric",
+            claim_type="fundamental_metric",
+            key="Revenues",
+            shape="series",
+            transform="level",
+        )
+        result = await materialize(spec, db.pool, entity_id=entity_id, audience=None)
+
+        assert isinstance(result, Materialized)
+        # Exactly the Revenues series, never Earnings blended in.
+        assert result.value == [10.0, 11.0, 12.0, 13.0]
 
