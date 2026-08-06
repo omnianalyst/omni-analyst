@@ -231,6 +231,47 @@ class TestIdempotentReingest:
         assert attempt["reason"], "nothing-new must carry a reason distinct from failure"
         assert "already held" in attempt["reason"]
 
+    async def test_no_new_data_cooldowns_not_resolves_so_it_cannot_be_requried_every_cycle(self, db):
+        """The re-query loop: 'all already held' used to resolve the gap, so
+        detect_gaps reopened a fresh one next sweep with next_attempt_at NULL,
+        re-querying the source every cycle for data that could not have changed
+        (this burned ~the entire free-tier rate limit). Now the gap cools down:
+        stays open, next_attempt_at in the future, not immediately reclaimable."""
+        entity_id = await _entity(db)
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="macro_series_point", key="GDP"
+        )
+        await persist_gaps(db.pool, await detect_gaps(db.pool))
+        registry = _fred_registry()
+        await run_once(db.pool, registry=registry, worker_id="w1")  # fills
+
+        await db.pool.execute(
+            "INSERT INTO gap (entity_id, claim_type, key, gap_class, "
+            "audience_user_id, score) "
+            "VALUES ($1, 'macro_series_point', 'GDP', 'missing', NULL, 1.0)",
+            entity_id,
+        )
+        result = await run_once(db.pool, registry=registry, worker_id="w1")
+        assert result.outcome != "filled"  # all already held -> cooldown
+
+        row = await db.pool.fetchrow(
+            "SELECT resolved_at, next_attempt_at, attempts FROM gap WHERE id = $1",
+            result.gap_id,
+        )
+        # Still open (not resolved) -- detect_gaps will refresh it, not reopen.
+        assert row["resolved_at"] is None
+        # Backoff scheduled in the future.
+        assert row["next_attempt_at"] is not None
+        assert row["next_attempt_at"] > datetime.now(UTC)
+        # Not counted as a failure attempt (the source worked).
+        assert row["attempts"] == 0
+
+        # And it cannot be reclaimed immediately -- the lease/next_attempt gate
+        # in _CLAIM_GAP skips it. A second worker gets nothing.
+        from omni.fill.pipeline import claim_next_gap
+        reclaimed = await claim_next_gap(db.pool, worker_id="w2")
+        assert reclaimed is None
+
         # The loop completes the cycle rather than dying: the queue drains.
         assert await drain(db.pool, registry=registry, worker_id="w1") == []
 

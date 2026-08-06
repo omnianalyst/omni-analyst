@@ -37,6 +37,15 @@ DEFAULT_LEASE_SECONDS = 300
 RETRY_BASE_SECONDS = 30
 MAX_ATTEMPTS = 6
 
+#: How long to wait before re-querying a source that answered correctly but had
+#: nothing newer than what the store already holds ("all N already held"). This
+#: is not a failure -- the source worked -- so it must not burn a retry attempt
+#: or count toward MAX_ATTEMPTS. A daily-bar source (Polygon) publishes once per
+#: close, so re-querying every sweep wastes the entire free-tier rate budget on
+#: data that cannot have changed. Six hours catches a newly published bar within
+#: that window while freeing ~80% of the rate limit for productive fills.
+NO_NEW_DATA_COOLDOWN_SECONDS = 6 * 3600
+
 # A capability takes the gap's target and returns drafts. Anything that cannot
 # answer raises Unavailable with a reason a human can act on.
 Capability = Callable[..., Awaitable[Sequence[ClaimDraft]]]
@@ -75,6 +84,19 @@ WHERE id = $1
 
 _RESOLVE = """
 UPDATE gap SET resolved_at = now(), lease_owner = NULL, lease_expires_at = NULL
+WHERE id = $1
+"""
+
+# Cooldown for "source answered but had nothing new". Unlike _RELEASE this is
+# not a failure: attempts is not incremented, the gap is not resolved, and the
+# retry is scheduled at a fixed cadence rather than an exponential backoff. The
+# gap stays OPEN so persist_gaps' ON CONFLICT DO UPDATE refreshes its score
+# while preserving next_attempt_at -- without this, resolving the gap let
+# detect_gaps open a fresh one each sweep with next_attempt_at NULL, re-querying
+# the source every cycle for data that could not have changed.
+_COOLDOWN = """
+UPDATE gap SET lease_owner = NULL, lease_expires_at = NULL,
+               next_attempt_at = now() + ($2 || ' seconds')::interval
 WHERE id = $1
 """
 
@@ -197,18 +219,19 @@ async def fill_gap(
 
         if not claim_ids:
             # The source answered, but every draft was already held -- a
-            # correct source re-queried. Not 'filled' (nothing was written, so
-            # coverage did not improve) and not a failure (the source worked).
-            # Resolved, not released: the demand is met by claims already in
-            # the store, and re-querying reproduces the same already-held data,
-            # so a retry buys nothing. The reason distinguishes nothing-new
-            # from the failure path below.
+            # correct source re-queried. Not 'filled' (nothing written) and not
+            # a failure (the source worked). Cooldown, not resolve: resolving
+            # let detect_gaps reopen a fresh gap next sweep with no backoff,
+            # re-querying the source every cycle for data that could not have
+            # changed (this was burning ~the entire free-tier rate limit).
             reason = (
                 f"{registration.name} returned no new observations "
                 f"(all {len(drafts)} already held)"
             )
             await _record(pool, gap_id, registration.name, "unfillable", None, reason)
-            await pool.execute(_RESOLVE, gap_id)
+            await pool.execute(
+                _COOLDOWN, gap_id, str(NO_NEW_DATA_COOLDOWN_SECONDS)
+            )
             return FillResult(gap_id, "unfillable", registration.name, [], reason)
 
         first = claim_ids[0]
