@@ -5,10 +5,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
-_orchestrator/logs/
-_orchestrator/worktrees/
 .DS_Store
-_orchestrator/worktrees/
-_orchestrator/logs/
 .opencode-session.db*
 vendor/
+_orchestrator/logs/
+_orchestrator/worktrees/
+_orchestrator/queue-state/
