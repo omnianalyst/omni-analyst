@@ -5,11 +5,8 @@ import {
   clearAuthToken,
   getAuthToken,
   login,
-  register,
   setAuthToken,
 } from "../lib/auth";
-
-type Mode = "signin" | "register";
 
 function authErrorMessage(err: unknown): string {
   if (err instanceof ApiHttpError) {
@@ -32,7 +29,6 @@ function authErrorMessage(err: unknown): string {
 
 export function LoginView() {
   const navigate = useNavigate();
-  const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -49,11 +45,6 @@ export function LoginView() {
     setError(null);
     setBusy(true);
     try {
-      if (mode === "register") {
-        // Register returns the user, not a token; log in straight after so the
-        // caller always ends with a stored token.
-        await register(email, password);
-      }
       const res = await login(email, password);
       setAuthToken(res.token);
       setSignedIn(true);
@@ -75,7 +66,7 @@ export function LoginView() {
   return (
     <div class="login-view">
       <header class="page-head">
-        <h1>{signedIn ? "Signed in" : mode === "signin" ? "Sign in" : "Create account"}</h1>
+        <h1>{signedIn ? "Signed in" : "Sign in"}</h1>
         <p class="muted">
           A watchlist and your BYO credentials are private to your account.
           Identity is a verified token, never a header a caller can name.
@@ -117,30 +108,15 @@ export function LoginView() {
                 type="password"
                 required
                 minlength={8}
-                autocomplete={mode === "signin" ? "current-password" : "new-password"}
+                autocomplete="current-password"
                 value={password}
                 onInput={(e) => setPassword((e.target as HTMLInputElement).value)}
               />
             </label>
             {error ? <p class="auth-error">{error}</p> : null}
             <button class="search-btn" type="submit" disabled={busy}>
-              {busy ? "…" : mode === "signin" ? "Sign in" : "Create account"}
+              {busy ? "..." : "Sign in"}
             </button>
-            <p class="auth-toggle">
-              {mode === "signin" ? (
-                <>No account?{" "}
-                  <a href="#" onClick={(e) => { e.preventDefault(); setMode("register"); setError(null); }}>
-                    Create one
-                  </a>
-                </>
-              ) : (
-                <>Already have an account?{" "}
-                  <a href="#" onClick={(e) => { e.preventDefault(); setMode("signin"); setError(null); }}>
-                    Sign in
-                  </a>
-                </>
-              )}
-            </p>
           </form>
         </section>
       )}

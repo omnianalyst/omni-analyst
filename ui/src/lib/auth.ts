@@ -49,3 +49,23 @@ export const register = (email: string, password: string): Promise<AuthUser> =>
 
 export const login = (email: string, password: string): Promise<LoginResponse> =>
   sendJson<LoginResponse>("POST", "/auth/login", { email, password });
+
+export interface SetupStatus {
+  setup_required: boolean;
+}
+
+export interface SetupResponse extends LoginResponse {
+  user: AuthUser;
+}
+
+// setup-status is anonymous (the UI needs it before any identity exists to
+// pick the redirect target); setup is the one-shot first-run operator
+// provisioning that the backend refuses once any user exists.
+export const fetchSetupStatus = (): Promise<SetupStatus> =>
+  request<SetupStatus>("/auth/setup-status");
+
+export const setup = (
+  email: string,
+  password: string,
+): Promise<SetupResponse> =>
+  sendJson<SetupResponse>("POST", "/auth/setup", { email, password });
