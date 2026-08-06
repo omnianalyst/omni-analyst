@@ -6,7 +6,13 @@ declare module "@neutron-build/core" {
     | "/alerts"
     | "/briefing"
     | `/entity/${string}`
+    | "/login"
     | "/objective"
+    | "/regime"
+    | "/search"
+    | "/sectors"
+    | "/setup"
+    | "/system"
     | "/watchlist"
   }
 }

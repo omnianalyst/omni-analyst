@@ -118,52 +118,62 @@ export function EntityView() {
         <h1>Coverage</h1>
       </header>
 
-      <section class="panel">
-        <h2 class="panel-title">Claims by type</h2>
-        {coverage.kind === "loading" || coverage.kind === "idle" ? (
-          <Loading label="Loading coverage…" />
-        ) : null}
-        {coverage.kind === "error" && (
-          <ErrorState message={coverage.message} detail={coverage.detail} />
-        )}
-        {coverage.kind === "ok" && (
-          <CoverageTable
-            groups={coverage.data.groups}
-            entityId={id}
-            selectedType={selectedType}
-            contradictionTypes={conflictTypes}
-          />
-        )}
-      </section>
-
-      {selectedType ? (
-        <section class="panel">
-          <h2 class="panel-title">
-            {selectedType} claims
-            <a class="panel-clear" href={`/entity/${id}`}>
-              all types
-            </a>
-          </h2>
-          {claims.kind === "loading" || claims.kind === "idle" ? (
-            <Loading label={`Loading ${selectedType} claims…`} />
+      <div class="entity-grid">
+        <section class="panel entity-coverage">
+          <h2 class="panel-title">Claims by type</h2>
+          {coverage.kind === "loading" || coverage.kind === "idle" ? (
+            <Loading label="Loading coverage…" />
           ) : null}
-          {claims.kind === "error" && (
-            <ErrorState message={claims.message} detail={claims.detail} />
+          {coverage.kind === "error" && (
+            <ErrorState message={coverage.message} detail={coverage.detail} />
           )}
-          {claims.kind === "ok" && <ClaimsTable claims={claims.data.claims} />}
+          {coverage.kind === "ok" && (
+            <CoverageTable
+              groups={coverage.data.groups}
+              entityId={id}
+              selectedType={selectedType}
+              contradictionTypes={conflictTypes}
+            />
+          )}
         </section>
-      ) : null}
 
-      <section class="panel">
-        <h2 class="panel-title">Open gaps</h2>
-        {gaps.kind === "loading" || gaps.kind === "idle" ? (
-          <Loading label="Loading gaps…" />
-        ) : null}
-        {gaps.kind === "error" && (
-          <ErrorState message={gaps.message} detail={gaps.detail} />
-        )}
-        {gaps.kind === "ok" && <GapsList gaps={gaps.data.gaps} />}
-      </section>
+        <div class="entity-detail">
+          <section class="panel">
+            <h2 class="panel-title">
+              {selectedType ? `${selectedType} claims` : "Claims"}
+              {selectedType ? (
+                <a class="panel-clear" href={`/entity/${id}`}>
+                  all types
+                </a>
+              ) : null}
+            </h2>
+            {!selectedType ? (
+              <p class="empty">Select a claim type to inspect its values.</p>
+            ) : null}
+            {selectedType &&
+            (claims.kind === "loading" || claims.kind === "idle") ? (
+              <Loading label={`Loading ${selectedType} claims…`} />
+            ) : null}
+            {selectedType && claims.kind === "error" && (
+              <ErrorState message={claims.message} detail={claims.detail} />
+            )}
+            {selectedType && claims.kind === "ok" && (
+              <ClaimsTable claims={claims.data.claims} />
+            )}
+          </section>
+
+          <section class="panel">
+            <h2 class="panel-title">Open gaps</h2>
+            {gaps.kind === "loading" || gaps.kind === "idle" ? (
+              <Loading label="Loading gaps…" />
+            ) : null}
+            {gaps.kind === "error" && (
+              <ErrorState message={gaps.message} detail={gaps.detail} />
+            )}
+            {gaps.kind === "ok" && <GapsList gaps={gaps.data.gaps} />}
+          </section>
+        </div>
+      </div>
     </div>
   );
 }

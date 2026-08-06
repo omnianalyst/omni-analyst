@@ -36,50 +36,14 @@ function EvidenceColumn({
   emptyText: string;
 }) {
   return (
-    <div
-      style={{
-        padding: "12px",
-        background: "var(--bg)",
-        border: "1px solid var(--border)",
-        borderRadius: "8px",
-        minWidth: 0,
-      }}
-    >
-      <p
-        style={{
-          margin: "0 0 8px",
-          fontSize: "12px",
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-          color: "var(--faint)",
-        }}
-      >
-        {title}
-      </p>
+    <div class="evidence-col">
+      <p class="evidence-title">{title}</p>
       {items.length === 0 ? (
-        <p
-          style={{
-            margin: 0,
-            fontFamily: "var(--mono)",
-            fontSize: "13px",
-            color: "var(--faint)",
-          }}
-        >
-          {emptyText}
-        </p>
+        <p class="evidence-empty">{emptyText}</p>
       ) : (
-        <ul style={{ margin: 0, paddingLeft: "18px" }}>
+        <ul class="evidence-list">
           {items.map((text, i) => (
-            <li
-              key={i}
-              style={{
-                fontFamily: "var(--mono)",
-                fontSize: "13px",
-                color: "var(--muted)",
-                marginBottom: "4px",
-                wordBreak: "break-word",
-              }}
-            >
+            <li key={i} class="evidence-item">
               {text}
             </li>
           ))}
@@ -117,14 +81,7 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
           <span class="faint">surfaced {finding.created_at.slice(0, 10)}</span>
         ) : null}
       </div>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: "12px",
-          marginTop: "12px",
-        }}
-      >
+      <div class="evidence-grid">
         <EvidenceColumn
           title="Supporting"
           items={supporting}
@@ -137,29 +94,9 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
         />
       </div>
       {finding.deduction_chain && finding.deduction_chain.length > 1 ? (
-        <div
-          style={{
-            marginTop: "12px",
-            padding: "10px 12px",
-            background: "var(--bg)",
-            border: "1px solid var(--border)",
-            borderRadius: "8px",
-          }}
-        >
-          <p
-            style={{
-              margin: "0 0 4px",
-              fontSize: "12px",
-              textTransform: "uppercase",
-              letterSpacing: "0.08em",
-              color: "var(--faint)",
-            }}
-          >
-            Deduction chain
-          </p>
-          <p style={{ margin: 0, fontFamily: "var(--mono)", fontSize: "13px", color: "var(--muted)" }}>
-            {chainSummary(finding.deduction_chain)}
-          </p>
+        <div class="deduction-box">
+          <p class="deduction-title">Deduction chain</p>
+          <p class="deduction-summary">{chainSummary(finding.deduction_chain)}</p>
         </div>
       ) : null}
     </li>
