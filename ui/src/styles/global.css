@@ -130,6 +130,27 @@ button.topnav-signout {
   margin: 0 auto;
   padding: 32px 24px 80px;
 }
+/* The sign-in / setup shell: no topbar, so the card centers in the viewport
+   rather than sitting left-aligned in the 1080px content rail. Narrow by
+   design -- an auth form stretched across a wide page reads as broken. */
+.content-centered {
+  flex: 1;
+  width: 100%;
+  max-width: 420px;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 48px 24px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.content-centered .page-head {
+  text-align: center;
+  margin-bottom: 20px;
+}
+.content-centered .page-head h1 {
+  font-size: 22px;
+}
 
 .page-head {
   margin-bottom: 24px;

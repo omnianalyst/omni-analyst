@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { useLocation } from "@neutron-build/core/client";
 import "../styles/global.css";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "../components/CommandPalette";
 import { StatusRail } from "../components/StatusRail";
@@ -38,6 +39,11 @@ const COMMANDS: CommandItem[] = NAV.map((item, i) => ({
 const PUBLIC_PATHS = ["/login", "/setup"];
 
 export default function Layout({ children }: { children?: preact.ComponentChildren }) {
+  // useLocation reads router context, so it is correct during SSR too -- the
+  // bare/public render below is decided server-side, no header flash on login.
+  const { pathname } = useLocation();
+  const isPublic = pathname === "/login" || pathname === "/setup";
+
   // Auth state is client-only: localStorage is unavailable during SSR, so the
   // link renders as "Sign in" on the server and may flip to "Sign out" after
   // hydration reads the stored token. No router context is read here, so SSR
@@ -51,10 +57,10 @@ export default function Layout({ children }: { children?: preact.ComponentChildr
   useEffect(() => {
     setSignedIn(getAuthToken() !== null);
     const path = window.location.pathname;
-    const isPublic = PUBLIC_PATHS.some(
+    const isPublicPath = PUBLIC_PATHS.some(
       (p) => path === p || path.startsWith(p + "/"),
     );
-    if (isPublic) {
+    if (isPublicPath) {
       setAllowed(true);
       return;
     }
@@ -78,6 +84,19 @@ export default function Layout({ children }: { children?: preact.ComponentChildr
   function signOut() {
     clearAuthToken();
     setSignedIn(false);
+  }
+
+  // Public pages (sign-in, first-run setup) render bare: no topbar nav, no
+  // status rail, no command palette. Those are app chrome for a signed-in
+  // operator -- a sign-in page carrying the full 8-link nav reads as broken,
+  // and the auth guard below would withhold their content anyway. A centered
+  // card on a quiet page is the shape a sign-in flow should have.
+  if (isPublic) {
+    return (
+      <div class="app-shell">
+        <main class="content content-centered">{children}</main>
+      </div>
+    );
   }
 
   return (
