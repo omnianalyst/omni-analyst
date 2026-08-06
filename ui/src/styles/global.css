@@ -1,9 +1,10 @@
 :root {
   --bg: #05070a;
   --bg-elev: #0b111a;
-  --panel: #0c1320;
-  --panel-2: #0f1724;
-  --border: #1c2738;
+  --panel: #0d1422;
+  --panel-2: #101a2b;
+  --border: #1b2638;
+  --border-soft: #141d2c;
   --border-strong: #2a3a52;
   --text: #e6edf6;
   --muted: #93a4be;
@@ -16,6 +17,28 @@
   --tier-stale: #f97316;
   --tier-dead: #ef4444;
   --tier-unknown: #64748b;
+
+  /* Spacing scale -- a single rhythm so padding never feels ad hoc. */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+  --s-8: 48px;
+
+  /* Radius scale. */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+
+  /* Elevation. Dark UIs read as flat without it; a faint top highlight plus a
+     soft drop lifts panels and cards off the background without a harsh border. */
+  --shadow-panel: 0 1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 12px 32px -16px rgba(0, 0, 0, 0.7);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.025) inset,
+    0 8px 24px -18px rgba(0, 0, 0, 0.8);
 
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo,
     Consolas, monospace;
@@ -30,20 +53,30 @@ html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--bg);
+  background:
+    radial-gradient(1200px 600px at 50% -200px, #0a1320 0%, transparent 60%),
+    var(--bg);
   color: var(--text);
   font-family: var(--sans);
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.55;
+  letter-spacing: -0.005em;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(92, 197, 255, 0.24);
 }
 
 a {
   color: var(--accent);
   text-decoration: none;
+  transition: color 0.12s ease;
 }
 a:hover {
-  text-decoration: underline;
+  color: #8fd6ff;
+  text-decoration: none;
 }
 
 .app-shell {
@@ -58,19 +91,22 @@ a:hover {
   z-index: 10;
   display: flex;
   align-items: center;
-  height: 52px;
-  padding: 0 24px;
-  background: rgba(8, 12, 18, 0.92);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--border);
+  height: 60px;
+  padding: 0 32px;
+  background: rgba(8, 12, 18, 0.78);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  border-bottom: 1px solid var(--border-soft);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
 }
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   color: var(--text);
   font-weight: 600;
-  letter-spacing: 0.01em;
+  font-size: 15px;
+  letter-spacing: -0.01em;
 }
 .brand:hover {
   text-decoration: none;
@@ -128,7 +164,7 @@ button.topnav-signout {
   width: 100%;
   max-width: 1080px;
   margin: 0 auto;
-  padding: 32px 24px 80px;
+  padding: 40px 28px 96px;
 }
 /* The sign-in / setup shell: no topbar, so the card centers in the viewport
    rather than sitting left-aligned in the 1080px content rail. Narrow by
@@ -153,12 +189,14 @@ button.topnav-signout {
 }
 
 .page-head {
-  margin-bottom: 24px;
+  margin-bottom: 28px;
 }
 .page-head h1 {
-  margin: 6px 0 0;
-  font-size: 26px;
-  letter-spacing: -0.01em;
+  margin: 8px 0 0;
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
 }
 .muted {
   margin: 0;
@@ -300,20 +338,22 @@ a.search-btn {
 
 /* ---------- panels / coverage ---------- */
 .panel {
-  margin-bottom: 32px;
+  margin-bottom: var(--s-7);
   background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
   overflow: hidden;
+  box-shadow: var(--shadow-panel);
 }
 .panel-title {
   margin: 0;
-  padding: 14px 18px;
-  font-size: 13px;
+  padding: var(--s-4) var(--s-5);
+  font-size: 12px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.12em;
   color: var(--muted);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-soft);
   background: var(--bg-elev);
 }
 
@@ -1194,22 +1234,23 @@ tr.row.tier-unknown td:first-child {
 /* -- Living brief: market banner, claim cards, confidence ------------------ */
 
 .market-banner {
-  margin: 0 0 20px;
-  padding: 22px 24px;
-  border: 1px solid var(--border-strong);
+  margin: 0 0 24px;
+  padding: var(--s-6) var(--s-7);
+  border: 1px solid var(--border-soft);
   border-left: 3px solid var(--accent);
-  border-radius: 10px;
+  border-radius: var(--r-lg);
   background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  box-shadow: var(--shadow-panel);
 }
 .market-banner-loading,
 .market-banner-none {
   border-left-color: var(--tier-unknown);
 }
 .market-headline {
-  margin: 0 0 6px;
-  font-size: 20px;
+  margin: 0 0 8px;
+  font-size: 22px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
   color: var(--text);
 }
 .market-implication {
@@ -1256,13 +1297,18 @@ tr.row.tier-unknown td:first-child {
 /* The claim card: direction · confidence · chain · invalidation · evidence.
    Border-left tinted by direction so a glance sorts up from down. */
 .claim-card {
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
   background: var(--panel);
-  padding: 16px 18px;
+  padding: var(--s-5) var(--s-6);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.14s ease, transform 0.14s ease;
+}
+.claim-card:hover {
+  border-color: var(--border-strong);
 }
 .claim-up {
   border-left: 3px solid var(--tier-fresh);
