@@ -13,15 +13,40 @@ export function head() {
   return { title: "Omni Analyst" };
 }
 
+// The pathname, from the framework's own request-aware mechanism.
+//
+// useLocation() reads RouterContext, and Neutron mounts that provider only in
+// the client hydrate path -- there is none in the server renderer, so on the
+// server the hook silently returns the createContext default "/" and every
+// page believes it is the home route. That made the sign-in page render the
+// full nine-link app nav server-side, which then vanished on hydration.
+// Reported in Neutron/docs/ADOPTION_FINDINGS.md; a layout loader is correct on
+// both sides in the meantime.
+export async function loader({ request }: { request: Request }) {
+  return { pathname: new URL(request.url).pathname };
+}
+
+interface LayoutData {
+  pathname?: string;
+}
+
+function isPublicPath(pathname: string): boolean {
+  return PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
+}
+
+// Grouped by what the operator came to do: read what the system says, look
+// something up, or check on the machine itself. /console is absent on purpose --
+// it was a third rendering of the feed already on "/" and /briefing, and the
+// route now redirects.
 const NAV = [
-  { href: "/briefing", label: "Briefing" },
-  { href: "/console", label: "Console" },
-  { href: "/search", label: "Search" },
-  { href: "/objective", label: "Objective" },
+  { href: "/", label: "Today" },
+  { href: "/briefing", label: "Track record" },
   { href: "/regime", label: "Regime" },
   { href: "/sectors", label: "Sectors" },
+  { href: "/search", label: "Search" },
   { href: "/watchlist", label: "Watchlists" },
   { href: "/alerts", label: "Alerts" },
+  { href: "/objective", label: "Ask" },
   { href: "/system", label: "System" },
 ];
 
@@ -39,29 +64,42 @@ const COMMANDS: CommandItem[] = NAV.map((item, i) => ({
 // fetch audience-scoped data that would 401.
 const PUBLIC_PATHS = ["/login", "/setup"];
 
-export default function Layout({ children }: { children?: preact.ComponentChildren }) {
-  // useLocation reads router context, so it is correct during SSR too -- the
-  // bare/public render below is decided server-side, no header flash on login.
-  const { pathname } = useLocation();
-  const isPublic = pathname === "/login" || pathname === "/setup";
+export default function Layout({
+  data,
+  children,
+}: {
+  data?: LayoutData;
+  children?: preact.ComponentChildren;
+}) {
+  // Client navigation keeps RouterContext current, so the hook wins once
+  // hydrated; the loader value is what makes the first server render correct.
+  const { pathname: routerPath } = useLocation();
+  const pathname =
+    typeof window === "undefined" ? (data?.pathname ?? routerPath) : routerPath;
+  const isPublic = isPublicPath(pathname);
 
   // Auth state is client-only: localStorage is unavailable during SSR, so the
   // link renders as "Sign in" on the server and may flip to "Sign out" after
   // hydration reads the stored token. No router context is read here, so SSR
   // is not at risk.
   const [signedIn, setSignedIn] = useState(false);
-  // Guard state: content is withheld until the auth check resolves, so an
-  // unauthenticated visitor never sees a protected page shell flash before the
-  // redirect fires. "allow" gates the children render.
-  const [allowed, setAllowed] = useState(false);
+  // The guard withholds protected content from a signed-out visitor. It must
+  // not withhold it from the server renderer: SSR has no localStorage, so a
+  // guard defaulting to false there rendered <main> empty on every route and
+  // the whole app arrived as a blank frame that popped in after hydration.
+  // Nothing audience-scoped is in the server output -- every panel fetches its
+  // own data with a token after mount -- so rendering the shell leaks nothing.
+  // On the client the initial state reads storage synchronously, so a
+  // signed-out visitor still never paints a protected page.
+  const [allowed, setAllowed] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return isPublicPath(window.location.pathname) || getAuthToken() !== null;
+  });
 
   useEffect(() => {
     setSignedIn(getAuthToken() !== null);
     const path = window.location.pathname;
-    const isPublicPath = PUBLIC_PATHS.some(
-      (p) => path === p || path.startsWith(p + "/"),
-    );
-    if (isPublicPath) {
+    if (isPublicPath(path)) {
       setAllowed(true);
       return;
     }
