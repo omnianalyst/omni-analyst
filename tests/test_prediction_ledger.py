@@ -467,7 +467,7 @@ class TestSchedulerResolveLoop:
                 outcome = await db.pool.fetchval(
                     "SELECT outcome FROM prediction WHERE id=$1", pid
                 )
-                if outcome != "pending":
+                if outcome != "pending" and scheduler.stats.resolved >= 1:
                     break
                 await asyncio.sleep(0.05)
         finally:

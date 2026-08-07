@@ -365,7 +365,13 @@ class Scheduler:
         self.stats = Stats()
 
     async def _do(
-        self, loop_name: str, interval: float, fn, *args, **kwargs
+        self,
+        loop_name: str,
+        interval: float,
+        fn,
+        *args,
+        on_result=None,
+        **kwargs,
     ):
         """Run one loop iteration, recording its outcome to loop_health.
 
@@ -374,6 +380,12 @@ class Scheduler:
         and applying its per-loop discipline (e.g. ``continue`` vs sleep).
         ``asyncio.CancelledError`` is never recorded as a failure -- shutdown is
         not a fault.
+
+        ``on_result`` (if given) is called synchronously with the result BEFORE
+        the health-record await. The scheduler's stats counters are updated this
+        way so they tick the instant the work is done, not one DB-write later --
+        otherwise there is a window where the work is visible in the store but
+        ``stats`` has not advanced, which the resolve-loop test polls for.
         """
         try:
             result = await fn(*args, **kwargs)
@@ -388,6 +400,8 @@ class Scheduler:
                 expected_interval_seconds=interval,
             )
             raise
+        if on_result is not None:
+            on_result(result)
         await record_loop_health(
             self._pool,
             loop_name=loop_name,
