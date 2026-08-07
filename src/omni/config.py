@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     #: 0.6 is lenient (3-in-5); 0.7 is a defensible "high conviction" bar.
     target_hit_rate: float = 0.6
 
+    #: Auth token lifetime in seconds. 3600 (1h) is conservative; for a solo
+    #: operator on a private deployment, a longer session (e.g. 604800 = 7d)
+    #: is more usable. Env-configurable so it's tunable without code changes.
+    token_expires_in: int = 3600
+
     @property
     def licensed(self) -> tuple[str, ...]:
         return tuple(

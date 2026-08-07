@@ -62,6 +62,7 @@ services:
       ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY:-}
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
       LICENSED_REDISTRIBUTION_PROVIDERS: ${LICENSED_REDISTRIBUTION_PROVIDERS:-}
+      TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-3600}
     ports:
       - "${API_PORT:-8000}:8000"
     # No healthcheck override: the image's HEALTHCHECK (see Dockerfile) is what
@@ -94,6 +95,7 @@ services:
       ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY:-}
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
       LICENSED_REDISTRIBUTION_PROVIDERS: ${LICENSED_REDISTRIBUTION_PROVIDERS:-}
+      TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-3600}
       # Conviction gate bar: surface only confidence buckets historically right
       # at least this often. 0.65 = "high conviction" (~7-in-10), tuned from the
       # trend.sma calibration buckets. Raise for stricter/more silence, lower

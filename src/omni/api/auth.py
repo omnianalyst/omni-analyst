@@ -38,8 +38,9 @@ from omni.auth.users import (
     get_user,
     user_count,
 )
+from omni.config import settings
 
-TOKEN_EXPIRES_IN = 3600
+TOKEN_EXPIRES_IN = settings.token_expires_in
 
 
 def _client_ip(request: Request) -> str:
