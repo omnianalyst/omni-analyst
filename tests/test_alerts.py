@@ -20,9 +20,9 @@ from neutron.auth.jwt import create_token
 from neutron.test import TestClient
 
 from omni.alerts.rules import KNOWN_KINDS, InvalidCondition, evaluate, validate_condition
-from omni.scheduler.worker import evaluate_alerts_once
 from omni.api.alerts import build_router
 from omni.main import create_app
+from omni.scheduler.worker import evaluate_alerts_once
 
 
 async def _user(db, email) -> uuid4:
@@ -693,7 +693,6 @@ class TestSchedulerEvaluation:
     function existed but no loop called it."""
 
     async def test_evaluate_alerts_once_fires_every_active_alert_against_coverage(self, db):
-        from omni.alerts.rules import evaluate  # noqa: F811 (clarity at call site)
 
         user = await _user(db, "op@example.com")
         entity = await _entity(db)

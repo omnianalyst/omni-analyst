@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from omni.capabilities.execution_analytics import BenchmarkBar, Fill
 from omni.capabilities.fixed_income import (
     Bond,
     CouponFrequency,
@@ -15,7 +16,6 @@ from omni.capabilities.fixed_income import (
     YieldCurve,
     nelson_siegel,
 )
-from omni.capabilities.execution_analytics import BenchmarkBar, Fill
 from omni.capabilities.portfolio_risk import Scenario
 from omni.capabilities.signal_fusion import NormalizationMethod
 from omni.capabilities.volatility import Bar
@@ -1559,8 +1559,8 @@ class TestInvocation:
         declared-argument path has been restructured and this pin needs review
         -- the ImportError is the signal, not a defect in the test.
         """
-        from omni.capability.arguments import Materialized
         from omni.capabilities.risk import analyze_credit_risk
+        from omni.capability.arguments import Materialized
         from omni.orchestrator.analysis import _compute_credit_risk
 
         ig = Materialized(value=200.0, claim_ids=(), rows=())

@@ -19,11 +19,11 @@ import pytest
 
 from omni.config import Settings
 from omni.credentials.catalog import (
+    _WIRED_PROVIDERS,
     FALLBACK_ALLOWED,
     FALLBACK_BYO_ONLY,
     FALLBACK_PROHIBITED,
     PROVIDER_CATALOG,
-    _WIRED_PROVIDERS,
     redistribution_for,
 )
 

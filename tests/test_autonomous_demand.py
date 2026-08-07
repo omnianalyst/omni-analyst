@@ -2,15 +2,14 @@
 
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 import pytest
 
+from omni.autonomous.backfill import backfill_trend_predictions
 from omni.autonomous.demand import (
     _rank_sectors,
     create_autonomous_demand,
 )
-from omni.autonomous.backfill import backfill_trend_predictions
 
 
 async def _seed_company(db, symbol="AAPL"):

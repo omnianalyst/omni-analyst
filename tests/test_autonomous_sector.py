@@ -2,12 +2,10 @@
 
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 import pytest
 
 from omni.autonomous.sector import (
-    CLAIM_TYPE,
     macro_alignment,
     scan_sectors,
 )

@@ -7,7 +7,6 @@ the real ledger. Every pure test states what bug it catches.
 
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
 import pytest
 

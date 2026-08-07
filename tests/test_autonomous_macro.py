@@ -9,12 +9,10 @@ insufficient.
 
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 import pytest
 
 from omni.autonomous.macro import (
-    CLAIM_TYPE,
     _compute_output_gap,
     assess_macro_regime,
     cycle_phase,

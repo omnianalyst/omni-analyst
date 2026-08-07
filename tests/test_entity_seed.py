@@ -25,8 +25,8 @@ from omni.entities.seed import (
     INDEX_KIND,
     MEMBER_OF_SECTOR,
     SECTOR_ETF_KIND,
-    seed_market_universe,
     run,
+    seed_market_universe,
 )
 
 

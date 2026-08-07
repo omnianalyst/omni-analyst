@@ -111,7 +111,7 @@ class TestWriteClaims:
 
     async def test_reingesting_the_same_observation_writes_nothing(self, db):
         entity_id = await _entity(db)
-        common = dict(entity_id=entity_id, source="fred", provider_key="fred")
+        common = {"entity_id": entity_id, "source": "fred", "provider_key": "fred"}
         first = await write_claims(db.pool, [_draft()], **common)
         second = await write_claims(db.pool, [_draft()], **common)
         assert len(first) == 1
@@ -120,7 +120,7 @@ class TestWriteClaims:
 
     async def test_a_later_vintage_is_a_new_claim(self, db):
         entity_id = await _entity(db)
-        common = dict(entity_id=entity_id, source="fred", provider_key="fred")
+        common = {"entity_id": entity_id, "source": "fred", "provider_key": "fred"}
         await write_claims(db.pool, [_draft()], **common)
 
         revised = ClaimDraft(

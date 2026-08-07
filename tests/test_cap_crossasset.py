@@ -18,6 +18,7 @@ from omni.capabilities.crossasset import (
     ICResult,
     _corr,
     _finite,
+    _summarize_ic,
     cross_asset_correlations,
     detect_divergences,
     evaluate_signal,
@@ -28,7 +29,6 @@ from omni.capabilities.crossasset import (
     roro_indicator,
     sector_rotation,
     time_series_ic,
-    _summarize_ic,
 )
 from omni.ingest.protocol import Unavailable
 

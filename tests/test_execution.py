@@ -52,7 +52,7 @@ def _order(**overrides) -> OrderRequest:
         "symbol": "AAPL",
         "side": OrderSide.BUY,
         "order_type": OrderType.MARKET,
-        "quantity": Decimal("100"),
+        "quantity": Decimal(100),
     }
     base.update(overrides)
     return OrderRequest(**base)
@@ -66,7 +66,7 @@ def _alpaca_submitted_order() -> SimpleNamespace:
         status=SimpleNamespace(value="pending_new"),
         submitted_at=None,
         symbol="AAPL",
-        qty=Decimal("100"),
+        qty=Decimal(100),
         side=SimpleNamespace(value="buy"),
         type=SimpleNamespace(value="market"),
     )
@@ -387,7 +387,7 @@ class TestAlpacaOrderMapping:
         assert isinstance(req, mod.MarketOrderRequest)
         assert req.kwargs == {
             "symbol": "AAPL",
-            "qty": Decimal("100"),
+            "qty": Decimal(100),
             "side": mod.AlpacaOrderSide.BUY,
             "time_in_force": mod.AlpacaTimeInForce.DAY,
         }
@@ -411,7 +411,7 @@ class TestAlpacaOrderMapping:
         client = await self._connected(mod)
         client.trading_client.submit_order.return_value = _alpaca_submitted_order()
 
-        await client.submit_order(_order(order_type=OrderType.STOP, stop_price=Decimal("180")))
+        await client.submit_order(_order(order_type=OrderType.STOP, stop_price=Decimal(180)))
 
         req = client.trading_client.submit_order.call_args.args[0]
         assert isinstance(req, mod.StopOrderRequest)
@@ -426,7 +426,7 @@ class TestAlpacaOrderMapping:
         await client.submit_order(
             _order(
                 order_type=OrderType.STOP_LIMIT,
-                stop_price=Decimal("180"),
+                stop_price=Decimal(180),
                 limit_price=Decimal("185.50"),
             )
         )
@@ -564,7 +564,7 @@ class TestIbkrOrderMapping:
     def test_stop_order_sets_the_stop_aux_price(self, ibkr_sdk):
         mod = ibkr_sdk
         client = mod.IBKRClient()
-        order = _order(order_type=OrderType.STOP, stop_price=Decimal("180"))
+        order = _order(order_type=OrderType.STOP, stop_price=Decimal(180))
 
         ib_order = client._create_ib_order(order)
 
@@ -577,7 +577,7 @@ class TestIbkrOrderMapping:
         client = mod.IBKRClient()
         order = _order(
             order_type=OrderType.STOP_LIMIT,
-            stop_price=Decimal("180"),
+            stop_price=Decimal(180),
             limit_price=Decimal("185.50"),
         )
 

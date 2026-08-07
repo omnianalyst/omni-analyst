@@ -2,12 +2,11 @@
 
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 import pytest
 
-from omni.autonomous.synthesis import enrich_findings
 from omni.autonomous.meta import meta_hit_rate, resolve_meta
+from omni.autonomous.synthesis import enrich_findings
 
 
 async def _seed_entity(db, kind, symbol, name=None):
