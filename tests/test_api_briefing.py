@@ -192,6 +192,93 @@ async def test_a_surfaced_finding_carries_its_threshold_and_both_evidence_lists(
     assert item["prediction_id"] is not None
 
 
+async def test_a_claimless_finding_reports_claim_id_null_not_the_string_None(
+    db, database_url
+):
+    """claim_id has been nullable since 012. An unguarded str() renders NULL as
+    the literal "None", which a client cannot distinguish from a real id -- and
+    every finding the trend producer writes is claim-less, so this was the
+    shipped shape of 100% of the feed."""
+    e = await _entity(db)
+    await _surface(db, entity_id=e, claim_id=None)
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.get("/briefing")
+
+    assert r.status_code == 200, r.text
+    feed = r.json()
+    assert len(feed) == 1
+    assert feed[0]["claim_id"] is None
+    assert feed[0]["claim_id"] != "None"
+
+
+async def test_the_feed_shows_one_current_call_per_entity_and_method(
+    db, database_url
+):
+    """The finding table is an append-only ledger; the feed is a statement of
+    the current view. Two passes as price crosses the moving average write
+    opposite directions on the same name -- rendering both makes the product
+    contradict itself on one screen. Newest wins; the older row stays on the
+    ledger."""
+    e = await _entity(db)
+    await _surface(db, entity_id=e, claim_id=None, direction="down")
+    await _surface(db, entity_id=e, claim_id=None, direction="up")
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.get("/briefing")
+
+    feed = r.json()
+    assert len(feed) == 1, [f["direction"] for f in feed]
+    assert feed[0]["direction"] == "up"
+    # Both rows are still on the ledger -- superseding the feed must not delete
+    # history, or the refusal denominator and the scorecard stop adding up.
+    assert await db.pool.fetchval(
+        "SELECT count(*) FROM finding WHERE status = 'surfaced'"
+    ) == 2
+
+
+async def test_a_resolved_call_leaves_the_feed_but_stays_on_the_scorecard(
+    db, database_url
+):
+    """The feed is what the system says now. A call whose prediction has played
+    out is what it said, and belongs to the record.
+
+    Nothing else retires it: a resolved finding can only be displaced by a newer
+    surfaced row for the same key, so if the next pass refuses it would stand as
+    "currently standing" forever.
+    """
+    e = await _entity(db)
+    await _surface(db, entity_id=e, claim_id=None, outcome="upper")
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        feed = (await client.get("/briefing")).json()
+        card = (await client.get("/briefing/scorecard", headers=_auth(uuid4()))).json()
+
+    assert feed == []
+    # Still counted, and counted as a hit -- leaving the feed is not forgetting.
+    assert card[0]["resolved"] == 1
+    assert card[0]["hits"] == 1
+
+
+async def test_a_resolved_call_does_not_hide_a_live_one_behind_it(db, database_url):
+    """Filtering after the dedup instead of inside it would pick the resolved
+    row as newest for its key and then drop it, silently hiding the open call
+    underneath. Order matters, so it is asserted."""
+    e = await _entity(db)
+    await _surface(db, entity_id=e, claim_id=None, direction="up")  # open, older
+    await _surface(db, entity_id=e, claim_id=None, outcome="upper")  # resolved, newer
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        feed = (await client.get("/briefing")).json()
+
+    assert len(feed) == 1
+    assert feed[0]["direction"] == "up"
+
+
 async def test_a_private_finding_leaks_to_neither_another_user_nor_the_shared_feed(
     db, database_url
 ):

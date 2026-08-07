@@ -55,7 +55,10 @@ def _finding_to_dict(row) -> dict:
     # without it reads as advocacy, and the client must not have to ask twice.
     return {
         "id": str(row["id"]),
-        "claim_id": str(row["claim_id"]),
+        # Nullable since 012: an analysis-sourced finding anchors to no single
+        # claim. Unguarded str() renders that as the literal "None", which a
+        # client cannot tell from a real id.
+        "claim_id": str(row["claim_id"]) if row["claim_id"] is not None else None,
         "entity_id": str(row["entity_id"]),
         "entity": {
             "id": str(row["entity_id"]),

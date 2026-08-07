@@ -96,26 +96,50 @@ async def record(
 
 
 async def briefing(pool, *, audience: UUID | None = None, limit: int = 20) -> list[dict]:
-    """What the system chose to say, newest first.
+    """What the system currently says, newest first.
 
     Scoped to an audience the same way coverage is: a finding derived from a
     user's licensed data belongs to that user. `audience=None` returns the
     shared feed only.
+
+    One row per (entity, method, audience): the newest. The finding table is an
+    append-only ledger -- every pass writes a fresh row so the refusal
+    denominator and the historical record stay intact -- but the *feed* is a
+    statement of the current view, and a ledger read raw is not that. Two passes
+    an hour apart legitimately produce opposite directions on the same name as
+    price crosses the moving average; showing both makes the product contradict
+    itself in a single screen. The superseded rows are still on the ledger and
+    still score; they are simply not what the system says now.
+
+    A call whose prediction has resolved is likewise not what the system says
+    now -- it is what the system said, and it belongs to the scorecard. Nothing
+    would otherwise retire it: a resolved finding can only be displaced by a
+    newer *surfaced* row for the same key, so if the next pass refuses (the
+    confidence fell, the evidence went quiet) the resolved call would stand as
+    current indefinitely. Deduping first and filtering after would be wrong for
+    the same reason -- it would let a resolved row hide a live one behind it --
+    so the filter is inside the subquery, where the newest row per key is chosen
+    from the still-open ones.
     """
     rows = await pool.fetch(
         """
-        SELECT f.id, f.claim_id, f.entity_id, f.method, f.confidence,
-               f.threshold, f.calibrated_hit_rate, f.supporting,
-               f.disconfirming, f.prediction_id, f.created_at,
-               f.deduction_chain,
-               e.symbol, e.name,
-               p.direction, p.entry_price, p.upper_barrier, p.lower_barrier
-        FROM finding f
-        JOIN entity e ON e.id = f.entity_id
-        LEFT JOIN prediction p ON p.id = f.prediction_id
-        WHERE f.status = 'surfaced'
-          AND (f.audience_user_id IS NULL OR f.audience_user_id = $1)
-        ORDER BY f.created_at DESC
+        SELECT * FROM (
+            SELECT DISTINCT ON (f.entity_id, f.method, f.audience_user_id)
+                   f.id, f.claim_id, f.entity_id, f.method, f.confidence,
+                   f.threshold, f.calibrated_hit_rate, f.supporting,
+                   f.disconfirming, f.prediction_id, f.created_at,
+                   f.deduction_chain,
+                   e.symbol, e.name,
+                   p.direction, p.entry_price, p.upper_barrier, p.lower_barrier
+            FROM finding f
+            JOIN entity e ON e.id = f.entity_id
+            LEFT JOIN prediction p ON p.id = f.prediction_id
+            WHERE f.status = 'surfaced'
+              AND (f.audience_user_id IS NULL OR f.audience_user_id = $1)
+              AND (p.id IS NULL OR p.outcome = 'pending')
+            ORDER BY f.entity_id, f.method, f.audience_user_id, f.created_at DESC
+        ) current
+        ORDER BY created_at DESC
         LIMIT $2
         """,
         audience,
