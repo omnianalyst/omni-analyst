@@ -51,9 +51,14 @@
 	}
 
 	# Everything else: serve the SPA, falling back to index.html for
-	# client-side routing.
+	# client-side routing. The entry document is no-cache so a new deploy's
+	# changed asset hashes reach the user immediately; the hashed /assets/*
+	# above stay immutable (content-addressed). Without this, an edge cache
+	# (Cloudflare) or the browser serves a stale index.html and the user's tab
+	# keeps loading the old bundle -- new routes read as "not found".
 	handle {
 		root * /srv/ui
+		header Cache-Control "no-cache"
 		try_files {path} /index.html
 		file_server
 	}
