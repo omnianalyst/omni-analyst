@@ -6,7 +6,9 @@ the real ledger. Every pure test states what bug it catches.
 """
 
 import json
+import math
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 
 import pytest
 
@@ -31,7 +33,7 @@ class TestTrendCall:
     def test_down_call_when_price_below_ma(self):
         out = trend_call(entry=100.0, sma=110.0, vol=5.0, target_k=2.0)
         assert out is not None
-        direction, upper, lower, conf = out
+        direction, upper, lower, _conf = out
         assert direction == "down"
         assert upper == pytest.approx(110.0)  # MA invalidation, above entry
         assert lower == pytest.approx(90.0)  # entry - 2*vol
@@ -57,7 +59,7 @@ class TestTrendCall:
             assert out is not None
             confs.append(out[3])
         # Strictly increasing with trend strength.
-        for a, b in zip(confs, confs[1:]):
+        for a, b in pairwise(confs):
             assert b > a, (confs)
         # And spans a meaningful range (not collapsed to a constant).
         assert confs[-1] - confs[0] > 0.2
@@ -77,7 +79,8 @@ class TestRealizedVol:
 
     def test_varying_series_is_positive_and_finite(self):
         v = _realized_vol([100.0, 101.0, 99.0, 102.0, 98.0, 103.0])
-        assert v > 0.0 and v == v  # finite
+        assert v > 0.0
+        assert math.isfinite(v)
 
 
 @pytest.fixture(autouse=True)

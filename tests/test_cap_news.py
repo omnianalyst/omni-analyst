@@ -6,6 +6,7 @@ rather than return a fabricated default.
 """
 
 from datetime import UTC, datetime
+from typing import ClassVar
 
 import pytest
 
@@ -345,7 +346,7 @@ class TestSymbolNewsImpact:
 
 
 class TestSectorNewsOutlook:
-    MAPPING = {
+    MAPPING: ClassVar[dict[str, list[str]]] = {
         "Technology": ["AAPL", "MSFT"],
         "Energy": ["XOM"],
     }

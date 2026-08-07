@@ -7,6 +7,7 @@ surface for "which tier does this data land in".
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import asyncpg
 import pytest
 
 from omni.coverage.visibility import visible_claims
@@ -148,7 +149,11 @@ class TestWriteClaims:
             event_date=NOW, knowledge_date=NOW, confidence=1.0,
         )
         object.__setattr__(bad, "claim_type", "not_a_real_claim_type")
-        with pytest.raises(Exception):
+        # An invalid claim_type violates the claim_type enum: the database
+        # rejects the whole batch. Pinning the class matters -- a blind
+        # `Exception` would also be satisfied by a TypeError from a typo in
+        # this test, and the rollback would go unverified.
+        with pytest.raises(asyncpg.PostgresError):
             await write_claims(
                 db.pool, [_draft(key="A"), bad, _draft(key="B")],
                 entity_id=entity_id, source="fred", provider_key="fred",

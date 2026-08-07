@@ -6,14 +6,14 @@ that calibrates in-sample by luck collapses forward -- the test rate falls
 toward chance. If the harness could not tell these apart it would be useless.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from omni.conviction.walk_forward import (
     PredictionRow,
     walk_forward,
 )
 
-_BASE = datetime(2026, 1, 1)
+_BASE = datetime(2026, 1, 1, tzinfo=UTC)
 CUTOFF = _BASE + timedelta(days=50)
 
 

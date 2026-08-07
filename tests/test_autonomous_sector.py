@@ -115,9 +115,11 @@ class TestMacroAlignment:
 class TestScanSectors:
     async def test_abstains_when_no_prices(self, db):
         await _seed_etfs(db)
-        macro = await db.pool.fetchval(
+        # The macro entity must exist for the sector scan to find a regime to
+        # align against; its id is not needed here.
+        await db.pool.execute(
             "INSERT INTO entity (kind, symbol, name) "
-            "VALUES ('macro', 'US_MACRO', 'US Macro') RETURNING id"
+            "VALUES ('macro', 'US_MACRO', 'US Macro')"
         )
         report = await scan_sectors(db.pool)
         assert report.scored == 0
@@ -148,9 +150,11 @@ class TestScanSectors:
 
     async def test_top_performer_gets_highest_rs(self, db):
         etf_ids = await _seed_etfs(db)
-        macro = await db.pool.fetchval(
+        # The macro entity must exist for the sector scan to find a regime to
+        # align against; its id is not needed here.
+        await db.pool.execute(
             "INSERT INTO entity (kind, symbol, name) "
-            "VALUES ('macro', 'US_MACRO', 'US Macro') RETURNING id"
+            "VALUES ('macro', 'US_MACRO', 'US Macro')"
         )
         await _seed_prices(db, etf_ids["XLK"], _uptrend_closes(drift=0.005))
         await _seed_prices(db, etf_ids["XLP"], _uptrend_closes(drift=0.001))
@@ -172,9 +176,11 @@ class TestScanSectors:
 
     async def test_downtrend_detected(self, db):
         etf_ids = await _seed_etfs(db)
-        macro = await db.pool.fetchval(
+        # The macro entity must exist for the sector scan to find a regime to
+        # align against; its id is not needed here.
+        await db.pool.execute(
             "INSERT INTO entity (kind, symbol, name) "
-            "VALUES ('macro', 'US_MACRO', 'US Macro') RETURNING id"
+            "VALUES ('macro', 'US_MACRO', 'US Macro')"
         )
         await _seed_prices(db, etf_ids["XLE"], _downtrend_closes())
 
@@ -201,9 +207,11 @@ class TestScanSectors:
 
     async def test_idempotent_on_unchanged_prices(self, db):
         etf_ids = await _seed_etfs(db)
-        macro = await db.pool.fetchval(
+        # The macro entity must exist for the sector scan to find a regime to
+        # align against; its id is not needed here.
+        await db.pool.execute(
             "INSERT INTO entity (kind, symbol, name) "
-            "VALUES ('macro', 'US_MACRO', 'US Macro') RETURNING id"
+            "VALUES ('macro', 'US_MACRO', 'US Macro')"
         )
         await _seed_prices(db, etf_ids["XLK"], _uptrend_closes())
 

@@ -287,9 +287,9 @@ def _returns(n=50, seed=7):
 # ask, so effective_spread = 2 * |100.01 - 100.00| = 0.02 and a buy at 100.01
 # whose future mid reverts to 100.00 gives realised_spread = -0.02.
 def _effective_spread_inputs():
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
-    base = datetime(2024, 1, 1, 9, 30)
+    base = datetime(2024, 1, 1, 9, 30, tzinfo=UTC)
     quotes = [
         {"timestamp": base + timedelta(minutes=i), "bid": 99.99, "ask": 100.01}
         for i in range(25)
@@ -330,10 +330,10 @@ def _vpin_inputs():
 # delay = 0.4*1/100 = 40 bps, trading = 0.4*(100-101)/100 = -40 bps,
 # opportunity = 0.6*4/100 = 240 bps, total = 240 bps (additive).
 def _implementation_shortfall_inputs():
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     return {
-        "fills": [Fill(price=100.0, size=40.0, timestamp=datetime(2024, 1, 1, 10, 0))],
+        "fills": [Fill(price=100.0, size=40.0, timestamp=datetime(2024, 1, 1, 10, 0, tzinfo=UTC))],
         "decision_price": 100.0,
         "market_price_at_execution": 101.0,
         "close_price": 104.0,
@@ -343,15 +343,15 @@ def _implementation_shortfall_inputs():
 
 
 def _fill(price=101.0, size=100.0):
-    from datetime import datetime
+    from datetime import UTC, datetime
 
-    return Fill(price=price, size=size, timestamp=datetime(2024, 1, 1, 10, 0))
+    return Fill(price=price, size=size, timestamp=datetime(2024, 1, 1, 10, 0, tzinfo=UTC))
 
 
 def _flat_window_bars(price=100.0):
-    from datetime import datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
-    base = datetime(2024, 1, 1, 10, 0)
+    base = datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
     return [
         BenchmarkBar(timestamp=base, price=price, volume=50.0),
         BenchmarkBar(timestamp=base + timedelta(minutes=1), price=price, volume=50.0),

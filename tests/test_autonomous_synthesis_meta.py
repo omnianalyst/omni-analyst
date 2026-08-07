@@ -164,7 +164,7 @@ class TestSynthesis:
         pid = await _seed_prediction(db, entity_id=company)
         await _seed_finding(db, entity_id=company, prediction_id=pid)
 
-        report = await enrich_findings(db.pool)
+        await enrich_findings(db.pool)
         chain_raw = await db.pool.fetchval(
             "SELECT deduction_chain FROM finding WHERE prediction_id = $1", pid
         )
