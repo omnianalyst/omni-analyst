@@ -156,6 +156,10 @@ class SchedulerConfig:
     #: "which predictions now clear the calibrated threshold and should be
     #: surfaced as findings". Rate-limited by conviction, never by schedule.
     surface_interval: float = 300.0
+    #: The conviction gate's bar (see config.target_hit_rate). Surfaces only
+    #: confidence buckets historically right at least this often; raising it
+    #: yields fewer, higher-conviction calls and silences weak methods.
+    target_hit_rate: float = 0.6
     #: Alerts read only the coverage store (no external API), cheap like
     #: resolve. Each active alert is evaluated against its owner's audience, so
     #: a watched condition fires the moment coverage satisfies it rather than
@@ -275,7 +279,7 @@ async def predict_once(pool, *, horizon_days: int) -> tuple[int, int]:
     return produced, abstained
 
 
-async def surface_once(pool) -> int:
+async def surface_once(pool, *, target_hit_rate: float = 0.6) -> int:
     """Assess recent predictions through the conviction gate; record findings.
 
     For each prediction that has no recorded finding yet (the latest per entity +
@@ -317,7 +321,7 @@ async def surface_once(pool) -> int:
             searched_for_disconfirming=True,
             falsifiable=True,
         )
-        verdict = assess(candidate, buckets)
+        verdict = assess(candidate, buckets, target_hit_rate=target_hit_rate)
         await record(
             pool, verdict, entity_id=r["entity_id"],
             audience_user_id=audience, prediction_id=r["id"],
@@ -442,7 +446,8 @@ class Scheduler:
         # a finding.
         try:
             n = await self._do(
-                "surface", self._config.surface_interval, surface_once, self._pool
+                "surface", self._config.surface_interval, surface_once, self._pool,
+                target_hit_rate=self._config.target_hit_rate,
             )
             self.stats.surfaced += n
         except Exception:
@@ -599,7 +604,8 @@ class Scheduler:
         while self._running:
             try:
                 n = await self._do(
-                    "surface", self._config.surface_interval, surface_once, self._pool
+                    "surface", self._config.surface_interval, surface_once, self._pool,
+                target_hit_rate=self._config.target_hit_rate,
                 )
                 self.stats.surfaced += n
                 if n:

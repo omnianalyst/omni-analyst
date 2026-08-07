@@ -48,7 +48,9 @@ async def main() -> None:
     await populate_identifiers(client.pool, user_agent=settings.sec_user_agent)
 
     registry = default_registry()
-    scheduler = Scheduler(client.pool, registry, SchedulerConfig())
+    scheduler = Scheduler(
+        client.pool, registry, SchedulerConfig(target_hit_rate=settings.target_hit_rate)
+    )
 
     stopping = asyncio.Event()
     loop = asyncio.get_running_loop()

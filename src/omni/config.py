@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     #: their data may enter shared coverage. Comma-separated provider keys.
     licensed_redistribution_providers: str = ""
 
+    #: The conviction gate's bar: a prediction is surfaced only if its
+    #: confidence bucket has historically resolved right at least this often.
+    #: Derived-threshold-friendly -- raising it surfaces only higher-conviction
+    #: calls and silences weak methods; lowering it surfaces more (noisier).
+    #: 0.6 is lenient (3-in-5); 0.7 is a defensible "high conviction" bar.
+    target_hit_rate: float = 0.6
+
     @property
     def licensed(self) -> tuple[str, ...]:
         return tuple(

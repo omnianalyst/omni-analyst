@@ -94,6 +94,11 @@ services:
       ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY:-}
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
       LICENSED_REDISTRIBUTION_PROVIDERS: ${LICENSED_REDISTRIBUTION_PROVIDERS:-}
+      # Conviction gate bar: surface only confidence buckets historically right
+      # at least this often. 0.65 = "high conviction" (~7-in-10), tuned from the
+      # trend.sma calibration buckets. Raise for stricter/more silence, lower
+      # for more (noisier).
+      TARGET_HIT_RATE: ${TARGET_HIT_RATE:-0.6}
     # Exactly one. Do not scale.
     deploy:
       replicas: 1
