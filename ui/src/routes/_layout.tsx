@@ -104,9 +104,7 @@ export default function Layout({ children }: { children?: preact.ComponentChildr
     <div class="app-shell">
       <header class="topbar">
         <a href="/" class="brand">
-          <span class="brand-mark" aria-hidden="true" />
           Omni Analyst
-          <span class="brand-sub">coverage</span>
         </a>
         <nav class="topnav">
           {signedIn ? (
