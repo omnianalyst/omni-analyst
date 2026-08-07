@@ -1,11 +1,11 @@
-import { BriefingView } from "../components/BriefingView";
+import { RecordView } from "../components/RecordView";
 
 export const config = { mode: "app", hydrate: true };
 
 export function head() {
-  return { title: "Briefing | Omni Analyst" };
+  return { title: "Track record | Omni Analyst" };
 }
 
-export default function BriefingPage() {
-  return <BriefingView />;
+export default function RecordPage() {
+  return <RecordView />;
 }

@@ -1,4 +1,4 @@
-import { BriefView } from "../components/BriefView";
+import { TodayView } from "../components/TodayView";
 
 export const config = { mode: "app", hydrate: true };
 
@@ -7,5 +7,5 @@ export function head() {
 }
 
 export default function HomePage() {
-  return <BriefView />;
+  return <TodayView />;
 }

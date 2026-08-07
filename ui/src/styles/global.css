@@ -1246,6 +1246,12 @@ tr.row.tier-unknown td:first-child {
 .market-banner-none {
   border-left-color: var(--tier-unknown);
 }
+/* A failed read must not look like a healthy one. "No regime yet" is the
+   system working; "could not be read" is a fault, and the rail colour is the
+   fastest way to tell them apart at a glance. */
+.market-banner-error {
+  border-left-color: var(--tier-dead);
+}
 .market-headline {
   margin: 0 0 8px;
   font-size: 22px;
@@ -1279,10 +1285,17 @@ tr.row.tier-unknown td:first-child {
   color: var(--text);
 }
 
+/* Inside a .panel the subtitle sits under the title bar and needs the panel's
+   own horizontal padding; standing alone under a page heading it does not. */
 .panel-sub {
   margin: -6px 0 14px;
   font-size: 13px;
+  line-height: 1.55;
   color: var(--faint);
+}
+.panel > .panel-sub {
+  margin: 0;
+  padding: 0 var(--s-5) var(--s-3);
 }
 
 .claims-list {
@@ -1469,4 +1482,126 @@ tr.row.tier-unknown td:first-child {
 }
 .claim-evidence-toggle:hover {
   border-color: var(--accent);
+}
+
+/* -- Hint: a term that explains itself ------------------------------------- */
+/* Dotted underline signals "this has a definition" without shouting. The
+   bubble is positioned above by default and flips below via .hint-below when a
+   term sits near the top of the viewport. */
+
+.hint {
+  position: relative;
+  border-bottom: 1px dotted var(--faint);
+  cursor: help;
+  outline: none;
+}
+.hint:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.hint-bubble {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  z-index: 40;
+  width: max-content;
+  max-width: min(320px, 70vw);
+  padding: var(--s-3) var(--s-4);
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-panel);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: normal;
+  text-align: left;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms;
+  pointer-events: none;
+}
+
+.hint:hover .hint-bubble,
+.hint:focus-visible .hint-bubble {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Touch has no hover: the bubble would need a tap-to-open affordance to be
+   usable, and a tooltip that opens on tap intercepts scrolling. The aria-label
+   still carries the definition to assistive tech. */
+@media (hover: none) {
+  .hint {
+    border-bottom: none;
+    cursor: default;
+  }
+  .hint-bubble {
+    display: none;
+  }
+}
+
+/* -- Form field labels ------------------------------------------------------ */
+/* Fields were labelled in mono with their raw database column names
+   (claim_type, condition kind, seconds). Mono signals "identifier, type it
+   exactly"; these are questions being asked of a person, so they read as
+   sentences and carry their own help text. */
+
+.field-label {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  letter-spacing: 0.01em;
+}
+
+.field-help {
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* -- Chip set: multi-select without a multi-select --------------------------- */
+/* A native <select multiple> is close to unusable with a mouse and invisible on
+   touch. Toggle chips show every option and what is currently chosen at once. */
+
+.chip-set {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.chip {
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+.chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.chip-on {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+.chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

@@ -19,6 +19,7 @@ import {
   status,
 } from "../lib/systemStore";
 import { ErrorState } from "./ErrorState";
+import { Hint } from "./Hint";
 import { Loading } from "./Loading";
 
 const WORD_TIER: Record<EngineStatusWord, string> = {
@@ -55,7 +56,11 @@ function LoopRow({ loop }: { loop: LoopStatus }) {
         {loop.loop}
       </td>
       <td>
-        <span class="gap-class">{cadence === "scheduled" ? "scheduled" : "on demand"}</span>
+        <Hint term={cadence === "scheduled" ? "loop_scheduled" : "loop_on_demand"}>
+          <span class="gap-class">
+            {cadence === "scheduled" ? "scheduled" : "on demand"}
+          </span>
+        </Hint>
       </td>
       <td class="mono">{timestamp(loop.last_activity)}</td>
       <td class="num mono">{loopAgeLabel(loop)}</td>
@@ -87,7 +92,7 @@ export function SystemView() {
     if (st === "error") {
       return <ErrorState message={errorMessage.value ?? "status unreachable"} />;
     }
-    return <Loading label="Loading system status\u2026" />;
+    return <Loading label="Loading system status…" />;
   }
 
   const worst = worstScheduledTier(s.loops);
@@ -134,7 +139,9 @@ export function SystemView() {
           </div>
           <div class="metric-grid">
             <div class="metric">
-              <span class="metric-label">Demand active</span>
+              <span class="metric-label">
+                <Hint term="demand">Demand active</Hint>
+              </span>
               <span class="metric-value">{s.demand.active}</span>
               <span class="metric-sub">{s.demand.total} total</span>
             </div>
@@ -143,7 +150,7 @@ export function SystemView() {
               <span class="metric-value">{s.production_24h.predictions}</span>
             </div>
             <div class="metric">
-              <span class="metric-label">Findings (24h)</span>
+              <span class="metric-label">Calls surfaced (24h)</span>
               <span class="metric-value">{s.production_24h.findings}</span>
               <span class="metric-sub">quiet days are healthy</span>
             </div>
@@ -199,7 +206,10 @@ export function SystemView() {
       </section>
 
       <section class="panel">
-        <h2 class="panel-title">Fill outcomes (last hour)</h2>
+        <h2 class="panel-title">
+          <Hint term="fill_outcome">Fill outcomes</Hint>
+          <span class="panel-clear">last hour</span>
+        </h2>
         {fillEntries.length === 0 ? (
           <p class="empty">No fill attempts in the last hour. The engine is idle on this path.</p>
         ) : (

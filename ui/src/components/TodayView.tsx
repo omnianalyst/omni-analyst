@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { describeError } from "../lib/api";
 import {
   aggregateScorecard,
   regimeBadges,
@@ -6,7 +7,6 @@ import {
   topReason,
   topSectors,
 } from "../lib/console";
-import { describeError } from "../lib/api";
 import {
   briefingHeading,
   explainRefusal,
@@ -22,18 +22,30 @@ import {
 import { getRegime, getSectors, type RegimeResponse, type SectorEntry } from "../lib/autonomous";
 import { ErrorState } from "./ErrorState";
 import { FindingCard } from "./FindingCard";
+import { Hint } from "./Hint";
 import { Loading } from "./Loading";
+import { MarketBanner } from "./MarketBanner";
+
+// The front door: what the system says right now, framed by the macro backdrop
+// it deduced it from, with its own track record beside it.
+//
+// This page was three -- "/" showed the calls, "/console" showed the same calls
+// under a different heading with a sidebar, "/briefing" showed them a third time
+// with the scorecard. One dataset, three names for it, and a reader who could
+// not tell what distinguished them. Now there are two pages with genuinely
+// different jobs: this one says what the system currently believes, and the
+// track record page shows how often that belief has been right and what it
+// declined to say. Silence in the feed is the conviction gate working.
 
 type Async<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
   | { kind: "error"; message: string; detail?: string };
 
-const FINDING_PREVIEW = 5;
 const SECTOR_PREVIEW = 3;
 
-function useConsoleData() {
-  const [findings, setFindings] = useState<Async<BriefingFinding[]>>({ kind: "loading" });
+function useTodayData() {
+  const [calls, setCalls] = useState<Async<BriefingFinding[]>>({ kind: "loading" });
   const [scorecard, setScorecard] = useState<Async<ScorecardRow[]>>({ kind: "loading" });
   const [refusals, setRefusals] = useState<Async<RefusalCounts>>({ kind: "loading" });
   const [regime, setRegime] = useState<Async<RegimeResponse>>({ kind: "loading" });
@@ -41,15 +53,16 @@ function useConsoleData() {
 
   useEffect(() => {
     let cancelled = false;
-    const run = <T,>(
-      set: (v: Async<T>) => void,
-      fetcher: () => Promise<T>,
-    ) => {
+    const run = <T,>(set: (v: Async<T>) => void, fetcher: () => Promise<T>) => {
       fetcher()
         .then((d) => {
           if (!cancelled) set({ kind: "ok", data: d });
         })
         .catch((err) => {
+          // A failed fetch is an error state, never an empty one. Rendering a
+          // 500 as a calm "nothing to report" is the single most dishonest
+          // thing this UI could do, in the one product whose whole claim is
+          // that silence means something.
           if (!cancelled) {
             const { message, detail } = describeError(err);
             set({ kind: "error", message, detail });
@@ -57,7 +70,7 @@ function useConsoleData() {
         });
     };
 
-    run(setFindings, getBriefing);
+    run(setCalls, getBriefing);
     run(setScorecard, getScorecard);
     run(setRefusals, getRefusals);
     run(setRegime, getRegime);
@@ -68,11 +81,11 @@ function useConsoleData() {
     };
   }, []);
 
-  return { findings, scorecard, refusals, regime, sectors };
+  return { calls, scorecard, refusals, regime, sectors };
 }
 
 function RegimeStrip({ regime }: { regime: Async<RegimeResponse> }) {
-  if (regime.kind === "loading") return <Loading label="Loading regime\u2026" />;
+  if (regime.kind === "loading") return <Loading label="Loading regime…" />;
   if (regime.kind === "error") {
     return <ErrorState message={regime.message} detail={regime.detail} />;
   }
@@ -80,7 +93,8 @@ function RegimeStrip({ regime }: { regime: Async<RegimeResponse> }) {
   if (!r.value || !r.value.cycle_phase) {
     return (
       <p class="faint">
-        No regime yet &mdash; the system waits for enough macro data before reading the market.
+        No regime read yet — the system waits for enough macro data before
+        calling one.
       </p>
     );
   }
@@ -109,8 +123,8 @@ function RegimeStrip({ regime }: { regime: Async<RegimeResponse> }) {
   );
 }
 
-function CalibrationGauge({ scorecard }: { scorecard: Async<ScorecardRow[]> }) {
-  if (scorecard.kind === "loading") return <Loading label="Loading calibration\u2026" />;
+function TrackRecordPanel({ scorecard }: { scorecard: Async<ScorecardRow[]> }) {
+  if (scorecard.kind === "loading") return <Loading label="Loading track record…" />;
   if (scorecard.kind === "error") {
     return <ErrorState message={scorecard.message} detail={scorecard.detail} />;
   }
@@ -120,23 +134,23 @@ function CalibrationGauge({ scorecard }: { scorecard: Async<ScorecardRow[]> }) {
       <span class="gauge-rate">{formatHitRate(summary.rate)}</span>
       <span class="metric-sub">
         {summary.resolved > 0
-          ? `${summary.hits} of ${summary.resolved} resolved predictions`
-          : "no resolved predictions yet"}
+          ? `of ${summary.resolved} call${summary.resolved === 1 ? "" : "s"} that have played out`
+          : "no calls have played out yet"}
       </span>
-      <a class="bar-detail" href="/briefing">scorecard</a>
+      <a class="bar-detail" href="/briefing">full record</a>
     </div>
   );
 }
 
-function RefusalsBlock({ refusals }: { refusals: Async<RefusalCounts> }) {
-  if (refusals.kind === "loading") return <Loading label="Loading refusals\u2026" />;
+function RefusalsPanel({ refusals }: { refusals: Async<RefusalCounts> }) {
+  if (refusals.kind === "loading") return <Loading label="Loading refusals…" />;
   if (refusals.kind === "error") {
     return <ErrorState message={refusals.message} detail={refusals.detail} />;
   }
   const total = refusalTotal(refusals.data);
   const top = topReason(refusals.data);
   if (total === 0) {
-    return <p class="empty">Nothing turned away yet &mdash; no calls have been considered and refused.</p>;
+    return <p class="empty">Nothing considered and turned down yet.</p>;
   }
   return (
     <div class="refusals-block">
@@ -148,16 +162,16 @@ function RefusalsBlock({ refusals }: { refusals: Async<RefusalCounts> }) {
   );
 }
 
-function SectorTeaser({ sectors }: { sectors: Async<SectorEntry[]> }) {
-  if (sectors.kind === "loading") return <Loading label="Loading sectors\u2026" />;
+function SectorLeaders({ sectors }: { sectors: Async<SectorEntry[]> }) {
+  if (sectors.kind === "loading") return <Loading label="Loading sectors…" />;
   if (sectors.kind === "error") {
     return <ErrorState message={sectors.message} detail={sectors.detail} />;
   }
   if (sectors.data.length === 0) {
     return (
       <p class="empty">
-        No sector scores yet &mdash; sector scanning needs ETF price data,
-        which fills once you&rsquo;re signed in as the operator.
+        No sector scores yet — scoring needs sector ETF prices, which arrive once
+        a provider key is configured.
       </p>
     );
   }
@@ -180,73 +194,72 @@ function SectorTeaser({ sectors }: { sectors: Async<SectorEntry[]> }) {
   );
 }
 
-export function ConsoleView() {
-  const { findings, scorecard, refusals, regime, sectors } = useConsoleData();
+export function TodayView() {
+  const { calls, scorecard, refusals, regime, sectors } = useTodayData();
 
   return (
-    <div class="console">
-      <header class="page-head">
-        <h1>Console</h1>
-        <p class="muted">
-          What the system is saying right now, against the macro backdrop. Silence
-          in the feed is the conviction gate working, not an error.
-        </p>
-      </header>
+    <div class="today">
+      <MarketBanner />
 
       <RegimeStrip regime={regime} />
 
       <div class="console-grid">
         <section class="panel console-main">
           <h2 class="panel-title">
-            Findings
-            <a class="panel-clear" href="/briefing">full briefing</a>
+            Today&apos;s calls
+            <a class="panel-clear" href="/briefing">track record</a>
           </h2>
-          {findings.kind === "loading" ? <Loading label="Loading briefing\u2026" /> : null}
-          {findings.kind === "error" ? (
-            <ErrorState message={findings.message} detail={findings.detail} />
+          <p class="panel-sub muted">
+            Only what cleared the{" "}
+            <Hint term="conviction_gate">conviction gate</Hint>. Direction is
+            analysis, not advice.
+          </p>
+          {calls.kind === "loading" ? <Loading label="Loading calls…" /> : null}
+          {calls.kind === "error" ? (
+            <ErrorState message={calls.message} detail={calls.detail} />
           ) : null}
-          {findings.kind === "ok" && findings.data.length === 0 ? (
+          {calls.kind === "ok" && calls.data.length === 0 ? (
             <div class="empty">
               <p>
-                <strong>{briefingHeading([])}</strong> &mdash; nothing was confident and
-                calibrated enough to interrupt you with.
+                <strong>{briefingHeading([])}</strong> — nothing was confident and
+                calibrated enough to surface. That is the system working, not an
+                empty feed.
               </p>
             </div>
           ) : null}
-          {findings.kind === "ok" && findings.data.length > 0 ? (
+          {calls.kind === "ok" && calls.data.length > 0 ? (
             <>
               <p class="gap-meta" style={{ padding: "12px 18px 0" }}>
-                {briefingHeading(findings.data)}
+                {briefingHeading(calls.data)}
               </p>
-              <ul class="gaps" style={{ marginTop: "8px" }}>
-                {findings.data.slice(0, FINDING_PREVIEW).map((f) => (
+              <ul class="claims-list">
+                {calls.data.map((f) => (
                   <FindingCard key={f.id} finding={f} />
                 ))}
               </ul>
-              {findings.data.length > FINDING_PREVIEW ? (
-                <a class="panel-clear" href="/briefing" style={{ display: "inline-block", padding: "12px 18px" }}>
-                  {findings.data.length - FINDING_PREVIEW} more in the full briefing
-                </a>
-              ) : null}
             </>
           ) : null}
         </section>
 
         <aside class="console-side">
           <section class="panel">
-            <h2 class="panel-title">Calibration</h2>
-            <CalibrationGauge scorecard={scorecard} />
+            <h2 class="panel-title">
+              <Hint term="hit_rate">Track record</Hint>
+            </h2>
+            <TrackRecordPanel scorecard={scorecard} />
           </section>
           <section class="panel">
-            <h2 class="panel-title">Refusals</h2>
-            <RefusalsBlock refusals={refusals} />
+            <h2 class="panel-title">
+              <Hint term="refusal">Refusals</Hint>
+            </h2>
+            <RefusalsPanel refusals={refusals} />
           </section>
           <section class="panel">
             <h2 class="panel-title">
               Sector leaders
               <a class="panel-clear" href="/sectors">scan</a>
             </h2>
-            <SectorTeaser sectors={sectors} />
+            <SectorLeaders sectors={sectors} />
           </section>
         </aside>
       </div>

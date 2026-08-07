@@ -85,10 +85,13 @@ describe("briefingHeading", () => {
     expect(briefingHeading([])).not.toMatch(/loading|error/i);
   });
 
-  it("counts surfaced findings when the feed is non-empty", () => {
-    expect(briefingHeading([{ id: "1" } as never])).toBe("1 finding surfaced");
+  it("counts surfaced calls when the feed is non-empty", () => {
+    // "call" is the one noun for what the system surfaces. The UI previously
+    // mixed call / finding / pick for the same object; "finding" survives only
+    // as the internal table name.
+    expect(briefingHeading([{ id: "1" } as never])).toBe("1 call surfaced");
     expect(
       briefingHeading([{ id: "1" } as never, { id: "2" } as never]),
-    ).toBe("2 findings surfaced");
+    ).toBe("2 calls surfaced");
   });
 });

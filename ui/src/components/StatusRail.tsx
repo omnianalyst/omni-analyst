@@ -128,7 +128,7 @@ export function StatusRail() {
         <FillCounts counts={s.fill_last_hour} />
         <span class="bar-stat">
           24h <strong>{s.production_24h.predictions}</strong> predictions
-          <span class="bar-dim"> &middot; {s.production_24h.findings} surfaced</span>
+          <span class="bar-dim"> &middot; {s.production_24h.findings} calls</span>
         </span>
         <a class="bar-detail" href="/system">details</a>
       </div>
