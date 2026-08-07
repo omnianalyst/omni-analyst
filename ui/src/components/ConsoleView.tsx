@@ -80,7 +80,7 @@ function RegimeStrip({ regime }: { regime: Async<RegimeResponse> }) {
   if (!r.value || !r.value.cycle_phase) {
     return (
       <p class="faint">
-        No regime assessment yet. The macro loop abstains until FRED data is available.
+        No regime yet &mdash; the system waits for enough macro data before reading the market.
       </p>
     );
   }
@@ -136,7 +136,7 @@ function RefusalsBlock({ refusals }: { refusals: Async<RefusalCounts> }) {
   const total = refusalTotal(refusals.data);
   const top = topReason(refusals.data);
   if (total === 0) {
-    return <p class="empty">Nothing considered and refused yet.</p>;
+    return <p class="empty">Nothing turned away yet &mdash; no calls have been considered and refused.</p>;
   }
   return (
     <div class="refusals-block">
@@ -156,8 +156,8 @@ function SectorTeaser({ sectors }: { sectors: Async<SectorEntry[]> }) {
   if (sectors.data.length === 0) {
     return (
       <p class="empty">
-        No sector scores. The scanner needs ETF prices (Polygon); sign in as the
-        operator to view byo_only scores.
+        No sector scores yet &mdash; sector scanning needs ETF price data,
+        which fills once you&rsquo;re signed in as the operator.
       </p>
     );
   }

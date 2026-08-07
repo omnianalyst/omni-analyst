@@ -166,7 +166,7 @@ export function WatchlistPanel({ watchlist }: { watchlist: Watchlist }) {
         ) : null}
         {entries.kind === "ok" && entries.entries.length === 0 ? (
           <p class="empty">
-            No entities on this watchlist yet. The list is genuinely empty.
+            Nothing on this watchlist yet. Search above to add a ticker.
           </p>
         ) : null}
         {entries.kind === "ok" && entries.entries.length > 0 ? (

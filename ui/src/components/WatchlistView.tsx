@@ -119,7 +119,7 @@ export function WatchlistView() {
 function AuthRequired() {
   return (
     <section class="panel">
-      <h2 class="panel-title">Authentication required</h2>
+      <h2 class="panel-title">Sign in to use watchlists</h2>
       <div style={{ padding: "18px" }}>
         <p>
           A watchlist is private to its owner. A request without a verified

@@ -41,7 +41,7 @@ export function RegimeView() {
   if (!regime.value || !regime.value.cycle_phase) {
     return (
       <div class="card">
-        <p class="faint">No regime assessment yet. The macro loop abstains until FRED data is available.</p>
+        <p class="faint">No regime yet &mdash; the system waits for enough macro data before reading the market.</p>
       </div>
     );
   }

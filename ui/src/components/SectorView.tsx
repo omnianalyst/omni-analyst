@@ -43,7 +43,7 @@ export function SectorView() {
   if (sectors.length === 0) {
     return (
       <div class="card">
-        <p class="faint">No sector scores. The scanner needs ETF prices (Polygon). Sign in as the operator to view byo_only scores.</p>
+        <p class="faint">No sector scores yet &mdash; sector scanning needs ETF price data, which fills once you&rsquo;re signed in as the operator.</p>
       </div>
     );
   }

@@ -47,9 +47,8 @@ export function AlertsView() {
       <header class="page-head">
         <h1>Alerts</h1>
         <p class="muted">
-          An alert is a condition over coverage, evaluated for you alone. The
-          four kinds are the closed set the evaluator will run; anything else is
-          rejected at creation.
+          An alert watches a condition on a ticker and notifies you the moment
+          it&rsquo;s met. Pick one of the condition types below.
         </p>
       </header>
 
@@ -82,8 +81,7 @@ export function AlertsView() {
         ) : null}
         {state.kind === "ok" && state.alerts.length === 0 ? (
           <p class="empty">
-            No alerts configured. The API answered and the list is genuinely
-            empty.
+            No alerts set. Create one above to be notified when a condition is met.
           </p>
         ) : null}
         {state.kind === "ok" && state.alerts.length > 0 ? (

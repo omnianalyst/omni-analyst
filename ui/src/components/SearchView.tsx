@@ -59,10 +59,9 @@ export function SearchView() {
   return (
     <div class="search-view">
       <header class="page-head">
-        <h1>Coverage search</h1>
+        <h1>Search</h1>
         <p class="muted">
-          Find an entity by symbol or name. Empty search shows nothing — a
-          network that looks full is worse than one that is honestly empty.
+          Find a ticker or company by symbol or name.
         </p>
       </header>
 
@@ -94,8 +93,7 @@ export function SearchView() {
         )}
         {state.kind === "empty" && (
           <p class="empty">
-            No entities matched “{state.q}”. The API answered; nothing
-            matched.
+            No tickers or companies matched &ldquo;{state.q}&rdquo;.
           </p>
         )}
         {state.kind === "error" && (

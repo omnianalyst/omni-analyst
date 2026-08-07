@@ -10,7 +10,7 @@ import { fetchSetupStatus } from "../lib/auth";
 export const config = { hydrate: true };
 
 export function head() {
-  return { title: "Omni Analyst — coverage" };
+  return { title: "Omni Analyst" };
 }
 
 const NAV = [
