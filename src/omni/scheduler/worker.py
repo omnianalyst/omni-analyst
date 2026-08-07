@@ -35,6 +35,7 @@ from uuid import UUID, uuid4
 
 from omni.alerts.rules import evaluate
 from omni.capability.registry import Registry
+from omni.conviction.disconfirm import gather_evidence
 from omni.conviction.gate import Candidate, assess
 from omni.conviction.ledger import resolve_due_predictions
 from omni.conviction.predict import produce_dcf_prediction_from_coverage
@@ -296,7 +297,7 @@ async def surface_once(pool, *, target_hit_rate: float = 0.6) -> int:
         """
         SELECT DISTINCT ON (p.entity_id, p.method, p.audience_user_id)
                p.id, p.entity_id, p.method, p.confidence, p.audience_user_id,
-               p.direction
+               p.direction, p.created_at
         FROM prediction p
         WHERE p.method IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM finding f WHERE f.prediction_id = p.id)
@@ -313,12 +314,23 @@ async def surface_once(pool, *, target_hit_rate: float = 0.6) -> int:
         buckets = await load_calibration(
             pool, claim_type=label, method=r["method"], audience=audience
         )
+        # Point-in-time as-of the call, not now: evidence gathered from prices
+        # the call could not have seen would be scoring it with hindsight.
+        evidence = await gather_evidence(
+            pool,
+            entity_id=r["entity_id"],
+            method=r["method"],
+            direction=r["direction"],
+            audience=audience,
+            as_of=r["created_at"],
+        )
         candidate = Candidate(
             claim_type=label,
             method=r["method"],
             confidence=float(r["confidence"]),
-            supporting=(f"{r['direction']} directional call from {r['method']}",),
-            searched_for_disconfirming=True,
+            supporting=evidence.supporting,
+            disconfirming=evidence.disconfirming,
+            searched_for_disconfirming=evidence.searched,
             falsifiable=True,
         )
         verdict = assess(candidate, buckets, target_hit_rate=target_hit_rate)

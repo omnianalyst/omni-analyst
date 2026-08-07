@@ -326,20 +326,56 @@ class TestClaimlessFindings:
         assert row["claim_id"] is None
         assert "input claim a" in row["supporting"]
 
-    async def test_a_claimless_finding_with_empty_supporting_is_rejected(self, db):
-        """The whole point of the new CHECK: a finding with no claim and no
-        named evidence is untraceable and must not be stored. `refusal` is
-        supplied so refusal_names_a_reason does not fire -- the new CHECK is the
-        only thing being exercised."""
+    async def test_a_claimless_surfaced_finding_with_empty_supporting_is_rejected(
+        self, db
+    ):
+        """The whole point of the CHECK: a finding that speaks unprompted while
+        anchored to no claim and naming no evidence is advocacy, and must not be
+        stored. A real prediction is supplied so surfaced_findings_are_falsifiable
+        does not fire -- the evidence CHECK is the only thing being exercised."""
+        e = await _entity(db)
+        p = await _prediction(db, e)
+        with pytest.raises(asyncpg.IntegrityConstraintViolationError) as exc:
+            await db.pool.execute(
+                "INSERT INTO finding (claim_id, entity_id, status, method, "
+                "confidence, threshold, prediction_id, supporting) "
+                "VALUES (NULL,$1,'surfaced','detect',0.85,0.7,$2,'[]'::jsonb)",
+                e, p,
+            )
+        assert exc.value.constraint_name == "surfaced_findings_name_their_evidence"
+
+    async def test_a_refusal_needs_no_evidence_only_a_reason(self, db):
+        """A refusal's traceability is its reason, not an evidence list. 031
+        scoped the evidence CHECK to surfaced rows for exactly this: the gate
+        refusing a candidate whose disconfirming search could not run has, by
+        definition, no evidence to name."""
+        e = await _entity(db)
+        fid = await db.pool.fetchval(
+            "INSERT INTO finding (claim_id, entity_id, status, method, "
+            "confidence, refusal, supporting) "
+            "VALUES (NULL,$1,'refused','detect',0.5,"
+            "'no_disconfirming_evidence_was_gathered','[]'::jsonb) RETURNING id",
+            e,
+        )
+        row = await db.pool.fetchrow(
+            "SELECT status, supporting, refusal FROM finding WHERE id=$1", fid
+        )
+        assert row["status"] == "refused"
+        assert row["supporting"] == "[]"
+        assert row["refusal"] == "no_disconfirming_evidence_was_gathered"
+
+    async def test_a_refusal_still_needs_a_reason(self, db):
+        """Scoping the evidence CHECK must not have opened a hole: a refusal
+        naming neither evidence nor reason is still untraceable and rejected."""
         e = await _entity(db)
         with pytest.raises(asyncpg.IntegrityConstraintViolationError) as exc:
             await db.pool.execute(
                 "INSERT INTO finding (claim_id, entity_id, status, method, "
-                "confidence, refusal, supporting) "
-                "VALUES (NULL,$1,'refused','detect',0.5,'test','[]'::jsonb)",
+                "confidence, supporting) "
+                "VALUES (NULL,$1,'refused','detect',0.5,'[]'::jsonb)",
                 e,
             )
-        assert exc.value.constraint_name == "claim_or_supporting_names_the_evidence"
+        assert exc.value.constraint_name == "refusal_names_a_reason"
 
     async def test_a_claimless_surfaced_finding_with_a_real_prediction_is_allowed(self, db):
         """Proves the relaxation does not block a surfaced claim-less finding in

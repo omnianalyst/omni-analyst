@@ -259,16 +259,150 @@ class TestDefaultRegistry:
         assert capability.invocable
 
 
+# The disconfirming search only supports trend.sma* -- its checks read a
+# moving average, which is what a trend call rests on. Surfacing tests must use
+# a method the search covers, or they measure the unsupported-method refusal
+# rather than the path they name.
+SURFACE_METHOD = "trend.sma"
+
+
 async def _seed_resolved(db, entity_id, *, n, outcome, confidence=0.7):
     for _ in range(n):
         await db.pool.execute(
             "INSERT INTO prediction (entity_id, method, direction, confidence, "
             "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
             "resolved_at, provenance, created_at) "
-            "VALUES ($1,'test.surface','up',$2,100.0,110.0,90.0, now(), $3::prediction_outcome, "
+            "VALUES ($1,$4,'up',$2,100.0,110.0,90.0, now(), $3::prediction_outcome, "
             "now(), '{}'::jsonb, now() - interval '30 days')",
-            entity_id, confidence, outcome,
+            entity_id, confidence, outcome, SURFACE_METHOD,
         )
+
+
+async def _seed_price_history(db, entity_id, *, days=60, flat=False):
+    """Daily closes ending today, so the disconfirming search has the price
+    window it needs. Without this the gate refuses on
+    NO_DISCONFIRMING_SEARCH before it ever reaches the threshold check.
+
+    ``flat=True`` writes a constant series: enough rows to satisfy the window,
+    but degenerate -- zero vol, price on its own average, so no check can reach
+    a verdict.
+    """
+    import json as _json
+
+    for i in range(days):
+        close = 100.0 if flat else 100.0 + i
+        await db.pool.execute(
+            "INSERT INTO claim (entity_id, claim_type, key, value, source, "
+            "event_date, knowledge_date, confidence, redistributable) VALUES "
+            "($1,'price_snapshot','close',$2::jsonb,'poly',"
+            "now() - make_interval(days => $3), now() - make_interval(days => $3),"
+            "1.0,'allowed')",
+            entity_id, _json.dumps({"close": close}), days - 1 - i,
+        )
+
+
+async def test_surface_once_survives_a_candidate_with_no_usable_evidence(db):
+    """The poison-row regression. A flat price series satisfies the window but
+    lets no check reach a verdict, so the candidate carries no evidence. If that
+    were reported as a completed search, the gate would pass it and the insert
+    would violate surfaced_findings_name_their_evidence -- and because rows are
+    ordered by entity_id, the raised CheckViolation would abort the pass and
+    every prediction behind it, on this pass and every later one.
+
+    Two entities: the degenerate one sorts first often enough to matter, so the
+    assertion is that BOTH get a finding and the pass completes.
+    """
+    flat_e = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('company','FLAT','Flat') RETURNING id"
+    )
+    live_e = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('company','LIVE','Live') RETURNING id"
+    )
+    await _seed_price_history(db, flat_e, flat=True)
+    await _seed_price_history(db, live_e)
+    for e in (flat_e, live_e):
+        await _seed_resolved(db, e, n=11, outcome="upper")
+        await db.pool.execute(
+            "INSERT INTO prediction (entity_id, method, direction, confidence, "
+            "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
+            "provenance, created_at) "
+            "VALUES ($1,$2,'up',0.7,100.0,110.0,90.0, "
+            "now()+interval '30 days','pending','{}'::jsonb, now())",
+            e, SURFACE_METHOD,
+        )
+
+    n = await surface_once(db.pool)
+
+    assert n == 2, "the pass must not abort partway"
+    flat_status = await db.pool.fetchval(
+        "SELECT refusal FROM finding WHERE entity_id=$1 AND status='refused'", flat_e
+    )
+    assert flat_status == "no_disconfirming_evidence_was_gathered"
+    assert await db.pool.fetchval(
+        "SELECT count(*) FROM finding WHERE entity_id=$1", live_e
+    ) == 1
+
+
+async def test_surface_once_does_not_abort_on_an_entity_with_no_own_history(db):
+    """The crash path exactly. Calibration is per method and pooled across
+    entities, so a name with no resolved history of its own can still clear a
+    derived threshold. Give it a flat price series and every check goes quiet:
+    no vol, no trend direction, no regime, and -- because the record check is
+    per entity -- no track record either. The evidence list is then genuinely
+    empty, and a candidate reported as searched would be surfaced and rejected
+    by surfaced_findings_name_their_evidence, raising out of the pass.
+    """
+    calibrator = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('company','CAL','Cal') RETURNING id"
+    )
+    await _seed_resolved(db, calibrator, n=11, outcome="upper")
+
+    flat_e = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('company','FLAT','Flat') RETURNING id"
+    )
+    await _seed_price_history(db, flat_e, flat=True)
+    await db.pool.execute(
+        "INSERT INTO prediction (entity_id, method, direction, confidence, "
+        "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
+        "provenance, created_at) "
+        "VALUES ($1,$2,'up',0.7,100.0,110.0,90.0, now()+interval '30 days',"
+        "'pending','{}'::jsonb, now())",
+        flat_e, SURFACE_METHOD,
+    )
+
+    await surface_once(db.pool)
+
+    row = await db.pool.fetchrow(
+        "SELECT status, refusal, supporting FROM finding WHERE entity_id=$1", flat_e
+    )
+    assert row is not None, "the candidate was never assessed"
+    assert row["status"] == "refused"
+    assert row["refusal"] == "no_disconfirming_evidence_was_gathered"
+
+
+async def test_surface_once_refuses_when_no_disconfirming_search_could_run(db):
+    """The invariant the gate exists for. With no price coverage the search has
+    no inputs, so nothing was examined and the candidate is refused -- however
+    strong its calibration. Before the search was real this call site passed a
+    hardcoded True and this refusal could never fire."""
+    e = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('company','S','S') RETURNING id"
+    )
+    await _seed_resolved(db, e, n=11, outcome="upper")
+    cand = await db.pool.fetchval(
+        "INSERT INTO prediction (entity_id, method, direction, confidence, "
+        "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
+        "provenance, created_at) "
+        "VALUES ($1,$2,'up',0.7,100.0,110.0,90.0, now()+interval '30 days', "
+        "'pending', '{}'::jsonb, now()) RETURNING id",
+        e, SURFACE_METHOD,
+    )
+    await surface_once(db.pool)
+    row = await db.pool.fetchrow(
+        "SELECT status, refusal FROM finding WHERE prediction_id=$1", cand
+    )
+    assert row["status"] == "refused"
+    assert row["refusal"] == "no_disconfirming_evidence_was_gathered"
 
 
 async def test_surface_once_surfaces_a_calibrated_candidate(db):
@@ -278,13 +412,14 @@ async def test_surface_once_surfaces_a_calibrated_candidate(db):
         "INSERT INTO entity (kind, symbol, name) VALUES ('company','S','S') RETURNING id"
     )
     await _seed_resolved(db, e, n=11, outcome="upper")  # 11 hits at conf 0.7
+    await _seed_price_history(db, e)
     cand = await db.pool.fetchval(
         "INSERT INTO prediction (entity_id, method, direction, confidence, "
         "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
         "provenance, created_at) "
-        "VALUES ($1,'test.surface','up',0.7,100.0,110.0,90.0, now()+interval '30 days', "
+        "VALUES ($1,$2,'up',0.7,100.0,110.0,90.0, now()+interval '30 days', "
         "'pending', '{}'::jsonb, now()) RETURNING id",
-        e,
+        e, SURFACE_METHOD,
     )
     n = await surface_once(db.pool)
     assert n >= 1
@@ -306,9 +441,9 @@ async def test_surface_once_refuses_a_below_threshold_candidate(db):
         "INSERT INTO prediction (entity_id, method, direction, confidence, "
         "entry_price, upper_barrier, lower_barrier, horizon_ends_at, outcome, "
         "provenance, created_at) "
-        "VALUES ($1,'test.surface','up',0.7,100.0,110.0,90.0, now()+interval '30 days', "
+        "VALUES ($1,$2,'up',0.7,100.0,110.0,90.0, now()+interval '30 days', "
         "'pending', '{}'::jsonb, now()) RETURNING id",
-        e,
+        e, SURFACE_METHOD,
     )
     await surface_once(db.pool)
     status = await db.pool.fetchval(
