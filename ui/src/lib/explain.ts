@@ -11,9 +11,18 @@ import type { DeductionLayer } from "./briefing";
 // -- Confidence: felt, not just a number -------------------------------------
 //
 // "0.74" is opaque. A novice reads it as "high" and stops. The discipline is to
-// surface BOTH a calibrated word AND the inverse -- roughly how often a call
-// like this is WRONG -- because over-trust lives in the gap between "74% right"
-// and "1 in 4 wrong". The word and the fraction are the same fact; both render.
+// surface BOTH a word AND the inverse -- roughly how often a call like this is
+// WRONG -- because over-trust lives in the gap between "74% right" and "1 in 4
+// wrong".
+//
+// The two numbers are NOT interchangeable, and treating them as such was a bug
+// that shipped. `confidence` is the model's own first-passage probability;
+// `calibrated_hit_rate` is how often that class HAS resolved correctly. Deriving
+// the wrongness frequency from confidence put "~1 in 2 wrong" on the same card
+// as "right ~85% of the time" -- two contradictory claims about one call, both
+// stated as fact. Only the measured rate can say how often something is wrong,
+// so that is the only input here. When nothing has resolved yet, the honest
+// answer is no frequency at all, not one computed from a self-report.
 
 export function confidenceWord(c: number | null | undefined): string {
   if (c === null || c === undefined || Number.isNaN(c)) return "uncalibrated";
@@ -23,11 +32,22 @@ export function confidenceWord(c: number | null | undefined): string {
   return "very high conviction";
 }
 
-export function oddsOfWrong(c: number | null | undefined): string | null {
-  if (c === null || c === undefined || Number.isNaN(c) || c >= 0.97 || c <= 0.03) {
+export function oddsOfWrong(rate: number | null | undefined): string | null {
+  if (
+    rate === null ||
+    rate === undefined ||
+    Number.isNaN(rate) ||
+    rate >= 0.97 ||
+    rate <= 0.03
+  ) {
     return null;
   }
-  const n = Math.round(1 / (1 - c));
+  // "1 in N" cannot express a majority. At a 35% hit rate the formula rounds to
+  // "1 in 2 wrong", which reads as a coin flip and understates a class that
+  // loses about two times in three. Below the halfway mark the honest sentence
+  // is the plain one.
+  if (rate < 0.5) return "wrong more often than right";
+  const n = Math.round(1 / (1 - rate));
   return `~1 in ${n} calls like this are wrong`;
 }
 

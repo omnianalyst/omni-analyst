@@ -204,25 +204,55 @@ export const getClaims = (id: string, claimType: string): Promise<ClaimsResponse
     authHeaderIfPresent(),
   );
 
+// The server speaks RFC 7807 problem+json. Its `detail` is written for a
+// person; the rest of the envelope is not.
+function problemDetail(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown; title?: unknown };
+    for (const field of [parsed.detail, parsed.title]) {
+      if (typeof field === "string" && field.trim()) return field.trim();
+    }
+  } catch {
+    /* not problem+json */
+  }
+  return null;
+}
+
+function statusMessage(status: number): string {
+  // 403 is separate from 401 on purpose. This API never issues one -- it
+  // answers 404 where a lesser design would say "exists, but not yours" -- so a
+  // 403 reaching here came from something in front of it, and telling the
+  // reader to sign in would be a guess about a layer we do not control.
+  if (status === 401) return "You are not signed in.";
+  if (status === 403) return "That is not allowed.";
+  if (status === 404) return "That is not here.";
+  if (status === 429) return "Too many requests — wait a moment.";
+  if (status >= 500) return "The server could not answer.";
+  return "That request was not accepted.";
+}
+
+// What a person should read when something fails. The previous version put the
+// message from an Error subclass straight on screen -- "API responded 500 from
+// http://localhost:8000/briefing" -- which names an internal host and a status
+// code and tells the reader nothing they can act on. The raw text stays on the
+// error object for the console; only the human sentence is returned here.
 export function describeError(err: unknown): {
   message: string;
   detail?: string;
 } {
   if (err instanceof ApiUnavailableError) {
-    const reason =
-      err.cause instanceof Error ? err.cause.message : String(err.cause);
     return {
-      message: err.message,
-      detail: `The coverage API did not answer (${reason}). Showing nothing instead of guessing.`,
+      message: "Could not reach the server",
+      detail:
+        "Nothing is being shown rather than something guessed. Check your connection and try again.",
     };
   }
   if (err instanceof ApiHttpError) {
-    const detail = err.body
-      ? `${err.status} — ${err.body.slice(0, 200)}`
-      : `${err.status}`;
-    return { message: err.message, detail };
+    const fromServer = problemDetail(err.body);
+    return {
+      message: statusMessage(err.status),
+      detail: fromServer ?? undefined,
+    };
   }
-  return {
-    message: err instanceof Error ? err.message : "Request failed.",
-  };
+  return { message: "Something went wrong." };
 }

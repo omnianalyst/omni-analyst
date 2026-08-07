@@ -26,7 +26,7 @@ describe("confidenceWord", () => {
 });
 
 describe("oddsOfWrong", () => {
-  it("expresses confidence as inverse odds so a novice reads the loss rate", () => {
+  it("expresses the measured hit rate as inverse odds so a novice reads the loss rate", () => {
     // 0.74 -> 1/(1-0.74) = ~3.8 -> round 4 -> "~1 in 4 calls like this are wrong"
     expect(oddsOfWrong(0.74)).toBe("~1 in 4 calls like this are wrong");
     expect(oddsOfWrong(0.5)).toBe("~1 in 2 calls like this are wrong");
@@ -35,6 +35,32 @@ describe("oddsOfWrong", () => {
     expect(oddsOfWrong(0.97)).toBeNull();
     expect(oddsOfWrong(0.03)).toBeNull();
     expect(oddsOfWrong(null)).toBeNull();
+  });
+  it("agrees with hitRateFelt, because they must describe the same fact", () => {
+    // The bug this catches: the card fed oddsOfWrong the model's own confidence
+    // while hitRateFelt showed the measured rate, so a finding with confidence
+    // 0.51 and a measured 0.85 rendered "~1 in 2 wrong" directly beside "right
+    // ~85% of the time". Both strings derive from one input or they can lie
+    // about the same call in a single glance.
+    for (const rate of [0.5, 0.68, 0.74, 0.85, 0.9]) {
+      const odds = oddsOfWrong(rate);
+      const felt = hitRateFelt(rate);
+      expect(odds).not.toBeNull();
+      const impliedWrong = Number(/1 in (\d+)/.exec(odds!)![1]);
+      const statedRight = Number(/~(\d+)%/.exec(felt)![1]) / 100;
+      // 1/impliedWrong is the wrong-rate; it must match 1 - statedRight to
+      // within the rounding both strings apply.
+      expect(Math.abs(1 / impliedWrong - (1 - statedRight))).toBeLessThan(0.06);
+    }
+  });
+
+  it("does not dress a losing class up as a coin flip", () => {
+    // 1/(1-0.35) rounds to 2, so the "1 in N" form would print "~1 in 2 wrong"
+    // for a class that actually loses about two times in three. A majority
+    // cannot be expressed as 1-in-N, so below half the sentence changes shape.
+    expect(oddsOfWrong(0.35)).toBe("wrong more often than right");
+    expect(oddsOfWrong(0.45)).toBe("wrong more often than right");
+    expect(oddsOfWrong(0.5)).toBe("~1 in 2 calls like this are wrong");
   });
 });
 

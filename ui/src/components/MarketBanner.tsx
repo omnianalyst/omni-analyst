@@ -11,7 +11,8 @@ import { regimeHeadline, regimeImplication } from "../lib/explain";
 type State =
   | { kind: "loading" }
   | { kind: "ok"; value: RegimeValue; date: string | null }
-  | { kind: "none" };
+  | { kind: "none" }
+  | { kind: "error" };
 
 export function MarketBanner() {
   const [state, setState] = useState<State>({ kind: "loading" });
@@ -28,13 +29,29 @@ export function MarketBanner() {
           setState({ kind: "none" });
         }
       } catch {
-        if (!cancelled) setState({ kind: "none" });
+        // "No regime assessed yet" and "the request failed" are different
+        // facts. Collapsing the second into the first made a 500 render as the
+        // system's calm honesty -- the one lie this product cannot afford,
+        // since not-knowing is exactly what it claims to report faithfully.
+        if (!cancelled) setState({ kind: "error" });
       }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  if (state.kind === "error") {
+    return (
+      <section class="market-banner market-banner-error">
+        <p class="market-headline">Market regime unavailable</p>
+        <p class="market-implication">
+          The regime could not be read just now, so this is a missing answer
+          rather than a quiet one. The calls below are unaffected.
+        </p>
+      </section>
+    );
+  }
 
   if (state.kind === "loading") {
     return (

@@ -70,7 +70,9 @@ describe("refresh", () => {
     fetchStatus.mockRejectedValueOnce(new Error("fetch failed"));
     await refresh();
     expect(state.value).toBe("error");
-    expect(errorMessage.value).toMatch(/fetch failed/);
+    // The message is the human sentence from describeError, not the raw
+    // exception text -- the rail is user-facing surface.
+    expect(errorMessage.value).toBe("Something went wrong.");
     expect(status.value).toBe(OK);
   });
 
