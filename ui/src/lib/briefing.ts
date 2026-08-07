@@ -104,5 +104,5 @@ export function refusalTotal(counts: RefusalCounts): number {
 export function briefingHeading(findings: BriefingFinding[]): string {
   if (findings.length === 0) return "Nothing met the bar";
   const n = findings.length;
-  return `${n} finding${n === 1 ? "" : "s"} surfaced`;
+  return `${n} call${n === 1 ? "" : "s"} surfaced`;
 }

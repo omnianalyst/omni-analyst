@@ -95,7 +95,7 @@ export function BriefingView() {
       </header>
 
       <section class="panel">
-        <h2 class="panel-title">Findings</h2>
+        <h2 class="panel-title">Calls</h2>
         {findings.kind === "loading" ? (
           <Loading label="Loading briefing\u2026" />
         ) : null}
@@ -110,7 +110,7 @@ export function BriefingView() {
             </p>
             {refusedTotal !== null && refusedTotal > 0 ? (
               <p class="mono">
-                {refusedTotal} finding{refusedTotal === 1 ? "" : "s"} were
+                {refusedTotal} call{refusedTotal === 1 ? "" : "s"} were
                 considered and stayed quiet &mdash; see the refusals below for
                 why.
               </p>

@@ -25,7 +25,7 @@ const WORD_TIER: Record<EngineStatusWord, string> = {
   nominal: "fresh",
   degraded: "aging",
   stalled: "stale",
-  down: "dead",
+  inactive: "dead",
   standby: "unknown",
 };
 

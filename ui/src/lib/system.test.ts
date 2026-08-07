@@ -135,10 +135,11 @@ describe("loopAgeLabel", () => {
 
 describe("engineStatusWord", () => {
   // A fresh deployment must never read as an outage: standby is distinct from
-  // down, so first install reads as "waiting to start", not "broken".
-  it("reports standby for an unknown tier, never down", () => {
+  // an inactive loop, and an idle loop reads as "inactive" (ask for a glance),
+  // never as "down" (asserts broken).
+  it("reports standby for an unknown tier, never an outage word", () => {
     expect(engineStatusWord("unknown")).toBe("standby");
-    expect(engineStatusWord("unknown")).not.toBe("down");
+    expect(engineStatusWord("unknown")).not.toBe("inactive");
   });
 
   it("collapses healthy tiers to nominal and graduates the rest", () => {
@@ -146,7 +147,7 @@ describe("engineStatusWord", () => {
     expect(engineStatusWord("recent")).toBe("nominal");
     expect(engineStatusWord("aging")).toBe("degraded");
     expect(engineStatusWord("stale")).toBe("stalled");
-    expect(engineStatusWord("dead")).toBe("down");
+    expect(engineStatusWord("dead")).toBe("inactive");
   });
 });
 

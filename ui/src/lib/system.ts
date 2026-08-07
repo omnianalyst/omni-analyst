@@ -132,19 +132,20 @@ export function fillOutcomeClass(outcome: string): FillOutcomeClass {
 // never_run is rendered as a distinct label rather than an age, because
 // formatAge(null) would say "no data" -- which reads as a failure to fetch the
 // timestamp, not the truthful "this loop has never produced output yet".
+// A single-word engine-health label for the rail. The ladder is honest about
+// uncertainty: "nominal" needs no action; "degraded" means a tick is slipping;
+// "stalled" means a loop has missed several cycles; "inactive" means 6h+ since
+// the last write -- which is usually idle (nothing to do) but could be stuck,
+// so it asks for a glance rather than asserting "broken". "standby" is a fresh
+// deployment (never run) -- distinct so a first install does not read as an
+// outage.
 export type EngineStatusWord =
   | "nominal"
   | "degraded"
   | "stalled"
-  | "down"
+  | "inactive"
   | "standby";
 
-// The single headline word the rail shows for overall engine health. It maps
-// the worst scheduled-loop tier to a state a glance can parse: nominal needs no
-// action, degraded means ticks are slipping, stalled means a loop has missed
-// many cycles, down means almost certainly stopped. "standby" is the fresh
-// deployment (never_run) -- distinct from down so first install does not read
-// as an outage.
 export function engineStatusWord(tier: StalenessTier): EngineStatusWord {
   switch (tier) {
     case "fresh":
@@ -155,7 +156,7 @@ export function engineStatusWord(tier: StalenessTier): EngineStatusWord {
     case "stale":
       return "stalled";
     case "dead":
-      return "down";
+      return "inactive";
     case "unknown":
     default:
       return "standby";

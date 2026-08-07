@@ -22,8 +22,16 @@ const WORD_TIER: Record<EngineStatusWord, string> = {
   nominal: "fresh",
   degraded: "aging",
   stalled: "stale",
-  down: "dead",
+  inactive: "dead",
   standby: "unknown",
+};
+
+// Readable short labels for the loops shown in the rail. The raw names
+// (prediction/fill) are truncated to "pred"/"fill" by .slice elsewhere; these
+// are the words an operator can parse at a glance.
+const LOOP_LABEL: Record<string, string> = {
+  prediction: "predict",
+  fill: "ingest",
 };
 
 function staleLabel(): string | null {
@@ -43,8 +51,7 @@ function FillCounts({ counts }: { counts: Record<string, number> }) {
     <span class="bar-stat">
       {entries.map(([outcome, n]) => (
         <span key={outcome} class={`fill fill-${fillOutcomeClass(outcome)}`}>
-          {n}
-          {outcome[0]}
+          {n} {outcome}
         </span>
       ))}
     </span>
@@ -53,10 +60,11 @@ function FillCounts({ counts }: { counts: Record<string, number> }) {
 
 function LoopDot({ loop }: { loop: LoopStatus }) {
   const tier = scheduledLoopTier(loop.age_seconds, loop.never_run);
+  const label = LOOP_LABEL[loop.loop] ?? loop.loop.slice(0, 4);
   return (
-    <span class="loop" title={`${loop.loop}: ${loopAgeLabel(loop)}`}>
+    <span class="loop" title={`${label}: ${loopAgeLabel(loop)}`}>
       <span class={`engine-dot tier-${tier}`} aria-hidden="true" />
-      {loop.loop.slice(0, 4)}
+      {label}
       <span class="loop-age">{loopAgeLabel(loop)}</span>
     </span>
   );
@@ -115,12 +123,12 @@ export function StatusRail() {
       <div class="systembar-right">
         <span class="bar-stat">
           demand <strong>{s.demand.active}</strong>
-          <span class="bar-dim">/{s.demand.total}</span>
+          <span class="bar-dim"> active</span>
         </span>
         <FillCounts counts={s.fill_last_hour} />
         <span class="bar-stat">
-          24h <strong>{s.production_24h.predictions}</strong>p
-          <span class="bar-dim">/{s.production_24h.findings}f</span>
+          24h <strong>{s.production_24h.predictions}</strong> predictions
+          <span class="bar-dim"> &middot; {s.production_24h.findings} surfaced</span>
         </span>
         <a class="bar-detail" href="/system">details</a>
       </div>
