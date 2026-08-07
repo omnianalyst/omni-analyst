@@ -4,6 +4,7 @@ import {
   type BriefingFinding,
   type DeductionLayer,
 } from "../lib/briefing";
+import { Hint } from "./Hint";
 import {
   chainSteps,
   confidenceWord,
@@ -29,14 +30,18 @@ function EvidenceColumn({
   title,
   items,
   emptyText,
+  term,
 }: {
   title: string;
   items: string[];
   emptyText: string;
+  term?: string;
 }) {
   return (
     <div class="evidence-col">
-      <p class="evidence-title">{title}</p>
+      <p class="evidence-title">
+        {term ? <Hint term={term}>{title}</Hint> : title}
+      </p>
       {items.length === 0 ? (
         <p class="evidence-empty">{emptyText}</p>
       ) : (
@@ -66,7 +71,9 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
   const dirClass = dir === "up" ? "up" : dir === "down" ? "down" : "flat";
   const confPct = Math.max(0, Math.min(100, Math.round((finding.confidence || 0) * 100)));
   const invalidation = invalidationLevel(dir, finding.upper_barrier, finding.lower_barrier);
-  const wrong = oddsOfWrong(finding.confidence);
+  // From the measured hit rate, never from the model's own confidence -- see
+  // oddsOfWrong. The two disagreeing on one card is what this fixes.
+  const wrong = oddsOfWrong(finding.calibrated_hit_rate);
   const steps = chainSteps(finding.deduction_chain as DeductionLayer[] | undefined);
 
   return (
@@ -87,9 +94,13 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
         <div class="conf-bar" aria-hidden="true">
           <div class={`conf-fill conf-fill-${dirClass}`} style={{ width: `${confPct}%` }} />
         </div>
-        <span class="conf-word">{confidenceWord(finding.confidence)}</span>
+        <Hint term="confidence">
+          <span class="conf-word">{confidenceWord(finding.confidence)}</span>
+        </Hint>
         {wrong ? <span class="conf-wrong">{wrong}</span> : null}
-        <span class="conf-track">{hitRateFelt(finding.calibrated_hit_rate)}</span>
+        <Hint term="hit_rate">
+          <span class="conf-track">{hitRateFelt(finding.calibrated_hit_rate)}</span>
+        </Hint>
       </div>
 
       {steps.length > 0 ? (
@@ -105,9 +116,10 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
 
       {invalidation !== null ? (
         <p class="claim-invalidation">
-          Proven wrong {dir === "up" ? "below" : dir === "down" ? "above" : "at"}{" "}
+          <Hint term="invalidation">Proven wrong</Hint>{" "}
+          {dir === "up" ? "below" : dir === "down" ? "above" : "at"}{" "}
           <strong>{priceLabel(invalidation)}</strong>
-          <span class="muted"> &middot; entry {priceLabel(finding.entry_price)}</span>
+          <span class="muted"> &middot; called at {priceLabel(finding.entry_price)}</span>
         </p>
       ) : null}
 
@@ -121,8 +133,18 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
       </button>
       {showEvidence ? (
         <div class="evidence-grid">
-          <EvidenceColumn title="Supporting" items={supporting} emptyText="none cited" />
-          <EvidenceColumn title="Disconfirming" items={disconfirming} emptyText="none found" />
+          <EvidenceColumn
+            term="supporting"
+            title="For this call"
+            items={supporting}
+            emptyText="none cited"
+          />
+          <EvidenceColumn
+            term="disconfirming"
+            title="Against this call"
+            items={disconfirming}
+            emptyText="the checks ran and found none"
+          />
         </div>
       ) : null}
     </li>

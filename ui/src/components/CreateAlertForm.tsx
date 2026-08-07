@@ -4,12 +4,14 @@ import { AuthRequiredError } from "../lib/auth";
 import {
   buildCondition,
   CONDITION_KINDS,
+  conditionLabel,
   createAlert,
   defaultConditionForm,
   type ConditionFormState,
   type ConditionKind,
 } from "../lib/alerts";
 import { ErrorState } from "./ErrorState";
+import { Hint } from "./Hint";
 import { Loading } from "./Loading";
 
 type SearchState =
@@ -89,7 +91,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
     if (!entityId) {
       setCreate({
         kind: "error",
-        message: "Choose an entity to attach the alert to.",
+        message: "Choose a subject for this alert to watch.",
       });
       return;
     }
@@ -97,7 +99,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
     if (!ct) {
       setCreate({
         kind: "error",
-        message: "claim_type is required.",
+        message: "Name which piece of information to watch.",
       });
       return;
     }
@@ -136,7 +138,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
   return (
     <form onSubmit={onSubmit} style={{ padding: "18px", display: "grid", gap: "12px" }}>
       <div style={fieldStyle}>
-        <span class="mono">entity</span>
+        <span class="field-label">Subject to watch</span>
         {entityId ? (
           <div
             style={{
@@ -232,7 +234,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
       </div>
 
       <label style={fieldStyle}>
-        <span class="mono">claim_type</span>
+        <span class="field-label">Which piece of information</span>
         <input
           class="search-input"
           type="text"
@@ -240,13 +242,16 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
           onInput={(e) =>
             setClaimType((e.target as HTMLInputElement).value)
           }
-          placeholder="e.g. price.close"
-          aria-label="Claim type"
+          placeholder="e.g. price_snapshot"
+          aria-label="Which piece of information"
         />
+        <span class="field-help">
+          The kind of <Hint term="claim">claim</Hint> to watch on this subject.
+        </span>
       </label>
 
       <div style={fieldStyle}>
-        <span class="mono">condition kind</span>
+        <span class="field-label">Alert me when</span>
         <select
           class="search-input"
           style={{ height: "42px" }}
@@ -256,11 +261,11 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
               kind: (e.target as HTMLSelectElement).value as ConditionKind,
             })
           }
-          aria-label="Condition kind"
+          aria-label="Alert me when"
         >
           {CONDITION_KINDS.map((k) => (
             <option key={k} value={k}>
-              {k}
+              {conditionLabel(k)}
             </option>
           ))}
         </select>
@@ -269,7 +274,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
       {needsThreshold(form.kind) ? (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
           <label style={fieldStyle}>
-            <span class="mono">threshold</span>
+            <span class="field-label">The level</span>
             <input
               class="search-input"
               type="number"
@@ -281,11 +286,11 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
                 })
               }
               placeholder="e.g. 100"
-              aria-label="Threshold"
+              aria-label="The level"
             />
           </label>
           <label style={fieldStyle}>
-            <span class="mono">field (defaults to value)</span>
+            <span class="field-label">Which number to compare (optional)</span>
             <input
               class="search-input"
               type="text"
@@ -296,15 +301,18 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
                 })
               }
               placeholder="value"
-              aria-label="Value field"
+              aria-label="Which number to compare"
             />
+            <span class="field-help">
+              Claims can carry several numbers. Leave blank for the main one.
+            </span>
           </label>
         </div>
       ) : null}
 
       {form.kind === "staleness_exceeds" ? (
         <label style={fieldStyle}>
-          <span class="mono">seconds (must be positive)</span>
+          <span class="field-label">After how long, in seconds</span>
           <input
             class="search-input"
             type="number"
@@ -317,8 +325,12 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
               })
             }
             placeholder="e.g. 86400"
-            aria-label="Staleness seconds"
+            aria-label="After how long, in seconds"
           />
+          <span class="field-help">
+            86400 is a day, 604800 a week. Fires when nothing newer has arrived
+            in that time.
+          </span>
         </label>
       ) : null}
 

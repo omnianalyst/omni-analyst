@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { describeError } from "../lib/api";
 import { getSectors, type SectorEntry } from "../lib/autonomous";
+import { Hint } from "./Hint";
 import { Loading } from "./Loading";
 import { ErrorState } from "./ErrorState";
 
@@ -57,9 +58,15 @@ export function SectorView() {
       <thead>
         <tr>
           <th>Sector</th>
-          <th>Trend</th>
-          <th>RS percentile</th>
-          <th>Macro alignment</th>
+          <th>
+            <Hint term="sector_trend">Trend</Hint>
+          </th>
+          <th>
+            <Hint term="rs_percentile">Relative strength</Hint>
+          </th>
+          <th>
+            <Hint term="macro_alignment">Macro alignment</Hint>
+          </th>
         </tr>
       </thead>
       <tbody>

@@ -13,6 +13,20 @@ export const CONDITION_KINDS: ConditionKind[] = [
   "contradiction",
 ];
 
+// The wire values are stable identifiers; the labels are what a person picking
+// from a dropdown should read. A <select> listing "staleness_exceeds" asks the
+// reader to decode a schema.
+const CONDITION_LABELS: Record<ConditionKind, string> = {
+  value_above: "Value rises above",
+  value_below: "Value falls below",
+  staleness_exceeds: "Data goes stale",
+  contradiction: "Sources disagree",
+};
+
+export function conditionLabel(kind: ConditionKind): string {
+  return CONDITION_LABELS[kind] ?? kind;
+}
+
 export interface ValueThresholdCondition {
   kind: "value_above" | "value_below";
   threshold: number;

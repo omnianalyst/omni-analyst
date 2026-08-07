@@ -1,5 +1,6 @@
 import type { CoverageGroup } from "../lib/api";
 import { formatAge, stalenessTier } from "../lib/age";
+import { Hint } from "./Hint";
 
 function formatConfidence(value: number | null): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "\u2014";
@@ -29,11 +30,17 @@ export function CoverageTable({
     <table class="coverage">
       <thead>
         <tr>
-          <th>Claim type</th>
-          <th class="num">Claims</th>
-          <th>Newest</th>
+          <th>
+            <Hint term="claim">Kind of claim</Hint>
+          </th>
+          <th class="num">Held</th>
+          <th>
+            <Hint term="freshness">Newest</Hint>
+          </th>
           <th class="num">Sources</th>
-          <th class="num">Confidence</th>
+          <th class="num">
+            <Hint term="confidence">Confidence</Hint>
+          </th>
         </tr>
       </thead>
       <tbody>
@@ -50,23 +57,17 @@ export function CoverageTable({
                   {g.claim_type}
                 </a>
                 {contradictionTypes?.has(g.claim_type) ? (
-                  <span
-                    class="conflict-pill"
-                    title="Two sources disagree on a value for this type (see Open gaps)"
-                  >
-                    conflict
-                  </span>
+                  <Hint term="contradiction">
+                    <span class="conflict-pill">conflict</span>
+                  </Hint>
                 ) : null}
               </td>
               <td class="num">
                 {g.count}
                 {g.private_count > 0 ? (
-                  <span
-                    class="byo"
-                    title={`${g.private_count} of these are visible only via your credential`}
-                  >
-                    {" "}incl. {g.private_count}
-                  </span>
+                  <Hint term="byo_scoped">
+                    <span class="byo"> incl. {g.private_count} yours</span>
+                  </Hint>
                 ) : null}
               </td>
               <td class="age">

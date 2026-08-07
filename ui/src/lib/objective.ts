@@ -49,6 +49,47 @@ export interface ObjectiveRequest {
   budget?: number;
 }
 
+export interface Capability {
+  name: string;
+  description: string;
+  produces: string[];
+  consumes: string[];
+  licence_tier: string;
+  cost: number;
+}
+
+// The claim types the planner can actually produce, derived from the live
+// registry rather than typed from memory into a free-text box. A capability
+// with an empty `produces` cannot satisfy a need, so it contributes nothing
+// here -- which is also why the picker is much shorter than the capability
+// count.
+export async function fetchClaimTypes(): Promise<string[]> {
+  const url = API_BASE_URL + "/capabilities";
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { accept: "application/json" } });
+  } catch (err) {
+    throw new ApiUnavailableError(url, err);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ApiHttpError(res.status, url, text);
+  }
+  const body = (await res.json()) as { capabilities: Capability[] };
+  const types = new Set<string>();
+  for (const c of body.capabilities ?? []) {
+    for (const p of c.produces ?? []) types.add(p);
+  }
+  return [...types].sort();
+}
+
+// "price_snapshot" -> "Price snapshot". The registry's names are stable
+// identifiers; this is display only and never travels back to the API.
+export function humaniseClaimType(claimType: string): string {
+  const spaced = claimType.replace(/[._]/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const url = API_BASE_URL + path;
   let res: Response;

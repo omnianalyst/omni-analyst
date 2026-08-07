@@ -1,4 +1,5 @@
 import type { Gap } from "../lib/api";
+import { Hint } from "./Hint";
 
 function safeClass(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -45,9 +46,11 @@ export function GapsList({ gaps }: { gaps: Gap[] }) {
                 attempts <strong>{gap.attempts}</strong>
               </span>
               {gap.audience_user_id ? (
-                <span class="byo" title={gap.audience_user_id}>
-                  BYO-scoped
-                </span>
+                // The tooltip used to be the raw audience UUID, which told a
+                // reader nothing and leaked an internal id into the surface.
+                <Hint term="byo_scoped">
+                  <span class="byo">Your key only</span>
+                </Hint>
               ) : null}
               {gap.detected_at ? (
                 <span class="faint">detected {gap.detected_at.slice(0, 10)}</span>
