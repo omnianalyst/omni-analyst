@@ -134,3 +134,68 @@ class TestInvocation:
         cap = registry.get("detect.manipulation")
         assert "order-flow" in cap.provenance
         assert cap.consumes == ("price_snapshot",)
+
+
+class TestSourceIsTheAdapterNotTheProvider:
+    """`source` names the adapter that produced a row; `provider_key` names the
+    vendor and the credential. They coincide for a single-venue adapter, which
+    is why setting `source=provider_key` went unnoticed -- but `CCXTAdapter`
+    serves five venues and stamps `ccxt`, and `DerivativesAdapter` stamps
+    `derivatives`.
+
+    The consequence is not cosmetic. `fill/pipeline.py` writes
+    `source=(registration.source or registration.provider_key)`, and the
+    idempotency index covers `source`, so a capability claiming `binance` would
+    not collide with rows stored as `ccxt` -- the scheduler would write a second
+    copy of the whole price spine, and `_price_window` (which does not filter on
+    source) would take LIMIT window over a doubled series, silently halving the
+    SMA window.
+    """
+
+    def test_every_capability_reports_the_source_its_adapter_stamps(self, registry):
+        # The claim writer needs the adapter's label. Asserted for all of them,
+        # not just the multi-venue ones, so a single-venue adapter that later
+        # grows a second venue cannot quietly reintroduce the conflation.
+        import importlib
+
+        for name, capability in registry._by_name.items():
+            if capability.provider_key is None:
+                continue
+            family = name.split(".")[0]
+            try:
+                module = importlib.import_module(f"omni.ingest.{family}")
+            except ModuleNotFoundError:
+                continue
+            declared = getattr(module, "SOURCE", None)
+            if declared is None:
+                continue
+            assert capability.source == declared, (
+                f"{name} reports source={capability.source!r} but its adapter "
+                f"stamps {declared!r}; the writer would not collide with rows "
+                f"already stored under the adapter's label"
+            )
+
+    def test_venues_sharing_an_adapter_share_a_source(self, registry):
+        # The specific defect: five ccxt venues had five different sources
+        # because each took its own provider_key. Their provider_keys must stay
+        # distinct -- that is the credential -- while the source is one value.
+        families = ("exchanges", "microstructure")
+        for family in families:
+            caps = [c for n, c in registry._by_name.items() if n.startswith(f"{family}.")]
+            assert len(caps) > 1, f"{family} should register several venues"
+            assert len({c.source for c in caps}) == 1, (
+                f"{family} capabilities disagree on source: "
+                f"{sorted({c.source for c in caps})}"
+            )
+            assert len({c.provider_key for c in caps}) == len(caps), (
+                f"{family} capabilities must keep distinct provider_keys"
+            )
+
+    def test_an_adapter_without_a_source_is_refused(self):
+        from omni.capability.builtin import _source_of
+
+        class Sourceless:
+            pass
+
+        with pytest.raises(ValueError, match="declares no `source`"):
+            _source_of(Sourceless)

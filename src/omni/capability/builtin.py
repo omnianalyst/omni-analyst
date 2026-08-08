@@ -20,6 +20,37 @@ def _byo(provider_key: str) -> bool:
     return redistribution_for(provider_key) != "allowed"
 
 
+def _source_of(factory) -> str:
+    """The `source` the adapter stamps on its own claims.
+
+    `provider_key` and `source` are different facts and were previously the
+    same value. `provider_key` names the vendor and the credential; `source`
+    names the adapter that produced the row. For a single-venue adapter they
+    coincide, which is why the conflation went unnoticed -- but `CCXTAdapter`
+    serves five venues and stamps `ccxt`, and `DerivativesAdapter` stamps
+    `derivatives`.
+
+    The fill pipeline writes `source=(registration.source or provider_key)`,
+    and the idempotency index is on
+    `(entity, type, key, source, event_date, knowledge_date)`. So a capability
+    claiming `source="binance"` would not collide with the 69,567 rows already
+    stored as `ccxt`: the scheduler would write a second copy of the entire
+    price spine. `_price_window` does not filter on source, so it would then
+    take `LIMIT window` over a doubled series and a 100-day SMA would silently
+    become a 50-day one.
+
+    Read off the adapter rather than passed in, so a new venue cannot be added
+    with the wrong label by forgetting an argument.
+    """
+    source = getattr(factory, "source", None)
+    if not isinstance(source, str) or not source:
+        raise ValueError(
+            f"{factory!r} declares no `source`; the claim writer needs the "
+            f"adapter's own label, not the provider key"
+        )
+    return source
+
+
 def _adapter(
     name: str,
     description: str,
@@ -44,7 +75,7 @@ def _adapter(
         produces=produces,
         entity_kinds=entity_kinds,
         provider_key=provider_key,
-        source=provider_key,
+        source=_source_of(factory),
         touches_byo=_byo(provider_key),
         cost=cost,
         maturity=Maturity.WIRED,
