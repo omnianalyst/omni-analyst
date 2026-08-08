@@ -551,6 +551,31 @@ async def _resolve_portfolio(pool, audience: UUID, params) -> UUID:
     return owned[0]
 
 
+def portfolio_payload(book) -> dict:
+    """One book, in the shape `TRADING_API_CONTRACT.md` freezes.
+
+    Public and module-level because two endpoints in two routers return it:
+    this module's `GET /trading/portfolio` and `api/portfolio.py`'s create
+    response. It was assembled inline here first, and the create endpoint had to
+    reproduce the six scalar keys by hand -- two spellings of one contract, each
+    passing its own tests while free to drift from the other.
+
+    `gross_exposure` and `net_exposure` are the `PortfolioState` properties, not
+    a second computation of them. Two implementations of one quantity is how
+    they come to disagree.
+    """
+    return {
+        "portfolio_id": str(book.portfolio_id),
+        "as_of": book.as_of.isoformat(),
+        "nav": str(book.nav),
+        "cash": str(book.cash),
+        "gross_exposure": str(book.gross_exposure),
+        "net_exposure": str(book.net_exposure),
+        "positions": [_position_payload(p) for p in book.positions],
+        "cash_positions": [_cash_payload(c) for c in book.cash_positions],
+    }
+
+
 def _position_payload(position) -> dict:
     """One position, signed.
 
@@ -818,18 +843,7 @@ def build_router(app: App) -> Router:
             # the wrong account.
             raise not_found(str(exc)) from exc
 
-        return {
-            "portfolio_id": str(book.portfolio_id),
-            "as_of": book.as_of.isoformat(),
-            "nav": str(book.nav),
-            "cash": str(book.cash),
-            # The `PortfolioState` properties, not a second computation of them.
-            # Two implementations of one quantity is how they come to disagree.
-            "gross_exposure": str(book.gross_exposure),
-            "net_exposure": str(book.net_exposure),
-            "positions": [_position_payload(p) for p in book.positions],
-            "cash_positions": [_cash_payload(c) for c in book.cash_positions],
-        }
+        return portfolio_payload(book)
 
     @router.get("/trading/reconciliation")
     async def reconciliation_report(request: Request) -> dict:

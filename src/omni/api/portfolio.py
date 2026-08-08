@@ -26,7 +26,7 @@ the gate, the same `Decimal(raw)` + `is_finite()` idiom `trading.py` uses for
 query parameters.
 
 The response is the shape `GET /trading/portfolio` returns, built from the same
-`_position_payload` and `_cash_payload` helpers rather than a second rendering
+`portfolio_payload` rather than a second rendering
 of them, so a caller cannot read one field one way on creation and another way
 on the next read.
 """
@@ -41,7 +41,7 @@ from neutron.error import bad_request, conflict, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
-from omni.api.trading import _cash_payload, _position_payload
+from omni.api.trading import portfolio_payload
 from omni.auth import resolve_audience_from_request
 from omni.portfolio.state import DuplicatePortfolio, create_portfolio
 
@@ -109,16 +109,7 @@ def build_router(app: App) -> Router:
             # must not read as the server's.
             raise bad_request(str(exc)) from exc
 
-        return {
-            "portfolio_id": str(book.portfolio_id),
-            "as_of": book.as_of.isoformat(),
-            "nav": str(book.nav),
-            "cash": str(book.cash),
-            "gross_exposure": str(book.gross_exposure),
-            "net_exposure": str(book.net_exposure),
-            "positions": [_position_payload(p) for p in book.positions],
-            "cash_positions": [_cash_payload(c) for c in book.cash_positions],
-        }
+        return portfolio_payload(book)
 
     return router
 
