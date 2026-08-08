@@ -44,7 +44,43 @@ FLOW = "onchain_flow"
 TVL = "onchain_tvl"
 SUPPLY = "onchain_supply"
 
-ETHERSCAN_URL = "https://api.etherscan.io/api"
+# V2, not V1. Etherscan sunset the V1 endpoint, which now answers EVERY request
+# with {"status":"0","message":"NOTOK","result":"You are using a deprecated V1
+# endpoint..."}. This adapter could therefore fetch nothing at all, and the
+# failure surfaced as `Unavailable: Etherscan returned no latest block` -- an
+# honest refusal that named the wrong cause, which is why it survived unnoticed.
+#
+# V2 requires an explicit `chainid`. That is also what makes the multi-chain
+# path expressible through one base URL rather than a second client.
+ETHERSCAN_URL = "https://api.etherscan.io/v2/api"
+ETHEREUM_CHAIN_ID = 1
+
+
+def _params(api_key: str, **rest: Any) -> dict[str, Any]:
+    """Every V2 call carries a chainid, built in one place.
+
+    A route that forgets it does not fail -- it queries whichever chain the API
+    defaults to, and returns real-looking data for the wrong network.
+    """
+    return {"chainid": ETHEREUM_CHAIN_ID, "apikey": api_key, **rest}
+
+
+def _require_ok(payload: Any, *, what: str) -> dict[str, Any]:
+    """Refuse an error-shaped response instead of indexing into it.
+
+    On an error V2 returns `result` as a STRING, so the supply path handed a
+    `str` to code expecting a mapping and died with `AttributeError: 'str'
+    object has no attribute 'get'`. A crash is not a refusal: the fill pipeline
+    records `Unavailable` with a reason and treats anything else as a defect.
+    """
+    if not isinstance(payload, dict):
+        raise Unavailable(f"Etherscan returned a non-object for {what}")
+    if str(payload.get("status")) == "0":
+        detail = payload.get("result") or payload.get("message") or "no reason given"
+        raise Unavailable(f"Etherscan refused {what}: {detail}")
+    return payload
+
+
 DEFILLAMA_PROTOCOL_URL = "https://api.llama.fi/protocol/{slug}"
 
 # Lifted verbatim from v1 `_KNOWN_EXCHANGE_ADDRESSES`. On-chain identity is
@@ -237,24 +273,21 @@ async def _fetch_latest_block(api_key: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=30.0) as client:
         num_resp = await get_json(client,
             ETHERSCAN_URL,
-            params={"module": "proxy", "action": "eth_blockNumber", "apikey": api_key},
+            params=_params(api_key, module="proxy", action="eth_blockNumber"),
         )
         if num_resp.status_code != 200:
             raise Unavailable(
                 f"Etherscan blockNumber returned HTTP {num_resp.status_code}"
             )
-        latest = _hex_to_int((num_resp.json() or {}).get("result", "0x0"))
+        latest = _hex_to_int(
+            _require_ok(num_resp.json(), what="eth_blockNumber").get("result", "0x0")
+        )
         if latest <= 0:
             raise Unavailable("Etherscan returned no latest block")
         blk_resp = await get_json(client,
             ETHERSCAN_URL,
-            params={
-                "module": "proxy",
-                "action": "eth_getBlockByNumber",
-                "tag": hex(latest),
-                "boolean": "true",
-                "apikey": api_key,
-            },
+            params=_params(api_key, module="proxy", action="eth_getBlockByNumber",
+                            tag=hex(latest), boolean="true"),
         )
         if blk_resp.status_code != 200:
             raise Unavailable(
@@ -282,44 +315,45 @@ async def _fetch_supply(api_key: str, token: str, decimals: int) -> dict[str, An
     async with httpx.AsyncClient(timeout=30.0) as client:
         num_resp = await get_json(client,
             ETHERSCAN_URL,
-            params={"module": "proxy", "action": "eth_blockNumber", "apikey": api_key},
+            params=_params(api_key, module="proxy", action="eth_blockNumber"),
         )
         if num_resp.status_code != 200:
             raise Unavailable(
                 f"Etherscan blockNumber returned HTTP {num_resp.status_code}"
             )
-        tag = (num_resp.json() or {}).get("result", "0x0")
+        tag = _require_ok(num_resp.json(), what="eth_blockNumber").get("result", "0x0")
         blk_resp = await get_json(client,
             ETHERSCAN_URL,
-            params={
-                "module": "proxy",
-                "action": "eth_getBlockByNumber",
-                "tag": tag,
-                "boolean": "false",
-                "apikey": api_key,
-            },
+            params=_params(api_key, module="proxy", action="eth_getBlockByNumber",
+                            tag=tag, boolean="false"),
         )
         if blk_resp.status_code != 200:
             raise Unavailable(
                 f"Etherscan getBlockByNumber returned HTTP {blk_resp.status_code}"
             )
-        block_timestamp = (blk_resp.json() or {}).get("result", {}).get("timestamp")
+        # `result` is a mapping on success and a STRING on error, so this
+        # cannot index blindly. `_require_ok` catches the error-shaped response;
+        # the isinstance guard catches a success-shaped one whose result is not
+        # the block object this line assumes -- a crash here is a defect, while
+        # `Unavailable` is a recorded refusal the fill pipeline understands.
+        block = _require_ok(blk_resp.json(), what="eth_getBlockByNumber").get("result")
+        if not isinstance(block, dict):
+            raise Unavailable(
+                f"Etherscan returned no block object for {token}; got {type(block).__name__}"
+            )
+        block_timestamp = block.get("timestamp")
 
         if token.upper() == "ETH":
             supply_resp = await get_json(client,
                 ETHERSCAN_URL,
-                params={"module": "stats", "action": "ethsupply", "apikey": api_key},
+                params=_params(api_key, module="stats", action="ethsupply"),
             )
-            supply = (supply_resp.json() or {}).get("result")
+            supply = _require_ok(supply_resp.json(), what=f"supply for {token}").get("result")
         else:
             supply_resp = await get_json(client,
                 ETHERSCAN_URL,
-                params={
-                    "module": "stats",
-                    "action": "tokensupply",
-                    "contractaddress": token,
-                    "apikey": api_key,
-                },
+                params=_params(api_key, module="stats", action="tokensupply",
+                                contractaddress=token),
             )
             supply = (supply_resp.json() or {}).get("result")
         if supply is None:
