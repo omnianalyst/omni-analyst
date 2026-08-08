@@ -21,6 +21,9 @@ from uuid import UUID
 
 from omni.conviction.basis import produce_basis_prediction_from_coverage
 from omni.conviction.carry import produce_carry_prediction_from_coverage
+from omni.conviction.convergence_producer import (
+    produce_convergence_prediction_from_coverage,
+)
 from omni.conviction.oi_divergence import (
     produce_oi_divergence_prediction_from_coverage,
 )
@@ -112,6 +115,17 @@ PRODUCERS: tuple[Producer, ...] = (
         entity_kinds=("crypto_asset", "protocol"),
         produce=produce_protocol_fundamentals_prediction_from_coverage,
         requires_claim_types=("protocol_fees", "price_snapshot"),
+    ),
+    Producer(
+        # The corroboration layer. trend.sma alone sits near a coin flip on
+        # barrier-resolved trades; this asserts that a call several INDEPENDENT
+        # claim families agree on should resolve better than one standing alone,
+        # which is a claim the ledger can score directly -- each family count
+        # lands in its own confidence bucket.
+        method="convergence.multistream",
+        entity_kinds=("crypto_asset", "company"),
+        produce=produce_convergence_prediction_from_coverage,
+        requires_claim_types=("price_snapshot",),
     ),
 )
 

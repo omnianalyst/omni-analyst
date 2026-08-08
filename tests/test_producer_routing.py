@@ -33,9 +33,33 @@ TREND = "trend.sma"
 
 
 class TestRegistryContract:
-    def test_company_routes_to_both_producers(self):
+    def test_company_routes_to_every_producer_that_serves_equities(self):
+        """Inclusion, not a fixed roster -- the sixth test this shape has bitten.
+
+        This asserted `== {DCF, TREND}` and broke the moment
+        convergence.multistream registered for company as well. What must hold
+        is that the two producers equities depend on are reachable, and that a
+        producer requiring a claim type no company can have never routes here.
+        """
         methods = {p.method for p in producers_for("company")}
-        assert methods == {DCF, TREND}
+        assert {DCF, TREND} <= methods
+
+    def test_no_company_producer_requires_a_crypto_only_claim(self):
+        crypto_only = {
+            "funding_rate",
+            "open_interest",
+            "liquidation_event",
+            "basis",
+            "onchain_flow",
+            "protocol_fees",
+            "protocol_revenue",
+        }
+        for producer in producers_for("company"):
+            overlap = crypto_only & set(producer.requires_claim_types)
+            assert not overlap, (
+                f"{producer.method} routes to company but requires {overlap}, "
+                f"which no equity will ever have"
+            )
 
     def test_crypto_asset_never_routes_to_a_company_only_producer(self):
         """The invariant is exclusion, not a fixed roster.
