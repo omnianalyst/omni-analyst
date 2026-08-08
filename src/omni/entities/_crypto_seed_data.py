@@ -36,8 +36,9 @@
 # explicitly rather than built from the convention.
 #
 # Sourced 2026-08-07 from CoinGecko (ids via the verified map), Etherscan
-# (contract addresses), Binance (pair symbols), and DeFiLlama (protocol slugs
-# for the three blue-chip protocols named in PROTOCOLS). Re-derive to refresh.
+# (contract addresses), Binance (pair symbols), and DeFiLlama (protocol slugs;
+# see the note above PROTOCOLS for the inclusion bar and for the protocols
+# deliberately left out). Re-derive to refresh.
 
 from __future__ import annotations
 
@@ -126,17 +127,77 @@ CHAINS: tuple[Chain, ...] = (
 class Protocol:
     defillama_slug: str  # link key an asset's `defillama_slug` field references
     name: str
-    chain: str  # the chain the protocol is indexed under on DeFiLlama
+    chain: str  # a CHAINS slug; the chain the protocol originated on
+    # The asset that governs this protocol, as a CRYPTO_ASSETS symbol, or None.
+    # None means one of two honest things: the protocol has no governance token
+    # (Liquity, Spark), or it has one that this universe does not carry (LDO,
+    # CAKE, PENDLE, ...). It is never a placeholder for a token that exists and
+    # is seeded -- the consistency test in test_crypto_seed.py pairs this field
+    # with the asset's own `defillama_slug` in both directions, so a link
+    # asserted on one side and missing on the other fails.
+    governance_token: str | None
 
 
-# Only protocols whose DeFiLlama parent slug is unambiguous are listed, so a
-# governs edge never points at the wrong protocol's TVL. Three blue-chip
-# protocols whose slugs match their canonical names; everything else carries a
-# None defillama_slug on the asset and gets no governs edge rather than a guess.
+# Only protocols whose DeFiLlama slug is unambiguous are listed, so `governs`
+# never points at the wrong protocol's fees and `fundamentals.protocol` never
+# computes a real-looking P/F for another company's revenue.
+#
+# The bar is: the slug names *this* protocol on DeFiLlama and could not
+# plausibly name a different one. A slug that has drifted (a protocol renamed,
+# a version suffix added) 404s and the fill loop records `unfillable` -- an
+# honest failure. A slug that resolves to *another* protocol is the one outcome
+# nothing downstream can detect, so a name shared with anything else is
+# disqualifying on its own.
+#
+# Deliberately absent, because the slug could not be settled without a lookup
+# and a guessed one is worse than a gap: Jupiter (aggregator, perps and the
+# parent are separate DeFiLlama entries and it is not clear which the plain
+# slug reaches), Frax (a parent over frxETH/Fraxlend/Fraxswap whose plain slug
+# is uncertain), Radiant and BENQI (both are split into per-market entries and
+# the parent slug is not certain). They stay out until the slug is verified
+# against DeFiLlama rather than recalled.
 PROTOCOLS: tuple[Protocol, ...] = (
-    Protocol("uniswap", "Uniswap", "ethereum"),
-    Protocol("aave", "Aave", "ethereum"),
-    Protocol("compound", "Compound", "ethereum"),
+    # DEXes and aggregators
+    Protocol("uniswap", "Uniswap", "ethereum", "UNI"),
+    Protocol("curve-dex", "Curve DEX", "ethereum", "CRV"),
+    Protocol("pancakeswap", "PancakeSwap", "binance-smart-chain", None),
+    Protocol("balancer", "Balancer", "ethereum", "BAL"),
+    Protocol("sushiswap", "SushiSwap", "ethereum", "SUSHI"),
+    Protocol("raydium", "Raydium", "solana", None),
+    Protocol("orca", "Orca", "solana", None),
+    Protocol("loopring", "Loopring", "ethereum", "LRC"),
+    # Lending and CDPs
+    Protocol("aave", "Aave", "ethereum", "AAVE"),
+    Protocol("compound-finance", "Compound Finance", "ethereum", "COMP"),
+    Protocol("makerdao", "MakerDAO", "ethereum", "MKR"),
+    Protocol("morpho", "Morpho", "ethereum", None),
+    Protocol("spark", "Spark", "ethereum", None),
+    Protocol("venus", "Venus", "binance-smart-chain", None),
+    Protocol("liquity", "Liquity", "ethereum", None),
+    # Liquid staking and restaking
+    Protocol("lido", "Lido", "ethereum", None),
+    Protocol("rocket-pool", "Rocket Pool", "ethereum", None),
+    Protocol("jito", "Jito", "solana", "JTO"),
+    Protocol("eigenlayer", "EigenLayer", "ethereum", None),
+    # Yield
+    Protocol("convex-finance", "Convex Finance", "ethereum", None),
+    Protocol("yearn-finance", "Yearn Finance", "ethereum", None),
+    Protocol("pendle", "Pendle", "ethereum", None),
+    # Derivatives
+    Protocol("gmx", "GMX", "arbitrum", None),
+    Protocol("dydx", "dYdX", "ethereum", None),
+    Protocol("synthetix", "Synthetix", "ethereum", "SNX"),
+    Protocol("gains-network", "Gains Network", "arbitrum", None),
+    # Synthetic dollars
+    Protocol("ethena", "Ethena", "ethereum", None),
+    # Bridges and cross-chain liquidity
+    Protocol("stargate", "Stargate", "ethereum", None),
+    Protocol("across", "Across", "ethereum", None),
+    Protocol("hop-protocol", "Hop Protocol", "ethereum", None),
+    Protocol("thorchain", "THORChain", "thorchain", "RUNES"),
+    # Middleware and cover
+    Protocol("instadapp", "Instadapp", "ethereum", None),
+    Protocol("nexus-mutual", "Nexus Mutual", "ethereum", None),
 )
 
 
@@ -176,7 +237,7 @@ def _b(sym: str) -> dict[str, str]:
     return {"binance": sym + "USDT"}
 
 
-# 92 assets, ordered roughly by market cap and prominence. Every coingecko_id
+# 91 assets, ordered roughly by market cap and prominence. Every coingecko_id
 # is copied verbatim from omni.ingest.coingecko.SYMBOL_TO_ID; the drift test
 # enforces they stay in lock-step.
 CRYPTO_ASSETS: tuple[CryptoAsset, ...] = (
@@ -279,7 +340,7 @@ CRYPTO_ASSETS: tuple[CryptoAsset, ...] = (
         "maker",
         "ethereum",
         "0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2",
-        None,
+        "makerdao",
         _b("MKR"),
         "defi",
     ),
@@ -306,15 +367,17 @@ CRYPTO_ASSETS: tuple[CryptoAsset, ...] = (
         "compound-governance-token",
         "ethereum",
         None,
-        "compound",
+        "compound-finance",
         _b("COMP"),
         "defi",
     ),
-    CryptoAsset("SNX", "Synthetix", "havven", "ethereum", None, None, _b("SNX"), "defi"),
-    CryptoAsset("CRV", "Curve DAO", "curve-dao-token", "ethereum", None, None, _b("CRV"), "defi"),
+    CryptoAsset("SNX", "Synthetix", "havven", "ethereum", None, "synthetix", _b("SNX"), "defi"),
+    CryptoAsset(
+        "CRV", "Curve DAO", "curve-dao-token", "ethereum", None, "curve-dex", _b("CRV"), "defi"
+    ),
     CryptoAsset("GRT", "The Graph", "the-graph", "ethereum", None, None, _b("GRT"), "infra"),
     CryptoAsset("1INCH", "1inch", "1inch", "ethereum", None, None, _b("1INCH"), "defi"),
-    CryptoAsset("SUSHI", "SushiSwap", "sushi", "ethereum", None, None, _b("SUSHI"), "defi"),
+    CryptoAsset("SUSHI", "SushiSwap", "sushi", "ethereum", None, "sushiswap", _b("SUSHI"), "defi"),
     CryptoAsset("OKB", "OKB", "okb", "ethereum", None, None, {}, "infra"),
     CryptoAsset(
         "BAT",
@@ -338,7 +401,7 @@ CRYPTO_ASSETS: tuple[CryptoAsset, ...] = (
         "rune",
         "thorchain",
         None,
-        None,
+        "thorchain",
         {"binance": "RUNEUSDT"},
         "defi",
     ),
@@ -378,8 +441,8 @@ CRYPTO_ASSETS: tuple[CryptoAsset, ...] = (
     CryptoAsset("NEM", "NEM", "nem", "nem", None, None, {"binance": "XEMUSDT"}, "l1"),
     CryptoAsset("LSK", "Lisk", "lisk", "lisk", None, None, _b("LSK"), "l1"),
     CryptoAsset("ARK", "ARK", "ark", "ark", None, None, _b("ARK"), "l1"),
-    CryptoAsset("LRC", "Loopring", "loopring", "ethereum", None, None, _b("LRC"), "defi"),
-    CryptoAsset("BAL", "Balancer", "balancer", "ethereum", None, None, _b("BAL"), "defi"),
+    CryptoAsset("LRC", "Loopring", "loopring", "ethereum", None, "loopring", _b("LRC"), "defi"),
+    CryptoAsset("BAL", "Balancer", "balancer", "ethereum", None, "balancer", _b("BAL"), "defi"),
     CryptoAsset(
         "WETH",
         "Wrapped Ether",
@@ -400,5 +463,5 @@ CRYPTO_ASSETS: tuple[CryptoAsset, ...] = (
         "JUP", "Jupiter", "jupiter-exchange-solana", "solana", None, None, _b("JUP"), "defi"
     ),
     CryptoAsset("PYTH", "Pyth Network", "pyth-network", "solana", None, None, _b("PYTH"), "infra"),
-    CryptoAsset("JTO", "Jito", "jito-governance-token", "solana", None, None, _b("JTO"), "defi"),
+    CryptoAsset("JTO", "Jito", "jito-governance-token", "solana", None, "jito", _b("JTO"), "defi"),
 )

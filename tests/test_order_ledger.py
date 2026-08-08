@@ -292,6 +292,43 @@ class TestFillAccumulation:
         # mean is 125, so neither of the two wrong implementations passes.
         assert order.average_fill_price == Decimal(120)
 
+    async def test_three_fills_weight_over_every_fill_not_the_last_pair(self, db):
+        # The two-fill cases below only exercise one accumulation step, where
+        # the running average and the first fill's price are the same number.
+        # A third fill separates the correct recursion from an implementation
+        # that weights only what it can see now: the arithmetic is written out
+        # here rather than copied from `record_fill`.
+        #
+        #   5 @ 100 -> 500
+        #   3 @ 200 -> 600     running: 1100 / 8 = 137.5
+        #  12 @  50 -> 600     running: 1700 / 20 = 85
+        #
+        # 85 is not the last price (50), not the unweighted mean of the three
+        # prices (116.66...), not the weighted mean of the last two fills
+        # (1200 / 15 = 80), and not the running average re-averaged unweighted
+        # against each new price ((137.5 + 50) / 2 = 93.75).
+        order_id = await self._submitted(db, quantity=Decimal(20))
+
+        await record_fill(db.pool, order_id, _fill(Decimal(5), Decimal(100)))
+        await record_fill(db.pool, order_id, _fill(Decimal(3), Decimal(200)))
+
+        midway = await get(db.pool, order_id)
+        after_two = (Decimal(5) * Decimal(100) + Decimal(3) * Decimal(200)) / Decimal(8)
+        assert after_two == Decimal("137.5")
+        assert midway.filled_quantity == Decimal(8)
+        assert midway.average_fill_price == after_two
+
+        await record_fill(db.pool, order_id, _fill(Decimal(12), Decimal(50)))
+
+        order = await get(db.pool, order_id)
+        after_three = (
+            Decimal(5) * Decimal(100) + Decimal(3) * Decimal(200) + Decimal(12) * Decimal(50)
+        ) / Decimal(20)
+        assert after_three == Decimal(85)
+        assert order.filled_quantity == Decimal(20)
+        assert order.average_fill_price == after_three
+        assert order.status is OrderStatus.FILLED
+
     async def test_an_uneven_weighting_is_not_the_midpoint(self, db):
         order_id = await self._submitted(db, quantity=Decimal(100))
         await record_fill(db.pool, order_id, _fill(Decimal(90), Decimal(10)))

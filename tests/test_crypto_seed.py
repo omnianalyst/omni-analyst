@@ -86,14 +86,16 @@ class TestSeed:
     async def test_writes_all_three_edge_relations(self, db):
         report = await seed_crypto_universe(db.pool)
 
-        # Every asset links to its chain; every asset links to its sector; the
-        # three assets with a defillama_slug link to their protocol. The per-edge
+        # Every asset links to its chain; every asset links to its sector; each
+        # asset carrying a defillama_slug links to its protocol. The per-edge
         # counts come from INSERT ... ON CONFLICT DO NOTHING, so they prove the
         # rows were actually written on a fresh graph.
         assert report.issued_on_edges == len(CRYPTO_ASSETS)
         assert report.sector_edges == len(CRYPTO_ASSETS)
         with_slug = [a for a in CRYPTO_ASSETS if a.defillama_slug is not None]
-        assert len(with_slug) == len(PROTOCOLS)
+        # Not every protocol has a seeded governance token, so this is the count
+        # of protocols that name one -- not len(PROTOCOLS).
+        assert len(with_slug) == len([p for p in PROTOCOLS if p.governance_token is not None])
         assert report.governs_edges == len(with_slug)
 
         relations = {
@@ -276,6 +278,110 @@ class TestSeed:
             for r in await db.pool.fetch("SELECT symbol FROM entity WHERE kind = $1", CHAIN_KIND)
         }
         assert referenced <= present, f"asset chains with no chain entity: {referenced - present}"
+
+
+class TestProtocolTable:
+    """The protocol list is a coverage layer, so its identity has to hold.
+
+    `ingest/defillama.py` fetches fees and revenue BY SLUG and nothing
+    downstream can tell a wrong slug from a right one -- the numbers come back
+    shaped correctly either way and `fundamentals.protocol` computes a
+    real-looking P/F from another protocol's revenue. These are the checks that
+    can be made without a network call: the slugs are distinct, every claimed
+    governance link resolves on both sides, and the table has not silently
+    shrunk back to a handful of entries.
+    """
+
+    # Stated here rather than derived, so shrinking PROTOCOLS fails loudly
+    # instead of quietly re-narrowing the coverage layer. Update deliberately.
+    EXPECTED_PROTOCOLS = 33
+    EXPECTED_GOVERNANCE_LINKS = 11
+
+    def test_the_table_is_the_size_it_claims(self):
+        assert len(PROTOCOLS) == self.EXPECTED_PROTOCOLS
+        linked = [p for p in PROTOCOLS if p.governance_token is not None]
+        assert len(linked) == self.EXPECTED_GOVERNANCE_LINKS
+
+    def test_every_slug_is_unique(self):
+        # A duplicate slug is two protocol rows collapsing onto one entity: the
+        # second protocol's fees would be attributed to the first and its own
+        # entity would never exist.
+        slugs = [p.defillama_slug for p in PROTOCOLS]
+        duplicates = sorted({s for s in slugs if slugs.count(s) > 1})
+        assert duplicates == [], f"duplicate defillama slugs: {duplicates}"
+        assert len(set(slugs)) == len(PROTOCOLS)
+
+    def test_every_name_is_unique(self):
+        names = [p.name for p in PROTOCOLS]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        assert duplicates == [], f"duplicate protocol names: {duplicates}"
+
+    def test_no_slug_is_blank_or_whitespace_padded(self):
+        # A padded slug builds a URL that 404s forever; it is not caught by any
+        # uniqueness check because " aave" and "aave" are distinct strings.
+        bad = [p.defillama_slug for p in PROTOCOLS if p.defillama_slug.strip() != p.defillama_slug]
+        assert bad == [], f"slugs with surrounding whitespace: {bad}"
+        assert all(p.defillama_slug for p in PROTOCOLS)
+
+    def test_every_governance_token_resolves_to_a_seeded_asset(self):
+        symbols = {a.symbol for a in CRYPTO_ASSETS}
+        unresolved = [
+            (p.defillama_slug, p.governance_token)
+            for p in PROTOCOLS
+            if p.governance_token is not None and p.governance_token not in symbols
+        ]
+        assert unresolved == [], (
+            f"governance_token values with no CRYPTO_ASSETS entry: {unresolved}"
+        )
+        # Vacuous if nothing is linked at all.
+        assert any(p.governance_token is not None for p in PROTOCOLS)
+
+    def test_a_governance_link_is_asserted_on_both_sides(self):
+        # The protocol's `governance_token` and the asset's `defillama_slug` are
+        # the same claim written twice, and only the asset side produces the
+        # `governs` edge. A protocol naming a token that does not point back is
+        # a link that seeds no edge -- the near-inert state this table exists to
+        # leave behind.
+        by_symbol = {a.symbol: a for a in CRYPTO_ASSETS}
+        protocol_to_token = {
+            p.defillama_slug: p.governance_token
+            for p in PROTOCOLS
+            if p.governance_token is not None
+        }
+        forward = {
+            slug: (by_symbol[token].defillama_slug if token in by_symbol else None)
+            for slug, token in protocol_to_token.items()
+        }
+        assert forward == {slug: slug for slug in protocol_to_token}, (
+            "protocol -> token -> slug does not round-trip"
+        )
+
+        reverse = {
+            a.defillama_slug: a.symbol for a in CRYPTO_ASSETS if a.defillama_slug is not None
+        }
+        assert reverse == {slug: token for slug, token in protocol_to_token.items()}, (
+            "an asset carries a defillama_slug whose protocol names a different token"
+        )
+
+    def test_every_protocol_chain_has_a_chain_entity(self):
+        known = {c.slug for c in CHAINS}
+        dangling = sorted({p.chain for p in PROTOCOLS} - known)
+        assert dangling == [], f"protocol chains with no CHAINS entry: {dangling}"
+
+    async def test_every_protocol_is_seeded_with_a_defillama_key_to_fetch_by(self, db):
+        # The whole point of the table: each protocol becomes an entity the
+        # DefiLlama adapter can key on (`fees:<slug>` / `revenue:<slug>`). A
+        # protocol seeded without the identifier is an entity no fill can reach.
+        await seed_crypto_universe(db.pool)
+
+        rows = await db.pool.fetch(
+            "SELECT id, symbol, name FROM entity WHERE kind = $1", PROTOCOL_KIND
+        )
+        keys = {
+            row["symbol"]: (await _identifiers(db.pool, row["id"])).get("defillama") for row in rows
+        }
+        assert keys == {p.defillama_slug: p.defillama_slug for p in PROTOCOLS}
+        assert {row["name"] for row in rows} == {p.name for p in PROTOCOLS}
 
 
 class TestEntryPoint:

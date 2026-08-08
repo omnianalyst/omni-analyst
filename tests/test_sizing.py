@@ -23,7 +23,7 @@ implementation that ignored `kelly_cap` and merely happened to round down.
 from __future__ import annotations
 
 import ast
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pytest
@@ -37,6 +37,55 @@ from omni.portfolio.sizing import (
 )
 
 _SOURCE = Path(sizing.__file__).read_text()
+
+_FOLDABLE_CALLS = {"Decimal", "float"}
+
+
+def _fold(node: ast.AST) -> Decimal | None:
+    """Evaluate a constant-only numeric expression, or None if it is not one.
+
+    Covers the forms a probability can be written in -- a bare literal, a
+    `Decimal(...)`/`float(...)` around one, and arithmetic between them -- so
+    the 0.5 scan is not a substring match wearing a parser's clothes. Bare
+    string constants are deliberately not folded: an error message containing a
+    number is prose, not a value.
+    """
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+            return None
+        return Decimal(repr(node.value))
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _fold(node.operand)
+        return None if inner is None else -inner
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name not in _FOLDABLE_CALLS or len(node.args) != 1 or node.keywords:
+            return None
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            try:
+                return Decimal(arg.value)
+            except InvalidOperation:
+                return None
+        return _fold(arg)
+    if isinstance(node, ast.BinOp):
+        left, right = _fold(node.left), _fold(node.right)
+        if left is None or right is None:
+            return None
+        try:
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+        except (InvalidOperation, ZeroDivisionError):
+            return None
+    return None
+
 
 # entry 100, stop 90, target 120 -> b = 20 / 10 = 2.
 # p = 0.6 -> f* = (0.6 * 2 - 0.4) / 2 = 0.4 of NAV at full Kelly.
@@ -277,6 +326,49 @@ class TestSize:
         with pytest.raises(ValueError, match="hit_rate is required"):
             _size(hit_rate=None)
 
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {},
+            {"kelly_cap": Decimal(1)},
+            {"volatility": Decimal("0.02"), "vol_target": Decimal("0.02")},
+            {"max_position_pct_nav": Decimal("0.05")},
+            dict(SHORT),
+        ],
+        ids=["plain", "full-kelly", "vol-targeted", "tight-cap", "short"],
+    )
+    def test_no_configuration_lets_a_missing_hit_rate_through(self, extra):
+        # One passing `hit_rate=None` case says nothing about the others; the
+        # rule is that *no* path through `size` returns a quantity without a
+        # calibrated p, so every branch it has is asked the same question.
+        with pytest.raises(ValueError, match="hit_rate is required"):
+            _size(hit_rate=None, **extra)
+
+    def test_size_refuses_a_missing_hit_rate_on_its_own(self, monkeypatch):
+        """The refusal must be `size`'s, not one it happens to inherit.
+
+        `size` delegates to `kelly_fraction`, which refuses `None` too, so
+        deleting the guard inside `size` changes nothing observable today and
+        every other test here stays green. It is still a hole: the rule is that
+        no path through `size` yields a quantity without a calibrated p, and
+        with its own guard gone that holds only while the collaborator keeps
+        enforcing it. Standing in a `kelly_fraction` that hands back a fraction
+        for `None` -- the exact substitution this module exists to refuse --
+        makes the difference visible.
+        """
+
+        def substituting_kelly(*, hit_rate, payoff):
+            return Decimal("0.4")
+
+        monkeypatch.setattr(sizing, "kelly_fraction", substituting_kelly)
+
+        # The stub is reached and really does produce a number, so a refusal
+        # below can only have come from `size` itself.
+        assert _size(kelly_cap=Decimal(1)) == Decimal(400)
+
+        with pytest.raises(ValueError, match="hit_rate is required"):
+            _size(hit_rate=None)
+
     def test_hit_rate_cannot_be_omitted(self):
         with pytest.raises(TypeError):
             size(
@@ -341,3 +433,32 @@ class TestNoSubstitutedProbability:
 
     def test_the_source_carries_no_substitute_probability(self):
         assert "0.5" not in _SOURCE
+
+    def test_no_literal_in_the_module_evaluates_to_one_half(self):
+        # The substring check above only catches a coin flip spelled `0.5`.
+        # `.5`, `5e-1`, `Decimal("5e-1")`, `1 / 2` and `Decimal(1) / Decimal(2)`
+        # all read as 0.5 at runtime and all slip past it, which is exactly how
+        # a substituted probability would arrive if someone were routing around
+        # the rule rather than breaking it by accident. This folds every numeric
+        # literal and every constant-only arithmetic expression in the module
+        # and refuses any that lands on one half.
+        offenders = [
+            (node.lineno, ast.unparse(node))
+            for node in ast.walk(ast.parse(_SOURCE))
+            if _fold(node) == Decimal("0.5")
+        ]
+        assert offenders == [], f"literals evaluating to 0.5: {offenders}"
+
+    def test_the_one_half_scan_would_catch_a_disguised_default(self):
+        # Proves the scan above is not vacuous: the same walk over a module
+        # that hides a coin flip behind `Decimal("5e-1")` -- which contains no
+        # "0.5" and is not an argument default, so neither of the other two
+        # tests sees it -- reports it.
+        disguised = 'from decimal import Decimal\n_FALLBACK = Decimal("5e-1")\n'
+        assert "0.5" not in disguised
+        found = [
+            ast.unparse(node)
+            for node in ast.walk(ast.parse(disguised))
+            if _fold(node) == Decimal("0.5")
+        ]
+        assert found, "the 0.5 scan misses a disguised one half"
