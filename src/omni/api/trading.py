@@ -46,6 +46,13 @@ earn -- together with the three properties that can make that number untrue
 They agree when every prediction shares one geometry and diverge exactly when
 the average barrier stops describing the individual trade, which is the
 condition under which a modelled expectancy quietly stops being true.
+
+`/trading/portfolio` and `/trading/reconciliation` are read paths over the same
+tier and inherit the same rules. The first exposes exactly what
+`portfolio.state.load` returns and derives nothing -- a quantity it does not
+hold is a quantity this endpoint does not report. The second reports
+`never_run` for every venue, because no reconciliation result is persisted
+anywhere in this system; the reasoning is at the endpoint.
 """
 
 from __future__ import annotations
@@ -53,9 +60,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from uuid import UUID
 
 from neutron import App, Router
-from neutron.error import bad_request, unauthorized
+from neutron.error import bad_request, not_found, unauthorized
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
@@ -66,6 +74,8 @@ from omni.conviction.walk_forward_report import (
     walk_forward,
     wilson_interval,
 )
+from omni.portfolio.state import UnknownPortfolio
+from omni.portfolio.state import load as load_portfolio
 from omni.trading.policy import MIN_RESOLVED_FOR_PAPER, TradingPhase, eligible
 from omni.venue.costs import BPS, gross_expectancy_bps, round_trip_cost, survives_costs
 from omni.venue.protocol import Capabilities, MarketType, OrderKind, Side, TradeIntent
@@ -218,6 +228,25 @@ WHERE p.direction <> 'neutral'
   AND p.outcome <> 'pending'
   AND (p.audience_user_id IS NULL OR p.audience_user_id = $1)
 GROUP BY p.method, e.kind
+"""
+
+
+# Portfolios the caller owns. `portfolio.user_id` is nullable, and an unowned
+# row is deliberately not matched: a portfolio names positions, cash and NAV,
+# and serving one to an account that does not own it is the same class of leak
+# the audience scoping on claims exists to prevent.
+_PORTFOLIOS_FOR_AUDIENCE = """
+SELECT id FROM portfolio WHERE user_id = $1 ORDER BY created_at, id
+"""
+
+# The venues this book actually has exposure at. Cash is unioned in rather than
+# read off positions alone: cash parked at a venue with no open position is
+# still cash whose local figure nobody has checked against the venue's.
+_BOOK_VENUES = """
+SELECT venue FROM position     WHERE portfolio_id = $1
+UNION
+SELECT venue FROM cash_balance WHERE portfolio_id = $1
+ORDER BY venue
 """
 
 
@@ -458,6 +487,70 @@ def _walk_forward_payload(result) -> dict:
     }
 
 
+async def _resolve_portfolio(pool, audience: UUID, params) -> UUID:
+    """Which portfolio this caller is asking about, among the ones they own.
+
+    An id the caller does not own is reported missing rather than forbidden:
+    the two answers differ only in that the second confirms the portfolio
+    exists, which is the fact being withheld.
+
+    More than one owned portfolio with nothing naming which is refused rather
+    than resolved by picking. Any rule for picking -- oldest, newest, largest --
+    would answer a question about one book while the operator was reading it as
+    a question about the other.
+    """
+    owned = [row["id"] for row in await pool.fetch(_PORTFOLIOS_FOR_AUDIENCE, audience)]
+
+    raw = params.get("portfolio_id")
+    if raw:
+        try:
+            asked = UUID(raw)
+        except ValueError as exc:
+            raise bad_request(f"portfolio_id is not a uuid: {raw!r}") from exc
+        if asked not in owned:
+            raise not_found(f"No portfolio {asked}")
+        return asked
+
+    if not owned:
+        raise not_found("No portfolio for this account")
+    if len(owned) > 1:
+        raise bad_request(
+            f"this account holds {len(owned)} portfolios "
+            f"({', '.join(str(p) for p in owned)}); name one with portfolio_id"
+        )
+    return owned[0]
+
+
+def _position_payload(position) -> dict:
+    """One position, signed.
+
+    `notional` and `is_short` are the `Position` properties, not a second
+    derivation of them here: `notional` is cost basis (`|quantity| *
+    average_entry`) and nothing in this path marks a position, so no field
+    here depends on a price the system does not hold.
+    """
+    return {
+        "venue": position.venue,
+        "symbol": position.symbol,
+        "market_type": position.market_type.value,
+        "quantity": str(position.quantity),
+        "average_entry": str(position.average_entry),
+        "notional": str(position.notional),
+        "is_short": position.is_short,
+        "as_of": position.as_of.isoformat(),
+    }
+
+
+def _cash_payload(cash) -> dict:
+    return {
+        "venue": cash.venue,
+        "asset": cash.asset,
+        "free": str(cash.free),
+        "locked": str(cash.locked),
+        "as_of": cash.as_of.isoformat(),
+    }
+
+
 def build_router(app: App) -> Router:
     router = Router()
 
@@ -625,6 +718,80 @@ def build_router(app: App) -> Router:
                 "max_concentration": str(GATE_MAX_CONCENTRATION),
             },
             "methods": methods,
+        }
+
+    @router.get("/trading/portfolio")
+    async def portfolio_state(request: Request) -> dict:
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+
+        pool = app.db.pool
+        portfolio_id = await _resolve_portfolio(pool, audience, request.query_params)
+        try:
+            book = await load_portfolio(pool, portfolio_id)
+        except UnknownPortfolio as exc:
+            # Reachable only if the row is deleted between the resolve above and
+            # this load. Still a 404 and never an empty payload: a portfolio
+            # that has nothing in it and a portfolio that is not there are
+            # different facts, and one of them means the caller is looking at
+            # the wrong account.
+            raise not_found(str(exc)) from exc
+
+        return {
+            "portfolio_id": str(book.portfolio_id),
+            "as_of": book.as_of.isoformat(),
+            "nav": str(book.nav),
+            "cash": str(book.cash),
+            # The `PortfolioState` properties, not a second computation of them.
+            # Two implementations of one quantity is how they come to disagree.
+            "gross_exposure": str(book.gross_exposure),
+            "net_exposure": str(book.net_exposure),
+            "positions": [_position_payload(p) for p in book.positions],
+            "cash_positions": [_cash_payload(c) for c in book.cash_positions],
+        }
+
+    @router.get("/trading/reconciliation")
+    async def reconciliation_report(request: Request) -> dict:
+        """The last reconciliation per venue -- which, today, is none of them.
+
+        Nothing in this system stores a reconciliation result.
+        `portfolio/reconcile.py` builds a `ReconciliationResult` and returns it;
+        `trading/loop.py` reads its boolean, folds the discrepancy details into
+        a halt string and drops the object; no migration defines a table for it.
+        So there is no record to report, and the honest answer for every venue
+        is `never_run`.
+
+        That is the entire reason `never_run` is in the contract. A venue with
+        no stored check has not been shown to agree with the book -- it has not
+        been looked at -- and reporting it as `reconciled` would state a verdict
+        no evidence exists for, on the page an operator reads before committing
+        capital. `reconciled`, `diverged` and `stale` become reachable when a
+        result is persisted, and not before.
+
+        The venues listed are the ones the stored book has exposure at, which is
+        a real fact about real rows rather than a configured list. A venue the
+        book does not touch has nothing to reconcile.
+        """
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+
+        pool = app.db.pool
+        portfolio_id = await _resolve_portfolio(pool, audience, request.query_params)
+        rows = await pool.fetch(_BOOK_VENUES, portfolio_id)
+
+        return {
+            "as_of": datetime.now(UTC).isoformat(),
+            "venues": [
+                {
+                    "venue": row["venue"],
+                    "status": "never_run",
+                    "checked_at": None,
+                    "discrepancies": [],
+                }
+                for row in rows
+            ],
         }
 
     return router

@@ -1,12 +1,11 @@
-"""GET /trading/eligibility -- the report GATE A is read off.
+"""The trading read API: eligibility, portfolio, reconciliation.
 
-The router is not mounted in `omni.main` yet (registering it is an orchestrator
-step), so these tests mount it onto a real app the same way `create_app` would.
-
-What is pinned here is the report's honesty rather than its shape: a method
+What is pinned here is each report's honesty rather than its shape: a method
 nobody has measured must appear rather than vanish, an unknown rate must
 serialise as null rather than as zero, the same edge must survive a cheap venue
-and not an expensive one, and reading the page must not change the ledger it
+and not an expensive one, a short must stay signed, a portfolio that is not
+there must not read as one that is empty, a venue nobody has checked must not
+read as one that agreed, and reading any of these pages must not change what it
 describes.
 """
 
@@ -14,7 +13,7 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from neutron.test import TestClient
@@ -77,6 +76,99 @@ async def _token(client) -> str:
     )
     assert r.status_code == 200, r.text
     return r.json()["token"]
+
+
+async def _operator(client) -> tuple[str, UUID]:
+    """The first-run operator's token and the user id it authenticates as."""
+    r = await client.post(
+        "/auth/setup", json={"email": "op@example.com", "password": "a" * 16}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    return body["token"], UUID(body["user"]["id"])
+
+
+async def _second_user(client, token) -> UUID:
+    r = await client.post(
+        "/auth/register",
+        json={"email": "other@example.com", "password": "b" * 16},
+        headers={"authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 201, r.text
+    return UUID(r.json()["id"])
+
+
+async def _read(client, token, path):
+    return await client.get(path, headers={"authorization": f"Bearer {token}"})
+
+
+async def _portfolio(db, user_id, *, base_currency="USD") -> UUID:
+    return await db.pool.fetchval(
+        """
+        INSERT INTO portfolio (user_id, name, base_currency)
+        VALUES ($1, $2, $3) RETURNING id
+        """,
+        user_id,
+        f"book-{uuid4().hex[:8]}",
+        base_currency,
+    )
+
+
+async def _hold(
+    db,
+    portfolio_id,
+    *,
+    venue,
+    symbol,
+    quantity,
+    average_entry,
+    market_type="spot",
+    updated_at=NOW,
+):
+    await db.pool.execute(
+        """
+        INSERT INTO position (portfolio_id, venue, symbol, market_type,
+                              quantity, average_entry, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        """,
+        portfolio_id,
+        venue,
+        symbol,
+        market_type,
+        Decimal(quantity),
+        Decimal(average_entry),
+        updated_at,
+    )
+
+
+async def _cash(
+    db, portfolio_id, *, venue, asset, free, locked="0", updated_at=NOW
+):
+    await db.pool.execute(
+        """
+        INSERT INTO cash_balance (portfolio_id, venue, asset, free, locked,
+                                  updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6)
+        """,
+        portfolio_id,
+        venue,
+        asset,
+        Decimal(free),
+        Decimal(locked),
+        updated_at,
+    )
+
+
+def _held(body, symbol):
+    matches = [p for p in body["positions"] if p["symbol"] == symbol]
+    assert len(matches) == 1, f"{symbol} appears {len(matches)} times in the book"
+    return matches[0]
+
+
+def _venue_row(body, name):
+    matches = [v for v in body["venues"] if v["venue"] == name]
+    assert len(matches) == 1, f"{name} appears {len(matches)} times in the report"
+    return matches[0]
 
 
 async def _get(client, token, query=f"notional={NOTIONAL}"):
@@ -738,3 +830,498 @@ class TestTheReportWritesNothing:
         before = await counts()
         await _predict(db, entity, method=_method(), resolved_at=NOW)
         assert await counts() != before
+
+
+class TestPortfolioAccess:
+    async def test_an_anonymous_caller_is_refused(self, db, database_url):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            r = await client.get("/trading/portfolio")
+        assert r.status_code == 401
+
+    async def test_a_missing_portfolio_is_a_404_and_not_an_empty_book(
+        self, db, database_url
+    ):
+        """An empty portfolio and a portfolio that is not there are different
+        facts. A 200 carrying zeros tells an operator their book is flat when
+        what actually happened is that they are looking at the wrong account.
+        """
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, _ = await _operator(client)
+            r = await _read(client, token, "/trading/portfolio")
+
+        assert r.status_code == 404, r.text
+        body = json.loads(r.text)
+        # Not merely "the status is 404": a payload that also carried a book
+        # would let a client read the body and ignore the code.
+        assert "positions" not in body
+        assert "nav" not in body
+
+    async def test_another_accounts_portfolio_is_not_served(self, db, database_url):
+        """A portfolio names positions, cash and NAV. Serving one across
+        accounts is the leak the audience scoping exists to prevent, and a 403
+        would still confirm the portfolio is there."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, _ = await _operator(client)
+            other = await _second_user(client, token)
+            theirs = await _portfolio(db, other)
+            await _hold(
+                db,
+                theirs,
+                venue="binance",
+                symbol="SECRET/USD",
+                quantity="7",
+                average_entry="100",
+            )
+
+            r = await _read(client, token, f"/trading/portfolio?portfolio_id={theirs}")
+
+        assert r.status_code == 404, r.text
+        assert "SECRET/USD" not in r.text
+
+    async def test_an_unparseable_portfolio_id_is_refused(self, db, database_url):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            await _portfolio(db, user_id)
+            r = await _read(client, token, "/trading/portfolio?portfolio_id=not-a-uuid")
+
+        assert r.status_code == 400
+        assert "portfolio_id" in r.text
+
+    async def test_two_portfolios_with_nothing_naming_one_is_refused(
+        self, db, database_url
+    ):
+        """Rather than picked. Any rule for picking -- oldest, largest -- would
+        answer about one book while it is read as an answer about the other."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            first = await _portfolio(db, user_id)
+            second = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                first,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="1",
+                average_entry="100",
+            )
+
+            ambiguous = await _read(client, token, "/trading/portfolio")
+            named = await _read(
+                client, token, f"/trading/portfolio?portfolio_id={second}"
+            )
+
+        assert ambiguous.status_code == 400, ambiguous.text
+        assert "BTC/USD" not in ambiguous.text
+        # And naming one resolves it: the refusal is about ambiguity, not a
+        # blanket refusal to serve an account that holds more than one book.
+        assert named.status_code == 200, named.text
+        assert named.json()["portfolio_id"] == str(second)
+
+
+class TestThePortfolioIsReportedAsStored:
+    async def test_a_short_is_reported_signed(self, db, database_url):
+        """`abs(quantity)` would render a 3-unit short as a 3-unit long.
+
+        Every downstream reading of the number -- exposure, the direction an
+        operator believes they are carrying, whether a hedge is on -- inverts
+        with the sign, and the magnitude is identical either way, so nothing
+        else on the page would look wrong.
+        """
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="ETH/USD",
+                quantity="-3",
+                average_entry="50",
+            )
+
+            r = await _read(client, token, "/trading/portfolio")
+
+        assert r.status_code == 200, r.text
+        held = _held(r.json(), "ETH/USD")
+        assert Decimal(held["quantity"]) == Decimal(-3)
+        assert Decimal(held["quantity"]) < 0
+        assert held["is_short"] is True
+        # Notional is a size and stays positive -- it is |quantity| * entry --
+        # so it cannot stand in for the sign check above.
+        assert Decimal(held["notional"]) == Decimal(150)
+
+    async def test_exposure_distinguishes_a_hedged_book_from_a_directional_one(
+        self, db, database_url
+    ):
+        """Long 200 against short 150.
+
+            gross = |2 * 100| + |-3 * 50| = 350   -- how much is at risk
+            net   =   2 * 100 +  -3 * 50  =  50   -- which way it leans
+
+        A net computed over absolute quantities would report 350 for both, and
+        a book that is nearly flat would read as one carrying full directional
+        risk. The two figures are the `PortfolioState` properties; the endpoint
+        must not recompute them, because two implementations of one quantity is
+        how they come to disagree.
+        """
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="2",
+                average_entry="100",
+            )
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="ETH/USD",
+                quantity="-3",
+                average_entry="50",
+            )
+
+            r = await _read(client, token, "/trading/portfolio")
+
+        body = r.json()
+        assert Decimal(body["gross_exposure"]) == Decimal(350)
+        assert Decimal(body["net_exposure"]) == Decimal(50)
+        assert Decimal(body["net_exposure"]) != Decimal(body["gross_exposure"])
+
+    async def test_cash_is_the_base_currency_total_and_the_split_is_kept(
+        self, db, database_url
+    ):
+        """9,000 free and 1,000 locked is 10,000 of cash, of which 1,000 cannot
+        be spent. Reporting only the total hides an order the book has already
+        committed capital to, which is the case reconciliation exists to catch.
+
+        The EUR row is in `cash_positions` and not in `cash`: converting it
+        would need an FX rate nobody supplied, and inventing one would put a
+        fabricated number into NAV.
+        """
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id, base_currency="USD")
+            await _cash(
+                db,
+                portfolio_id,
+                venue="binance",
+                asset="USD",
+                free="9000",
+                locked="1000",
+            )
+            await _cash(db, portfolio_id, venue="kraken", asset="EUR", free="500")
+
+            r = await _read(client, token, "/trading/portfolio")
+
+        body = r.json()
+        assert Decimal(body["cash"]) == Decimal(10000)
+        usd = next(c for c in body["cash_positions"] if c["asset"] == "USD")
+        assert Decimal(usd["free"]) == Decimal(9000)
+        assert Decimal(usd["locked"]) == Decimal(1000)
+        eur = next(c for c in body["cash_positions"] if c["asset"] == "EUR")
+        assert Decimal(eur["free"]) == Decimal(500)
+        # NAV is cash plus the book at cost basis; with no positions it is the
+        # base-currency cash and the EUR is not folded in at some invented rate.
+        assert Decimal(body["nav"]) == Decimal(10000)
+
+    async def test_market_type_is_the_lowercase_protocol_value(
+        self, db, database_url
+    ):
+        """Spot and a perpetual on the same symbol are two exposures with
+        different funding and different liquidation behaviour."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="1",
+                average_entry="100",
+                market_type="perpetual",
+            )
+
+            r = await _read(client, token, "/trading/portfolio")
+
+        assert _held(r.json(), "BTC/USD")["market_type"] == "perpetual"
+
+    async def test_every_money_field_is_a_string_in_the_raw_json(
+        self, db, database_url
+    ):
+        """A float round trip loses precision on exactly the values that matter,
+        and a parsed body cannot tell a string from a number the parser already
+        coerced. Read the text."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="0.1",
+                average_entry="63500.55",
+            )
+            await _cash(
+                db,
+                portfolio_id,
+                venue="binance",
+                asset="USD",
+                free="10000.10",
+                locked="0.05",
+            )
+
+            r = await _read(client, token, "/trading/portfolio")
+
+        raw = json.loads(r.text)
+        for field in ("nav", "cash", "gross_exposure", "net_exposure"):
+            assert isinstance(raw[field], str), field
+        held = _held(raw, "BTC/USD")
+        for field in ("quantity", "average_entry", "notional"):
+            assert isinstance(held[field], str), field
+        assert Decimal(held["average_entry"]) == Decimal("63500.55")
+        for cash in raw["cash_positions"]:
+            for field in ("free", "locked"):
+                assert isinstance(cash[field], str), field
+        # is_short is a fact, not an amount, and stays a boolean.
+        assert held["is_short"] is False
+
+    async def test_the_timestamps_carry_an_explicit_offset(self, db, database_url):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="1",
+                average_entry="100",
+            )
+
+            r = await _read(client, token, "/trading/portfolio")
+
+        body = r.json()
+        assert datetime.fromisoformat(body["as_of"]).tzinfo is not None
+        assert datetime.fromisoformat(_held(body, "BTC/USD")["as_of"]) == NOW
+
+
+class TestReconciliationReportsWhatIsRecorded:
+    """No reconciliation result is persisted anywhere in this system.
+
+    `portfolio/reconcile.py` returns a `ReconciliationResult` to its caller,
+    `trading/loop.py` reads its boolean and drops the object, and no migration
+    defines a table for it. So every venue is `never_run`, and these tests pin
+    that the endpoint says so rather than filling the silence.
+    """
+
+    async def test_an_anonymous_caller_is_refused(self, db, database_url):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            r = await client.get("/trading/reconciliation")
+        assert r.status_code == 401
+
+    async def test_a_venue_never_checked_is_never_run_and_not_reconciled(
+        self, db, database_url
+    ):
+        """The substitution this whole enum exists to make unrepresentable.
+
+        A venue with no stored check has not been shown to agree with the book.
+        It has not been looked at. Reporting it as `reconciled` states a verdict
+        no evidence exists for, on the page an operator reads before committing
+        capital -- and the two statuses are indistinguishable to anything that
+        only asserts a status is present.
+        """
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="1",
+                average_entry="100",
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        assert r.status_code == 200, r.text
+        row = _venue_row(r.json(), "binance")
+        assert row["status"] == "never_run"
+        assert row["status"] != "reconciled"
+        # Never checked, so there is no moment at which it was.
+        assert row["checked_at"] is None
+        assert row["discrepancies"] == []
+
+    async def test_no_venue_anywhere_in_the_report_reads_as_healthy(
+        self, db, database_url
+    ):
+        """Across a book at three venues, held three different ways. A status
+        derived per venue rather than stated once is the shape a fail-open
+        substitution hides in, so the assertion is over every row."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="1",
+                average_entry="100",
+            )
+            await _hold(
+                db,
+                portfolio_id,
+                venue="okx",
+                symbol="ETH/USD",
+                quantity="-2",
+                average_entry="50",
+            )
+            await _cash(db, portfolio_id, venue="kraken", asset="USD", free="1000")
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        rows = r.json()["venues"]
+        assert {v["venue"] for v in rows} == {"binance", "kraken", "okx"}
+        assert {v["status"] for v in rows} == {"never_run"}
+        for row in rows:
+            assert row["checked_at"] is None, row
+            assert row["discrepancies"] == [], row
+
+    async def test_a_venue_holding_only_cash_is_still_unreconciled(
+        self, db, database_url
+    ):
+        """Cash parked at a venue with no open position is still a local figure
+        nobody has checked against the venue's. A report walking positions alone
+        would omit it, and an omitted venue reads as no venue at all."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="1",
+                average_entry="100",
+            )
+            await _cash(db, portfolio_id, venue="kraken", asset="USD", free="1000")
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        assert _venue_row(r.json(), "kraken")["status"] == "never_run"
+
+    async def test_the_raw_json_says_null_rather_than_a_timestamp_or_a_zero(
+        self, db, database_url
+    ):
+        """`checked_at: 0` or `""` would parse as falsy and satisfy a client
+        testing for absence, while reading as a moment to anything that formats
+        it. Absent is null."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        assert '"checked_at": null' in r.text or '"checked_at":null' in r.text
+        row = _venue_row(json.loads(r.text), "binance")
+        assert row["checked_at"] is None
+        assert not isinstance(row["checked_at"], int | str)
+
+    async def test_the_report_covers_this_book_and_not_another_accounts(
+        self, db, database_url
+    ):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            other = await _second_user(client, token)
+            mine = await _portfolio(db, user_id)
+            theirs = await _portfolio(db, other)
+            await _cash(db, mine, venue="binance", asset="USD", free="1000")
+            await _cash(db, theirs, venue="deribit", asset="USD", free="1000")
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        assert {v["venue"] for v in r.json()["venues"]} == {"binance"}
+        assert mine != theirs
+
+    async def test_a_book_with_no_venues_reports_none_rather_than_inventing_one(
+        self, db, database_url
+    ):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            await _portfolio(db, user_id)
+            r = await _read(client, token, "/trading/reconciliation")
+
+        assert r.status_code == 200, r.text
+        assert r.json()["venues"] == []
+
+
+class TestTheReadPathsWriteNothing:
+    async def test_neither_endpoint_changes_what_it_describes(
+        self, db, database_url
+    ):
+        """Reading a portfolio must not materialise one, and reading a
+        reconciliation report must not record a reconciliation."""
+
+        async def counts():
+            row = await db.pool.fetchrow(
+                """
+                SELECT (SELECT count(*) FROM portfolio)     AS portfolios,
+                       (SELECT count(*) FROM position)      AS positions,
+                       (SELECT count(*) FROM cash_balance)  AS cash,
+                       (SELECT count(*) FROM nav_snapshot)  AS navs,
+                       (SELECT count(*) FROM trade_order)   AS orders
+                """
+            )
+            return dict(row)
+
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="binance",
+                symbol="BTC/USD",
+                quantity="1",
+                average_entry="100",
+            )
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+
+            before = await counts()
+            for path in ("/trading/portfolio", "/trading/reconciliation"):
+                # Twice: an endpoint writing on first read only would still pass
+                # a single-call comparison taken after the write.
+                for _ in range(2):
+                    r = await _read(client, token, path)
+                    assert r.status_code == 200, r.text
+            after = await counts()
+
+        assert after == before
+        assert before["positions"] > 0, "the comparison must not be over zero rows"
