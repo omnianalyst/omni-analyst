@@ -12,10 +12,11 @@ call, so it runs under a hard ceiling.
 **Resolve** -- cheap, coverage-only. Resolve predictions whose horizons elapsed,
 each against its own audience's visible prices.
 
-**Predict** -- cheap, coverage-only. Make a DCF directional call for each
-demanded company entity with enough coverage to run one, deduped to one pending
-call per (entity, method, audience). Produces nothing until an audience supplies
-a price key (BYOK) -- the correct outcome, not a failure.
+**Predict** -- cheap, coverage-only. Make a directional call for each
+demanded entity, routing it to the producers registered for its kind,
+deduped to one pending call per (entity, method, audience). Produces nothing
+until an audience supplies a price key (BYOK) -- the correct outcome, not a
+failure.
 
 Collapsing them would mean either sweeping too rarely to notice staleness, or
 filling without a ceiling. The gap table is the work queue itself -- it already
@@ -38,21 +39,12 @@ from omni.capability.registry import Registry
 from omni.conviction.disconfirm import gather_evidence
 from omni.conviction.gate import Candidate, assess
 from omni.conviction.ledger import resolve_due_predictions
-from omni.conviction.predict import produce_dcf_prediction_from_coverage
+from omni.conviction.producers import producers_for
 from omni.conviction.publish import load_calibration, record
-from omni.conviction.trend import produce_trend_prediction_from_coverage
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.fill.pipeline import drain
 
 logger = logging.getLogger(__name__)
-
-# The method the predict loop writes/dupe-checks. Kept here as a literal rather
-# than imported so the scheduler does not depend on the producer's internals;
-# produce_dcf_prediction defaults its method to the capability name, which is
-# this string. A second producer would carry its own constant the same way.
-_DCF_METHOD = "fundamentals.dcf_valuation"
-# The trend producer's method, literal for the same reason as _DCF_METHOD.
-_TREND_METHOD = "trend.sma"
 
 # A loop is "degraded" once it has failed this many times in a row. The point is
 # to surface a chronically-failing loop (every cycle raises) above the per-error
@@ -221,48 +213,47 @@ async def resolve_once(pool) -> int:
 
 
 async def predict_once(pool, *, horizon_days: int) -> tuple[int, int]:
-    """Make a directional call for each demanded company entity.
+    """Make a directional call for each demanded entity, routed by kind.
 
-    Two producers run, each demand-driven (the system predicts for entities
-    under active attention), per-audience, and deduped -- one pending call per
-    (entity, method, audience), so neither producer can flood the ledger by
-    re-firing each cycle. DCF needs fundamentals + a BYO price; trend needs a
-    price window. Either may abstain honestly (no key, short coverage, or the
-    model asserts no honest barrier) -- abstention is the correct outcome when
+    The producers applicable to an entity come from its kind (see
+    ``conviction.producers``): a kind with no registered producer gets nothing
+    and that is correct, not an error. Each producer is demand-driven (the
+    system predicts for entities under active attention), per-audience, and
+    deduped -- one pending call per (entity, method, audience), so a second
+    producer for a kind cannot double-write or flood the ledger by re-firing
+    each cycle. DCF needs fundamentals + a BYO price; trend needs a price
+    window. Either may abstain honestly (no key, short coverage, or the model
+    asserts no honest barrier) -- abstention is the correct outcome when
     coverage is insufficient, never a manufactured prediction.
     """
     now = datetime.now(UTC)
     horizon = now + timedelta(days=horizon_days)
     rows = await pool.fetch(
         """
-        SELECT DISTINCT d.entity_id, d.requested_by
+        SELECT DISTINCT d.entity_id, d.requested_by, e.kind
         FROM demand d JOIN entity e ON e.id = d.entity_id
-        WHERE d.active AND e.kind = 'company'
+        WHERE d.active
         """
-    )
-    producers = (
-        (_DCF_METHOD, produce_dcf_prediction_from_coverage),
-        (_TREND_METHOD, produce_trend_prediction_from_coverage),
     )
     produced = 0
     abstained = 0
     for r in rows:
         entity_id: UUID = r["entity_id"]
         audience: UUID | None = r["requested_by"]
-        for method, producer in producers:
+        for producer in producers_for(r["kind"]):
             pending = await pool.fetchval(
                 "SELECT 1 FROM prediction "
                 "WHERE entity_id = $1 AND method = $2 "
                 "AND audience_user_id IS NOT DISTINCT FROM $3 "
                 "AND outcome = 'pending' LIMIT 1",
                 entity_id,
-                method,
+                producer.method,
                 audience,
             )
             if pending:
                 continue
             try:
-                pid = await producer(
+                pid = await producer.produce(
                     pool,
                     entity_id=entity_id,
                     audience_user_id=audience,
