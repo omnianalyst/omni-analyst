@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID
 
 from omni.conviction.gate import MIN_RESOLVED_FOR_CALIBRATION  # noqa: F401  (public re-export)
@@ -228,6 +229,16 @@ def _price_point(value: dict) -> tuple[float | None, float | None, float | None]
     )
 
 
+def _barrier_exit(
+    outcome: str, upper: float, lower: float, at: datetime
+) -> tuple[str, datetime, float, datetime]:
+    # A barrier outcome closes AT the barrier: that level is the falsifiable
+    # threshold fixed at write time, not wherever the discrete sample that
+    # revealed the crossing happened to print. Mapping outcome -> barrier lives
+    # here alone so no branch below can disagree with another about it.
+    return outcome, at, (upper if outcome == "upper" else lower), at
+
+
 def _decide_outcome(
     *,
     direction: str,
@@ -236,14 +247,14 @@ def _decide_outcome(
     lower: float,
     horizon_ends_at: datetime,
     samples: list[tuple[datetime, float | None, float | None, float | None]],
-) -> tuple[str, datetime | None]:
-    """Decide a prediction's outcome from an ordered price path.
+) -> tuple[str, datetime | None, float | None, datetime | None]:
+    """Decide a prediction's outcome, and the price it closed at, from a path.
 
     `samples` are `(event_date, scalar, high, low)` in event_date order, already
-    restricted to the window. Returns `(outcome, resolved_at)`; outcome is
-    `pending` only when no barrier was touched and the caller must not have
-    called with a passed horizon -- exposed for reuse, not expected from the
-    resolver.
+    restricted to the window. Returns `(outcome, resolved_at, exit_price,
+    exit_at)`; outcome is `pending` only when no barrier was touched and the
+    caller must not have called with a passed horizon -- exposed for reuse, not
+    expected from the resolver.
 
     Both-barriers-crossed: the barrier whose crossing is *observed first* in
     event_date order wins. Price snapshots are discrete; this is the finest
@@ -254,9 +265,24 @@ def _decide_outcome(
     is applied: the outcome that counts as a miss for the prediction's
     direction. The system's danger is manufacturing credibility, so the
     indeterminate case is scored against the predictor, never for it.
+
+    **The exit price** is what GATE A found missing: a barrier outcome's
+    realised move was recoverable from the row, an `expiry`'s was not, so a
+    third of the sample was scored at zero for want of an observed number. An
+    expiry closes at the LAST OBSERVED price in the window, carrying that
+    observation's OWN timestamp -- which is why `exit_at` is returned separately
+    from `resolved_at` (the horizon) rather than reusing it. Stamping the last
+    price with the horizon would assert a price was observed at a moment it was
+    not, and interpolating one to the horizon would invent it outright. When the
+    path holds no scalar price at all (a range-only bar with no close), the exit
+    is `None`: the outcome is still decided -- the range shows neither barrier
+    was touched -- but the mid of a range is an invention, and 044's CHECK keeps
+    the missing price and its missing time together.
     """
     upper_crossed_at: datetime | None = None
     lower_crossed_at: datetime | None = None
+    last_price: float | None = None
+    last_price_at: datetime | None = None
 
     for event_date, scalar, high, low in samples:
         top = high if high is not None else scalar
@@ -267,25 +293,27 @@ def _decide_outcome(
         if touched_upper and touched_lower and upper_crossed_at is None and lower_crossed_at is None:
             # Both barriers spanned within one observation: the granularity
             # cannot order them. Conservative miss for this direction.
-            return _miss_outcome(direction), event_date
+            return _barrier_exit(_miss_outcome(direction), upper, lower, event_date)
 
         if touched_upper and upper_crossed_at is None:
             upper_crossed_at = event_date
         if touched_lower and lower_crossed_at is None:
             lower_crossed_at = event_date
+        if scalar is not None:
+            last_price, last_price_at = scalar, event_date
 
     if upper_crossed_at is not None and lower_crossed_at is not None:
         if upper_crossed_at < lower_crossed_at:
-            return "upper", upper_crossed_at
+            return _barrier_exit("upper", upper, lower, upper_crossed_at)
         if lower_crossed_at < upper_crossed_at:
-            return "lower", lower_crossed_at
+            return _barrier_exit("lower", upper, lower, lower_crossed_at)
         # Observed crossed on the same event_date: order unknowable.
-        return _miss_outcome(direction), upper_crossed_at
+        return _barrier_exit(_miss_outcome(direction), upper, lower, upper_crossed_at)
 
     if upper_crossed_at is not None:
-        return "upper", upper_crossed_at
+        return _barrier_exit("upper", upper, lower, upper_crossed_at)
     if lower_crossed_at is not None:
-        return "lower", lower_crossed_at
+        return _barrier_exit("lower", upper, lower, lower_crossed_at)
 
     # No barrier was touched. If the window was observed, this is expiry --
     # price stayed within the barriers until the horizon elapsed, and
@@ -294,8 +322,8 @@ def _decide_outcome(
     # path would fabricate the very thing the outcome is decided on, so it
     # stays pending rather than being scored against an invented path.
     if not samples:
-        return "pending", None
-    return "expiry", horizon_ends_at
+        return "pending", None, None, None
+    return "expiry", horizon_ends_at, last_price, last_price_at
 
 
 def _miss_outcome(direction: str) -> str:
@@ -348,7 +376,7 @@ async def _resolve_one(pool, prediction_id: UUID) -> bool:
                 continue
             samples.append((rec["event_date"], scalar, high, low))
 
-        outcome, resolved_at = _decide_outcome(
+        outcome, resolved_at, exit_price, exit_at = _decide_outcome(
             direction=row["direction"],
             entry=float(row["entry_price"]),
             upper=float(row["upper_barrier"]),
@@ -361,10 +389,16 @@ async def _resolve_one(pool, prediction_id: UUID) -> bool:
 
         await conn.execute(
             "UPDATE prediction "
-            "SET outcome = $1::prediction_outcome, resolved_at = $2 "
-            "WHERE id = $3",
+            "SET outcome = $1::prediction_outcome, resolved_at = $2, "
+            "    exit_price = $3, exit_at = $4 "
+            "WHERE id = $5",
             outcome,
             resolved_at,
+            # Via str(), not Decimal(float): asyncpg encodes a float into NUMERIC
+            # as its full binary expansion (0.1 lands as 0.1000000000000000055...),
+            # which stores noise the observation never had.
+            None if exit_price is None else Decimal(str(exit_price)),
+            exit_at,
             prediction_id,
         )
         return True
