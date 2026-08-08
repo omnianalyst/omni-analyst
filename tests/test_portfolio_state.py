@@ -593,6 +593,401 @@ class TestApplyFill:
             await apply_fill(db.pool, portfolio_id, naive, MarketType.SPOT)
 
 
+class TestPerpetualSettlement:
+    """A perpetual is a contract for difference, so it is not settled as an asset.
+
+    Everything here follows from one statement: opening a perpetual posts margin
+    rather than spending cash. So the open costs the fee and nothing else, the
+    position contributes its unrealised P&L to NAV rather than its notional, and
+    the close is where cash arrives.
+
+    The defect this class exists to pin was invisible in NAV. A short perpetual
+    credited `+q*p` to cash while the position booked `-q*p` at entry, and
+    `nav = cash + book` cancelled the two -- so a book whose `cash` overstated by
+    the entire perpetual notional reported a correct NAV the whole time. Cash is
+    what a margin check, a buying-power calculation and an operator reading the
+    book all look at, so every assertion below names cash separately from NAV.
+
+    Note what does *not* discriminate: a completed round trip moves the same
+    total cash under both accountings, because the error opens and unwinds. The
+    tests therefore assert the state while the position is open, and assert the
+    close against a book that is still holding something.
+    """
+
+    async def test_opening_a_short_perp_costs_the_fee_and_nothing_else(
+        self, db, portfolio_id
+    ):
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", fee="1.5", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+
+        held = result.position_for("binance", "BTC/USD", MarketType.PERPETUAL)
+        assert held.quantity == Decimal(-2)
+        assert held.average_entry == Decimal(100)
+        # 200 of sale proceeds are not cash: nothing was sold. Settled as spot
+        # this reads 198.5, and NAV still comes out at -1.5 either way.
+        assert result.cash == Decimal("-1.5")
+        assert result.nav == Decimal("-1.5")
+
+    async def test_opening_a_long_perp_costs_the_fee_and_nothing_else(
+        self, db, portfolio_id
+    ):
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", fee="1.5"),
+            MarketType.PERPETUAL,
+        )
+
+        held = result.position_for("binance", "BTC/USD", MarketType.PERPETUAL)
+        assert held.quantity == Decimal(2)
+        # A spot buy of the same size debits 201.5. This one buys nothing.
+        assert result.cash == Decimal("-1.5")
+        assert result.nav == Decimal("-1.5")
+
+    async def test_a_perp_is_exposure_even_where_it_is_not_nav(self, db, portfolio_id):
+        """`risk.py` sizes against exposure, so a levered book must not read flat.
+
+        Two BTC short is two BTC of exposure whatever it contributes to NAV. If
+        the fix to NAV also netted the perpetual out of `gross_exposure`, the
+        gross and net limits would stop binding on precisely the position they
+        exist to bound.
+        """
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+
+        assert result.gross_exposure == Decimal(200)
+        assert result.net_exposure == Decimal(-200)
+        assert result.cash == Decimal(0)
+        assert result.nav == Decimal(0)
+
+    async def test_closing_a_short_perp_realises_the_gain_into_cash(
+        self, db, portfolio_id
+    ):
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="90", at=NOW + timedelta(minutes=1)),
+            MarketType.PERPETUAL,
+        )
+
+        assert result.positions == ()
+        # Short 2 at 100, bought back at 90. The contract returns the 20 it made
+        # and nothing else; a close that moved no cash would report zero.
+        assert result.cash == Decimal(20)
+        assert result.nav == Decimal(20)
+
+    async def test_closing_a_short_perp_at_a_loss_takes_cash(self, db, portfolio_id):
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="110", at=NOW + timedelta(minutes=1)),
+            MarketType.PERPETUAL,
+        )
+
+        assert result.positions == ()
+        assert result.cash == Decimal(-20)
+        assert result.nav == Decimal(-20)
+
+    async def test_closing_a_long_perp_realises_against_its_own_entry(
+        self, db, portfolio_id
+    ):
+        await apply_fill(
+            db.pool, portfolio_id, _fill(quantity="2", price="100"), MarketType.PERPETUAL
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(
+                quantity="2",
+                price="130",
+                side=Side.SELL,
+                at=NOW + timedelta(minutes=1),
+            ),
+            MarketType.PERPETUAL,
+        )
+
+        assert result.positions == ()
+        assert result.cash == Decimal(60)
+        assert result.nav == Decimal(60)
+
+    async def test_a_partial_close_realises_only_the_part_it_closed(
+        self, db, portfolio_id
+    ):
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="1", price="90", at=NOW + timedelta(minutes=1)),
+            MarketType.PERPETUAL,
+        )
+
+        held = result.position_for("binance", "BTC/USD", MarketType.PERPETUAL)
+        assert held.quantity == Decimal(-1)
+        assert held.average_entry == Decimal(100)
+        # One unit closed at 90 against an entry of 100. The unit still open has
+        # realised nothing, so it moves no cash and contributes no NAV.
+        assert result.cash == Decimal(10)
+        assert result.nav == Decimal(10)
+        assert result.gross_exposure == Decimal(100)
+
+    async def test_a_flip_realises_the_closed_part_and_opens_the_rest_flat(
+        self, db, portfolio_id
+    ):
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="5", price="90", at=NOW + timedelta(minutes=1)),
+            MarketType.PERPETUAL,
+        )
+
+        held = result.position_for("binance", "BTC/USD", MarketType.PERPETUAL)
+        assert held.quantity == Decimal(3)
+        assert held.average_entry == Decimal(90)
+        # Two units closed for 20; the three now long opened at the fill price
+        # and are worth nothing yet. Settled as spot this cash reads -250.
+        assert result.cash == Decimal(20)
+        assert result.nav == Decimal(20)
+
+    async def test_the_fee_on_a_close_is_charged_on_top_of_what_it_realised(
+        self, db, portfolio_id
+    ):
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", fee="1", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="90", fee="0.9", at=NOW + timedelta(minutes=1)),
+            MarketType.PERPETUAL,
+        )
+
+        assert result.positions == ()
+        assert result.cash == Decimal("18.1")
+
+    async def test_marking_a_perp_values_its_unrealised_pnl_not_its_notional(
+        self, db, portfolio_id
+    ):
+        """And the recorded exposures stay at the full notional either way."""
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+
+        assert await snapshot_nav(db.pool, portfolio_id, {BTC: Decimal(90)}) == Decimal(20)
+        assert await snapshot_nav(db.pool, portfolio_id, {BTC: Decimal(110)}) == Decimal(-20)
+
+        rows = await db.pool.fetch(
+            "SELECT nav, cash, gross_exposure, net_exposure FROM nav_snapshot "
+            "WHERE portfolio_id = $1 ORDER BY nav",
+            portfolio_id,
+        )
+        assert [row["nav"] for row in rows] == [Decimal(-20), Decimal(20)]
+        assert [row["cash"] for row in rows] == [Decimal(0), Decimal(0)]
+        assert [row["gross_exposure"] for row in rows] == [Decimal(220), Decimal(180)]
+        assert [row["net_exposure"] for row in rows] == [Decimal(-220), Decimal(-180)]
+
+    async def test_marking_before_a_close_agrees_with_the_cash_after_it(
+        self, db, portfolio_id
+    ):
+        """The unrealised figure and the realised one must be the same number.
+
+        If they were not, P&L would appear or vanish at the moment a position
+        closes -- and nothing in the book would record which of the two was the
+        lie.
+        """
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+        marked = await snapshot_nav(db.pool, portfolio_id, {BTC: Decimal(90)})
+
+        after = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="90", at=NOW + timedelta(minutes=1)),
+            MarketType.PERPETUAL,
+        )
+
+        assert after.positions == ()
+        assert after.cash == marked
+        assert after.nav == marked
+
+    async def test_spot_settles_in_cash_while_the_perp_beside_it_does_not(
+        self, db, portfolio_id
+    ):
+        """One venue, one symbol, one price, two market types, two settlements."""
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", fee="1"),
+            MarketType.SPOT,
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", fee="1", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+
+        # The spot leg paid 200 for the asset and 1 in fees; the perpetual paid
+        # its fee only. Settling both the same way gives -2 or -402.
+        assert result.cash == Decimal(-202)
+        assert result.nav == Decimal(-2)
+        assert result.gross_exposure == Decimal(400)
+        assert result.net_exposure == Decimal(0)
+
+    async def test_margin_settles_in_cash_like_spot(self, db, portfolio_id):
+        """A margin buy takes delivery with borrowed cash; only a perp is a CFD.
+
+        The discriminator is `market_type is PERPETUAL`, not `is not SPOT`, and
+        widening it would stop a margin purchase debiting the cash it borrowed --
+        making the overdraw invisible rather than absent, which is the state
+        `CashPosition` exists to keep visible.
+        """
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", fee="1"),
+            MarketType.MARGIN,
+        )
+
+        held = result.position_for("binance", "BTC/USD", MarketType.MARGIN)
+        assert held.quantity == Decimal(2)
+        assert result.cash == Decimal(-201)
+        assert result.nav == Decimal(-1)
+
+    async def test_the_replay_settles_a_perp_the_same_way_the_book_does(
+        self, db, portfolio_id
+    ):
+        """`rebuild_from_fills` is the check on the stored rows, so it cannot
+        settle a perpetual differently from the path it is checking."""
+        fills = [
+            (
+                _fill(quantity="2", price="100", fee="1", side=Side.SELL),
+                MarketType.PERPETUAL,
+            ),
+            (
+                _fill(
+                    quantity="1",
+                    price="90",
+                    fee="0.5",
+                    at=NOW + timedelta(minutes=1),
+                ),
+                MarketType.PERPETUAL,
+            ),
+        ]
+
+        replayed = await rebuild_from_fills(db.pool, portfolio_id, fills)
+
+        # -1 to open, then 10 realised on the unit closed less its 0.5 fee.
+        assert replayed.cash == Decimal("8.5")
+        assert replayed.nav == Decimal("8.5")
+
+        for fill, market_type in fills:
+            await apply_fill(db.pool, portfolio_id, fill, market_type)
+        materialised = await load(db.pool, portfolio_id)
+        assert materialised.cash == replayed.cash
+        assert materialised.nav == replayed.nav
+
+    async def test_a_delta_neutral_carry_book_ends_holding_exactly_its_funding(
+        self, db, portfolio_id
+    ):
+        """Long spot, short perp, both closed at one price: the carry is the P&L.
+
+        This is the strategy the module exists for, and the two failure modes it
+        catches are the ones that matter. A close that realises nothing leaves
+        the spot leg's 20 of price gain in cash with nothing offsetting it, and
+        the book reports a 20 profit on a position that asserted nothing about
+        direction. A perpetual settled as spot reports the right total here --
+        the error unwinds over a full round trip -- but the mid-position cash
+        assertion below is where it shows.
+        """
+        await apply_fill(
+            db.pool, portfolio_id, _fill(quantity="2", price="100"), MarketType.SPOT
+        )
+        opened = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="100", side=Side.SELL),
+            MarketType.PERPETUAL,
+        )
+        assert opened.cash == Decimal(-200), "the hedge is not a source of cash"
+        assert opened.nav == Decimal(0)
+
+        accrual = await apply_funding(
+            db.pool,
+            portfolio_id,
+            venue="binance",
+            symbol="BTC/USD",
+            funding_time=NOW,
+            funding_rate=Decimal("0.0001"),
+            mark=Decimal(100),
+        )
+        assert accrual.amount == Decimal("0.02")
+
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(
+                quantity="2",
+                price="110",
+                side=Side.SELL,
+                at=NOW + timedelta(minutes=1),
+            ),
+            MarketType.SPOT,
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="2", price="110", at=NOW + timedelta(minutes=2)),
+            MarketType.PERPETUAL,
+        )
+
+        assert result.positions == ()
+        # Spot made 20, the perpetual lost 20, and the funding is the whole
+        # return -- which is the entire premise of the trade.
+        assert result.cash == Decimal("0.02")
+        assert result.nav == Decimal("0.02")
+
+
 class TestLoad:
     async def test_cash_ignores_other_currencies(self, db, portfolio_id):
         await apply_fill(db.pool, portfolio_id, _fill(quantity="1", price="100"), MarketType.SPOT)
@@ -616,6 +1011,14 @@ class TestLoad:
         assert result.cash == Decimal(125)
 
     async def test_exposures_and_nav_are_cost_basis(self, db, portfolio_id):
+        """Exposure counts both legs; only the spot leg moved cash.
+
+        `cash` was `-50` here until the perpetual stopped being settled as a
+        spot asset: the short credited its `150` notional, and the position
+        booked `-150` against it, so the NAV of `0` came out of two errors that
+        cancelled. `-200` is the spot purchase alone, which is the only cash
+        that left the account.
+        """
         await apply_fill(db.pool, portfolio_id, _fill(quantity="2", price="100"), MarketType.SPOT)
         await apply_fill(
             db.pool,
@@ -627,8 +1030,11 @@ class TestLoad:
         result = await load(db.pool, portfolio_id)
         assert result.gross_exposure == Decimal(350)
         assert result.net_exposure == Decimal(50)
-        assert result.cash == Decimal(-50)
+        assert result.cash == Decimal(-200)
         assert result.nav == Decimal(0)
+        assert result.nav != result.cash + result.net_exposure, (
+            "the perpetual is exposure without being NAV, so the two must differ"
+        )
 
     async def test_position_for_discriminates_market_type_and_venue(self, db, portfolio_id):
         await apply_fill(db.pool, portfolio_id, _fill(quantity="2", price="100"), MarketType.SPOT)
@@ -1372,12 +1778,18 @@ async def _leg(
     quantity: str,
     venue: str = "binance",
     symbol: str = "BTC/USD",
+    fee: str = "0",
 ) -> None:
     await apply_fill(
         db.pool,
         portfolio_id,
         _fill(
-            venue=venue, symbol=symbol, side=side, quantity=quantity, price=str(MARK)
+            venue=venue,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=str(MARK),
+            fee=fee,
         ),
         market_type,
     )
@@ -1679,11 +2091,20 @@ class TestApplyFunding:
     async def test_a_settlement_is_scoped_to_one_venue_and_symbol(
         self, db, portfolio_id
     ):
-        """One venue's funding says nothing about another's, or another symbol's."""
+        """One venue's funding says nothing about another's, or another symbol's.
+
+        The expected rows changed with the perpetual settlement rule. They used
+        to be `100000` each -- the `2 * 50000` notional a short was credited when
+        a perpetual was accounted for as a spot sale. Opening a perpetual takes
+        no cash, so each venue holds exactly the fee its own leg paid, and the
+        fees are deliberately different so a settlement leaking across either key
+        moves a number this test can name rather than turning one zero into
+        another.
+        """
         await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
-                   side=Side.SELL, quantity="2", venue="kraken")
+                   side=Side.SELL, quantity="2", venue="kraken", fee="3")
         await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
-                   side=Side.SELL, quantity="2", symbol="ETH/USD")
+                   side=Side.SELL, quantity="2", symbol="ETH/USD", fee="5")
 
         accrual = await apply_funding(
             db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
@@ -1695,11 +2116,11 @@ class TestApplyFunding:
             "SELECT venue, asset, free FROM cash_balance WHERE portfolio_id = $1",
             portfolio_id,
         )
-        # Both legs opened short, so each venue holds the sale proceeds and
-        # nothing else. A settlement that leaked across either key would move one.
+        # A settlement that leaked across either key would move one of these by
+        # the 10 it would have accrued.
         assert {(r["venue"], r["free"]) for r in rows} == {
-            ("binance", Decimal(100000)),
-            ("kraken", Decimal(100000)),
+            ("binance", Decimal(-5)),
+            ("kraken", Decimal(-3)),
         }
 
     async def test_the_accrual_moves_cash_and_leaves_the_position_alone(

@@ -19,13 +19,44 @@ wrong:
   and every stop, mark and unrealised P&L computed from it is wrong by the
   size of the flip.
 
-`nav` on `PortfolioState` is a **cost-basis** figure: cash plus positions at
-their average entry. It is exact and needs no market data, which is what makes
-it safe to return from a write path. The marked NAV comes from `snapshot_nav`,
-which requires a mark for every position and raises when one is missing --
-valuing an unmarked position at its entry reports an unrealised P&L of exactly
-zero for the position most likely to have moved, and a NAV that is wrong in a
-direction nobody can see.
+`nav` on `PortfolioState` is a **cost-basis** figure: cash plus what each
+position contributes at its own average entry. It is exact and needs no market
+data, which is what makes it safe to return from a write path. The marked NAV
+comes from `snapshot_nav`, which requires a mark for every position and raises
+when one is missing -- valuing an unmarked position at its entry reports an
+unrealised P&L of exactly zero for the position most likely to have moved, and a
+NAV that is wrong in a direction nobody can see.
+
+**A perpetual is a contract for difference, not an asset**, and it is settled
+here as one. Opening a perpetual moves no cash: margin is posted against the
+position rather than spent, so the only cash an open costs is the fee. Its
+contribution to NAV is therefore its *unrealised P&L*,
+`quantity * (mark - average_entry)`, which at cost basis -- where the mark is
+the entry -- is exactly zero. Spot and margin are unchanged and are still cash
+settlements: a buy pays out the notional and takes delivery, a sell hands the
+asset over and takes the notional in.
+
+The two halves are one change because either alone is worse than neither. The
+predecessor of this rule credited `+q*p` to cash on a short perpetual open while
+the position booked `-q*p` at entry, so `nav = cash + book` came out right
+through two errors that cancelled -- and every figure between them was wrong.
+`cash` overstated by the whole perpetual notional, and `cash` is what a margin
+check, a buying-power calculation and an operator reading the book all look at.
+Correcting the cash leg on its own would drop NAV by the full notional on every
+open.
+
+Closing a perpetual realises, and that realisation *is* the cash the contract
+returns -- there is no asset to sell. It is the closed quantity against its own
+entry, `closed * (price - average_entry)` carried by the position's sign. A
+close that moved no cash would take the unrealised P&L away with the position
+row and put nothing in its place, so a carry book that made money would show
+none.
+
+**Exposure is a different question from NAV** and still counts the full
+notional. Two BTC short as a perpetual is two BTC of exposure however little it
+contributes to NAV, and `risk.py` sizes against exposure; netting a perpetual
+out of `gross_exposure` would make a levered book read as flat to the limits
+that exist to stop it.
 
 Marks are keyed by `(venue, symbol)`, because positions are. One symbol held at
 two venues is two positions with two prices, and the whole point of a
@@ -276,7 +307,10 @@ class PortfolioState:
     """Positions, cash and cost-basis NAV as of a moment.
 
     `gross_exposure` and `net_exposure` are stated at average entry, because
-    that is what the stored rows contain. The marked pair is written by
+    that is what the stored rows contain, and they count a perpetual's full
+    notional -- exposure is what the risk limits bind on, and a perpetual is
+    exposure whatever it contributes to NAV. `nav` is therefore not
+    `cash + net_exposure` on a book holding one. The marked pair is written by
     `snapshot_nav`, which has the prices.
 
     `cash` is the base-currency total; `cash_positions` is every stored row in
@@ -392,10 +426,104 @@ def _next_position(
     return new_quantity, average_entry
 
 
-def _cash_delta(fill: Fill) -> Decimal:
-    """Cash-account settlement: a buy pays out, a sell takes in, fees always cost."""
+def _closed_quantity(
+    *, quantity: Decimal, side: Side, filled_quantity: Decimal
+) -> Decimal:
+    """How much of a fill reduces the position it lands on.
+
+    Zero when the fill opens a position or adds to one. A fill that flips the
+    sign closes only what was there; the rest opens the new side.
+
+    Shared by the cash settlement and the realised-P&L derivation so the two
+    cannot disagree about what a fill closed -- a divergence there would show up
+    as cash and P&L telling different stories about the same trade.
+    """
+    delta = filled_quantity if side is Side.BUY else -filled_quantity
+    if quantity == 0 or (delta > 0) == (quantity > 0):
+        return Decimal(0)
+    return min(abs(delta), abs(quantity))
+
+
+def _closed_pnl(
+    *,
+    quantity: Decimal,
+    average_entry: Decimal,
+    side: Side,
+    filled_quantity: Decimal,
+    price: Decimal,
+) -> Decimal:
+    """Gross P&L on the part of a fill that reduces a position, before fees.
+
+    A long realises what it gained above its entry, a short what it gained below
+    it. The opening part of a flip realises nothing, so this is zero for any fill
+    that only opens or adds.
+    """
+    closed = _closed_quantity(
+        quantity=quantity, side=side, filled_quantity=filled_quantity
+    )
+    if quantity > 0:
+        return closed * (price - average_entry)
+    return closed * (average_entry - price)
+
+
+def _cash_delta(
+    fill: Fill,
+    market_type: MarketType,
+    *,
+    quantity: Decimal,
+    average_entry: Decimal,
+) -> Decimal:
+    """What one fill does to cash, given the position it lands on.
+
+    Two settlements, not one:
+
+    - **Spot and margin** settle in cash. A buy pays out the notional and takes
+      delivery, a sell hands the asset over and takes the notional in.
+    - **A perpetual settles nothing on open.** Margin is posted against the
+      contract rather than spent, so an open costs the fee and nothing else. A
+      close realises the closed quantity against its entry, and that is the only
+      cash the contract ever returns.
+
+    Fees always cost, on both, and the whole fee leaves the account at the moment
+    it is paid -- including on a fill that closes and flips, where only the
+    closing share of it is *attributable* to realised P&L but all of it is gone
+    from cash.
+
+    The position the fill lands on is a parameter rather than something this
+    function reads, because both derivations already hold it: `apply_fill` from
+    the locked row, `rebuild_from_fills` from the replay.
+    """
+    if market_type is MarketType.PERPETUAL:
+        realised = _closed_pnl(
+            quantity=quantity,
+            average_entry=average_entry,
+            side=fill.side,
+            filled_quantity=fill.filled_quantity,
+            price=fill.average_price,
+        )
+        return realised - fill.fee_paid
     proceeds = fill.notional if fill.side is Side.SELL else -fill.notional
     return proceeds - fill.fee_paid
+
+
+def _marked_equity(position: Position, marked_value: Decimal) -> Decimal:
+    """What a position contributes to NAV, given its signed value at some price.
+
+    A cash-settled holding contributes the whole of it: the cash that bought it
+    has already left the account, so the asset stands in for it.
+
+    A perpetual contributes its **unrealised P&L** -- that same value less the
+    same quantity at entry -- because no cash left the account to open it.
+    Contributing its notional instead would count a long twice and cancel a short
+    to nothing.
+
+    At cost basis the price *is* the entry, so a perpetual contributes exactly
+    zero and `_state` reaches that through this same rule rather than restating
+    it.
+    """
+    if position.market_type is MarketType.PERPETUAL:
+        return marked_value - position.quantity * position.average_entry
+    return marked_value
 
 
 def _checked(fill: Fill, market_type: MarketType) -> MarketType:
@@ -413,7 +541,10 @@ def _state(
     positions: tuple[Position, ...],
     cash_positions: tuple[CashPosition, ...] = (),
 ) -> PortfolioState:
-    book = sum((p.quantity * p.average_entry for p in positions), Decimal(0))
+    book = sum(
+        (_marked_equity(p, p.quantity * p.average_entry) for p in positions),
+        Decimal(0),
+    )
     return PortfolioState(
         portfolio_id=portfolio_id,
         nav=cash + book,
@@ -611,7 +742,9 @@ async def apply_fill(
             portfolio_id,
             fill.venue,
             base_currency,
-            _cash_delta(fill),
+            _cash_delta(
+                fill, resolved, quantity=quantity, average_entry=average_entry
+            ),
             fill.filled_at,
         )
 
@@ -812,6 +945,11 @@ async def snapshot_nav(
     snapshot row is written. A partially-marked NAV is worse than no NAV: it
     reads as authoritative and understates exactly the exposure nobody could
     price.
+
+    The recorded exposures are the full marked notional of every position,
+    perpetuals included, while NAV takes a perpetual's unrealised P&L instead --
+    so `nav` is not `cash + net_exposure` for a book holding one, and the two
+    columns are answering different questions rather than disagreeing.
     """
     async with (
         pool.acquire() as conn,
@@ -822,7 +960,13 @@ async def snapshot_nav(
         values = [_marked_value(p, marks) for p in state.positions]
         net = sum(values, Decimal(0))
         gross = sum((abs(v) for v in values), Decimal(0))
-        nav = state.cash + net
+        nav = state.cash + sum(
+            (
+                _marked_equity(position, value)
+                for position, value in zip(state.positions, values, strict=True)
+            ),
+            Decimal(0),
+        )
 
         await conn.execute(_INSERT_NAV, portfolio_id, nav, state.cash, gross, net)
         return nav
@@ -845,15 +989,18 @@ def _realised_leg(
     is why a position still open at the end of the day contributes nothing at
     all, however far it has moved.
     """
-    delta = filled_quantity if side is Side.BUY else -filled_quantity
-    if quantity == 0 or (delta > 0) == (quantity > 0):
+    closed = _closed_quantity(
+        quantity=quantity, side=side, filled_quantity=filled_quantity
+    )
+    if closed == 0:
         return Decimal(0)
 
-    closed = min(abs(delta), abs(quantity))
-    gross = (
-        closed * (price - average_entry)
-        if quantity > 0
-        else closed * (average_entry - price)
+    gross = _closed_pnl(
+        quantity=quantity,
+        average_entry=average_entry,
+        side=side,
+        filled_quantity=filled_quantity,
+        price=price,
     )
 
     # A fill that only closes carries its whole fee against realised P&L. A
@@ -861,7 +1008,11 @@ def _realised_leg(
     # closing share of it is realised; the rest is a cost of the position now
     # open. The branch keeps the common case exact rather than routing it
     # through a division.
-    share = fee if closed == abs(delta) else fee * closed / abs(delta)
+    share = (
+        fee
+        if closed == abs(filled_quantity)
+        else fee * closed / abs(filled_quantity)
+    )
     return gross - share
 
 
@@ -1039,7 +1190,9 @@ async def rebuild_from_fills(
             filled_quantity=fill.filled_quantity,
             price=fill.average_price,
         )
-        cash += _cash_delta(fill)
+        cash += _cash_delta(
+            fill, resolved, quantity=quantity, average_entry=average_entry
+        )
 
         if new_quantity == 0:
             held.pop(key, None)
