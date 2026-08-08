@@ -9,6 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The suite is ~3,200 tests and runs in 2-8 minutes. Bounded so a hung
+    # postgres service fails in twenty minutes rather than inheriting GitHub's
+    # 360-minute default and burning six hours of runner time.
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -32,18 +36,49 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The repo must land where the editable dependency below expects it,
+          # relative to a sibling Neutron checkout.
+          path: omni-analyst/app-v2
+
+      # pyproject declares `neutron-py = { path = "../../Neutron/python",
+      # editable = true }` -- a path OUTSIDE this repository. Without this step
+      # `uv sync` fails before a single test runs:
+      #
+      #   error: Failed to generate package metadata for
+      #     `neutron-py==0.1.0 @ editable+../../Neutron/python`
+      #     Caused by: Distribution not found at: file:///.../Neutron/python
+      #
+      # The Dockerfile works around it by exporting frozen requirements with
+      # `grep -vE 'neutron-py'` and installing a prebuilt wheel from vendor/,
+      # which is gitignored and so unavailable here. Neutron is public, so CI
+      # checks it out at the path the dependency already names rather than
+      # teaching the build a second way to find it.
+      - uses: actions/checkout@v4
+        with:
+          repository: neutron-build/neutron
+          path: Neutron
+
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --extra dev
+        working-directory: omni-analyst/app-v2
         # Tests were outside the lint scope, and drifted to 41 findings before
         # anyone looked. They are code -- a test asserting the wrong thing is a
         # worse defect than a lint error in src/, because it reports green.
+      # `ruff format --check` is deliberately NOT run. 209 of 277 files would
+      # be reformatted; the repo has never been formatter-clean and adding it
+      # would make CI red on arrival for reasons unrelated to any change.
+      # `ruff check` is the house gate and it passes.
       - run: uv run ruff check
+        working-directory: omni-analyst/app-v2
       - run: uv run pytest -q
+        working-directory: omni-analyst/app-v2
 
   ui:
     # The Preact app's typecheck, tests, and build were entirely outside CI;
     # a broken UI merge reached main undetected and was discovered at deploy.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
