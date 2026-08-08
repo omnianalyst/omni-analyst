@@ -18,6 +18,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import asyncpg
 import pytest
 from neutron.test import TestClient
 
@@ -237,6 +238,66 @@ async def test_the_feed_shows_one_current_call_per_entity_and_method(
     assert await db.pool.fetchval(
         "SELECT count(*) FROM finding WHERE status = 'surfaced'"
     ) == 2
+
+
+async def test_a_finding_reports_whether_its_counter_case_was_searched(
+    db, database_url
+):
+    """The ambiguity migration 032 exists to remove. A finding written before
+    the disconfirming search has `disconfirming = []`, and so does one where the
+    search ran and found nothing -- the rows are identical. The card renders the
+    second as "the checks ran and found none", which is a lie about the first.
+
+    The flag is recorded at write time from what the gate was actually told, so
+    the two are distinguishable without deleting either.
+    """
+    e = await _entity(db)
+    await _surface(db, entity_id=e, claim_id=None, disconfirming=())
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        feed = (await client.get("/briefing")).json()
+
+    assert feed[0]["disconfirming"] == []
+    assert feed[0]["evidence_searched"] is True
+
+
+async def test_a_legacy_finding_reports_that_nothing_was_searched(db, database_url):
+    """Rows predating the search default to false, which is exactly correct for
+    them, and they are NOT deleted -- there are ~50k in production carrying the
+    resolved outcomes behind the published hit rate."""
+    e = await _entity(db)
+    p = await _prediction(db, e)
+    await db.pool.execute(
+        "INSERT INTO finding (claim_id, entity_id, status, method, confidence, "
+        "threshold, prediction_id, supporting, disconfirming) "
+        "VALUES (NULL,$1,'surfaced','trend.sma',0.85,0.7,$2,"
+        "'[\"up directional call from trend.sma\"]'::jsonb,'[]'::jsonb)",
+        e, p,
+    )
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        feed = (await client.get("/briefing")).json()
+
+    assert len(feed) == 1, "the legacy row is kept, not deleted"
+    assert feed[0]["evidence_searched"] is False
+
+
+async def test_a_searched_finding_must_report_what_it_found(db, database_url):
+    """Claiming a completed search while naming nothing on either side is the
+    original defect wearing a new column. The constraint refuses it."""
+    e = await _entity(db)
+    p = await _prediction(db, e)
+    with pytest.raises(asyncpg.IntegrityConstraintViolationError) as exc:
+        await db.pool.execute(
+            "INSERT INTO finding (claim_id, entity_id, status, method, confidence, "
+            "threshold, prediction_id, supporting, disconfirming, evidence_searched) "
+            "VALUES (NULL,$1,'surfaced','trend.sma',0.85,0.7,$2,"
+            "'[]'::jsonb,'[]'::jsonb,true)",
+            e, p,
+        )
+    assert exc.value.constraint_name == "searched_findings_report_what_they_found"
 
 
 async def test_a_resolved_call_leaves_the_feed_but_stays_on_the_scorecard(

@@ -66,6 +66,13 @@ def _bucket(low, n, hits):
 
 def _candidate(claim_id, confidence=0.85, **kw):
     kw.setdefault("searched_for_disconfirming", True)
+    # A candidate claiming a completed search must name what the search turned
+    # up -- `searched_findings_report_what_they_found` enforces it, and the real
+    # producer cannot violate it (a check that reaches a verdict always appends
+    # to one side). A fixture asserting the search ran while supplying nothing
+    # describes a state production cannot reach.
+    if kw.get("searched_for_disconfirming", True):
+        kw.setdefault("supporting", ("volume z=4.2",))
     kw.setdefault("falsifiable", True)
     return Candidate(claim_id=claim_id, claim_type="manipulation_signal",
                      method="detect", confidence=confidence, **kw)

@@ -26,6 +26,17 @@ async def _clean(db):
 BASE = datetime(2025, 1, 1, tzinfo=UTC)
 
 
+def _noisy_uptrend(n: int, *, start: float = 100.0, drift: float = 1.0) -> list[float]:
+    """A rising series with real session-to-session variation.
+
+    A straight ramp is not a usable fixture for anything reading realized vol:
+    its stdev is near zero, so any vol-normalised quantity explodes. The
+    deterministic zig-zag keeps the test reproducible while giving the vol
+    something to measure.
+    """
+    return [start + i * drift + (1.5 if i % 2 else -1.5) for i in range(n)]
+
+
 async def _entity(db, symbol="X"):
     return await db.pool.fetchval(
         "INSERT INTO entity (kind, symbol, name) VALUES ('company',$1,$1) RETURNING id",
@@ -125,16 +136,34 @@ class TestSearchedIsNotAConstant:
         """These checks read a moving average because that is what a trend call
         rests on. A DCF call is predicated on cash flows -- the same sentences
         would state the wrong thing about what invalidates it. No search exists
-        for that method, so it is refused rather than given borrowed evidence."""
+        for that method, so it is refused rather than given borrowed evidence.
+
+        `supported` is reported separately from `searched`: an unwritten search
+        is an unfinished part of the product, and reporting it as "could not
+        gather evidence" would file a build gap under a data gap and hide it.
+        """
         e = await _entity(db)
-        as_of = await _series(db, e, [100.0 + i for i in range(60)])
+        as_of = await _series(db, e, _noisy_uptrend(60))
         ev = await gather_evidence(
-            db.pool, entity_id=e, method="dcf.simple", direction="up",
-            audience=None, as_of=as_of, window=50,
+            db.pool, entity_id=e, method="fundamentals.dcf_valuation",
+            direction="up", audience=None, as_of=as_of, window=50,
         )
         assert ev.searched is False
+        assert ev.supported is False
         assert ev.supporting == ()
         assert ev.disconfirming == ()
+
+    async def test_a_data_gap_and_a_missing_search_are_different_refusals(self, db):
+        """Both refuse, but for different reasons an operator acts on
+        differently: one is fixed by ingesting prices, the other by writing
+        code."""
+        e = await _entity(db)
+        no_prices = await gather_evidence(
+            db.pool, entity_id=e, method="trend.sma", direction="up",
+            audience=None, as_of=BASE,
+        )
+        assert no_prices.searched is False
+        assert no_prices.supported is True, "trend.sma has a search; the data was missing"
 
     async def test_the_search_is_point_in_time(self, db):
         """Evidence gathered from prices the call could not have seen would be
@@ -194,14 +223,34 @@ class TestProximityToInvalidation:
             ev.disconfirming
         )
 
-    async def test_a_call_far_from_its_average_is_supported(self, db):
+    async def test_an_absurd_vol_ratio_is_not_quoted_as_a_number(self, db):
+        """A perfectly smooth ramp has a vol near zero without being flat, so
+        the distance ratio explodes -- the scale benchmark surfaced "price is
+        434.5 volatilities up of its 50-day average", which is arithmetically
+        true and useless to read. Real analogues: a pegged rate, a halted quote,
+        an interpolated series."""
         e = await _entity(db)
-        as_of = await _series(db, e, [100.0 + i for i in range(60)])
+        as_of = await _series(db, e, [100.0 + i * 0.5 for i in range(60)])
         ev = await gather_evidence(
             db.pool, entity_id=e, method="trend.sma", direction="up",
             audience=None, as_of=as_of, window=50,
         )
-        assert any("volatilities up of its" in s for s in ev.supporting), ev.supporting
+        assert ev.searched is True
+        joined = " ".join(ev.supporting)
+        assert "too smooth for the ratio to be meaningful" in joined, ev.supporting
+        # The fact still travels -- direction is reported, only the ratio is not.
+        assert "far above" in joined
+
+    async def test_a_call_far_from_its_average_is_supported(self, db):
+        e = await _entity(db)
+        # A noisy uptrend, not a straight line: a perfectly linear ramp has a
+        # vol near zero and trips the smoothness guard instead.
+        as_of = await _series(db, e, _noisy_uptrend(60))
+        ev = await gather_evidence(
+            db.pool, entity_id=e, method="trend.sma", direction="up",
+            audience=None, as_of=as_of, window=50,
+        )
+        assert any("volatilities above its" in s for s in ev.supporting), ev.supporting
 
 
 class TestMacroOpposition:

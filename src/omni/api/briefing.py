@@ -79,6 +79,10 @@ def _finding_to_dict(row) -> dict:
             str(row["prediction_id"]) if row["prediction_id"] else None
         ),
         "deduction_chain": _jsonb(row.get("deduction_chain") or "[]"),
+        # Whether a counter-case was actually looked for. The client cannot
+        # infer this from an empty `disconfirming` -- rows written before the
+        # search existed look identical to ones where it ran and found nothing.
+        "evidence_searched": bool(row.get("evidence_searched")),
         "created_at": _iso(row["created_at"]),
     }
 

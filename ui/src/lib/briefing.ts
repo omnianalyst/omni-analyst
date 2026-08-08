@@ -43,6 +43,10 @@ export interface BriefingFinding {
   disconfirming: string[];
   prediction_id: string | null;
   deduction_chain?: DeductionLayer[];
+  // False on findings written before the disconfirming search existed. Without
+  // it an empty `disconfirming` is ambiguous between "looked, found nothing"
+  // and "never looked", and the card would assert the first for both.
+  evidence_searched?: boolean;
   created_at: string | null;
 }
 
@@ -85,13 +89,15 @@ export function formatConfidence(value: number | null | undefined): string {
 export function explainRefusal(reason: string): string {
   switch (reason) {
     case "class_has_too_few_resolved_predictions":
-      return "Class has too few resolved predictions to calibrate a threshold.";
+      return "Too few calls of this kind have played out to know what its confidence is worth.";
     case "confidence_below_the_calibrated_threshold":
-      return "Confidence was below the calibrated threshold.";
+      return "Confidence fell short of the bar this kind of call has to clear.";
     case "no_disconfirming_evidence_was_gathered":
-      return "No disconfirming evidence was gathered.";
+      return "The counter-case could not be checked \u2014 not enough price history.";
+    case "no_disconfirming_search_exists_for_this_method":
+      return "No counter-case checks exist for this method yet, so it cannot be surfaced.";
     case "no_falsifiable_prediction_could_be_written":
-      return "No falsifiable prediction could be written.";
+      return "No price could be named that would prove the call wrong, so it cannot be scored.";
     default:
       return reason;
   }

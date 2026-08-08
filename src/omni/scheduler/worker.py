@@ -331,6 +331,7 @@ async def surface_once(pool, *, target_hit_rate: float = 0.6) -> int:
             supporting=evidence.supporting,
             disconfirming=evidence.disconfirming,
             searched_for_disconfirming=evidence.searched,
+            search_supported=evidence.supported,
             falsifiable=True,
         )
         verdict = assess(candidate, buckets, target_hit_rate=target_hit_rate)

@@ -75,6 +75,10 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
   // oddsOfWrong. The two disagreeing on one card is what this fixes.
   const wrong = oddsOfWrong(finding.calibrated_hit_rate);
   const steps = chainSteps(finding.deduction_chain as DeductionLayer[] | undefined);
+  // Never inferred from an empty list -- that is the ambiguity the flag exists
+  // to resolve. Absent (an older API) is treated as not searched, which is the
+  // claim that cannot be wrong.
+  const searched = finding.evidence_searched === true;
 
   return (
     <li class={`claim-card claim-${dirClass}`} key={finding.id}>
@@ -129,7 +133,11 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
         onClick={() => setShowEvidence((v) => !v)}
         aria-expanded={showEvidence}
       >
-        {showEvidence ? "Hide evidence" : `Evidence (${supporting.length} for, ${disconfirming.length} against)`}
+        {showEvidence
+          ? "Hide evidence"
+          : searched
+            ? `Evidence (${supporting.length} for, ${disconfirming.length} against)`
+            : `Evidence (${supporting.length} for, not assessed against)`}
       </button>
       {showEvidence ? (
         <div class="evidence-grid">
@@ -143,7 +151,11 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
             term="disconfirming"
             title="Against this call"
             items={disconfirming}
-            emptyText="the checks ran and found none"
+            emptyText={
+              searched
+                ? "the checks ran and found none"
+                : "not assessed \u2014 this call predates the counter-case checks"
+            }
           />
         </div>
       ) : null}

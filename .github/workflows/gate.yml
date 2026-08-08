@@ -34,7 +34,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
       - run: uv sync --extra dev
-      - run: uv run ruff check src/
+        # Tests were outside the lint scope, and drifted to 41 findings before
+        # anyone looked. They are code -- a test asserting the wrong thing is a
+        # worse defect than a lint error in src/, because it reports green.
+      - run: uv run ruff check
       - run: uv run pytest -q
 
   ui:

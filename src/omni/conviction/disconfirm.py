@@ -48,6 +48,12 @@ from omni.conviction.trend import _price_window, _realized_vol
 # being proven wrong is less than a typical session's move.
 _FRAGILE_VOL_DISTANCE = 0.5
 
+# Beyond this the vol-normalised distance stops carrying information: a series
+# smooth enough to produce it has a denominator near zero, so the ratio measures
+# the smoothness rather than the trend. Found by running the search over a
+# synthetic perfectly-linear ramp, which reported "434.5 volatilities".
+_IMPLAUSIBLE_VOL_DISTANCE = 10.0
+
 # Regimes that argue against a direction. Read as: an "up" call is opposed by a
 # risk_off regime or a contraction phase.
 _OPPOSING_RISK = {"up": "risk_off", "down": "risk_on"}
@@ -63,11 +69,19 @@ _SUPPORTED_METHOD_PREFIX = "trend.sma"
 
 @dataclass(frozen=True)
 class Evidence:
-    """What the search turned up, and whether it ran at all."""
+    """What the search turned up, and whether it ran at all.
+
+    ``supported`` and ``searched`` are different facts. A method with no search
+    written for it is an unfinished part of the product; a search that had no
+    inputs is a gap in the data. Both refuse, but collapsing them would hide the
+    first behind the second -- a DCF call would read as "we could not gather
+    evidence" when the truth is "nobody has written the checks yet".
+    """
 
     searched: bool
     supporting: tuple[str, ...] = ()
     disconfirming: tuple[str, ...] = ()
+    supported: bool = True
 
 
 def _sma_direction(closes: list[float]) -> str | None:
@@ -178,7 +192,7 @@ async def gather_evidence(
     a gap to paper over.
     """
     if not method.startswith(_SUPPORTED_METHOD_PREFIX):
-        return Evidence(searched=False)
+        return Evidence(searched=False, supported=False)
 
     closes = await _price_window(
         pool, entity_id=entity_id, audience=audience, as_of=as_of,
@@ -224,9 +238,22 @@ async def gather_evidence(
                 f"price is only {distance:.1f} volatilities from the average "
                 "that invalidates this call"
             )
-        else:
+        elif distance > _IMPLAUSIBLE_VOL_DISTANCE:
+            # A series that is smooth but not exactly flat -- a pegged rate, a
+            # halted or interpolated quote -- has a vol near zero without
+            # tripping the flatness guard, so the ratio explodes. "434.5
+            # volatilities" is arithmetically true and tells a reader nothing.
+            # Report the direction of the fact and stop quoting the number.
+            side = "above" if direction == "up" else "below"
             supporting.append(
-                f"price is {distance:.1f} volatilities {direction} of its "
+                f"price is far {side} its {window}-day average (over "
+                f"{_IMPLAUSIBLE_VOL_DISTANCE:.0f} volatilities, on a series too "
+                "smooth for the ratio to be meaningful)"
+            )
+        else:
+            side = "above" if direction == "up" else "below"
+            supporting.append(
+                f"price is {distance:.1f} volatilities {side} its "
                 f"{window}-day average"
             )
 

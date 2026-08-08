@@ -41,27 +41,51 @@ describe("formatConfidence", () => {
 
 describe("explainRefusal", () => {
   it("explains the uncalibrated refusal in plain language", () => {
+    // Asserted on meaning, not on the schema's words. The previous version
+    // required "calibrate|threshold" to appear, which passed only while the
+    // copy was still echoing the column names back at the reader.
     expect(
       explainRefusal("class_has_too_few_resolved_predictions"),
-    ).toMatch(/calibrate|threshold/i);
+    ).toMatch(/too few/i);
   });
 
   it("explains the below-threshold refusal", () => {
     expect(
       explainRefusal("confidence_below_the_calibrated_threshold"),
-    ).toMatch(/threshold/);
+    ).toMatch(/fell short|bar/i);
   });
 
-  it("explains the missing disconfirming search", () => {
-    expect(
-      explainRefusal("no_disconfirming_evidence_was_gathered"),
-    ).toMatch(/disconfirming/);
+  it("explains the unfalsifiable refusal without using the word", () => {
+    const text = explainRefusal("no_falsifiable_prediction_could_be_written");
+    expect(text).toMatch(/prove the call wrong/i);
+    expect(text).not.toMatch(/falsifiable/i);
   });
 
-  it("explains the non-falsifiable refusal", () => {
-    expect(
-      explainRefusal("no_falsifiable_prediction_could_be_written"),
-    ).toMatch(/falsifiable|prediction/);
+  it("distinguishes a data gap from an unwritten search", () => {
+    // Two different refusals an operator acts on differently: one is fixed by
+    // ingesting prices, the other by writing code. Collapsing them would file
+    // an unfinished part of the product under "missing data" and hide it.
+    const noData = explainRefusal("no_disconfirming_evidence_was_gathered");
+    const noSearch = explainRefusal(
+      "no_disconfirming_search_exists_for_this_method",
+    );
+    expect(noData).toMatch(/price history/);
+    expect(noSearch).toMatch(/no counter-case checks exist/i);
+    expect(noData).not.toBe(noSearch);
+  });
+
+  it("explains refusals without leaking the schema's vocabulary", () => {
+    // These strings are read by a person. "disconfirming" is the column name,
+    // not a word to put on screen.
+    for (const reason of [
+      "class_has_too_few_resolved_predictions",
+      "confidence_below_the_calibrated_threshold",
+      "no_disconfirming_evidence_was_gathered",
+      "no_disconfirming_search_exists_for_this_method",
+      "no_falsifiable_prediction_could_be_written",
+    ]) {
+      expect(explainRefusal(reason)).not.toMatch(/disconfirming|_/);
+    }
   });
 
   it("passes an unknown reason through verbatim", () => {

@@ -39,6 +39,7 @@ class Refusal(str, Enum):
     UNCALIBRATED = "class_has_too_few_resolved_predictions"
     BELOW_THRESHOLD = "confidence_below_the_calibrated_threshold"
     NO_DISCONFIRMING_SEARCH = "no_disconfirming_evidence_was_gathered"
+    NO_SEARCH_FOR_METHOD = "no_disconfirming_search_exists_for_this_method"
     NOT_FALSIFIABLE = "no_falsifiable_prediction_could_be_written"
 
 
@@ -79,6 +80,12 @@ class Candidate:
     supporting: tuple[str, ...] = ()
     disconfirming: tuple[str, ...] = ()
     searched_for_disconfirming: bool = False
+    # Whether a disconfirming search is implemented for this method at all.
+    # Distinct from `searched_for_disconfirming`, which says whether the search
+    # ran on this candidate: a method with no search written for it is a gap in
+    # the product, while a search that could not run is a gap in the data. Both
+    # refuse, and reporting them as one hides the first behind the second.
+    search_supported: bool = True
     falsifiable: bool = False
 
 
@@ -140,6 +147,14 @@ def assess(
         return Verdict(
             False, candidate, Refusal.NOT_FALSIFIABLE, threshold=threshold,
             detail="a surfaced finding must write a prediction that can be scored",
+        )
+
+    if not candidate.search_supported:
+        return Verdict(
+            False, candidate, Refusal.NO_SEARCH_FOR_METHOD, threshold=threshold,
+            detail=f"no disconfirming search is implemented for "
+                   f"{candidate.method}; until one is, calls from it cannot be "
+                   "surfaced however well calibrated",
         )
 
     if not candidate.searched_for_disconfirming:

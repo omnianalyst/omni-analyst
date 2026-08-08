@@ -19,8 +19,8 @@ from omni.conviction.gate import Calibration, Verdict
 _INSERT_FINDING = """
 INSERT INTO finding (claim_id, entity_id, audience_user_id, status, refusal,
                      method, confidence, threshold, calibrated_hit_rate,
-                     supporting, disconfirming, prediction_id)
-VALUES ($1,$2,$3,$4::finding_status,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12)
+                     supporting, disconfirming, prediction_id, evidence_searched)
+VALUES ($1,$2,$3,$4::finding_status,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13)
 RETURNING id
 """
 
@@ -92,6 +92,11 @@ async def record(
         json.dumps(list(candidate.supporting)),
         json.dumps(list(candidate.disconfirming)),
         prediction_id,
+        # Recorded, not inferred. An empty disconfirming list means "looked and
+        # found nothing" only when this is true; on rows written before the
+        # search existed it means "never looked", and nothing else in the row
+        # can tell the two apart.
+        candidate.searched_for_disconfirming,
     )
 
 
@@ -128,7 +133,7 @@ async def briefing(pool, *, audience: UUID | None = None, limit: int = 20) -> li
                    f.id, f.claim_id, f.entity_id, f.method, f.confidence,
                    f.threshold, f.calibrated_hit_rate, f.supporting,
                    f.disconfirming, f.prediction_id, f.created_at,
-                   f.deduction_chain,
+                   f.deduction_chain, f.evidence_searched,
                    e.symbol, e.name,
                    p.direction, p.entry_price, p.upper_barrier, p.lower_barrier
             FROM finding f
