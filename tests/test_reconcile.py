@@ -255,10 +255,45 @@ async def test_cash_balance_divergence_is_reported():
     assert only.magnitude == Decimal(500)
 
 
-async def test_locked_funds_count_toward_the_balance_compared():
+async def test_a_locked_split_diverges_even_when_the_totals_agree():
+    """This asserted `reconciled is True`, and that was the defect.
+
+    Local carries 10,000 free and nothing locked. The venue reports 4,000 free
+    and 6,000 LOCKED. The totals match exactly, so a reconciler comparing only
+    `free + locked` calls the books identical -- while 6,000 of capital sits
+    committed at the venue in an order we have no record of.
+
+    That is the precise state in which local order tracking has diverged, which
+    makes it the one case a reconciler must not be blind to. Comparing the
+    totals is necessary and it is not sufficient.
+    """
     local = (_local_cash("USD", "10000"),)
     remote = (_balance("USD", "4000", "6000"),)
     venue = FakeVenue(balances=remote)
+
+    result = await reconcile((), local, venue, tolerance=EXACT, now=NOW)
+
+    assert result.reconciled is False
+    kinds = {d.kind for d in result.discrepancies}
+    assert Divergence.CASH_LOCKED in kinds
+    assert Divergence.CASH_BALANCE not in kinds, (
+        "the totals DO agree; reporting a total divergence as well would send "
+        "the operator looking for a missing fill instead of a missing order"
+    )
+    locked = next(d for d in result.discrepancies if d.kind is Divergence.CASH_LOCKED)
+    assert locked.local == Decimal(0)
+    assert locked.remote == Decimal(6000)
+    assert "an order we do not know about" in locked.detail
+
+
+async def test_matching_splits_still_reconcile():
+    """The pair for the test above: same totals AND same split is agreement.
+
+    Without this, a reconciler that flagged every locked balance would pass the
+    test above while being useless.
+    """
+    local = (_local_cash("USD", "4000", locked="6000"),)
+    venue = FakeVenue(balances=(_balance("USD", "4000", "6000"),))
 
     result = await reconcile((), local, venue, tolerance=EXACT, now=NOW)
 

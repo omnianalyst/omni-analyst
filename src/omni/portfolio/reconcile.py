@@ -43,8 +43,12 @@ Four properties are load-bearing:
 
 Scope is one venue. Local rows stamped with another venue's name are not this
 venue's business and are skipped; the caller reconciles each venue in turn.
-Balances are compared on `free + locked`, since funds locked in a resting order
-are still funds the venue says we have.
+Balances are compared on the TOTAL and on the LOCKED leg independently.
+Comparing only `free + locked` cannot see an unrecorded resting order: a venue
+holding 4,000 free and 6,000 locked against a local book of 10,000 free agrees
+on the total while 6,000 of capital sits committed in an order we have no record
+of. Totals matching is necessary and it is not sufficient, and the case where
+they match is exactly the case worth catching.
 
 **Cash is compared, and the two sides are different types on purpose.** The
 local side is `state.CashPosition`, whose `free` is signed because a margin buy
@@ -75,6 +79,10 @@ class Divergence(str, Enum):
     POSITION_MISSING_LOCALLY = "position_missing_locally"
     POSITION_MISSING_AT_VENUE = "position_missing_at_venue"
     CASH_BALANCE = "cash_balance"
+    # Totals agree, the split does not. That is an unrecorded resting order:
+    # capital already committed at the venue that the local book still counts
+    # as spendable. A reconciler comparing only free + locked is blind to it.
+    CASH_LOCKED = "cash_locked"
     UNKNOWN_SYMBOL = "unknown_symbol"
     VENUE_UNAVAILABLE = "venue_unavailable"
 
@@ -183,19 +191,27 @@ def _index_balances(
     venue: str,
     source: str,
     unknown: list[Discrepancy],
-) -> dict[str, Decimal]:
-    """Total per asset. Accepts either side's type -- both expose `total`.
+) -> dict[str, tuple[Decimal, Decimal]]:
+    """`(free, locked)` per asset. Accepts either side's type.
 
-    The types are not interchangeable at their edges (one may be negative, the
-    other may not), which is exactly why they stay distinct up to this point
-    and meet only as the numbers being compared.
+    The split is kept rather than summed. Comparing only `free + locked` cannot
+    see an unrecorded resting order: a venue holding 600 free and 400 locked
+    against a local book of 1,000 free and nothing locked agrees on the total
+    and disagrees about 400 of capital that is already committed. That is
+    precisely the state in which local order tracking has diverged, so it is the
+    one a reconciler must not be blind to.
+
+    The types are not interchangeable at their edges -- a local `free` may be
+    negative where a venue's may not -- which is why they stay distinct up to
+    this point and meet only as the numbers being compared.
     """
-    book: dict[str, Decimal] = {}
+    book: dict[str, tuple[Decimal, Decimal]] = {}
     for balance in balances:
         if not balance.asset.strip():
             unknown.append(_unknown(venue, source, balance.asset))
             continue
-        book[balance.asset] = book.get(balance.asset, ZERO) + balance.total
+        free, locked = book.get(balance.asset, (ZERO, ZERO))
+        book[balance.asset] = (free + balance.free, locked + balance.locked)
     return book
 
 
@@ -265,8 +281,8 @@ def _position_discrepancies(
 
 
 def _balance_discrepancies(
-    local_book: dict[str, Decimal],
-    remote_book: dict[str, Decimal],
+    local_book: dict[str, tuple[Decimal, Decimal]],
+    remote_book: dict[str, tuple[Decimal, Decimal]],
     *,
     venue: str,
     tolerance: Decimal,
@@ -274,8 +290,38 @@ def _balance_discrepancies(
     found: list[Discrepancy] = []
 
     for asset in sorted(set(local_book) | set(remote_book)):
-        local = local_book.get(asset)
-        remote = remote_book.get(asset)
+        local_pair = local_book.get(asset)
+        remote_pair = remote_book.get(asset)
+        local = None if local_pair is None else local_pair[0] + local_pair[1]
+        remote = None if remote_pair is None else remote_pair[0] + remote_pair[1]
+
+        # The locked leg is checked first and independently of the total,
+        # because the case it exists for is one where the TOTALS AGREE. Folding
+        # it into the total comparison would let exactly that case pass.
+        if local_pair is not None and remote_pair is not None:
+            local_locked, remote_locked = local_pair[1], remote_pair[1]
+            if (
+                _usable(local_locked)
+                and _usable(remote_locked)
+                and not _within(local_locked, remote_locked, tolerance)
+            ):
+                found.append(
+                    Discrepancy(
+                        kind=Divergence.CASH_LOCKED,
+                        venue=venue,
+                        symbol=asset,
+                        local=local_locked,
+                        remote=remote_locked,
+                        detail=(
+                            f"{asset} at {venue}: we carry {local_locked} locked, "
+                            f"the venue reports {remote_locked}. Totals "
+                            f"{'agree' if _within(local, remote, tolerance) else 'also differ'}"
+                            f", so this is capital already committed at the venue "
+                            f"that our book still counts as spendable -- an order "
+                            f"we do not know about"
+                        ),
+                    )
+                )
 
         if not _usable(local) or not _usable(remote):
             note = (
