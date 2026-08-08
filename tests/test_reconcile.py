@@ -33,6 +33,7 @@ from omni.portfolio.reconcile import (
     ReconciliationResult,
     reconcile,
 )
+from omni.portfolio.state import CashPosition
 from omni.venue.protocol import (
     Balance,
     Capabilities,
@@ -124,7 +125,21 @@ def _position(
 def _balance(
     asset: str, free: str, locked: str = "0", *, venue: str = "paper"
 ) -> Balance:
+    """What the venue reports. Refuses a negative free by construction."""
     return Balance(
+        venue=venue,
+        asset=asset,
+        free=Decimal(free),
+        locked=Decimal(locked),
+        as_of=NOW,
+    )
+
+
+def _local_cash(
+    asset: str, free: str, locked: str = "0", *, venue: str = "paper"
+) -> CashPosition:
+    """What our own `cash_balance` row says. `free` may be negative."""
+    return CashPosition(
         venue=venue,
         asset=asset,
         free=Decimal(free),
@@ -139,10 +154,11 @@ def _kinds(result: ReconciliationResult) -> list[Divergence]:
 
 async def test_matching_book_reconciles():
     held = (_position("BTC/USD", "1.5"),)
-    cash = (_balance("USD", "10000"),)
-    venue = FakeVenue(positions=held, balances=cash)
+    venue = FakeVenue(positions=held, balances=(_balance("USD", "10000"),))
 
-    result = await reconcile(held, cash, venue, tolerance=EXACT, now=NOW)
+    result = await reconcile(
+        held, (_local_cash("USD", "10000"),), venue, tolerance=EXACT, now=NOW
+    )
 
     assert result.reconciled is True
     assert result.discrepancies == ()
@@ -223,7 +239,7 @@ async def test_position_held_locally_but_absent_at_venue_is_reported():
 
 
 async def test_cash_balance_divergence_is_reported():
-    local = (_balance("USD", "10000"),)
+    local = (_local_cash("USD", "10000"),)
     remote = (_balance("USD", "9500"),)
     venue = FakeVenue(balances=remote)
 
@@ -240,13 +256,76 @@ async def test_cash_balance_divergence_is_reported():
 
 
 async def test_locked_funds_count_toward_the_balance_compared():
-    local = (_balance("USD", "10000"),)
+    local = (_local_cash("USD", "10000"),)
     remote = (_balance("USD", "4000", "6000"),)
     venue = FakeVenue(balances=remote)
 
     result = await reconcile((), local, venue, tolerance=EXACT, now=NOW)
 
     assert result.reconciled is True
+
+
+async def test_an_overdrawn_local_book_diverges_and_names_the_borrow():
+    """The case the loop used to dodge by passing no balances at all.
+
+    Local cash of -200 is a legitimate stored row (a margin buy). A venue's
+    `Balance` floors at zero, so no reading of it agrees, and the honest answer
+    is a divergence that says why -- not a clamp, and not a skipped check.
+    """
+    local = (_local_cash("USD", "-200"),)
+    venue = FakeVenue(balances=(_balance("USD", "0"),))
+
+    result = await reconcile((), local, venue, tolerance=Decimal(1), now=NOW)
+
+    assert result.reconciled is False
+    assert _kinds(result) == [Divergence.CASH_BALANCE]
+
+    only = result.discrepancies[0]
+    assert only.local == Decimal(-200)
+    assert only.remote == Decimal(0)
+    assert only.magnitude == Decimal(200)
+    assert "overdrawn by 200" in only.detail
+    assert "cannot be negative" in only.detail
+
+
+async def test_a_positive_local_book_reconciles_cash_for_real():
+    """Passing local cash must actually compare it, not be accepted and ignored.
+
+    The pair is the whole test: an implementation that ignores `local_balances`
+    reconciles both, and one that compares them reconciles only the first.
+    """
+    agreeing = await reconcile(
+        (),
+        (_local_cash("USD", "10000"), _local_cash("EUR", "250")),
+        FakeVenue(balances=(_balance("USD", "10000"), _balance("EUR", "250"))),
+        tolerance=EXACT,
+        now=NOW,
+    )
+    assert agreeing.reconciled is True
+
+    off_by_one_asset = await reconcile(
+        (),
+        (_local_cash("USD", "10000"), _local_cash("EUR", "250")),
+        FakeVenue(balances=(_balance("USD", "10000"), _balance("EUR", "249"))),
+        tolerance=EXACT,
+        now=NOW,
+    )
+    assert off_by_one_asset.reconciled is False
+    assert [d.symbol for d in off_by_one_asset.discrepancies] == ["EUR"]
+
+
+async def test_holding_no_local_cash_is_a_claim_not_a_skip():
+    """An empty local side means "we hold nothing here", so a venue that holds
+    something diverges. Reading it as "do not check cash" is how the loop
+    passed reconciliation while never comparing a balance."""
+    venue = FakeVenue(balances=(_balance("USD", "10000"),))
+
+    result = await reconcile((), (), venue, tolerance=EXACT, now=NOW)
+
+    assert result.reconciled is False
+    assert _kinds(result) == [Divergence.CASH_BALANCE]
+    assert result.discrepancies[0].local is None
+    assert result.discrepancies[0].remote == Decimal(10000)
 
 
 async def test_venue_unavailable_is_a_divergence_not_an_exception():
@@ -292,7 +371,7 @@ async def test_every_divergence_is_reported_not_just_the_first():
     )
 
     result = await reconcile(
-        local, (_balance("USD", "10000"),), venue, tolerance=EXACT, now=NOW
+        local, (_local_cash("USD", "10000"),), venue, tolerance=EXACT, now=NOW
     )
 
     assert result.reconciled is False
@@ -383,8 +462,8 @@ async def test_rows_belonging_to_another_venue_are_out_of_scope():
         _position("BTC/USD", "9", venue="binance"),
     )
     cash = (
-        _balance("USD", "10000"),
-        _balance("USD", "777", venue="binance"),
+        _local_cash("USD", "10000"),
+        _local_cash("USD", "777", venue="binance"),
     )
     venue = FakeVenue(
         positions=(_position("BTC/USD", "1.5"),), balances=(_balance("USD", "10000"),)

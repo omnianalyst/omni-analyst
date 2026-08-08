@@ -978,3 +978,65 @@ class TestGrossDoesNotNetAcrossVenues:
             intent=_intent(side=Side.SELL, quantity="2"), state=state, limits=limits
         )
         assert RiskRefusal.GROSS_EXPOSURE_EXCEEDED in opening.refusals
+
+
+class TestMarksAreKeyedByVenueNotSymbol:
+    """The defect `state.py` carried, in the layer that enforces the limits.
+
+    `risk.py` kept marks in a symbol-keyed dict while the book it valued was
+    keyed per (venue, symbol), so the venue component was destructured away at
+    the lookup and both legs of a cross-venue position were valued at whichever
+    price landed in the dict first.
+
+    It matters here more than in `state.py`. There a wrong mark misreports an
+    unrealised P&L; here it decides whether an intent is REFUSED. A basis book
+    priced at one venue for both legs understates gross exposure, so the cap
+    stops binding on exactly the strategy `basis.crossvenue` exists to run.
+
+    Both tests set the cap BETWEEN the two answers, so a collapsed valuation
+    passes and a correct one refuses. Neither is satisfied by an engine that
+    merely refuses a lot.
+    """
+
+    NAV = Decimal(200_000)
+    # 10 @ 5000 at venue a, 10 @ 6000 at venue b.
+    #   correct   gross = 50_000 + 60_000 = 110_000
+    #   collapsed gross = 50_000 + 50_000 = 100_000   (both marked at 5000)
+    CAP = Decimal("0.525")  # 105_000, strictly between the two
+
+    def _cross_venue(self) -> FakeState:
+        return FakeState(
+            nav=self.NAV,
+            positions=(
+                _position("BTC/USD", "10", "5000", venue="a"),
+                _position("BTC/USD", "10", "6000", venue="b"),
+            ),
+        )
+
+    def _limits(self) -> RiskLimits:
+        return _limits(
+            max_gross_exposure_pct_nav=self.CAP,
+            max_position_pct_nav=Decimal(1),
+            max_net_exposure_pct_nav=Decimal(1),
+            max_positions=10,
+            max_correlated_exposure_pct_nav=Decimal(1),
+        )
+
+    def test_each_venue_is_valued_at_its_own_entry(self):
+        verdict = _check(
+            intent=_intent(symbol="ETH/USD", quantity="1", price="200"),
+            state=self._cross_venue(),
+            limits=self._limits(),
+        )
+        assert RiskRefusal.GROSS_EXPOSURE_EXCEEDED in verdict.refusals
+
+    def test_an_intents_price_does_not_reprice_the_other_venues_leg(self):
+        # Trading BTC at venue 'a' for 5000 must not re-price venue 'b''s leg,
+        # carried at 6000. Under the defect the intent's reference overwrote the
+        # single symbol key and both legs became 5000.
+        verdict = _check(
+            intent=_intent(symbol="BTC/USD", quantity="1", price="5000"),
+            state=self._cross_venue(),
+            limits=self._limits(),
+        )
+        assert RiskRefusal.GROSS_EXPOSURE_EXCEEDED in verdict.refusals

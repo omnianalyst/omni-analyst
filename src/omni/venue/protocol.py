@@ -325,6 +325,25 @@ class Position:
 
 @dataclass(frozen=True)
 class Balance:
+    """What a venue *reports* it is holding for us. Never negative.
+
+    The guard is a statement about the venue, not a convenience: an exchange
+    does not report a negative available balance. `free` answers "how much may
+    you spend right now", which floors at zero, and money owed appears as a
+    separate borrow or margin liability that this protocol does not carry. A
+    negative `free` from an adapter is therefore a sign error in the adapter,
+    and admitting it would put a fabricated liability into reconciliation.
+
+    This is **not** the same quantity as the local `cash_balance` row that
+    `portfolio/state.py` materialises, whose `free` is signed by design because
+    a margin buy legitimately overdraws it. The two share a name and nothing
+    else, so the local side has its own type -- `portfolio.state.CashPosition`
+    -- and the reconciler compares them explicitly rather than either one being
+    converted into the other. A local balance that is negative and a venue
+    balance that cannot be is a divergence with a cause, and it is reported as
+    one.
+    """
+
     venue: str
     asset: str
     free: Decimal

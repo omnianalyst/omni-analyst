@@ -45,6 +45,15 @@ Scope is one venue. Local rows stamped with another venue's name are not this
 venue's business and are skipped; the caller reconciles each venue in turn.
 Balances are compared on `free + locked`, since funds locked in a resting order
 are still funds the venue says we have.
+
+**Cash is compared, and the two sides are different types on purpose.** The
+local side is `state.CashPosition`, whose `free` is signed because a margin buy
+legitimately overdraws it; the venue side is `protocol.Balance`, whose `free`
+cannot be negative because that is not a thing an exchange reports. They are not
+bridged by relaxing either guard. They are compared as the two readings they
+are, and a local total below zero is reported as a divergence naming the borrow
+the venue protocol does not carry -- which is the honest answer, because
+nothing in either book says what the venue thinks that borrow is.
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
+from omni.portfolio.state import CashPosition
 from omni.venue.protocol import Balance, MarketType, Position, Venue, VenueUnavailable
 
 ZERO = Decimal(0)
@@ -168,12 +178,18 @@ def _index_positions(
 
 
 def _index_balances(
-    balances: Iterable[Balance],
+    balances: Iterable[Balance | CashPosition],
     *,
     venue: str,
     source: str,
     unknown: list[Discrepancy],
 ) -> dict[str, Decimal]:
+    """Total per asset. Accepts either side's type -- both expose `total`.
+
+    The types are not interchangeable at their edges (one may be negative, the
+    other may not), which is exactly why they stay distinct up to this point
+    and meet only as the numbers being compared.
+    """
     book: dict[str, Decimal] = {}
     for balance in balances:
         if not balance.asset.strip():
@@ -268,6 +284,16 @@ def _balance_discrepancies(
             )
         elif _within(local, remote, tolerance):
             continue
+        elif local is not None and local < ZERO:
+            # A venue's Balance floors at zero, so no reading of it can agree
+            # with a book that is overdrawn. Name the borrow rather than
+            # reporting a bare difference an operator would read as a lost fill.
+            note = (
+                f"{asset} at {venue}: our book is overdrawn by {-local} and the "
+                f"venue reports {ZERO if remote is None else remote}; a venue "
+                f"balance cannot be negative, so the borrow behind this is a "
+                f"figure neither book carries and the two cannot be shown to agree"
+            )
         elif local is None:
             note = (
                 f"{asset} at {venue}: the venue holds {remote} and we carry no "
@@ -301,13 +327,18 @@ def _balance_discrepancies(
 
 async def reconcile(
     local_positions: Iterable[Position],
-    local_balances: Iterable[Balance],
+    local_balances: Iterable[CashPosition],
     venue: Venue,
     *,
     tolerance: Decimal,
     now: datetime,
 ) -> ReconciliationResult:
     """Compare local state against what the venue says, and name every gap.
+
+    `local_balances` are `state.PortfolioState.cash_positions` -- the stored
+    rows, signed -- not `protocol.Balance`. Passing an empty tuple is still
+    legal and still means "we hold no cash at this venue", so a venue that
+    reports any balance diverges; it is not a way to skip the cash check.
 
     `tolerance` has no default because a tolerance is a risk parameter: how far
     the books may drift before trading stops is a decision the operator makes,

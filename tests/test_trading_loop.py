@@ -176,7 +176,16 @@ def _venue(*symbols: str, capabilities: Capabilities | None = None) -> PaperVenu
                 at=NOW,
             )
         )
-    return PaperVenue(bars, capabilities or _caps())
+    # Seeded with the cash the portfolio believes it holds. Before the paper
+    # venue moved cash at all this was irrelevant; now that the loop reconciles
+    # cash, a venue reporting no USD against a book holding 100,000 is a real
+    # divergence and halting on it is correct. Starting them equal is what a
+    # paper account actually is.
+    return PaperVenue(
+        bars,
+        capabilities or _caps(),
+        starting_balances={"USD": NAV},
+    )
 
 
 def _limits(**overrides) -> RiskLimits:

@@ -362,22 +362,36 @@ def check(
     # a whole, so selling into a long on that venue reduces gross while selling
     # the same size on a different venue opens a second, opposing leg and
     # raises it. Applying the delta to the symbol would score those identically.
+    # Marks are keyed by (venue, symbol), not by symbol alone.
+    #
+    # This previously kept `marks: dict[str, Decimal]`, filled it with
+    # `setdefault(position.symbol, ...)` and read it back as `marks[symbol]`
+    # while the book itself was keyed per venue -- so the venue component was
+    # destructured away and discarded at the lookup. Two venues holding one
+    # symbol were then both valued at whichever price happened to be inserted
+    # first, and the intent's reference price silently re-priced the position at
+    # the OTHER venue.
+    #
+    # That is the same defect `state.py::_marked_value` carried, and it matters
+    # for the same reason: `basis.crossvenue` exists to trade exactly the
+    # difference between two venues' prices, so collapsing them makes a real
+    # basis book measure zero exposure and the limits stop binding on it.
     resulting_book: dict[tuple[str, str], Decimal] = {}
-    marks: dict[str, Decimal] = {}
+    marks: dict[tuple[str, str], Decimal] = {}
     for position in positions:
         row = (position.venue, position.symbol)
         resulting_book[row] = resulting_book.get(row, ZERO) + position.quantity
-        marks.setdefault(position.symbol, position.average_entry)
+        marks.setdefault(row, position.average_entry)
     intent_row = (intent.venue, intent.symbol)
     resulting_book[intent_row] = resulting_book.get(intent_row, ZERO) + delta
-    marks[intent.symbol] = intent.reference_price
+    marks[intent_row] = intent.reference_price
 
     gross = sum(
-        (abs(quantity) * marks[symbol] for (_, symbol), quantity in resulting_book.items()),
+        (abs(quantity) * marks[row] for row, quantity in resulting_book.items()),
         ZERO,
     )
     net = sum(
-        (quantity * marks[symbol] for (_, symbol), quantity in resulting_book.items()),
+        (quantity * marks[row] for row, quantity in resulting_book.items()),
         ZERO,
     )
 

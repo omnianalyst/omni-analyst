@@ -44,12 +44,15 @@ because the notional was below its minimum, or because no volume traded, gets
 its own reason recorded verbatim against a rejected order. Nothing is resized,
 retried, or written to the position table.
 
-Cash is deliberately *not* reconciled here. `cash_balance.free` is signed by
-design -- a margin buy legitimately overdraws it, and clamping that would make
-the overdraw invisible -- while `venue.protocol.Balance` refuses a negative
-`free`. The two cannot be bridged without inventing a number, so this loop
-compares positions only and passes no local balances. A venue that does report
-balances therefore diverges and halts, which is the safe direction to fail in.
+Cash IS reconciled. It was not, originally: `cash_balance.free` is signed by
+design -- a margin buy legitimately overdraws it -- while
+`venue.protocol.Balance` refuses a negative `free`, and the two looked
+unbridgeable without inventing a number. The resolution was that they are
+different quantities sharing a name. A venue cannot report a negative available
+balance; a local book can be overdrawn. So `Balance` keeps its guard (it models
+what a venue reports) and `portfolio.state.CashPosition` carries the signed
+local figure. `state.load` returns both in one snapshot, so passing
+`book.cash_positions` introduces no second read and no torn comparison.
 """
 
 from __future__ import annotations
@@ -215,7 +218,7 @@ async def run_cycle(
 
     verified = await reconcile(
         book.positions,
-        (),
+        book.cash_positions,
         venue,
         tolerance=config.tolerance,
         now=now,

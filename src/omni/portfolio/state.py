@@ -27,18 +27,35 @@ valuing an unmarked position at its entry reports an unrealised P&L of exactly
 zero for the position most likely to have moved, and a NAV that is wrong in a
 direction nobody can see.
 
+Marks are keyed by `(venue, symbol)`, because positions are. One symbol held at
+two venues is two positions with two prices, and the whole point of a
+cross-venue basis trade is that those two prices differ; marking both legs at
+one price reports an unrealised P&L of exactly zero for the only position whose
+P&L *is* the spread. A position with no mark for its own venue raises rather
+than borrowing another venue's price, for the same reason an unmarked position
+raises at all.
+
 Cash settles in the portfolio's `base_currency` at the fill's venue, and only
 base-currency rows count toward `cash`. A balance in another asset is not
 converted here: that needs an FX rate, and inventing one would put a fabricated
 number directly into NAV.
+
+**The read paths are one snapshot.** Positions, cash rows and the ledger are
+read in separate statements, and under READ COMMITTED each of those statements
+takes its own snapshot -- so a fill committing between two of them is seen by
+the later statement and not the earlier one. `snapshot_nav` would then persist
+that half-state as an authoritative `nav_snapshot` row: positions from before
+the fill, cash from after it, a NAV belonging to no moment. Every read path here
+therefore opens a `repeatable_read` transaction, which fixes one snapshot for
+all of its statements.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 from omni.venue.protocol import Fill, MarketType, Position, Side
@@ -54,6 +71,15 @@ class UnknownPortfolio(Exception):
 
 class UnmarkedPosition(Exception):
     """A held position has no usable mark, so NAV cannot be computed."""
+
+
+class UnaccountedClose(Exception):
+    """The order ledger cannot explain the book, so realised P&L is not derivable.
+
+    Raised rather than returning the part that could be accounted for. The
+    number feeds `risk.check`'s daily-loss kill switch; a realised loss that is
+    short by one missing opening fill is a kill switch that does not fire.
+    """
 
 
 _PORTFOLIO = "SELECT base_currency FROM portfolio WHERE id = $1"
@@ -72,10 +98,29 @@ WHERE portfolio_id = $1
 ORDER BY venue COLLATE "C", symbol COLLATE "C", market_type COLLATE "C"
 """
 
-_CASH = """
-SELECT COALESCE(SUM(free + locked), 0)
+_CASH_ROWS = """
+SELECT venue, asset, free, locked, updated_at
 FROM cash_balance
-WHERE portfolio_id = $1 AND asset = $2
+WHERE portfolio_id = $1
+ORDER BY venue COLLATE "C", asset COLLATE "C"
+"""
+
+# Ordered by the fill's own timestamp, not by when the event row landed: a
+# venue reporting a fill late must still be replayed in the order it executed,
+# or a close is replayed before the open it closes.
+_LEDGER_FILLS = """
+SELECT e.payload -> 'fill' ->> 'venue'            AS venue,
+       e.payload -> 'fill' ->> 'symbol'           AS symbol,
+       o.market_type                              AS market_type,
+       e.payload -> 'fill' ->> 'side'             AS side,
+       e.payload -> 'fill' ->> 'filled_quantity'  AS filled_quantity,
+       e.payload -> 'fill' ->> 'average_price'    AS average_price,
+       e.payload -> 'fill' ->> 'fee_paid'         AS fee_paid,
+       (e.payload -> 'fill' ->> 'filled_at')::timestamptz AS filled_at
+FROM order_event e
+JOIN trade_order o ON o.id = e.order_id
+WHERE o.portfolio_id = $1 AND e.payload ? 'fill'
+ORDER BY filled_at, e.at, e.id
 """
 
 _LOCK_POSITION = """
@@ -115,12 +160,69 @@ VALUES ($1, $2, $3, $4, $5)
 
 
 @dataclass(frozen=True)
+class CashPosition:
+    """Cash *our book* says we hold at a venue. `free` is signed.
+
+    Deliberately not `venue.protocol.Balance`, and the split is not cosmetic --
+    the two model different quantities that happen to share a name.
+
+    `Balance` is what a venue *reports*. An exchange does not report a negative
+    available balance: what it reports is how much you may spend right now,
+    which floors at zero, and a borrow appears as a separate liability the
+    venue protocol does not carry. So `Balance` refuses a negative `free`, and
+    relaxing that guard would let a venue adapter's sign error through as if it
+    were a real reading.
+
+    `CashPosition` is what migration 033 stores, where `free` is signed by
+    design: a margin buy spends cash the account borrowed, and clamping it at
+    zero would make the overdraw invisible rather than absent. Refusing the
+    trade is the risk engine's job and it cannot do it from a clamped row.
+
+    The consequence for reconciliation is explicit rather than papered over: a
+    **negative total is our book saying we owe the venue that much**, and no
+    value of a venue's non-negative `Balance` can agree with it. That is
+    reported as a real divergence -- the venue's borrow figure is the missing
+    piece and the protocol does not carry it -- not converted, clamped, or
+    reconciled by inventing the difference.
+    """
+
+    venue: str
+    asset: str
+    free: Decimal
+    locked: Decimal
+    as_of: datetime
+
+    def __post_init__(self) -> None:
+        for name in ("free", "locked"):
+            value = getattr(self, name)
+            if not value.is_finite():
+                # NUMERIC accepts 'NaN' and sorts it above every number, so the
+                # schema's `locked >= 0` CHECK does not stop one, and every
+                # ordering comparison below would raise InvalidOperation.
+                raise ValueError(f"{name} is not a finite amount of cash: {value}")
+        if self.locked < 0:
+            raise ValueError(
+                f"locked must not be negative, got {self.locked}; it is a "
+                f"reservation against resting orders and a negative reservation "
+                f"is not a state"
+            )
+
+    @property
+    def total(self) -> Decimal:
+        return self.free + self.locked
+
+
+@dataclass(frozen=True)
 class PortfolioState:
     """Positions, cash and cost-basis NAV as of a moment.
 
     `gross_exposure` and `net_exposure` are stated at average entry, because
     that is what the stored rows contain. The marked pair is written by
     `snapshot_nav`, which has the prices.
+
+    `cash` is the base-currency total; `cash_positions` is every stored row in
+    every asset, read in the same snapshot so a caller reconciling positions
+    and cash against a venue compares one moment rather than two.
     """
 
     portfolio_id: UUID
@@ -128,6 +230,7 @@ class PortfolioState:
     cash: Decimal
     positions: tuple[Position, ...]
     as_of: datetime
+    cash_positions: tuple[CashPosition, ...] = ()
 
     @property
     def gross_exposure(self) -> Decimal:
@@ -198,7 +301,10 @@ def _checked(fill: Fill, market_type: MarketType) -> MarketType:
 
 
 def _state(
-    portfolio_id: UUID, cash: Decimal, positions: tuple[Position, ...]
+    portfolio_id: UUID,
+    cash: Decimal,
+    positions: tuple[Position, ...],
+    cash_positions: tuple[CashPosition, ...] = (),
 ) -> PortfolioState:
     book = sum((p.quantity * p.average_entry for p in positions), Decimal(0))
     return PortfolioState(
@@ -207,6 +313,7 @@ def _state(
         cash=cash,
         positions=positions,
         as_of=datetime.now(UTC),
+        cash_positions=cash_positions,
     )
 
 
@@ -216,7 +323,7 @@ async def _load_on_conn(conn, portfolio_id: UUID) -> PortfolioState:
         raise UnknownPortfolio(f"no portfolio {portfolio_id}")
 
     rows = await conn.fetch(_POSITIONS, portfolio_id)
-    cash = await conn.fetchval(_CASH, portfolio_id, base_currency)
+    cash_rows = await conn.fetch(_CASH_ROWS, portfolio_id)
     positions = tuple(
         Position(
             venue=row["venue"],
@@ -228,12 +335,34 @@ async def _load_on_conn(conn, portfolio_id: UUID) -> PortfolioState:
         )
         for row in rows
     )
-    return _state(portfolio_id, cash, positions)
+    cash_positions = tuple(
+        CashPosition(
+            venue=row["venue"],
+            asset=row["asset"],
+            free=row["free"],
+            locked=row["locked"],
+            as_of=row["updated_at"],
+        )
+        for row in cash_rows
+    )
+    cash = sum(
+        (c.total for c in cash_positions if c.asset == base_currency), Decimal(0)
+    )
+    return _state(portfolio_id, cash, positions, cash_positions)
 
 
 async def load(pool, portfolio_id: UUID) -> PortfolioState:
-    """Read the materialised state. Raises `UnknownPortfolio` if there is none."""
-    async with pool.acquire() as conn, conn.transaction():
+    """Read the materialised state. Raises `UnknownPortfolio` if there is none.
+
+    Read under `repeatable_read`: positions and cash come from separate
+    statements, and under READ COMMITTED a fill committing between them is
+    visible to one and not the other, producing a NAV that belongs to no
+    moment.
+    """
+    async with (
+        pool.acquire() as conn,
+        conn.transaction(isolation="repeatable_read"),
+    ):
         return await _load_on_conn(conn, portfolio_id)
 
 
@@ -290,31 +419,40 @@ async def apply_fill(
         return await _load_on_conn(conn, portfolio_id)
 
 
-def _marked_value(position: Position, marks: dict[str, Decimal]) -> Decimal:
-    mark = marks.get(position.symbol)
+def _marked_value(
+    position: Position, marks: Mapping[tuple[str, str], Decimal]
+) -> Decimal:
+    where = f"{position.symbol} at {position.venue}"
+    mark = marks.get((position.venue, position.symbol))
     if mark is None:
         raise UnmarkedPosition(
-            f"no mark for {position.symbol} at {position.venue}; NAV is not "
-            f"computable and valuing it at entry would report zero P&L on it"
+            f"no mark for {where}; NAV is not computable and valuing it at "
+            f"entry would report zero P&L on it. Another venue's price for "
+            f"{position.symbol} is not a substitute: the difference between "
+            f"the two venues is exactly what a cross-venue basis position is"
         )
     if mark.is_nan() or mark.is_infinite():
-        raise UnmarkedPosition(f"mark for {position.symbol} is not a number: {mark}")
+        raise UnmarkedPosition(f"mark for {where} is not a number: {mark}")
     if mark <= 0:
-        raise UnmarkedPosition(f"mark for {position.symbol} is not a price: {mark}")
+        raise UnmarkedPosition(f"mark for {where} is not a price: {mark}")
     return position.quantity * mark
 
 
 async def snapshot_nav(
-    pool, portfolio_id: UUID, marks: dict[str, Decimal]
+    pool, portfolio_id: UUID, marks: Mapping[tuple[str, str], Decimal]
 ) -> Decimal:
-    """Mark the book and record the NAV. Every held symbol needs a mark.
+    """Mark the book and record the NAV. Every held position needs its own mark.
 
-    A missing, non-finite or non-positive mark raises `UnmarkedPosition` and no
+    `marks` is keyed by `(venue, symbol)`, matching how positions are keyed. A
+    missing, non-finite or non-positive mark raises `UnmarkedPosition` and no
     snapshot row is written. A partially-marked NAV is worse than no NAV: it
     reads as authoritative and understates exactly the exposure nobody could
     price.
     """
-    async with pool.acquire() as conn, conn.transaction():
+    async with (
+        pool.acquire() as conn,
+        conn.transaction(isolation="repeatable_read"),
+    ):
         state = await _load_on_conn(conn, portfolio_id)
 
         values = [_marked_value(p, marks) for p in state.positions]
@@ -324,6 +462,182 @@ async def snapshot_nav(
 
         await conn.execute(_INSERT_NAV, portfolio_id, nav, state.cash, gross, net)
         return nav
+
+
+def _realised_leg(
+    *,
+    quantity: Decimal,
+    average_entry: Decimal,
+    side: Side,
+    filled_quantity: Decimal,
+    price: Decimal,
+    fee: Decimal,
+) -> Decimal:
+    """What one fill realises against the position it lands on.
+
+    Only the part of a fill that *reduces* an existing position realises
+    anything. The part that opens a position, adds to one, or flips through
+    into a new one is unrealised by definition and contributes nothing -- which
+    is why a position still open at the end of the day contributes nothing at
+    all, however far it has moved.
+    """
+    delta = filled_quantity if side is Side.BUY else -filled_quantity
+    if quantity == 0 or (delta > 0) == (quantity > 0):
+        return Decimal(0)
+
+    closed = min(abs(delta), abs(quantity))
+    gross = (
+        closed * (price - average_entry)
+        if quantity > 0
+        else closed * (average_entry - price)
+    )
+
+    # A fill that only closes carries its whole fee against realised P&L. A
+    # fill that closes and flips paid one fee for both legs, so only the
+    # closing share of it is realised; the rest is a cost of the position now
+    # open. The branch keeps the common case exact rather than routing it
+    # through a division.
+    share = fee if closed == abs(delta) else fee * closed / abs(delta)
+    return gross - share
+
+
+def _amount(raw: str | None, field: str) -> Decimal:
+    """One money field out of a recorded fill's payload, or a refusal.
+
+    `orders.py` writes these as strings so the audit record cannot disagree
+    with the NUMERIC column beside it. Anything that does not read back as a
+    finite number is corrupt ledger data, and the P&L derived from the rest of
+    it would be short by whatever this fill did.
+    """
+    if raw is None:
+        raise UnaccountedClose(f"a recorded fill carries no {field}")
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as exc:
+        raise UnaccountedClose(f"a recorded fill has an unreadable {field}: {raw!r}") from exc
+    if not value.is_finite():
+        raise UnaccountedClose(f"a recorded fill has a non-finite {field}: {value}")
+    return value
+
+
+async def realised_pnl(
+    pool,
+    portfolio_id: UUID,
+    *,
+    since: datetime,
+    until: datetime,
+) -> Decimal:
+    """Realised P&L from closed round trips with a fill in `[since, until)`.
+
+    Derived from the order ledger, replayed under the same averaging rules the
+    position rows are built with, so the two cannot drift apart. A position
+    still open contributes nothing: only the quantity a fill *closes* realises,
+    valued against the average entry it closes at.
+
+    Fees paid on a closing leg count against it, pro-rated by the share of the
+    fill that closed -- a fill that flips paid one fee for two legs, and the
+    part that opened the new position has realised nothing yet. The fee paid to
+    *open* is not attributed here: it was a cash cost at the moment it was
+    paid, and charging it again on the close would count it twice.
+
+    Stated in the portfolio's base currency, which is the unit `apply_fill`
+    settles cash in. The ledger records no per-symbol quote currency, so a
+    symbol quoted in something else would need an FX rate this module refuses
+    to invent -- the same rule that keeps non-base-currency balances out of
+    `cash`.
+
+    Raises `UnaccountedClose` when the replayed ledger does not reproduce the
+    stored position rows. That is the signature of a close whose opening fill
+    is missing, and the number is not returned partially: it feeds
+    `risk.check`'s daily-loss kill switch, and a loss that is short by one
+    missing fill is a kill switch that does not fire.
+    """
+    for name, value in (("since", since), ("until", until)):
+        if value.tzinfo is None:
+            raise ValueError(
+                f"{name} is naive ({value}); ledger timestamps are UTC and a "
+                f"naive bound silently shifts the window"
+            )
+    if until < since:
+        raise ValueError(f"until {until} is before since {since}")
+
+    async with (
+        pool.acquire() as conn,
+        conn.transaction(isolation="repeatable_read"),
+    ):
+        if await conn.fetchval(_PORTFOLIO, portfolio_id) is None:
+            raise UnknownPortfolio(f"no portfolio {portfolio_id}")
+
+        fills = await conn.fetch(_LEDGER_FILLS, portfolio_id)
+        stored_rows = await conn.fetch(_POSITIONS, portfolio_id)
+
+    book: dict[tuple[str, str, str], tuple[Decimal, Decimal]] = {}
+    realised = Decimal(0)
+
+    for row in fills:
+        venue, symbol, market_type = row["venue"], row["symbol"], row["market_type"]
+        if not venue or not symbol:
+            raise UnaccountedClose(
+                f"a recorded fill on portfolio {portfolio_id} names no venue or "
+                f"symbol ({venue!r}, {symbol!r}); it cannot be matched to a position"
+            )
+        filled_at = row["filled_at"]
+        if filled_at is None:
+            raise UnaccountedClose(
+                "a recorded fill carries no filled_at, so it cannot be placed "
+                "inside or outside the window"
+            )
+
+        key = (venue, symbol, market_type)
+        quantity, average_entry = book.get(key, (Decimal(0), Decimal(0)))
+        side = Side(row["side"])
+        filled_quantity = _amount(row["filled_quantity"], "filled_quantity")
+        price = _amount(row["average_price"], "average_price")
+        fee = _amount(row["fee_paid"], "fee_paid")
+
+        if since <= filled_at < until:
+            realised += _realised_leg(
+                quantity=quantity,
+                average_entry=average_entry,
+                side=side,
+                filled_quantity=filled_quantity,
+                price=price,
+                fee=fee,
+            )
+
+        new_quantity, new_entry = _next_position(
+            quantity=quantity,
+            average_entry=average_entry,
+            side=side,
+            filled_quantity=filled_quantity,
+            price=price,
+        )
+        if new_quantity == 0:
+            book.pop(key, None)
+        else:
+            book[key] = (new_quantity, new_entry)
+
+    stored = {
+        (row["venue"], row["symbol"], row["market_type"]): (
+            row["quantity"],
+            row["average_entry"],
+        )
+        for row in stored_rows
+    }
+    if stored != book:
+        # Rendered as mappings rather than sorted values: an average_entry that
+        # is NaN would raise on the comparison a sort needs, inside the very
+        # path that exists to report it.
+        replayed = {key: book[key] for key in sorted(book)}
+        held = {key: stored[key] for key in sorted(stored)}
+        raise UnaccountedClose(
+            f"replaying the order ledger for portfolio {portfolio_id} produces "
+            f"{replayed} but the position rows hold {held}; a close whose "
+            f"opening fill is not in the ledger cannot be valued, so no "
+            f"realised P&L is reported for this window"
+        )
+
+    return realised
 
 
 async def rebuild_from_fills(

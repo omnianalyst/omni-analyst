@@ -292,7 +292,39 @@ class PaperVenue:
         self._fills.append(fill)
         return fill
 
+    def _quote_asset(self, symbol: str) -> str:
+        """The asset a fill is paid in. `BTC/USD` settles in USD."""
+        _, _, quote = symbol.partition("/")
+        return quote or symbol
+
+    def _debit_cash(self, fill: Fill) -> None:
+        """Move cash the way a fill actually moves it.
+
+        `balances()` previously reported whatever the constructor was handed and
+        never changed, so a paper book's cash was fiction: it diverged from the
+        real figure by the full notional of the very first fill, and any caller
+        reconciling cash against this venue halted immediately.
+
+        A buy pays notional plus the fee; a sell receives notional less the fee.
+        The fee is subtracted in BOTH directions -- it is a cost, not a signed
+        flow -- which is the sign error worth naming, because charging it as a
+        credit on the sell side makes a round trip look free.
+
+        The balance may go negative here. That is correct for a paper book with
+        no funding model, and `Balance` refuses it, so `balances()` clamps at
+        zero for reporting while `_cash` keeps the true figure. A venue never
+        reports a negative available balance; that is exactly why
+        `portfolio.state.CashPosition` exists as a separate type.
+        """
+        asset = self._quote_asset(fill.symbol)
+        notional = fill.notional
+        delta = -notional if fill.side is Side.BUY else notional
+        self._balances[asset] = (
+            self._balances.get(asset, Decimal(0)) + delta - fill.fee_paid
+        )
+
     def _apply(self, fill: Fill, market_type: MarketType) -> None:
+        self._debit_cash(fill)
         key = (fill.symbol, market_type)
         signed = fill.filled_quantity if fill.side is Side.BUY else -fill.filled_quantity
         existing = self._positions.get(key)
@@ -340,7 +372,10 @@ class PaperVenue:
             Balance(
                 venue=self.name,
                 asset=asset,
-                free=amount,
+                # Clamped: a real venue never reports a negative available
+                # balance. The signed figure lives in `_balances` and reaches a
+                # reconciler through `portfolio.state.CashPosition`.
+                free=max(amount, Decimal(0)),
                 locked=Decimal(0),
                 as_of=now,
             )

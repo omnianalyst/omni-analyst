@@ -28,6 +28,7 @@ from decimal import Decimal
 
 import pytest
 
+from omni.portfolio.state import CashPosition
 from omni.venue.protocol import (
     Balance,
     Capabilities,
@@ -289,6 +290,32 @@ class TestBalance:
                 asset="USD",
                 free=Decimal(-1),
                 locked=Decimal(0),
+                as_of=NOW,
+            )
+
+    def test_a_venue_balance_is_not_the_local_cash_row(self):
+        """The overdraw migration 033 stores is refused here, and stored there.
+
+        Bridging the two by relaxing this guard is the mistake this pins: a
+        local book may be overdrawn by 200, a venue's `free` may not, and the
+        type that admits both is the type that lets an adapter's sign error
+        through as a real reading.
+        """
+        overdrawn = CashPosition(
+            venue="paper",
+            asset="USD",
+            free=Decimal(-200),
+            locked=Decimal(0),
+            as_of=NOW,
+        )
+        assert overdrawn.total == Decimal(-200)
+
+        with pytest.raises(ValueError, match="must not be negative"):
+            Balance(
+                venue="paper",
+                asset="USD",
+                free=overdrawn.free,
+                locked=overdrawn.locked,
                 as_of=NOW,
             )
 
