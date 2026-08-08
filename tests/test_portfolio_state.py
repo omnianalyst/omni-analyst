@@ -9,10 +9,12 @@ import pytest
 from omni.portfolio import orders, state
 from omni.portfolio.state import (
     DuplicatePortfolio,
+    FundingOutcome,
     UnaccountedClose,
     UnknownPortfolio,
     UnmarkedPosition,
     apply_fill,
+    apply_funding,
     create_portfolio,
     load,
     realised_pnl,
@@ -1349,4 +1351,560 @@ class TestSchema:
                 "INSERT INTO cash_balance (portfolio_id, venue, asset, free, locked) "
                 "VALUES ($1, 'binance', 'USD', 0, -1)",
                 portfolio_id,
+            )
+
+
+SETTLED_AT = datetime(2026, 8, 7, 8, 0, tzinfo=UTC)
+NEXT_SETTLEMENT = SETTLED_AT + timedelta(hours=8)
+
+# 2 BTC at 50,000 with a rate of 1bp settles 10 of quote currency. Every figure
+# below is derived from these by hand rather than from the implementation.
+MARK = Decimal(50000)
+RATE = Decimal("0.0001")
+
+
+async def _leg(
+    db,
+    portfolio_id,
+    *,
+    market_type: MarketType,
+    side: Side,
+    quantity: str,
+    venue: str = "binance",
+    symbol: str = "BTC/USD",
+) -> None:
+    await apply_fill(
+        db.pool,
+        portfolio_id,
+        _fill(
+            venue=venue, symbol=symbol, side=side, quantity=quantity, price=str(MARK)
+        ),
+        market_type,
+    )
+
+
+async def _accruals(db, portfolio_id):
+    return await db.pool.fetch(
+        "SELECT venue, symbol, funding_time, funding_rate, quantity, mark, amount "
+        "FROM funding_accrual WHERE portfolio_id = $1 "
+        "ORDER BY funding_time, symbol COLLATE \"C\"",
+        portfolio_id,
+    )
+
+
+class TestApplyFunding:
+    """Funding is the only thing a delta-neutral carry book earns.
+
+    Long spot, short perp: the two legs cancel on price by construction, so the
+    entire return of the position this module exists to support is the eight-hourly
+    payment neither leg records as a fill. A portfolio without it reports a NAV
+    that never moves and a strategy that cannot be graded.
+
+    The convention every figure here is derived from: **a positive funding rate
+    means longs pay shorts**, so `amount = -quantity * mark * rate`.
+    """
+
+    async def test_a_short_perp_receives_a_positive_rate(self, db, portfolio_id):
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        accrual = await apply_funding(
+            db.pool,
+            portfolio_id,
+            venue="binance",
+            symbol="BTC/USD",
+            funding_time=SETTLED_AT,
+            funding_rate=RATE,
+            mark=MARK,
+        )
+
+        # -(-2) * 50000 * 0.0001 = +10. The sign is the strategy: a carry book
+        # is short the perp precisely to be on the receiving side, and an
+        # inverted expression earns the exact negative of what it reports.
+        assert accrual.outcome is FundingOutcome.ACCRUED
+        assert accrual.quantity == Decimal(-2)
+        assert accrual.amount == Decimal(10)
+
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal(10)
+
+    async def test_a_long_perp_pays_a_positive_rate(self, db, portfolio_id):
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.BUY, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        accrual = await apply_funding(
+            db.pool,
+            portfolio_id,
+            venue="binance",
+            symbol="BTC/USD",
+            funding_time=SETTLED_AT,
+            funding_rate=RATE,
+            mark=MARK,
+        )
+
+        assert accrual.amount == Decimal(-10)
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal(-10)
+
+    async def test_a_negative_rate_reverses_who_pays(self, db, portfolio_id):
+        """Shorts pay longs when funding is negative, from the same expression."""
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        accrual = await apply_funding(
+            db.pool,
+            portfolio_id,
+            venue="binance",
+            symbol="BTC/USD",
+            funding_time=SETTLED_AT,
+            funding_rate=-RATE,
+            mark=MARK,
+        )
+
+        assert accrual.amount == Decimal(-10)
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal(-10)
+
+    async def test_only_the_perpetual_leg_of_a_hedged_pair_accrues(
+        self, db, portfolio_id
+    ):
+        """Spot pays no funding, so charging both legs double-counts the carry.
+
+        The legs are deliberately unequal -- long 3 spot against short 2 perp --
+        so that an accrual taken over both is arithmetically distinguishable from
+        one taken over the perp alone. At equal sizes the two collapse to
+        different numbers only by luck, and a test that cannot tell them apart on
+        the one position this feature exists for is not a test of it.
+        """
+        await _leg(db, portfolio_id, market_type=MarketType.SPOT,
+                   side=Side.BUY, quantity="3")
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        accrual = await apply_funding(
+            db.pool,
+            portfolio_id,
+            venue="binance",
+            symbol="BTC/USD",
+            funding_time=SETTLED_AT,
+            funding_rate=RATE,
+            mark=MARK,
+        )
+
+        # The perp leg alone: -(-2) * 50000 * 0.0001. Summing the spot leg in
+        # gives (3 - 2) = 1 and an accrual of -5; charging spot separately gives
+        # -15. Neither is 10.
+        assert accrual.quantity == Decimal(-2)
+        assert accrual.amount == Decimal(10)
+
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal(10)
+        assert len(await _accruals(db, portfolio_id)) == 1
+
+        # And the settlement moved cash only: neither leg was touched.
+        assert after.position_for("binance", "BTC/USD", MarketType.SPOT).quantity == Decimal(3)
+        assert after.position_for("binance", "BTC/USD", MarketType.PERPETUAL).quantity == Decimal(-2)
+
+    async def test_a_spot_only_holding_accrues_nothing_rather_than_zero(
+        self, db, portfolio_id
+    ):
+        await _leg(db, portfolio_id, market_type=MarketType.SPOT,
+                   side=Side.BUY, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        accrual = await apply_funding(
+            db.pool,
+            portfolio_id,
+            venue="binance",
+            symbol="BTC/USD",
+            funding_time=SETTLED_AT,
+            funding_rate=RATE,
+            mark=MARK,
+        )
+
+        assert accrual.outcome is FundingOutcome.NO_POSITION
+        assert accrual.amount is None
+        assert accrual.quantity is None
+        assert (await load(db.pool, portfolio_id)).cash == before.cash
+
+        (row,) = await _accruals(db, portfolio_id)
+        assert row["amount"] is None, "a spot holding did not accrue zero, it accrued nothing"
+
+    async def test_nothing_held_and_a_zero_rate_are_different_facts(
+        self, db, portfolio_id
+    ):
+        """Both move no cash. Only one of them had exposure to the settlement.
+
+        Carry is graded as a return per unit of exposure, so a settlement the book
+        was not in must not enter that average as a zero -- it would drag the
+        measured carry toward zero in proportion to how often the strategy was
+        flat, which is a property of the schedule and not of the edge.
+        """
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2", symbol="ETH/USD")
+
+        absent = await apply_funding(
+            db.pool,
+            portfolio_id,
+            venue="binance",
+            symbol="BTC/USD",
+            funding_time=SETTLED_AT,
+            funding_rate=RATE,
+            mark=MARK,
+        )
+        flat_rate = await apply_funding(
+            db.pool,
+            portfolio_id,
+            venue="binance",
+            symbol="ETH/USD",
+            funding_time=SETTLED_AT,
+            funding_rate=Decimal(0),
+            mark=MARK,
+        )
+
+        assert absent.outcome is FundingOutcome.NO_POSITION
+        assert absent.amount is None
+        assert flat_rate.outcome is FundingOutcome.ACCRUED
+        assert flat_rate.amount == Decimal(0)
+        assert flat_rate.quantity == Decimal(-2)
+
+        stored = {row["symbol"]: row for row in await _accruals(db, portfolio_id)}
+        assert stored["BTC/USD"]["amount"] is None
+        assert stored["ETH/USD"]["amount"] == Decimal(0)
+        assert stored["ETH/USD"]["quantity"] == Decimal(-2)
+
+    async def test_replaying_a_settlement_credits_it_once(self, db, portfolio_id):
+        """The database refuses the second write; the caller is not trusted to.
+
+        A re-run cycle, a replayed day and two overlapping schedulers all present
+        the same settlement again. The key is the settlement's own identity and
+        holds nothing from the clock of the process applying it -- a dedup key
+        derived from `now()` is how a backfill here once produced exactly twice
+        the rows it owed.
+        """
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        first = await apply_funding(
+            db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+            funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+        )
+        second = await apply_funding(
+            db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+            funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+        )
+
+        assert first.outcome is FundingOutcome.ACCRUED
+        assert second.outcome is FundingOutcome.ALREADY_SETTLED
+        assert second.amount == Decimal(10), "it reports what did settle"
+
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal(10), "credited once, not twice"
+        assert len(await _accruals(db, portfolio_id)) == 1
+
+    async def test_two_schedulers_settling_at_once_credit_once(self, db, portfolio_id):
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        results = await asyncio.gather(
+            apply_funding(
+                db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+                funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+            ),
+            apply_funding(
+                db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+                funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+            ),
+        )
+
+        assert {r.outcome for r in results} == {
+            FundingOutcome.ACCRUED,
+            FundingOutcome.ALREADY_SETTLED,
+        }
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal(10)
+        assert len(await _accruals(db, portfolio_id)) == 1
+
+    async def test_a_replay_reports_what_settled_not_what_was_offered(
+        self, db, portfolio_id
+    ):
+        """A second attempt at a different rate does not overwrite the first."""
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        await apply_funding(
+            db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+            funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+        )
+        replayed = await apply_funding(
+            db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+            funding_time=SETTLED_AT, funding_rate=Decimal("0.05"), mark=MARK,
+        )
+
+        assert replayed.outcome is FundingOutcome.ALREADY_SETTLED
+        assert replayed.funding_rate == RATE
+        assert replayed.amount == Decimal(10)
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal(10)
+
+    async def test_each_settlement_of_the_day_accrues_on_its_own(
+        self, db, portfolio_id
+    ):
+        """Idempotency is per settlement, not per symbol: funding is eight-hourly."""
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        before = await load(db.pool, portfolio_id)
+
+        for at in (SETTLED_AT, NEXT_SETTLEMENT):
+            accrued = await apply_funding(
+                db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+                funding_time=at, funding_rate=RATE, mark=MARK,
+            )
+            assert accrued.outcome is FundingOutcome.ACCRUED
+
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal(20)
+        assert [row["funding_time"] for row in await _accruals(db, portfolio_id)] == [
+            SETTLED_AT,
+            NEXT_SETTLEMENT,
+        ]
+
+    async def test_a_settlement_is_scoped_to_one_venue_and_symbol(
+        self, db, portfolio_id
+    ):
+        """One venue's funding says nothing about another's, or another symbol's."""
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2", venue="kraken")
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2", symbol="ETH/USD")
+
+        accrual = await apply_funding(
+            db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+            funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+        )
+
+        assert accrual.outcome is FundingOutcome.NO_POSITION
+        rows = await db.pool.fetch(
+            "SELECT venue, asset, free FROM cash_balance WHERE portfolio_id = $1",
+            portfolio_id,
+        )
+        # Both legs opened short, so each venue holds the sale proceeds and
+        # nothing else. A settlement that leaked across either key would move one.
+        assert {(r["venue"], r["free"]) for r in rows} == {
+            ("binance", Decimal(100000)),
+            ("kraken", Decimal(100000)),
+        }
+
+    async def test_the_accrual_moves_cash_and_leaves_the_position_alone(
+        self, db, portfolio_id
+    ):
+        """Funding is not a fill: no quantity moves and no entry is re-averaged."""
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        opened = await _row(db, portfolio_id, market_type="perpetual")
+        before = await snapshot_nav(db.pool, portfolio_id, {BTC: MARK})
+
+        await apply_funding(
+            db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+            funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+        )
+
+        settled = await _row(db, portfolio_id, market_type="perpetual")
+        assert settled["quantity"] == opened["quantity"]
+        assert settled["average_entry"] == opened["average_entry"]
+
+        after = await snapshot_nav(db.pool, portfolio_id, {BTC: MARK})
+        assert after - before == Decimal(10), "carry reaches NAV through cash"
+
+    async def test_the_stored_accrual_is_exact_to_the_last_place(
+        self, db, portfolio_id
+    ):
+        """A rate and a mark that do not survive a round trip through binary64.
+
+        3 x 50000.10 x 0.0001 is 15.000030 exactly in decimal. Bound as a float
+        it reaches NUMERIC as the full binary expansion of the nearest double and
+        comes back 15.0000300000000000...4, which is a difference that compounds
+        over three settlements a day for the life of a carry position.
+        """
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="3")
+        before = await load(db.pool, portfolio_id)
+
+        accrual = await apply_funding(
+            db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+            funding_time=SETTLED_AT,
+            funding_rate=Decimal("0.0001"),
+            mark=Decimal("50000.10"),
+        )
+
+        assert accrual.amount == Decimal("15.000030")
+        (row,) = await _accruals(db, portfolio_id)
+        assert row["amount"] == Decimal("15.000030")
+        assert row["mark"] == Decimal("50000.10")
+        assert row["funding_rate"] == Decimal("0.0001")
+
+        after = await load(db.pool, portfolio_id)
+        assert after.cash - before.cash == Decimal("15.000030")
+
+    async def test_a_float_rate_or_mark_is_refused_before_anything_moves(
+        self, db, portfolio_id
+    ):
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+
+        for kwargs in ({"funding_rate": 0.0001}, {"mark": 50000.0}):
+            with pytest.raises(TypeError, match="Decimal"):
+                await apply_funding(
+                    db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+                    funding_time=SETTLED_AT,
+                    **{"funding_rate": RATE, "mark": MARK, **kwargs},
+                )
+
+        assert await _accruals(db, portfolio_id) == []
+
+    async def test_a_rate_or_mark_that_is_not_a_number_is_refused(
+        self, db, portfolio_id
+    ):
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+
+        refused = (
+            {"funding_rate": Decimal("NaN")},
+            {"funding_rate": Decimal("Infinity")},
+            {"mark": Decimal("NaN")},
+            {"mark": Decimal(0)},
+            {"mark": Decimal(-1)},
+        )
+        for kwargs in refused:
+            with pytest.raises(ValueError):
+                await apply_funding(
+                    db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+                    funding_time=SETTLED_AT,
+                    **{"funding_rate": RATE, "mark": MARK, **kwargs},
+                )
+
+        assert await _accruals(db, portfolio_id) == []
+
+    async def test_a_naive_funding_time_is_refused(self, db, portfolio_id):
+        """The timestamp is the dedup key, so a shifted one is a second credit."""
+        with pytest.raises(ValueError, match="naive"):
+            await apply_funding(
+                db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+                funding_time=SETTLED_AT.replace(tzinfo=None),
+                funding_rate=RATE, mark=MARK,
+            )
+
+    async def test_an_unnamed_venue_or_symbol_is_refused(self, db, portfolio_id):
+        for kwargs in ({"venue": "  "}, {"symbol": ""}):
+            with pytest.raises(ValueError):
+                await apply_funding(
+                    db.pool, portfolio_id,
+                    funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+                    **{"venue": "binance", "symbol": "BTC/USD", **kwargs},
+                )
+
+    async def test_unknown_portfolio_raises_and_writes_nothing(self, db):
+        missing = uuid4()
+        with pytest.raises(UnknownPortfolio):
+            await apply_funding(
+                db.pool, missing, venue="binance", symbol="BTC/USD",
+                funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+            )
+
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM funding_accrual WHERE portfolio_id = $1", missing
+        ) == 0
+
+    async def test_the_ledger_row_and_the_cash_commit_together(
+        self, db, portfolio_id, monkeypatch
+    ):
+        """A settled row whose cash never landed is carry the book never earned.
+
+        And it can never land afterwards: the row is the idempotency key, so the
+        retry comes back `ALREADY_SETTLED` and the payment is lost for good.
+        """
+        await _leg(db, portfolio_id, market_type=MarketType.PERPETUAL,
+                   side=Side.SELL, quantity="2")
+        before = await load(db.pool, portfolio_id)
+        monkeypatch.setattr(
+            state,
+            "_UPSERT_CASH",
+            "INSERT INTO cash_balance (portfolio_id) VALUES ($1, $2, $3, $4, $5)",
+        )
+
+        with pytest.raises(asyncpg.PostgresError):
+            await apply_funding(
+                db.pool, portfolio_id, venue="binance", symbol="BTC/USD",
+                funding_time=SETTLED_AT, funding_rate=RATE, mark=MARK,
+            )
+
+        assert await _accruals(db, portfolio_id) == []
+        assert (await load(db.pool, portfolio_id)).cash == before.cash
+
+
+class TestFundingSchema:
+    async def test_one_row_per_settlement(self, db, portfolio_id):
+        statement = (
+            "INSERT INTO funding_accrual (portfolio_id, venue, symbol, "
+            "funding_time, funding_rate, quantity, mark, amount) "
+            "VALUES ($1, 'binance', 'BTC/USD', $2, 0.0001, -2, 50000, 10)"
+        )
+        await db.pool.execute(statement, portfolio_id, SETTLED_AT)
+
+        with pytest.raises(asyncpg.UniqueViolationError):
+            await db.pool.execute(statement, portfolio_id, SETTLED_AT)
+
+    async def test_an_amount_without_a_position_is_rejected(self, db, portfolio_id):
+        with pytest.raises(asyncpg.CheckViolationError):
+            await db.pool.execute(
+                "INSERT INTO funding_accrual (portfolio_id, venue, symbol, "
+                "funding_time, funding_rate, quantity, mark, amount) "
+                "VALUES ($1, 'binance', 'BTC/USD', $2, 0.0001, NULL, NULL, 10)",
+                portfolio_id,
+                SETTLED_AT,
+            )
+
+    async def test_an_inverted_sign_is_rejected_by_the_schema(self, db, portfolio_id):
+        """The last guard on the one defect that would not announce itself.
+
+        A short at a positive rate receives. A row claiming it paid is the whole
+        strategy reported as its own opposite, and every total it produces still
+        reads as a plausible P&L.
+        """
+        with pytest.raises(asyncpg.CheckViolationError):
+            await db.pool.execute(
+                "INSERT INTO funding_accrual (portfolio_id, venue, symbol, "
+                "funding_time, funding_rate, quantity, mark, amount) "
+                "VALUES ($1, 'binance', 'BTC/USD', $2, 0.0001, -2, 50000, -10)",
+                portfolio_id,
+                SETTLED_AT,
+            )
+
+    async def test_a_flat_position_cannot_have_settled(self, db, portfolio_id):
+        with pytest.raises(asyncpg.CheckViolationError):
+            await db.pool.execute(
+                "INSERT INTO funding_accrual (portfolio_id, venue, symbol, "
+                "funding_time, funding_rate, quantity, mark, amount) "
+                "VALUES ($1, 'binance', 'BTC/USD', $2, 0.0001, 0, 50000, 0)",
+                portfolio_id,
+                SETTLED_AT,
+            )
+
+    async def test_a_nan_amount_is_rejected(self, db, portfolio_id):
+        """NUMERIC accepts 'NaN' and sorts it above every number, so `mark > 0`
+        admits one and the sign check compares NaN with NaN and passes."""
+        with pytest.raises(asyncpg.CheckViolationError):
+            await db.pool.execute(
+                "INSERT INTO funding_accrual (portfolio_id, venue, symbol, "
+                "funding_time, funding_rate, quantity, mark, amount) "
+                "VALUES ($1, 'binance', 'BTC/USD', $2, 0.0001, -2, 'NaN', 'NaN')",
+                portfolio_id,
+                SETTLED_AT,
             )

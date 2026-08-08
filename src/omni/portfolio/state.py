@@ -40,6 +40,16 @@ base-currency rows count toward `cash`. A balance in another asset is not
 converted here: that needs an FX rate, and inventing one would put a fabricated
 number directly into NAV.
 
+**Funding is a cash flow, not a fill.** A perpetual pays or receives every eight
+hours for as long as it is held, and no trade happens when it settles -- the
+quantity does not move and the entry does not change, only cash. So it comes in
+through `apply_funding` rather than `apply_fill`, and it is deliberately absent
+from `rebuild_from_fills`: replaying the fills of a carry book reproduces its
+positions exactly and its cash not at all, which is the same statement that
+docstring already makes about deposits. A delta-neutral carry book earns nothing
+except funding, so a portfolio with no concept of it reports a NAV that never
+moves on the only strategy here with a measured edge.
+
 **The read paths are one snapshot.** Positions, cash rows and the ledger are
 read in separate statements, and under READ COMMITTED each of those statements
 takes its own snapshot -- so a fill committing between two of them is seen by
@@ -56,6 +66,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from uuid import UUID
 
 from omni.venue.protocol import Fill, MarketType, Position, Side
@@ -188,6 +199,24 @@ INSERT INTO nav_snapshot (portfolio_id, nav, cash, gross_exposure, net_exposure)
 VALUES ($1, $2, $3, $4, $5)
 """
 
+# DO NOTHING on the settlement's own primary key, so a replayed cycle is refused
+# by the database and not by a caller who remembered to look first. The returned
+# row is the whole decision: nothing back means the settlement was already in the
+# ledger and no cash may move for it a second time.
+_INSERT_FUNDING = """
+INSERT INTO funding_accrual (portfolio_id, venue, symbol, funding_time,
+                             funding_rate, quantity, mark, amount)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (portfolio_id, venue, symbol, funding_time) DO NOTHING
+RETURNING recorded_at
+"""
+
+_FUNDING_ROW = """
+SELECT funding_rate, quantity, mark, amount
+FROM funding_accrual
+WHERE portfolio_id = $1 AND venue = $2 AND symbol = $3 AND funding_time = $4
+"""
+
 
 @dataclass(frozen=True)
 class CashPosition:
@@ -279,6 +308,54 @@ class PortfolioState:
             if p.venue == venue and p.symbol == symbol and p.market_type == market_type:
                 return p
         return None
+
+
+class FundingOutcome(str, Enum):
+    """What one funding settlement did to the book.
+
+    `NO_POSITION` is not `ACCRUED` with an amount of zero, and the two are kept
+    apart everywhere -- here, in the returned amount, and in the stored row. A
+    settlement that lands while nothing is held accrues nothing; a settlement
+    that lands on a real perpetual leg at a rate of exactly zero accrues zero.
+    Collapsing them reports a position that was not held as one that earned
+    nothing, and the carry a strategy is graded on is an average over
+    settlements it actually had exposure to.
+    """
+
+    ACCRUED = "accrued"
+    NO_POSITION = "no_position"
+    ALREADY_SETTLED = "already_settled"
+
+
+@dataclass(frozen=True)
+class FundingAccrual:
+    """One settlement, as it stands in the ledger after `apply_funding`.
+
+    `quantity`, `mark` and `amount` are `None` together and only when no
+    perpetual leg was held. On `ALREADY_SETTLED` they are read back from the
+    stored row rather than recomputed from the arguments, because the stored row
+    is what actually moved the cash: a replay carrying a different rate is a
+    disagreement the caller can see rather than one that quietly overwrites.
+    """
+
+    portfolio_id: UUID
+    venue: str
+    symbol: str
+    funding_time: datetime
+    funding_rate: Decimal
+    outcome: FundingOutcome
+    quantity: Decimal | None
+    mark: Decimal | None
+    amount: Decimal | None
+
+    def __post_init__(self) -> None:
+        if self.outcome is FundingOutcome.NO_POSITION and self.amount is not None:
+            raise ValueError(
+                f"a settlement with no position accrued {self.amount}; nothing "
+                f"held accrues nothing, which is not an amount of zero"
+            )
+        if self.outcome is FundingOutcome.ACCRUED and self.amount is None:
+            raise ValueError("an accrual with no amount is not an accrual")
 
 
 def _next_position(
@@ -539,6 +616,171 @@ async def apply_fill(
         )
 
         return await _load_on_conn(conn, portfolio_id)
+
+
+def _funding_amount(
+    *, quantity: Decimal, mark: Decimal, funding_rate: Decimal
+) -> Decimal:
+    """Cash flow to the portfolio from one settlement. Negative is paid away.
+
+    The convention, which everything else here follows from: **a positive
+    funding rate means longs pay shorts.** It is what `venue/costs.py::carry_cost`
+    prices and what `conviction/carry.py` sells.
+
+    Derivation, both cases, from that one statement:
+
+    - A **long** of `q > 0` at mark `m` holds a notional of `q * m` and, at a
+      positive rate `r`, *pays* `q * m * r`. Its cash flow is `-q * m * r`.
+    - A **short** of `q < 0` holds a notional of `|q| * m = -q * m` and, at the
+      same positive `r`, *receives* it: `+(-q) * m * r`, which is `-q * m * r`
+      again.
+
+    So one expression covers both: `amount = -q * m * r`, with the sign carried
+    entirely by the signed quantity and the signed rate. A negative rate falls
+    out correctly without a second rule -- shorts pay longs, and `-q * m * r`
+    flips with `r`.
+
+    Worked, so the direction is checkable rather than asserted: short 2 at a mark
+    of 50,000 with `r = +0.0001` gives `-(-2) * 50000 * 0.0001 = +10`, received.
+    The same rate against a long of 2 gives `-10`, paid. That is the whole
+    strategy's sign: a carry book is short the perp precisely to be on the
+    receiving side, and inverting this expression would make it earn the exact
+    negative of what it reports while every total still reads as a plausible P&L.
+    """
+    return -quantity * mark * funding_rate
+
+
+async def apply_funding(
+    pool,
+    portfolio_id: UUID,
+    *,
+    venue: str,
+    symbol: str,
+    funding_time: datetime,
+    funding_rate: Decimal,
+    mark: Decimal,
+) -> FundingAccrual:
+    """Settle one funding period against the perpetual leg, once.
+
+    **Perpetual only.** A spot holding of the same symbol at the same venue
+    accrues nothing and is not looked at. The position this exists to support is
+    a delta-neutral pair -- long spot, short perp -- and charging both legs would
+    count the carry twice on the one book whose entire return *is* the carry.
+
+    **Applicable exactly once.** The ledger row is keyed on
+    `(portfolio, venue, symbol, funding_time)`, which is the settlement's own
+    identity and contains nothing from the clock of the process applying it. A
+    re-run, a replayed day or two overlapping schedulers all present that key and
+    the second one is refused by the primary key, so no cash moves and the result
+    comes back `ALREADY_SETTLED` carrying the values that did move.
+
+    **`mark` is required and has no default.** Funding settles against the
+    position's notional at the settlement's mark, which this module has no way to
+    know; falling back to `average_entry` would value every settlement at a price
+    the position has not traded at since it opened, and the error grows with
+    exactly the holding period a carry trade depends on. `snapshot_nav` refuses
+    an unmarked position for the same reason.
+
+    **The settlement lands on the book as it stands now.** Position rows carry no
+    history, so applying a settlement long after its `funding_time` values it
+    against whatever is held today rather than what was held then. Settlements
+    must therefore be applied in order and promptly; `funding_time` is stored so
+    an out-of-order application is at least visible afterwards.
+
+    Returns the ledger row. `amount` is `None` -- never zero -- when no
+    perpetual leg was held.
+    """
+    for field, value in (("venue", venue), ("symbol", symbol)):
+        if not value or not value.strip():
+            raise ValueError(f"{field} must be stated, got {value!r}")
+    if funding_time.tzinfo is None:
+        raise ValueError(
+            f"funding_time is naive ({funding_time}); settlements are UTC and a "
+            f"naive one silently shifts which eight-hour period this is, which "
+            f"is also the key that stops it being applied twice"
+        )
+    for field, value in (("funding_rate", funding_rate), ("mark", mark)):
+        if not isinstance(value, Decimal):
+            raise TypeError(
+                f"{field} must be a Decimal, got {type(value).__name__}; a float "
+                f"is encoded into NUMERIC as its full binary expansion, so the "
+                f"accrual stored is not the accrual computed"
+            )
+        if not value.is_finite():
+            raise ValueError(f"{field} is not a number: {value}")
+    if mark <= 0:
+        raise ValueError(
+            f"mark {mark} is not a price; a settlement valued at a non-positive "
+            f"mark reports a carry the position could not have earned"
+        )
+
+    async with pool.acquire() as conn, conn.transaction():
+        base_currency = await conn.fetchval(_PORTFOLIO_LOCKED, portfolio_id)
+        if base_currency is None:
+            raise UnknownPortfolio(f"no portfolio {portfolio_id}")
+
+        held = await conn.fetchrow(
+            _LOCK_POSITION, portfolio_id, venue, symbol, MarketType.PERPETUAL.value
+        )
+        quantity = held["quantity"] if held is not None else None
+        amount = (
+            None
+            if quantity is None
+            else _funding_amount(
+                quantity=quantity, mark=mark, funding_rate=funding_rate
+            )
+        )
+
+        recorded = await conn.fetchval(
+            _INSERT_FUNDING,
+            portfolio_id,
+            venue,
+            symbol,
+            funding_time,
+            funding_rate,
+            quantity,
+            None if quantity is None else mark,
+            amount,
+        )
+        if recorded is None:
+            settled = await conn.fetchrow(
+                _FUNDING_ROW, portfolio_id, venue, symbol, funding_time
+            )
+            return FundingAccrual(
+                portfolio_id=portfolio_id,
+                venue=venue,
+                symbol=symbol,
+                funding_time=funding_time,
+                funding_rate=settled["funding_rate"],
+                outcome=FundingOutcome.ALREADY_SETTLED,
+                quantity=settled["quantity"],
+                mark=settled["mark"],
+                amount=settled["amount"],
+            )
+
+        if amount is not None:
+            await conn.execute(
+                _UPSERT_CASH,
+                portfolio_id,
+                venue,
+                base_currency,
+                amount,
+                funding_time,
+            )
+
+        return FundingAccrual(
+            portfolio_id=portfolio_id,
+            venue=venue,
+            symbol=symbol,
+            funding_time=funding_time,
+            funding_rate=funding_rate,
+            outcome=(
+                FundingOutcome.NO_POSITION if amount is None else FundingOutcome.ACCRUED
+            ),
+            quantity=quantity,
+            mark=None if quantity is None else mark,
+            amount=amount,
+        )
 
 
 def _marked_value(
