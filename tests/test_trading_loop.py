@@ -18,6 +18,11 @@ about is *sequence* and *accounting*, so the weight sits on four things:
   The walk-forward case runs the same cycle twice, once with the method absent
   from the mapping and once with it present, so a loop that substituted `True`
   fails the first half and a loop that refused everything fails the second.
+- **The reconciliation being recorded on both outcomes, and recording nothing
+  it decides.** Each of those is asserted against its opposite: the divergence
+  is checked for a stored row as well as a halt, and the halt is checked with
+  the write forced to fail, because "record on success, halt on failure" passes
+  every assertion that looks at only one of the two.
 
 Numbers are chosen so the sizing is exact rather than approximately right:
 entry 100, barriers 120/90 and a 0.6 calibrated hit rate give b = 2,
@@ -28,6 +33,7 @@ is exactly 100 units.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -35,6 +41,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 
+from omni.portfolio.reconcile import Divergence
 from omni.portfolio.risk import RiskLimits, RiskRefusal
 from omni.trading.bridge import BridgeRefusal
 from omni.trading.loop import CycleResult, LoopConfig, LoopRefusal, run_cycle
@@ -259,6 +266,55 @@ async def _cycle(db, portfolio, venue, *, config=None, walk_forward=None, **kw):
     )
 
 
+async def _reconciliations(db, portfolio):
+    return await db.pool.fetch(
+        "SELECT id, venue, reconciled, checked_at FROM reconciliation_result "
+        "WHERE portfolio_id = $1 ORDER BY recorded_at, id",
+        portfolio,
+    )
+
+
+async def _discrepancies(db, result_id):
+    return await db.pool.fetch(
+        "SELECT kind, venue, symbol, detail FROM reconciliation_discrepancy "
+        "WHERE result_id = $1 ORDER BY seq",
+        result_id,
+    )
+
+
+async def _reconciliation_alert(db, portfolio, *, venue: str = "paper"):
+    """One configured reconciliation alert, so the alert pass has something to run.
+
+    `threshold` is required by the schema and meaningless to this kind; the hour
+    of staleness tolerance is far wider than the zero age of a result stamped
+    with the cycle's own clock, so nothing here can fire for being old.
+    """
+    return await db.pool.fetchval(
+        "INSERT INTO risk_alert (portfolio_id, kind, threshold, venue, stale_after) "
+        "VALUES ($1, 'reconciliation', $2, $3, $4) RETURNING id",
+        portfolio,
+        Decimal("0.01"),
+        venue,
+        timedelta(hours=1),
+    )
+
+
+async def _open_firings(db, alert_id):
+    return await db.pool.fetch(
+        "SELECT subject, reason, detail FROM risk_alert_firing "
+        "WHERE alert_id = $1 AND cleared_at IS NULL ORDER BY subject, reason",
+        alert_id,
+    )
+
+
+def _write_fails(monkeypatch, message: str = "the reconciliation write went nowhere"):
+    async def _boom(*args, **kwargs):
+        raise RuntimeError(message)
+
+    monkeypatch.setattr("omni.trading.loop.record", _boom)
+    return message
+
+
 async def _orders(db, portfolio):
     return await db.pool.fetch(
         "SELECT id, status, side, quantity, filled_quantity, average_fill_price, "
@@ -406,6 +462,175 @@ class TestReconciliationGatesTheCycle:
         assert result.halted is False
         assert result.considered == 1
         assert result.executed == 1
+
+
+def _ghost(symbol: str) -> Position:
+    """A holding the venue reports and the book has no row for."""
+    return Position(
+        venue="paper",
+        symbol=symbol,
+        market_type=MarketType.SPOT,
+        quantity=Decimal(5),
+        average_entry=Decimal(100),
+        as_of=NOW,
+    )
+
+
+class TestTheVerdictIsRecordedWhicheverWayItWent:
+    """Recording is a side effect of checking: taken on both outcomes, deciding neither.
+
+    The pair is the point. Storing only the passes satisfies a happy-path
+    assertion and deletes the single reading an operator has to act on -- the
+    venue that diverged is then the venue whose history reads `never_run`, which
+    is the answer given for a check that never happened.
+    """
+
+    async def test_a_pass_is_stored_as_a_pass(self, db, portfolio):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+
+        result = await _cycle(db, portfolio, _venue(symbol))
+
+        assert result.executed == 1
+        (stored,) = await _reconciliations(db, portfolio)
+        assert stored["venue"] == "paper"
+        assert stored["reconciled"] is True
+        # The cycle's clock, not the write's: a result recorded after a retry is
+        # evidence about the moment the books were compared.
+        assert stored["checked_at"] == NOW
+        assert await _discrepancies(db, stored["id"]) == []
+
+    async def test_a_divergence_is_stored_with_the_evidence_the_halt_named(
+        self, db, portfolio
+    ):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+        venue = _DivergentVenue(_venue(symbol), _ghost(symbol))
+
+        result = await _cycle(db, portfolio, venue)
+
+        assert result.halted is True
+        (stored,) = await _reconciliations(db, portfolio)
+        assert stored["reconciled"] is False
+        assert stored["checked_at"] == NOW
+
+        evidence = await _discrepancies(db, stored["id"])
+        assert Divergence.POSITION_MISSING_LOCALLY.value in {d["kind"] for d in evidence}
+        assert symbol in {d["symbol"] for d in evidence}
+        # What is on record is what the halt acted on, line for line. A store
+        # holding a divergence the operator was told nothing about, or a halt
+        # naming one the store cannot show, is the two drifting apart.
+        for discrepancy in evidence:
+            assert discrepancy["detail"] in result.halt_reason
+
+
+class TestAFailedWriteLosesTheRecordAndNeverTheVerdict:
+    """The write cannot move the verdict, in either direction.
+
+    A divergence already found stays a halt when the write fails, because the
+    alternative converts a divergence into a pass -- and a pass stays a pass,
+    because a bookkeeping failure is not evidence about the books. What the
+    failure does instead is surface: named in the halt reason when there is one,
+    logged with its traceback either way, and visible to the alert pass, which
+    reads the store and therefore sees an unrecordable verdict as a venue nobody
+    has checked.
+    """
+
+    async def test_a_divergence_still_halts_when_the_write_fails(
+        self, db, portfolio, monkeypatch
+    ):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+        venue = _DivergentVenue(_venue(symbol), _ghost(symbol))
+        message = _write_fails(monkeypatch)
+
+        result = await _cycle(db, portfolio, venue)
+
+        assert result.halted is True
+        assert result.considered == 0
+        assert symbol in result.halt_reason
+        assert message in result.halt_reason
+        assert venue.execute_calls == []
+        assert await _orders(db, portfolio) == []
+        # The write genuinely failed, so the assertions above are about the
+        # verdict surviving rather than about a store that quietly worked.
+        assert await _reconciliations(db, portfolio) == []
+
+    async def test_a_pass_still_runs_when_the_write_fails_and_the_failure_is_not_hidden(
+        self, db, portfolio, monkeypatch, caplog
+    ):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+        alert_id = await _reconciliation_alert(db, portfolio)
+        _write_fails(monkeypatch)
+
+        with caplog.at_level(logging.ERROR, logger="omni.trading.loop"):
+            result = await _cycle(db, portfolio, _venue(symbol))
+
+        assert result.halted is False
+        assert result.executed == 1
+        assert await _reconciliations(db, portfolio) == []
+
+        reported = [
+            r
+            for r in caplog.records
+            if r.name == "omni.trading.loop" and r.levelno >= logging.ERROR
+        ]
+        assert reported, "a write that failed and was never reported is a swallowed one"
+        assert reported[0].exc_info is not None
+
+        # And it surfaces where an operator is looking: the alert reads the
+        # store, so a verdict nobody can read back is an unchecked venue rather
+        # than a passing one.
+        (firing,) = await _open_firings(db, alert_id)
+        assert firing["subject"] == "paper"
+        assert firing["reason"] == RiskRefusal.RECONCILIATION_UNKNOWN.value
+
+
+class TestTheAlertPassIsGivenTheReconciliations:
+    """`alerts.evaluate` is wired to the stored results, not left to default.
+
+    Its `reconciliations` argument has no default precisely so that a caller
+    which never wired it cannot be mistaken for a healthy one: `None`, `{}` and
+    a mapping missing the venue all read as `RECONCILIATION_UNKNOWN`. So the two
+    cases below pin the wiring from both sides -- an unwired loop reports the
+    divergence as unknown and breaks the first, and reports a clean venue as
+    unknown and breaks the second, while a loop that never evaluates alerts at
+    all breaks the first.
+    """
+
+    async def test_a_divergence_opens_an_episode_naming_what_diverged(
+        self, db, portfolio
+    ):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+        alert_id = await _reconciliation_alert(db, portfolio)
+        venue = _DivergentVenue(_venue(symbol), _ghost(symbol))
+
+        result = await _cycle(db, portfolio, venue)
+
+        assert result.halted is True
+        (firing,) = await _open_firings(db, alert_id)
+        assert firing["subject"] == "paper"
+        assert firing["reason"] == RiskRefusal.RECONCILIATION_DIVERGENCE.value
+        # The stored evidence reached the alert, not merely the boolean.
+        assert Divergence.POSITION_MISSING_LOCALLY.value in firing["detail"]
+
+    async def test_a_recorded_pass_leaves_the_alert_silent(self, db, portfolio):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+        alert_id = await _reconciliation_alert(db, portfolio)
+
+        result = await _cycle(db, portfolio, _venue(symbol))
+
+        assert result.executed == 1
+        assert await _open_firings(db, alert_id) == []
 
 
 class TestRefusalsAreNamedAndCounted:

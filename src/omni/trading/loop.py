@@ -11,6 +11,18 @@ and says which symbol diverged. A divergence discovered after forty sized
 positions have been opened against it is a divergence that has already
 compounded into all forty.
 
+**Every reconciliation is recorded, and recording changes nothing.** The verdict
+is persisted whether it passed or failed, because the failed one is the reading
+an operator has to act on and a divergence that was found, halted on, and never
+written leaves `/trading/reconciliation` reporting `never_run` for the one venue
+that actually diverged. The write is a side effect in the strict sense: it
+cannot move the verdict in either direction, so a write that fails still halts
+the cycle on the divergence it already found, and a write that fails on a clean
+check still lets the cycle run. It surfaces instead through the alert pass --
+which reads the STORE, never the object in hand, so a verdict nobody can read
+back reaches the alerting system as `RECONCILIATION_UNKNOWN`, which is the
+honest statement about a check whose answer was lost.
+
 **Every refusal is counted and named.** `CycleResult.refused` is a histogram
 over reasons, and `CycleResult` refuses at construction to hold a count that
 does not add up: `sum(refused.values())` must equal `considered - executed`. A
@@ -57,6 +69,7 @@ local figure. `state.load` returns both in one snapshot, so passing
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -64,13 +77,15 @@ from decimal import Decimal
 from enum import Enum
 from uuid import UUID
 
-from omni.portfolio import orders, state
+from omni.portfolio import alerts, orders, state
 from omni.portfolio.orders import OrderLedgerError, OrderStatus
-from omni.portfolio.reconcile import reconcile
+from omni.portfolio.reconcile import ReconciliationResult, latest_by_venue, reconcile, record
 from omni.portfolio.risk import RiskLimits
 from omni.trading.bridge import BridgeRefusal, BridgeResult, prediction_to_intent
 from omni.trading.policy import Eligibility, TradingPhase, eligible
 from omni.venue.protocol import Fill, MarketType, Venue, VenueUnavailable
+
+logger = logging.getLogger(__name__)
 
 # Pending only, and only while the horizon is still open: a prediction whose
 # horizon has elapsed is waiting to be scored, not waiting to be traded, and an
@@ -195,6 +210,65 @@ def _refusal_name(result: BridgeResult) -> str:
     return result.refusal.value
 
 
+async def _record_reconciliation(
+    pool, verified: ReconciliationResult, *, portfolio_id: UUID
+) -> str | None:
+    """Persist a verdict already reached. Returns why it could not be, or None.
+
+    Called on both outcomes. Recording only the passes would delete exactly the
+    evidence an operator needs: the venue that diverged is the venue whose
+    history would then read `never_run`, and a reconciliation the store cannot
+    show ever happened is one nobody can be held to.
+
+    The failure is caught rather than raised because raising would abandon the
+    cycle before the halt below names which symbol diverged. It is returned so
+    the halt can carry it, and logged so it is not lost when there is no halt to
+    carry it -- what it must never do is decide anything.
+    """
+    try:
+        await record(pool, verified, portfolio_id=portfolio_id)
+    except Exception as exc:  # reported and returned, never swallowed
+        logger.exception(
+            "the reconciliation of %s could not be recorded for portfolio %s",
+            verified.venue,
+            portfolio_id,
+        )
+        return (
+            f"the result could not be recorded ({type(exc).__name__}: {exc}), so "
+            f"no reader of the reconciliation history can see that this check ran"
+        )
+    return None
+
+
+async def _evaluate_risk_alerts(pool, *, portfolio_id: UUID, now: datetime) -> None:
+    """Run the portfolio's configured risk alerts against what is on record.
+
+    `reconciliations` is read back from the store rather than handed the result
+    this cycle is holding. `alerts.evaluate` refuses to read a venue it has no
+    result for as healthy, and that refusal is the whole mechanism by which a
+    verdict that failed to persist stops looking like a pass: passing the
+    in-memory object instead would report the venue as verified on the strength
+    of a record nobody can read back.
+
+    Runs on the halting path too. A divergence is the moment the reconciliation
+    alert exists for, and an alert pass that only ran on the cycles that got
+    past reconciliation would be silent for exactly the venue in trouble.
+
+    Nothing here raises into the cycle. Alerting observes the cycle; a failure
+    to observe must not be able to lose the halt the cycle already decided on.
+    """
+    try:
+        reconciliations = await latest_by_venue(pool, portfolio_id)
+        for alert in await alerts.load_alerts(pool, portfolio_id):
+            await alerts.evaluate(
+                pool, alert, reconciliations=reconciliations, now=now
+            )
+    except Exception:  # logged, and never allowed to move a verdict
+        logger.exception(
+            "the risk alerts for portfolio %s could not be evaluated", portfolio_id
+        )
+
+
 async def run_cycle(
     pool,
     *,
@@ -235,18 +309,24 @@ async def run_cycle(
         tolerance=config.tolerance,
         now=now,
     )
+    unrecorded = await _record_reconciliation(pool, verified, portfolio_id=portfolio_id)
+    await _evaluate_risk_alerts(pool, portfolio_id=portfolio_id, now=now)
+
     if not verified:
+        halt_reason = (
+            f"{verified.venue} did not reconcile, so no position this cycle "
+            f"would size against a verified book: "
+            + "; ".join(d.detail for d in verified.discrepancies)
+        )
+        if unrecorded is not None:
+            halt_reason = f"{halt_reason} -- and {unrecorded}"
         return CycleResult(
             considered=0,
             executed=0,
             refused={},
             fills=(),
             halted=True,
-            halt_reason=(
-                f"{verified.venue} did not reconcile, so no position this cycle "
-                f"would size against a verified book: "
-                + "; ".join(d.detail for d in verified.discrepancies)
-            ),
+            halt_reason=halt_reason,
         )
 
     recorded_peak = await pool.fetchval(_PEAK_NAV, portfolio_id)
