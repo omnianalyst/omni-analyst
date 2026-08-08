@@ -1,0 +1,384 @@
+"""A venue that executes nothing, honestly.
+
+The paper phase decides whether real capital moves, so a paper venue that fills
+generously is worse than no paper venue at all -- it produces a track record
+that cannot be reproduced live, and the gap only becomes visible after the
+money is committed. Every rule here is chosen to fill *less* readily than
+reality, never more.
+
+Four rules, each closing a specific way a paper fill flatters itself:
+
+**Never fill at a price that did not trade.** A fill is clamped into the bar's
+own `[low, high]`. Without this, a slippage model can walk the fill price past
+the extreme the market actually printed, and the position opens at a level that
+never existed.
+
+**A limit order fills only if the market reached it.** A buy limit needs
+`low <= limit`, a sell limit needs `high >= limit`. The common shortcut --
+filling any limit whose price is "close enough" to the close -- is how a
+backtest earns the spread on every trade instead of paying it.
+
+**Size is capped by volume.** An order larger than the bar's traded volume
+cannot fill in full, and what does fill moves the price against itself. A model
+without this lets a strategy scale to any size at the touch, which is the
+single most common reason a backtest does not survive contact with a book.
+
+**A rejection is a rejection.** Below `min_notional` the venue returns an empty
+fill, not a fill for the minimum. Silently resizing an order is how a risk limit
+gets ignored one trade at a time.
+
+Market data is injected as a `MarketWindow` rather than read from the claim
+store, so fills can be tested against recorded bars with no database -- the same
+property that made the ingest adapters testable.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
+from typing import Protocol, runtime_checkable
+
+from omni.venue.protocol import (
+    Balance,
+    Capabilities,
+    Fill,
+    MarketType,
+    OrderKind,
+    Position,
+    Quote,
+    Side,
+    TradeIntent,
+    VenueUnavailable,
+)
+
+# What fraction of a bar's volume a single order may take. A strategy filling
+# more than this is not being modelled, it is being flattered: at 100% the
+# order is the entire market for that bar and the fill price is fiction.
+DEFAULT_PARTICIPATION_CAP = Decimal("0.10")
+
+# Price impact in bps per unit of participation. At the cap above, a full-size
+# order pays 10bps. Deliberately modest -- the point is that impact exists and
+# scales, not that this coefficient is calibrated. A venue with real book data
+# should override it from measured depth.
+DEFAULT_IMPACT_BPS = Decimal(100)
+
+
+@dataclass(frozen=True)
+class Bar:
+    """One OHLCV window. The only thing a paper fill is allowed to believe."""
+
+    symbol: str
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    at: datetime
+
+    def __post_init__(self) -> None:
+        if self.low > self.high:
+            raise ValueError(f"low {self.low} exceeds high {self.high} for {self.symbol}")
+        if not (self.low <= self.open <= self.high):
+            raise ValueError(f"open {self.open} outside [{self.low}, {self.high}]")
+        if not (self.low <= self.close <= self.high):
+            raise ValueError(f"close {self.close} outside [{self.low}, {self.high}]")
+        if self.volume < 0:
+            raise ValueError(f"negative volume: {self.volume}")
+
+    def clamp(self, price: Decimal) -> Decimal:
+        return min(max(price, self.low), self.high)
+
+
+@runtime_checkable
+class MarketWindow(Protocol):
+    """The recorded market a paper fill executes against."""
+
+    async def bar(self, symbol: str, at: datetime) -> Bar | None: ...
+
+
+@dataclass
+class RecordedBars:
+    """A `MarketWindow` over an in-memory list. Used by tests and backtests."""
+
+    bars: dict[str, list[Bar]] = field(default_factory=dict)
+
+    def add(self, bar: Bar) -> None:
+        self.bars.setdefault(bar.symbol, []).append(bar)
+
+    async def bar(self, symbol: str, at: datetime) -> Bar | None:
+        candidates = [b for b in self.bars.get(symbol, []) if b.at <= at]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda b: b.at)
+
+
+class PaperVenue:
+    """Simulated execution against recorded bars, using the real cost model.
+
+    `spread_bps` is charged on every taker fill because the reference price is
+    the bar close, which sits inside the spread. A paper venue that fills at the
+    close pays nothing to cross, and a strategy trading frequently enough will
+    show an edge composed entirely of that omission.
+    """
+
+    def __init__(
+        self,
+        market: MarketWindow,
+        capabilities: Capabilities,
+        *,
+        name: str = "paper",
+        spread_bps: Decimal = Decimal(4),
+        participation_cap: Decimal = DEFAULT_PARTICIPATION_CAP,
+        impact_bps: Decimal = DEFAULT_IMPACT_BPS,
+        starting_balances: dict[str, Decimal] | None = None,
+    ) -> None:
+        if participation_cap <= 0 or participation_cap > 1:
+            raise ValueError(
+                f"participation_cap must be in (0, 1], got {participation_cap}"
+            )
+        if spread_bps < 0 or impact_bps < 0:
+            raise ValueError("spread_bps and impact_bps must not be negative")
+
+        self.name = name
+        self.capabilities = capabilities
+        self._market = market
+        self._spread_bps = spread_bps
+        self._participation_cap = participation_cap
+        self._impact_bps = impact_bps
+        self._balances: dict[str, Decimal] = dict(starting_balances or {})
+        self._positions: dict[tuple[str, MarketType], Position] = {}
+        self._fills: list[Fill] = []
+
+    @property
+    def fills(self) -> list[Fill]:
+        return list(self._fills)
+
+    async def _require_bar(self, intent: TradeIntent) -> Bar:
+        at = intent.expires_at or _now_from(intent)
+        bar = await self._market.bar(intent.symbol, at)
+        if bar is None:
+            raise VenueUnavailable(
+                f"no recorded bar for {intent.symbol} at or before {at}; "
+                f"refusing to fill against a price that was never observed"
+            )
+        return bar
+
+    def _fillable_quantity(self, intent: TradeIntent, bar: Bar) -> Decimal:
+        cap = bar.volume * self._participation_cap
+        return min(intent.quantity, cap)
+
+    def _participation(self, quantity: Decimal, bar: Bar) -> Decimal:
+        if bar.volume <= 0:
+            return Decimal(1)
+        return quantity / bar.volume
+
+    async def quote(self, intent: TradeIntent) -> Quote:
+        bar = await self._require_bar(intent)
+        quantity = self._fillable_quantity(intent, bar)
+        price = self._price_for(intent, bar, quantity)
+        if price is None:
+            raise VenueUnavailable(
+                f"{intent.symbol} did not trade through {intent.limit_price} "
+                f"in the window [{bar.low}, {bar.high}]"
+            )
+        fee = price * quantity * self.capabilities.taker_fee_bps / Decimal(10_000)
+        slippage = abs(price - bar.close) * quantity
+        return Quote(
+            intent=intent,
+            expected_price=price,
+            fee=fee,
+            slippage=slippage,
+            gas=Decimal(0),
+            as_of=bar.at,
+        )
+
+    def _price_for(
+        self, intent: TradeIntent, bar: Bar, quantity: Decimal
+    ) -> Decimal | None:
+        """The price this intent would fill at, or None if it would not fill."""
+        if intent.order_kind is OrderKind.LIMIT:
+            limit = intent.limit_price
+            assert limit is not None  # guaranteed by TradeIntent.__post_init__
+            if intent.side is Side.BUY:
+                if bar.low > limit:
+                    return None
+                return bar.clamp(min(limit, bar.open))
+            if bar.high < limit:
+                return None
+            return bar.clamp(max(limit, bar.open))
+
+        half_spread = bar.close * self._spread_bps / Decimal(20_000)
+        impact = (
+            bar.close
+            * self._impact_bps
+            * self._participation(quantity, bar)
+            / Decimal(10_000)
+        )
+        adverse = half_spread + impact
+        raw = bar.close + adverse if intent.side is Side.BUY else bar.close - adverse
+        return bar.clamp(raw)
+
+    async def execute(self, intent: TradeIntent) -> Fill:
+        bar = await self._require_bar(intent)
+
+        if intent.notional < self.capabilities.min_notional:
+            return _empty_fill(
+                intent,
+                self.name,
+                bar.at,
+                reason=(
+                    f"notional {intent.notional} below venue minimum "
+                    f"{self.capabilities.min_notional}"
+                ),
+            )
+
+        if not self.capabilities.supports(intent.market_type):
+            raise VenueUnavailable(
+                f"{self.name} does not support {intent.market_type.value}"
+            )
+        if intent.side is Side.SELL and not self.capabilities.shorting:
+            existing = self._positions.get((intent.symbol, intent.market_type))
+            held = existing.quantity if existing else Decimal(0)
+            if held < intent.quantity:
+                raise VenueUnavailable(
+                    f"{self.name} cannot short: holding {held} of "
+                    f"{intent.symbol}, asked to sell {intent.quantity}"
+                )
+
+        quantity = self._fillable_quantity(intent, bar)
+        if quantity <= 0:
+            return _empty_fill(
+                intent, self.name, bar.at, reason="no volume traded in the window"
+            )
+
+        price = self._price_for(intent, bar, quantity)
+        if price is None:
+            return _empty_fill(
+                intent,
+                self.name,
+                bar.at,
+                reason=(
+                    f"limit {intent.limit_price} not reached; bar traded "
+                    f"[{bar.low}, {bar.high}]"
+                ),
+            )
+
+        fee = price * quantity * self.capabilities.taker_fee_bps / Decimal(10_000)
+        fill = Fill(
+            intent_id=intent.idempotency_key,
+            venue=self.name,
+            symbol=intent.symbol,
+            side=intent.side,
+            filled_quantity=quantity,
+            average_price=price,
+            fee_paid=fee,
+            filled_at=bar.at,
+            external_id=f"paper-{len(self._fills)}",
+            raw={
+                "bar": {
+                    "open": str(bar.open),
+                    "high": str(bar.high),
+                    "low": str(bar.low),
+                    "close": str(bar.close),
+                    "volume": str(bar.volume),
+                },
+                "requested_quantity": str(intent.quantity),
+                "participation": str(self._participation(quantity, bar)),
+                "partial": quantity < intent.quantity,
+            },
+        )
+        self._apply(fill, intent.market_type)
+        self._fills.append(fill)
+        return fill
+
+    def _apply(self, fill: Fill, market_type: MarketType) -> None:
+        key = (fill.symbol, market_type)
+        signed = fill.filled_quantity if fill.side is Side.BUY else -fill.filled_quantity
+        existing = self._positions.get(key)
+
+        if existing is None:
+            new_quantity = signed
+            new_entry = fill.average_price
+        else:
+            new_quantity = existing.quantity + signed
+            if existing.quantity == 0 or (existing.quantity > 0) != (signed > 0):
+                # Opening, flipping or reducing: a reduction keeps the original
+                # entry, a flip takes the new one. Averaging across a flip would
+                # invent an entry price the position never had.
+                new_entry = (
+                    fill.average_price
+                    if new_quantity != 0 and (new_quantity > 0) != (existing.quantity > 0)
+                    else existing.average_entry
+                )
+            else:
+                total = abs(existing.quantity) + abs(signed)
+                new_entry = (
+                    existing.average_entry * abs(existing.quantity)
+                    + fill.average_price * abs(signed)
+                ) / total
+
+        if new_quantity == 0:
+            self._positions.pop(key, None)
+            return
+
+        self._positions[key] = Position(
+            venue=self.name,
+            symbol=fill.symbol,
+            market_type=market_type,
+            quantity=new_quantity,
+            average_entry=new_entry,
+            as_of=fill.filled_at,
+        )
+
+    async def positions(self) -> list[Position]:
+        return list(self._positions.values())
+
+    async def balances(self) -> list[Balance]:
+        now = max((f.filled_at for f in self._fills), default=_EPOCH)
+        return [
+            Balance(
+                venue=self.name,
+                asset=asset,
+                free=amount,
+                locked=Decimal(0),
+                as_of=now,
+            )
+            for asset, amount in self._balances.items()
+        ]
+
+    async def cancel(self, external_id: str) -> bool:
+        # Paper fills are immediate; there is never a resting order to cancel.
+        # Returning True would report a cancellation that did not happen.
+        return False
+
+
+_EPOCH = datetime.fromtimestamp(0).astimezone()
+
+
+def _now_from(intent: TradeIntent) -> datetime:
+    stamp = intent.provenance.get("as_of")
+    if isinstance(stamp, datetime):
+        return stamp
+    raise VenueUnavailable(
+        "a paper intent must carry provenance['as_of'] or expires_at so the "
+        "fill can be dated; filling against 'now' would let a backtest see a "
+        "bar that had not printed yet"
+    )
+
+
+def _empty_fill(
+    intent: TradeIntent, venue: str, at: datetime, *, reason: str
+) -> Fill:
+    return Fill(
+        intent_id=intent.idempotency_key,
+        venue=venue,
+        symbol=intent.symbol,
+        side=intent.side,
+        filled_quantity=Decimal(0),
+        average_price=Decimal(0),
+        fee_paid=Decimal(0),
+        filled_at=at,
+        external_id=None,
+        raw={"rejected": reason, "requested_quantity": str(intent.quantity)},
+    )
