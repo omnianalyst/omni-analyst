@@ -15,7 +15,7 @@ own exception types; they import it through `pytest.importorskip` so they skip
 honestly if ccxt is absent rather than erroring on import.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -57,6 +57,11 @@ def _at(iso: str) -> datetime:
     return datetime.fromisoformat(iso).replace(tzinfo=UTC)
 
 
+# One daily bar. A literal, not BAR_DURATIONS["1d"]: the duration of a "1d"
+# candle is a fact about the exchange, and reading it from the module under test
+# would let a mutation to that table mutate the fixture along with it.
+DAY = timedelta(days=1)
+
 class FakeVenue:
     """A recording page server for the injected `fetch_fn` seam.
 
@@ -86,7 +91,7 @@ class FakeVenue:
 
 class TestParsing:
     def test_one_claim_per_bar_with_all_five_fields_and_venue(self):
-        drafts = parse_ohlcv(OHLCV_PAYLOAD, symbol="BTC/USDT", venue="binance")
+        drafts = parse_ohlcv(OHLCV_PAYLOAD, symbol="BTC/USDT", venue="binance", bar_duration=DAY)
         assert len(drafts) == 2
         assert drafts[0].value == {
             "open": 178.06,
@@ -98,21 +103,52 @@ class TestParsing:
         }
         assert drafts[1].value["venue"] == "binance"
 
-    def test_event_date_equals_knowledge_date(self):
-        """A crypto bar is knowable the moment it closes: crypto trades
-        continuously with no settlement lag. Asserted against a literal derived
-        from the bar's own timestamp, never from `datetime.now()`, and equal to
-        `event_date` -- not a fabricated close."""
-        drafts = parse_ohlcv(OHLCV_PAYLOAD, symbol="BTC/USDT", venue="binance")
+    def test_a_bar_is_knowable_one_duration_after_the_timestamp_it_carries(self):
+        """A crypto bar is knowable the moment it closes -- and it closes one
+        duration AFTER the timestamp it carries, because ccxt stamps a bar with
+        its open.
+
+        This previously asserted `event_date == knowledge_date`, which said a
+        day's closing price was knowable when the day began. Crypto having no
+        settlement lag is true and was never the issue; the issue is which end
+        of the candle the timestamp names.
+
+        Asserted against literals derived from the bar's own timestamp, never
+        from `datetime.now()`, and the inequality is asserted directly so a
+        regression to equality cannot pass.
+        """
+        drafts = parse_ohlcv(OHLCV_PAYLOAD, symbol="BTC/USDT", venue="binance", bar_duration=DAY)
         assert len(drafts) == 2
         for d in drafts:
-            assert d.event_date == d.knowledge_date
+            assert d.knowledge_date == d.event_date + DAY
+            assert d.knowledge_date != d.event_date
         assert drafts[0].event_date == _at("2024-03-01T00:00:00")
-        assert drafts[0].knowledge_date == _at("2024-03-01T00:00:00")
+        assert drafts[0].knowledge_date == _at("2024-03-02T00:00:00")
         assert drafts[0].knowledge_date != datetime.now(UTC)
 
+    def test_the_duration_is_used_and_not_assumed_to_be_a_day(self):
+        """An hourly bar closes an hour later, not a day later.
+
+        Without this, hard-coding `+ timedelta(days=1)` in the parser passes
+        every other test in this file, since they all use daily bars -- and it
+        would put a 23-hour lookahead on every intraday series.
+        """
+        drafts = parse_ohlcv(
+            OHLCV_PAYLOAD,
+            symbol="BTC/USDT",
+            venue="binance",
+            bar_duration=timedelta(hours=1),
+        )
+        assert drafts[0].knowledge_date == _at("2024-03-01T01:00:00")
+
+    def test_an_unknown_timeframe_is_refused_rather_than_defaulted(self):
+        """Guessing a duration would put a silent bitemporal error on every bar
+        of that interval. There is no safe default, so there is no default."""
+        with pytest.raises(ValueError, match="unknown timeframe"):
+            CCXTAdapter(venue="binance", timeframe="3d")
+
     def test_each_bar_is_a_price_snapshot_for_the_symbol(self):
-        drafts = parse_ohlcv(OHLCV_PAYLOAD, symbol="BTC/USDT", venue="binance")
+        drafts = parse_ohlcv(OHLCV_PAYLOAD, symbol="BTC/USDT", venue="binance", bar_duration=DAY)
         assert {d.claim_type for d in drafts} == {"price_snapshot"}
         assert {d.key for d in drafts} == {"BTC/USDT"}
 
@@ -122,7 +158,7 @@ class TestParsing:
             [1709337600000, 1.0, 2.0, 0.5, None, 100],
             [1709424000000, 1.0, 2.0, 0.5, 1.7, 100],
         ]
-        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance")
+        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance", bar_duration=DAY)
         assert len(drafts) == 2
         assert [d.value["close"] for d in drafts] == [1.5, 1.7]
 
@@ -131,7 +167,7 @@ class TestParsing:
         sentinel for absence. Dropping it would silently erase a day. The
         parser guards on None/NaN/inf, never on == 0."""
         payload = [[1709251200000, 1.0, 2.0, 0.5, 1.5, 0]]
-        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance")
+        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance", bar_duration=DAY)
         assert len(drafts) == 1
         assert drafts[0].value["volume"] == 0
 
@@ -140,7 +176,7 @@ class TestParsing:
             [1709251200000, 1.0, 2.0, 0.5],  # only 4 elements
             [1709337600000, 1.0, 2.0, 0.5, 1.5, 100],
         ]
-        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance")
+        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance", bar_duration=DAY)
         assert len(drafts) == 1
         assert drafts[0].value["close"] == 1.5
 
@@ -149,7 +185,7 @@ class TestParsing:
             [1709251200000, 1.0, 2.0, 0.5, float("nan"), 100],
             [1709337600000, 1.0, 2.0, 0.5, 1.5, 100],
         ]
-        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance")
+        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance", bar_duration=DAY)
         assert len(drafts) == 1
 
     def test_a_row_without_a_timestamp_is_skipped(self):
@@ -158,12 +194,12 @@ class TestParsing:
             ["not-a-ts", 1.0, 2.0, 0.5, 1.5, 100],
             [1709337600000, 1.0, 2.0, 0.5, 1.5, 100],
         ]
-        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance")
+        drafts = parse_ohlcv(payload, symbol="BTC/USDT", venue="binance", bar_duration=DAY)
         assert len(drafts) == 1
 
     def test_an_empty_result_returns_no_drafts(self):
-        assert parse_ohlcv([], symbol="BTC/USDT", venue="binance") == []
-        assert parse_ohlcv(None, symbol="BTC/USDT", venue="binance") == []
+        assert parse_ohlcv([], symbol="BTC/USDT", venue="binance", bar_duration=DAY) == []
+        assert parse_ohlcv(None, symbol="BTC/USDT", venue="binance", bar_duration=DAY) == []
 
 
 class TestAdapter:
@@ -175,13 +211,27 @@ class TestAdapter:
         drafts = await CCXTAdapter(venue="binance", fetch_fn=fake).fetch("BTC/USDT")
         assert len(drafts) == 2
 
-    async def test_knowledge_date_equals_event_date_through_the_adapter(self):
+    async def test_the_adapter_carries_its_timeframe_into_the_bitemporal_pair(self):
+        """The parser cannot know the duration; the adapter is told it.
+
+        Asserted through the adapter rather than on `parse_ohlcv` directly,
+        because the defect this guards against is the adapter forwarding the
+        wrong duration -- or a default one -- while the parser stays correct.
+        """
+
         async def fake(symbol: str, *, since=None, limit=None):
             return OHLCV_PAYLOAD
 
-        drafts = await CCXTAdapter(venue="binance", fetch_fn=fake).fetch("BTC/USDT")
-        for d in drafts:
-            assert d.knowledge_date == d.event_date
+        daily = await CCXTAdapter(venue="binance", fetch_fn=fake).fetch("BTC/USDT")
+        hourly = await CCXTAdapter(
+            venue="binance", timeframe="1h", fetch_fn=fake
+        ).fetch("BTC/USDT")
+
+        for d in daily:
+            assert d.knowledge_date == d.event_date + DAY
+        for h in hourly:
+            assert h.knowledge_date == h.event_date + timedelta(hours=1)
+        assert daily[0].knowledge_date != hourly[0].knowledge_date
 
     async def test_the_same_symbol_at_two_venues_is_distinguishable(self):
         """The whole point of a multi-venue feed: the same asset priced at two
@@ -323,8 +373,13 @@ class TestDeepHistory:
         into it, every backfilled bar would read as known today, a replay at a
         2021 cutoff would see the whole future, and any edge measured on it
         would be an artefact. That failure is silent, so it is asserted
-        directly: each pair equals the bar's own timestamp, and the newest of
-        them is still years in the past.
+        directly.
+
+        The close of a bar stamped `T` exists at `T + one duration`, so that is
+        the knowledge date -- one day after the bar, not seven years after it,
+        and not on the bar itself. This originally asserted equality with
+        `event_date`, which is a smaller version of the same lookahead it was
+        written to prevent: one day of it rather than seven years.
         """
         venue = FakeVenue(PAGE_ONE, PAGE_TWO)
         adapter = CCXTAdapter(
@@ -334,15 +389,15 @@ class TestDeepHistory:
 
         assert len(drafts) == 5
         for draft in drafts:
-            assert draft.knowledge_date == draft.event_date
+            assert draft.knowledge_date == draft.event_date + DAY
         assert [d.knowledge_date for d in drafts] == [
-            _at("2019-01-01T00:00:00"),
             _at("2019-01-02T00:00:00"),
             _at("2019-01-03T00:00:00"),
             _at("2019-01-04T00:00:00"),
             _at("2019-01-05T00:00:00"),
+            _at("2019-01-06T00:00:00"),
         ]
-        assert max(d.knowledge_date for d in drafts) < _at("2019-01-06T00:00:00")
+        assert max(d.knowledge_date for d in drafts) < _at("2019-01-07T00:00:00")
 
     async def test_a_bar_returned_on_two_pages_is_emitted_once(self):
         """Consecutive pages overlap at the boundary on some venues. A bar

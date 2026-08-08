@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from omni.ingest.protocol import ClaimDraft, Unavailable
@@ -46,6 +46,39 @@ SOURCE = "ccxt"
 CLAIM_TYPE = "price_snapshot"
 
 logger = logging.getLogger(__name__)
+
+# How long one bar covers, per ccxt timeframe string. Needed because a bar's
+# timestamp is its OPEN, so the bar is knowable only one duration later -- see
+# `parse_ohlcv`. Spelled out rather than parsed from the string: a parser that
+# guesses would map an unknown timeframe onto a plausible duration, and the
+# resulting bitemporal error is silent. An unrecognised timeframe raises.
+BAR_DURATIONS: dict[str, timedelta] = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "30m": timedelta(minutes=30),
+    "1h": timedelta(hours=1),
+    "4h": timedelta(hours=4),
+    "1d": timedelta(days=1),
+    "1w": timedelta(weeks=1),
+}
+
+
+def bar_duration_for(timeframe: str) -> timedelta:
+    """The span one bar of `timeframe` covers, or a refusal.
+
+    Refusing an unknown timeframe is the point. Defaulting to a day would put a
+    wrong `knowledge_date` on every bar of an unrecognised interval, and nothing
+    downstream can detect that -- the claims would look ordinary and a replay
+    would quietly see the future.
+    """
+    try:
+        return BAR_DURATIONS[timeframe]
+    except KeyError:
+        raise ValueError(
+            f"unknown timeframe {timeframe!r}; a bar's knowledge_date depends on "
+            f"how long it covers, so add it to BAR_DURATIONS rather than guess"
+        ) from None
 
 # Every ccxt exception that means "the venue would not answer" maps to
 # `Unavailable`. `BadSymbol` is listed separately because it is not under
@@ -103,14 +136,33 @@ def parse_ohlcv(
     *,
     symbol: str,
     venue: str,
+    bar_duration: timedelta,
 ) -> list[ClaimDraft]:
     """Flatten a ccxt ``fetch_ohlcv`` result into claim drafts.
 
-    Each row is ``[ts_ms, open, high, low, close, volume]`` -- the close
-    timestamp anchors the bitemporal pair. A row with a null or unparseable
-    field is skipped, never zero-filled: zero-filling a missing close would
-    invent a price. Neighbours are still emitted, so one bad bar does not erase
-    the window.
+    Each row is ``[ts_ms, open, high, low, close, volume]``. A row with a null
+    or unparseable field is skipped, never zero-filled: zero-filling a missing
+    close would invent a price. Neighbours are still emitted, so one bad bar
+    does not erase the window.
+
+    **The timestamp is the bar's OPEN, not its close**, and that distinction is
+    the whole reason this function takes a `bar_duration`. A row stamped `T`
+    covers ``[T, T + bar_duration)``, so its close is not knowable until
+    ``T + bar_duration``. Verified live: the newest daily bar Binance returns is
+    stamped today at 00:00Z and its `close` is equal to the current ticker --
+    it is the candle still forming.
+
+    So `event_date` is `T`, labelling the period the bar describes, and
+    `knowledge_date` is `T + bar_duration`, when that period finished and its
+    close existed.
+
+    This was previously ``knowledge_date = event_date``, which asserted that a
+    day's closing price was knowable at the moment the day began. Producers
+    filter on ``knowledge_date <= as_of`` and `trend.sma` enters at
+    ``closes[-1]``, so a replay at cutoff `T` entered at a price from `T + 1d`
+    -- a full day of lookahead on a two-day horizon, and it applied to the
+    signal as well as the entry. It did not raise, and every number measured
+    over this data inherited it.
     """
     drafts: list[ClaimDraft] = []
     for row in ohlcv or []:
@@ -135,7 +187,7 @@ def parse_ohlcv(
                     "venue": venue,
                 },
                 event_date=event_date,
-                knowledge_date=event_date,
+                knowledge_date=event_date + bar_duration,
                 confidence=1.0,
             )
         )
@@ -187,6 +239,10 @@ class CCXTAdapter:
         self._api_key = api_key
         self._api_secret = api_secret
         self._timeframe = timeframe
+        # Resolved here, not at parse time, so an unknown timeframe fails when
+        # the adapter is built rather than after a full historical walk has
+        # already been paid for.
+        self._bar_duration = bar_duration_for(timeframe)
         self._since_ms = None if since is None else _epoch_ms(since)
         self._page_limit = page_limit
         self._fetch_fn = fetch_fn
@@ -290,4 +346,9 @@ class CCXTAdapter:
         except Exception as exc:
             _translate(exc, self._venue, key)
             raise
-        return parse_ohlcv(ohlcv, symbol=key, venue=self._venue)
+        return parse_ohlcv(
+            ohlcv,
+            symbol=key,
+            venue=self._venue,
+            bar_duration=self._bar_duration,
+        )
