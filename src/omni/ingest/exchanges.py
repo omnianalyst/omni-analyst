@@ -34,6 +34,7 @@ result, the v1 `ibkr_integration.py` defect.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -44,12 +45,14 @@ from omni.ingest.protocol import ClaimDraft, Unavailable
 SOURCE = "ccxt"
 CLAIM_TYPE = "price_snapshot"
 
+logger = logging.getLogger(__name__)
+
 # Every ccxt exception that means "the venue would not answer" maps to
 # `Unavailable`. `BadSymbol` is listed separately because it is not under
 # NetworkError (it sits under ExchangeError) and carries a different fact: this
 # venue does not list this asset, which is not the same as the asset not having
 # traded. Returning [] for it would conflate the two.
-OhlcvFetcher = Callable[[str], Awaitable[list[list[Any]]]]
+OhlcvFetcher = Callable[..., Awaitable[list[list[Any]]]]
 
 
 def _event_date(ts_ms: Any) -> datetime | None:
@@ -70,6 +73,29 @@ def _valid_field(field: Any) -> bool:
     if not isinstance(field, (int, float)):
         return False
     return not (isinstance(field, float) and (math.isnan(field) or math.isinf(field)))
+
+
+def _row_timestamp(row: Any) -> int | None:
+    if not isinstance(row, (list, tuple)) or not row:
+        return None
+    if not _valid_field(row[0]):
+        return None
+    return int(row[0])
+
+
+def _epoch_ms(moment: datetime) -> int:
+    if moment.tzinfo is None:
+        raise ValueError(
+            "since must be timezone-aware; a naive datetime is read as local "
+            "time and would silently shift the requested window"
+        )
+    return int(moment.timestamp() * 1000)
+
+
+def _now_ms() -> int:
+    """Wall clock, used only to bound the walk. Never reaches a claim: a bar's
+    bitemporal pair comes from the bar's own timestamp (see `parse_ohlcv`)."""
+    return int(datetime.now(UTC).timestamp() * 1000)
 
 
 def parse_ohlcv(
@@ -152,6 +178,8 @@ class CCXTAdapter:
         api_key: str | None = None,
         api_secret: str | None = None,
         timeframe: str = "1d",
+        since: datetime | None = None,
+        page_limit: int | None = None,
         fetch_fn: OhlcvFetcher | None = None,
     ) -> None:
         self.provider_key = venue
@@ -159,7 +187,78 @@ class CCXTAdapter:
         self._api_key = api_key
         self._api_secret = api_secret
         self._timeframe = timeframe
+        self._since_ms = None if since is None else _epoch_ms(since)
+        self._page_limit = page_limit
         self._fetch_fn = fetch_fn
+        self.last_stop_reason: str | None = None
+
+    def _exchange_options(self) -> dict[str, Any]:
+        # ccxt's own throttle, rather than a hand-rolled sleep: it knows each
+        # venue's per-endpoint weights, which a fixed delay here would not.
+        options: dict[str, Any] = {"enableRateLimit": True}
+        if self._api_key:
+            options["apiKey"] = self._api_key
+        if self._api_secret:
+            options["secret"] = self._api_secret
+        return options
+
+    async def _walk(self, page_fetch: OhlcvFetcher, symbol: str) -> list[list[Any]]:
+        """Page forward from `since`, or take a single page when there is none.
+
+        Three conditions end the walk, and all three are terminal: an empty
+        page, a page whose newest timestamp does not advance, and a cursor that
+        has passed the present. The middle one is what stops an unbounded loop
+        -- a venue that silently re-serves the same window would otherwise be
+        paged forever, which reads as slow progress rather than as a fault, so
+        the reason is recorded and logged rather than being swallowed.
+
+        A stalled page is not merged: its rows are, by definition, ones already
+        walked past. Rows are deduplicated on their timestamp because
+        consecutive pages can overlap at the boundary, and a bar emitted twice
+        is a bar counted twice.
+        """
+        if self._since_ms is None:
+            self.last_stop_reason = "no since requested: single page"
+            return await page_fetch(symbol, since=None, limit=self._page_limit)
+
+        collected: list[list[Any]] = []
+        seen: set[int] = set()
+        cursor = self._since_ms
+        newest: int | None = None
+        while True:
+            rows = await page_fetch(symbol, since=cursor, limit=self._page_limit)
+            if not rows:
+                self.last_stop_reason = f"{self._venue} returned no rows from {cursor}"
+                break
+            timestamps = [
+                ts for ts in (_row_timestamp(row) for row in rows) if ts is not None
+            ]
+            if not timestamps:
+                self.last_stop_reason = (
+                    f"{self._venue} returned {len(rows)} rows from {cursor} with no "
+                    f"usable timestamp"
+                )
+                break
+            page_newest = max(timestamps)
+            if newest is not None and page_newest <= newest:
+                self.last_stop_reason = (
+                    f"{self._venue} did not advance past {newest}: asked from "
+                    f"{cursor}, newest row returned was {page_newest}"
+                )
+                logger.warning("%s ohlcv paging stalled: %s", symbol, self.last_stop_reason)
+                break
+            for row in rows:
+                ts = _row_timestamp(row)
+                if ts is None or ts in seen:
+                    continue
+                seen.add(ts)
+                collected.append(row)
+            newest = page_newest
+            cursor = page_newest + 1
+            if cursor > _now_ms():
+                self.last_stop_reason = f"{self._venue} reached the present at {newest}"
+                break
+        return collected
 
     async def _default_fetch(self, symbol: str) -> list[list[Any]]:
         import ccxt.async_support as ccxt_async
@@ -168,21 +267,24 @@ class CCXTAdapter:
             exchange_cls = getattr(ccxt_async, self._venue)
         except AttributeError as exc:
             raise Unavailable(f"ccxt has no venue named {self._venue!r}") from exc
-        options: dict[str, Any] = {}
-        if self._api_key:
-            options["apiKey"] = self._api_key
-        if self._api_secret:
-            options["secret"] = self._api_secret
-        exchange = exchange_cls(options)
+        exchange = exchange_cls(self._exchange_options())
+
+        async def page(
+            sym: str, *, since: int | None = None, limit: int | None = None
+        ) -> list[list[Any]]:
+            return await exchange.fetch_ohlcv(sym, self._timeframe, since=since, limit=limit)
+
         try:
-            return await exchange.fetch_ohlcv(symbol, self._timeframe)
+            return await self._walk(page, symbol)
         finally:
             await exchange.close()
 
     async def fetch(self, key: str) -> list[ClaimDraft]:
-        fetch_fn = self._fetch_fn if self._fetch_fn is not None else self._default_fetch
         try:
-            ohlcv = await fetch_fn(key)
+            if self._fetch_fn is not None:
+                ohlcv = await self._walk(self._fetch_fn, key)
+            else:
+                ohlcv = await self._default_fetch(key)
         except Unavailable:
             raise
         except Exception as exc:
