@@ -496,6 +496,48 @@ def test_a_closed_position_does_not_occupy_a_slot():
     assert RiskRefusal.TOO_MANY_POSITIONS not in verdict.refusals
 
 
+def test_a_book_of_shorts_still_fills_the_position_ceiling():
+    """A short occupies a slot. The count is of open names, not of longs.
+
+    Every other count test above holds only longs, so counting `quantity > 0`
+    rather than `quantity != 0` passes all of them. Under that rule a short-only
+    book reports zero open positions and can never reach the ceiling at all --
+    the limit is deleted for exactly the book that is hardest to unwind.
+
+    Refused at a cap of 2 and allowed at 3, so neither a permissive engine nor a
+    uniformly-refusing one satisfies both halves, and the detail pins the count
+    at 3 rather than merely at "too many".
+    """
+    state = FakeState(
+        nav=Decimal(100_000),
+        positions=(
+            _position("ETH/USD", "-1", "3000"),
+            _position("SOL/USD", "-10", "100"),
+        ),
+    )
+    correlations = {
+        ("BTC/USD", "ETH/USD"): Decimal("0.1"),
+        ("BTC/USD", "SOL/USD"): Decimal("0.1"),
+    }
+
+    at_the_cap = _check(
+        intent=_intent(side=Side.SELL),
+        state=state,
+        limits=_limits(max_positions=2, max_correlated_exposure_pct_nav=Decimal(1)),
+        correlations=correlations,
+    )
+    inside_it = _check(
+        intent=_intent(side=Side.SELL),
+        state=state,
+        limits=_limits(max_positions=3, max_correlated_exposure_pct_nav=Decimal(1)),
+        correlations=correlations,
+    )
+
+    assert RiskRefusal.TOO_MANY_POSITIONS in at_the_cap.refusals
+    assert "3 open positions" in at_the_cap.detail
+    assert inside_it.allowed is True
+
+
 # --- correlation, and the missing-pair rule ---
 
 

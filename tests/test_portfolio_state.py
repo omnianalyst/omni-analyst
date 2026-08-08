@@ -184,6 +184,38 @@ class TestApplyFill:
         assert result.cash == Decimal(20)
         assert result.nav == Decimal(20)
 
+    async def test_a_flat_round_trip_costs_exactly_both_fees(self, db, portfolio_id):
+        """Bought and sold at the same price, so the whole result is the fees.
+
+        Every other cash assertion in this file is either fee-free or on a BUY,
+        which leaves the sell side's fee unpinned: dropping `- fee_paid` for
+        `Side.SELL` alone passes all of them. Here the trade itself nets to
+        exactly zero, so cash cannot be anything but the negative of the two
+        fees -- 1 if the sell's fee were dropped, 2.5 if the buy's were.
+        """
+        await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(quantity="3", price="100", fee="1"),
+            MarketType.SPOT,
+        )
+        result = await apply_fill(
+            db.pool,
+            portfolio_id,
+            _fill(
+                quantity="3",
+                price="100",
+                fee="2.5",
+                side=Side.SELL,
+                at=NOW + timedelta(minutes=1),
+            ),
+            MarketType.SPOT,
+        )
+
+        assert result.positions == ()
+        assert result.cash == Decimal("-3.5")
+        assert result.nav == Decimal("-3.5")
+
     async def test_spot_and_perpetual_of_one_symbol_stay_separate(self, db, portfolio_id):
         await apply_fill(db.pool, portfolio_id, _fill(quantity="2", price="100"), MarketType.SPOT)
         result = await apply_fill(
@@ -645,6 +677,50 @@ class TestRebuild:
         assert averaged.quantity == Decimal(3)
         assert averaged.average_entry == Decimal(320) / Decimal(3)
         assert len(materialised.positions) == 2
+
+    async def test_replay_keys_on_market_type_so_a_hedge_survives_it(
+        self, db, portfolio_id
+    ):
+        """One symbol, one venue, held long spot and short perp at once.
+
+        `_sequence` never holds a symbol as both spot and perpetual at a single
+        venue, so the market-type component of the replay key is never exercised
+        there -- and the replay-versus-materialisation comparison cannot expose
+        it either, since a key that ignored market type would collapse the same
+        way on both sides of the equality.
+
+        Keying on a constant `MarketType.SPOT` nets these two legs to zero and
+        drops the position entirely: a delta-neutral basis book reported as an
+        empty one, which reads as no exposure rather than two.
+        """
+        fills = [
+            (_fill(quantity="2", price="100", at=NOW), MarketType.SPOT),
+            (
+                _fill(
+                    quantity="2",
+                    price="101",
+                    side=Side.SELL,
+                    at=NOW + timedelta(minutes=1),
+                ),
+                MarketType.PERPETUAL,
+            ),
+        ]
+
+        replayed = await rebuild_from_fills(db.pool, portfolio_id, fills)
+
+        assert len(replayed.positions) == 2
+        spot = replayed.position_for("binance", "BTC/USD", MarketType.SPOT)
+        perp = replayed.position_for("binance", "BTC/USD", MarketType.PERPETUAL)
+        assert spot.quantity == Decimal(2)
+        assert spot.average_entry == Decimal(100)
+        assert perp.quantity == Decimal(-2)
+        assert perp.average_entry == Decimal(101)
+        assert replayed.gross_exposure == Decimal(402)
+        assert replayed.net_exposure == Decimal(-2)
+
+        for fill, market_type in fills:
+            await apply_fill(db.pool, portfolio_id, fill, market_type)
+        assert replayed.positions == (await load(db.pool, portfolio_id)).positions
 
     async def test_rebuild_writes_nothing(self, db, portfolio_id):
         replayed = await rebuild_from_fills(db.pool, portfolio_id, _sequence())
