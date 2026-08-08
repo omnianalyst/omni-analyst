@@ -61,7 +61,19 @@ def _adapter(
     cost: float = 1.0,
     entity_kinds: tuple[str, ...] = (),
     credentials: dict | None = None,
+    per_venue_source: bool = False,
 ) -> Capability:
+    """Register one adapter as a capability.
+
+    `per_venue_source` marks an adapter class that serves SEVERAL venues, where
+    the class-level `source` names the adapter rather than the observation. For
+    those, `source` is the venue, because the venue is what makes two rows
+    different observations rather than one repeated: the claim identity index is
+    `(entity, type, key, source, event_date, knowledge_date)`, and a Binance bar
+    and a Kraken bar for the same asset on the same day differ in none of the
+    other five. Collapsing them means the second venue is silently discarded as
+    a duplicate and `basis.crossvenue` never sees two prices to compare.
+    """
     bound = dict(credentials or {})
 
     async def call(key: str, **kwargs):
@@ -75,7 +87,7 @@ def _adapter(
         produces=produces,
         entity_kinds=entity_kinds,
         provider_key=provider_key,
-        source=_source_of(factory),
+        source=provider_key if per_venue_source else _source_of(factory),
         touches_byo=_byo(provider_key),
         cost=cost,
         maturity=Maturity.WIRED,
@@ -210,6 +222,7 @@ def build_builtin_registry(settings=None) -> Registry:
             entity_kinds=("crypto_asset",),
             factory=CCXTAdapter,
             credentials={"venue": venue},
+            per_venue_source=True,
         ))
         registry.add(_adapter(
             f"microstructure.{venue}",
@@ -223,6 +236,7 @@ def build_builtin_registry(settings=None) -> Registry:
             factory=MicrostructureAdapter,
             credentials={"venue": venue},
             cost=2.0,
+            per_venue_source=True,
         ))
 
     registry.add(_adapter(
