@@ -25,6 +25,9 @@ from omni.conviction.oi_divergence import (
     produce_oi_divergence_prediction_from_coverage,
 )
 from omni.conviction.predict import produce_dcf_prediction_from_coverage
+from omni.conviction.protocol_fundamentals import (
+    produce_protocol_fundamentals_prediction_from_coverage,
+)
 from omni.conviction.reserve import (
     produce_reserve_prediction_from_coverage,
 )
@@ -98,6 +101,17 @@ PRODUCERS: tuple[Producer, ...] = (
         entity_kinds=("crypto_asset",),
         produce=produce_smart_money_prediction_from_coverage,
         requires_claim_types=("onchain_flow", "price_snapshot"),
+    ),
+    Producer(
+        # P/F reversion toward a protocol's OWN trailing multiple, never toward
+        # a cross-protocol average -- protocols have structurally different fee
+        # economics and comparing them turns a fair multiple into a fabricated
+        # one. Market cap comes only from CoinGecko and may be null, in which
+        # case this abstains rather than reconstructing one.
+        method="fundamentals.protocol",
+        entity_kinds=("crypto_asset", "protocol"),
+        produce=produce_protocol_fundamentals_prediction_from_coverage,
+        requires_claim_types=("protocol_fees", "price_snapshot"),
     ),
 )
 
