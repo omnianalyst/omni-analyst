@@ -18,7 +18,7 @@ funding sign is preserved unchanged, ``knowledge_date == event_date`` for every
 claim, and a zero rate is emitted rather than dropped as falsy.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -408,6 +408,298 @@ class TestAdapterRouting:
         )
         with pytest.raises(Unavailable, match="500"):
             await adapter.fetch("oi:BTCUSDT")
+
+
+# Binance facts, written here as literals rather than imported from the module
+# under test. A fixture built out of the module's own constants would move with
+# them, and the test would then agree with whatever the module believed rather
+# than with the venue.
+#
+# * funding settles every 8 hours,
+# * `/fapi/v1/fundingRate` caps a request at 1000 rows and defaults to 100,
+# * `/futures/data/openInterestHist` caps at 500 and retains ~30 days.
+FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000
+OI_INTERVAL_MS = 5 * 60 * 1000
+BINANCE_PAGE_DEFAULT = 100
+BINANCE_FUNDING_MAX_LIMIT = 1000
+BINANCE_OI_MAX_LIMIT = 500
+
+# The first BTCUSDT perpetual funding settlement.
+INCEPTION = datetime(2019, 9, 10, 8, 0, tzinfo=UTC)
+INCEPTION_MS = int(INCEPTION.timestamp() * 1000)
+
+
+class _PagedHistory:
+    """A venue serving a synthetic history the way Binance serves a real one:
+    rows at or after ``startTime``, oldest first, at most ``limit`` of them, and
+    the 100-row default when no ``limit`` is asked for.
+
+    ``overlap`` re-serves that many rows from before ``startTime``, which is
+    what a boundary-inclusive page looks like -- a settlement arriving on two
+    consecutive pages. ``ignore_start_time`` serves the same window forever,
+    which is what a cached or misbehaving endpoint looks like and what turns an
+    unguarded pager into an infinite loop.
+
+    Every call is counted and the count is bounded, so a pager that fails to
+    terminate fails this suite in milliseconds instead of hanging it.
+    """
+
+    MAX_REQUESTS = 12
+
+    def __init__(
+        self,
+        *,
+        time_field: str,
+        interval_ms: int,
+        count: int,
+        start_ms: int = INCEPTION_MS,
+        overlap: int = 0,
+        ignore_start_time: bool = False,
+    ) -> None:
+        self._time_field = time_field
+        self._interval_ms = interval_ms
+        self._overlap = overlap
+        self._ignore_start_time = ignore_start_time
+        self.rows = [
+            self._row(start_ms + i * interval_ms) for i in range(count)
+        ]
+        self.calls: list[dict] = []
+
+    def _row(self, ts: int) -> dict:
+        if self._time_field == "fundingTime":
+            return {
+                "symbol": "BTCUSDT",
+                "fundingTime": ts,
+                "fundingRate": "0.00010000",
+                "markPrice": "34500.00000000",
+            }
+        return {
+            "symbol": "BTCUSDT",
+            "timestamp": ts,
+            "sumOpenInterest": "106999.091",
+            "sumOpenInterestValue": "3689345789.12",
+        }
+
+    async def __call__(self, key: str, *, start_time=None, limit=None):
+        self.calls.append(
+            {"key": key, "start_time": start_time, "limit": limit}
+        )
+        if len(self.calls) > self.MAX_REQUESTS:
+            raise AssertionError(
+                f"the pager made more than {self.MAX_REQUESTS} requests for "
+                f"{len(self.rows)} rows -- it is not terminating"
+            )
+        if start_time is None or self._ignore_start_time:
+            window = self.rows
+        else:
+            floor = start_time - self._overlap * self._interval_ms
+            window = [r for r in self.rows if r[self._time_field] >= floor]
+        return window[: BINANCE_PAGE_DEFAULT if limit is None else limit]
+
+
+def _funding_history(**kwargs) -> _PagedHistory:
+    return _PagedHistory(
+        time_field="fundingTime", interval_ms=FUNDING_INTERVAL_MS, **kwargs
+    )
+
+
+def _oi_history(**kwargs) -> _PagedHistory:
+    return _PagedHistory(
+        time_field="timestamp", interval_ms=OI_INTERVAL_MS, **kwargs
+    )
+
+
+class _RecordingSession:
+    """Captures the query params of every request the default fetcher makes,
+    serving the supplied bodies in order and an empty page once they run out."""
+
+    def __init__(self, pages: list) -> None:
+        self._pages = list(pages)
+        self.params: list[dict] = []
+
+    async def get(self, url: str, params=None, headers=None) -> _FakeResponse:
+        self.params.append(dict(params or {}))
+        body = self._pages.pop(0) if self._pages else []
+        return _FakeResponse(200, body)
+
+
+class TestFundingPaging:
+    async def test_a_since_pages_past_the_hundred_row_default(self):
+        # 2,500 settlements is ~2.3 years. Unpaged, Binance answers with 100 of
+        # them and nothing says so -- the defect that hid seven years of funding
+        # behind what looked like one month of coverage.
+        history = _funding_history(count=2500)
+        adapter = DerivativesAdapter(fetch_fn=history, since=INCEPTION)
+
+        drafts = await adapter.fetch("funding:BTCUSDT")
+
+        assert len(drafts) == 2500
+        assert min(d.event_date for d in drafts) == _at_ms(INCEPTION_MS)
+        assert max(d.event_date for d in drafts) == _at_ms(
+            INCEPTION_MS + 2499 * FUNDING_INTERVAL_MS
+        )
+        # three full pages plus the empty one that ends the walk
+        assert len(history.calls) == 4
+
+    async def test_the_walk_asks_from_since_at_the_venues_maximum_page_size(self):
+        history = _funding_history(count=1200)
+        adapter = DerivativesAdapter(fetch_fn=history, since=INCEPTION)
+
+        await adapter.fetch("funding:BTCUSDT")
+
+        assert history.calls[0]["start_time"] == INCEPTION_MS
+        assert all(
+            c["limit"] == BINANCE_FUNDING_MAX_LIMIT for c in history.calls
+        )
+        # the cursor moves past the newest row of the page just taken, so the
+        # next request cannot re-ask for the window already walked
+        assert history.calls[1]["start_time"] == (
+            INCEPTION_MS + 999 * FUNDING_INTERVAL_MS + 1
+        )
+
+    async def test_a_settlement_re_served_at_a_page_boundary_is_counted_once(self):
+        # A boundary-inclusive venue hands back the last row of the previous
+        # page. Emitting it twice double-counts one settlement of carry.
+        history = _funding_history(count=2500, overlap=1)
+        adapter = DerivativesAdapter(fetch_fn=history, since=INCEPTION)
+
+        drafts = await adapter.fetch("funding:BTCUSDT")
+
+        times = [d.event_date for d in drafts]
+        assert len(times) == 2500
+        assert len(set(times)) == 2500
+        boundary = _at_ms(INCEPTION_MS + 999 * FUNDING_INTERVAL_MS)
+        assert times.count(boundary) == 1
+
+    async def test_a_venue_that_re_serves_the_same_window_stops_instead_of_looping(
+        self,
+    ):
+        history = _funding_history(count=1000, ignore_start_time=True)
+        adapter = DerivativesAdapter(fetch_fn=history, since=INCEPTION)
+
+        drafts = await adapter.fetch("funding:BTCUSDT")
+
+        # one page taken, one page that failed to advance, then stop
+        assert len(history.calls) == 2
+        assert len(drafts) == 1000
+        assert "did not advance" in (adapter.last_stop_reason or "")
+
+    async def test_deep_history_is_stamped_from_the_settlement_not_the_fetch_clock(
+        self,
+    ):
+        # Paging 2,500 settlements from 2019 today must not stamp any of them
+        # with today. knowledge_date is when the rate BECAME KNOWABLE, which is
+        # the instant the venue settled it; sourcing it from the fetch clock
+        # would let a replay read a rate that had not settled yet.
+        history = _funding_history(count=2500)
+        adapter = DerivativesAdapter(fetch_fn=history, since=INCEPTION)
+
+        drafts = await adapter.fetch("funding:BTCUSDT")
+
+        for i, draft in enumerate(drafts):
+            settled = _at_ms(INCEPTION_MS + i * FUNDING_INTERVAL_MS)
+            assert draft.event_date == settled
+            assert draft.knowledge_date == settled
+        newest = max(d.knowledge_date for d in drafts)
+        assert newest < datetime.now(UTC) - timedelta(days=365)
+
+    async def test_a_throttle_mid_walk_raises_rather_than_returning_a_short_history(
+        self,
+    ):
+        pages: list = [
+            _funding_history(count=1000).rows,
+            {"code": -1003, "msg": "request weight"},
+        ]
+
+        async def paged(key: str, *, start_time=None, limit=None):
+            return pages.pop(0) if pages else []
+
+        adapter = DerivativesAdapter(fetch_fn=paged, since=INCEPTION)
+
+        # A truncated history returned as if it were complete is exactly the
+        # class of defect this walk exists to fix, so the throttle propagates.
+        with pytest.raises(Unavailable, match="rate-limited"):
+            await adapter.fetch("funding:BTCUSDT")
+
+    async def test_a_naive_since_is_refused_rather_than_read_as_local_time(self):
+        with pytest.raises(ValueError, match="timezone-aware"):
+            DerivativesAdapter(since=datetime(2019, 9, 10, 8, 0))  # noqa: DTZ001
+
+    async def test_without_a_since_the_live_request_is_unchanged(self):
+        # The scheduler's rolling path: one request, no startTime, no limit.
+        session = _RecordingSession([FUNDING_PAYLOAD])
+        adapter = DerivativesAdapter(session=session)
+
+        drafts = await adapter.fetch("funding:BTCUSDT")
+
+        assert len(drafts) == 3
+        assert session.params == [{"symbol": "BTCUSDT"}]
+
+    async def test_a_since_puts_start_time_and_the_limit_on_the_wire(self):
+        session = _RecordingSession([FUNDING_PAYLOAD])
+        adapter = DerivativesAdapter(session=session, since=INCEPTION)
+
+        await adapter.fetch("funding:BTCUSDT")
+
+        assert session.params[0] == {
+            "symbol": "BTCUSDT",
+            "startTime": INCEPTION_MS,
+            "limit": BINANCE_FUNDING_MAX_LIMIT,
+        }
+        assert session.params[1]["startTime"] == FUNDING_TS[3] + 1
+
+    async def test_liquidations_are_not_paged_by_a_since(self):
+        # forceOrders is a different endpoint with its own retention and auth;
+        # a funding backfill window must not silently drive it.
+        history = _funding_history(count=1000)
+        adapter = DerivativesAdapter(fetch_fn=history, since=INCEPTION)
+
+        await adapter.fetch("liq:BTCUSDT")
+
+        assert len(history.calls) == 1
+        assert history.calls[0]["start_time"] is None
+
+
+class TestOpenInterestPaging:
+    async def test_a_since_pages_the_window_the_venue_still_retains(self):
+        # openInterestHist retains ~30 days, so paging it reaches a retention
+        # wall rather than inception -- the series is forward-accumulating.
+        history = _oi_history(count=1200)
+        adapter = DerivativesAdapter(fetch_fn=history, since=INCEPTION)
+
+        drafts = await adapter.fetch("oi:BTCUSDT")
+
+        assert len(drafts) == 1200
+        assert all(c["limit"] == BINANCE_OI_MAX_LIMIT for c in history.calls)
+        # 500 + 500 + 200, then the empty page that ends the walk
+        assert len(history.calls) == 4
+        times = [d.event_date for d in drafts]
+        assert len(set(times)) == 1200
+        for draft in drafts:
+            assert draft.knowledge_date == draft.event_date
+
+    async def test_without_a_since_the_snapshot_request_is_unchanged(self):
+        session = _RecordingSession([OI_PAYLOAD])
+        adapter = DerivativesAdapter(session=session)
+
+        drafts = await adapter.fetch("oi:BTCUSDT")
+
+        assert len(drafts) == 2
+        assert session.params == [
+            {"symbol": "BTCUSDT", "period": "5m", "limit": 30}
+        ]
+
+    async def test_a_venue_that_re_serves_the_same_window_stops_instead_of_looping(
+        self,
+    ):
+        history = _oi_history(count=500, ignore_start_time=True)
+        adapter = DerivativesAdapter(fetch_fn=history, since=INCEPTION)
+
+        drafts = await adapter.fetch("oi:BTCUSDT")
+
+        assert len(history.calls) == 2
+        assert len(drafts) == 500
+        assert "did not advance" in (adapter.last_stop_reason or "")
 
 
 class TestAdapterDeclaration:
