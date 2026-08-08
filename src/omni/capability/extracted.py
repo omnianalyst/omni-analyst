@@ -68,6 +68,13 @@ CLAIM_TYPES = frozenset(
         "open_interest",
         "liquidation_event",
         "basis",
+        # 037: crypto's redistributable fundamentals tier -- the EDGAR
+        # counterpart. Fees are what users paid; revenue is the protocol's
+        # own share, and conflating them misprices P/F by whatever goes to LPs.
+        "protocol_revenue",
+        "protocol_fees",
+        "stablecoin_supply",
+        "chain_tvl",
     }
 )
 

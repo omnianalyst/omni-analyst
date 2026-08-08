@@ -57,6 +57,11 @@ SCHEMA_CLAIM_TYPES = frozenset(
         "open_interest",
         "liquidation_event",
         "basis",
+        # 037: protocol fundamentals.
+        "protocol_revenue",
+        "protocol_fees",
+        "stablecoin_supply",
+        "chain_tvl",
     }
 )
 
