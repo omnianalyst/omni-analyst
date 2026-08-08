@@ -19,7 +19,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
+from omni.conviction.basis import produce_basis_prediction_from_coverage
 from omni.conviction.carry import produce_carry_prediction_from_coverage
+from omni.conviction.oi_divergence import (
+    produce_oi_divergence_prediction_from_coverage,
+)
 from omni.conviction.predict import produce_dcf_prediction_from_coverage
 from omni.conviction.trend import produce_trend_prediction_from_coverage
 
@@ -54,6 +58,22 @@ PRODUCERS: tuple[Producer, ...] = (
         entity_kinds=("crypto_asset",),
         produce=produce_carry_prediction_from_coverage,
         requires_claim_types=("funding_rate", "price_snapshot"),
+    ),
+    Producer(
+        # Needs the SAME asset priced at two or more venues. A single aggregate
+        # price cannot express a basis -- that is why the ccxt adapter registers
+        # per venue rather than once.
+        method="basis.crossvenue",
+        entity_kinds=("crypto_asset",),
+        produce=produce_basis_prediction_from_coverage,
+        requires_claim_types=("price_snapshot",),
+    ),
+    Producer(
+        # Open interest is a perpetual-market quantity; an equity has none.
+        method="oi.divergence",
+        entity_kinds=("crypto_asset",),
+        produce=produce_oi_divergence_prediction_from_coverage,
+        requires_claim_types=("open_interest", "price_snapshot"),
     ),
 )
 
