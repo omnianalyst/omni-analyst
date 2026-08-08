@@ -28,6 +28,9 @@ from omni.conviction.predict import produce_dcf_prediction_from_coverage
 from omni.conviction.reserve import (
     produce_reserve_prediction_from_coverage,
 )
+from omni.conviction.smart_money import (
+    produce_smart_money_prediction_from_coverage,
+)
 from omni.conviction.trend import produce_trend_prediction_from_coverage
 
 
@@ -85,6 +88,15 @@ PRODUCERS: tuple[Producer, ...] = (
         method="flow.exchange_reserve",
         entity_kinds=("crypto_asset",),
         produce=produce_reserve_prediction_from_coverage,
+        requires_claim_types=("onchain_flow", "price_snapshot"),
+    ),
+    Producer(
+        # Only fund and treasury wallets. An exchange deposit is bearish under
+        # flow.exchange_reserve, so admitting exchanges here would have the two
+        # producers read one flow in opposite directions.
+        method="onchain.smart_money",
+        entity_kinds=("crypto_asset",),
+        produce=produce_smart_money_prediction_from_coverage,
         requires_claim_types=("onchain_flow", "price_snapshot"),
     ),
 )
