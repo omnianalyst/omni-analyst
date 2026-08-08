@@ -62,6 +62,12 @@ CLAIM_TYPES = frozenset(
         "lei_signal",
         "regime_assessment",
         "sector_score",
+        # 035: crypto derivatives. Keyless public venue data, so `allowed` --
+        # unlike every crypto price feed, these accumulate as shared coverage.
+        "funding_rate",
+        "open_interest",
+        "liquidation_event",
+        "basis",
     }
 )
 

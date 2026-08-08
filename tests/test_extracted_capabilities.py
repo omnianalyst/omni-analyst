@@ -52,6 +52,11 @@ SCHEMA_CLAIM_TYPES = frozenset(
         "lei_signal",
         "regime_assessment",
         "sector_score",
+        # 035: crypto derivatives.
+        "funding_rate",
+        "open_interest",
+        "liquidation_event",
+        "basis",
     }
 )
 
