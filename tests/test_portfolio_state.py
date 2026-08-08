@@ -8,10 +8,12 @@ import pytest
 
 from omni.portfolio import orders, state
 from omni.portfolio.state import (
+    DuplicatePortfolio,
     UnaccountedClose,
     UnknownPortfolio,
     UnmarkedPosition,
     apply_fill,
+    create_portfolio,
     load,
     realised_pnl,
     rebuild_from_fills,
@@ -73,6 +75,28 @@ async def portfolio_id(db):
     await db.pool.execute("DELETE FROM portfolio WHERE id = $1", pid)
 
 
+@pytest.fixture
+async def make_owner(db):
+    """Real `users` rows, because `portfolio.user_id` is a foreign key to them.
+
+    Deleting the user cascades the portfolio, its positions and its cash.
+    """
+    created = []
+
+    async def _make():
+        uid = await db.pool.fetchval(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+            f"owner-{uuid4().hex}@omni.test",
+            "not-a-real-hash",
+        )
+        created.append(uid)
+        return uid
+
+    yield _make
+    for uid in created:
+        await db.pool.execute("DELETE FROM users WHERE id = $1", uid)
+
+
 async def _row(db, pid, venue="binance", symbol="BTC/USD", market_type="spot"):
     return await db.pool.fetchrow(
         "SELECT quantity, average_entry, updated_at FROM position "
@@ -82,6 +106,314 @@ async def _row(db, pid, venue="binance", symbol="BTC/USD", market_type="spot"):
         symbol,
         market_type,
     )
+
+
+async def _owned_ids(db, owner):
+    rows = await db.pool.fetch("SELECT id FROM portfolio WHERE user_id = $1", owner)
+    return [row["id"] for row in rows]
+
+
+class TestCreatePortfolio:
+    """The only path that opens a book, and the only one that names its owner.
+
+    Every portfolio written before this existed left `user_id` NULL, which the
+    audience-scoped read paths step over -- so the rows were there and no
+    operator could reach one.
+    """
+
+    async def test_the_new_book_is_owned_and_holds_the_cash_it_was_opened_with(
+        self, db, make_owner
+    ):
+        owner = await make_owner()
+
+        created = await create_portfolio(
+            db.pool,
+            user_id=owner,
+            name="macro book",
+            base_currency="USD",
+            opening_cash=Decimal("25000.50"),
+            cash_venue="kraken",
+        )
+
+        # Reached by owner, which is how every audience-scoped path reaches it.
+        # A NULL user_id leaves this empty while the row itself exists.
+        assert await _owned_ids(db, owner) == [created.portfolio_id]
+
+        reloaded = await load(db.pool, created.portfolio_id)
+        assert reloaded.cash == Decimal("25000.50")
+        assert reloaded.nav == Decimal("25000.50")
+        assert reloaded.positions == ()
+        assert created.cash == reloaded.cash
+
+        row = await db.pool.fetchrow(
+            "SELECT venue, asset, free, locked FROM cash_balance WHERE portfolio_id = $1",
+            created.portfolio_id,
+        )
+        # At the venue that was named, not one chosen here: money recorded
+        # somewhere it is not gets reconciled against an account holding none
+        # of it.
+        assert (row["venue"], row["asset"]) == ("kraken", "USD")
+        assert row["free"] == Decimal("25000.50")
+        assert row["locked"] == Decimal(0)
+
+    async def test_the_opening_balance_is_in_the_book_s_own_currency(
+        self, db, make_owner
+    ):
+        """`load` counts only base-currency rows, so a fixed asset reads as zero."""
+        owner = await make_owner()
+
+        created = await create_portfolio(
+            db.pool,
+            user_id=owner,
+            name="euro book",
+            base_currency="EUR",
+            opening_cash=Decimal(900),
+            cash_venue="kraken",
+        )
+
+        assert created.cash == Decimal(900)
+        reloaded = await load(db.pool, created.portfolio_id)
+        assert reloaded.cash == Decimal(900)
+        assert [c.asset for c in reloaded.cash_positions] == ["EUR"]
+
+    async def test_a_fill_settles_against_the_opening_balance(self, db, make_owner):
+        owner = await make_owner()
+        created = await create_portfolio(
+            db.pool,
+            user_id=owner,
+            name="macro book",
+            base_currency="USD",
+            opening_cash=Decimal(25000),
+            cash_venue="binance",
+        )
+
+        after = await apply_fill(
+            db.pool,
+            created.portfolio_id,
+            _fill(quantity="2", price="100", fee="1.5"),
+            MarketType.SPOT,
+        )
+
+        # The book bought 200 of BTC out of 25000 of cash, so it is worth what
+        # it was less the fee. An opening balance that never landed reports the
+        # same trade as a NAV of -1.5.
+        assert after.cash == Decimal("24798.50")
+        assert after.nav == Decimal("24998.50")
+
+    async def test_each_owner_loads_its_own_book_and_not_the_other_s(
+        self, db, make_owner
+    ):
+        first, second = await make_owner(), await make_owner()
+
+        a = await create_portfolio(
+            db.pool,
+            user_id=first,
+            name="macro book",
+            base_currency="USD",
+            opening_cash=Decimal(1000),
+            cash_venue="binance",
+        )
+        b = await create_portfolio(
+            db.pool,
+            user_id=second,
+            name="macro book",
+            base_currency="USD",
+            opening_cash=Decimal(7),
+            cash_venue="kraken",
+        )
+
+        assert a.portfolio_id != b.portfolio_id
+        # Neither figure is the sum, so a read that lost its portfolio scoping
+        # reports 1007 for both rather than 1000 and 7.
+        assert (await load(db.pool, a.portfolio_id)).cash == Decimal(1000)
+        assert (await load(db.pool, b.portfolio_id)).cash == Decimal(7)
+
+        assert await _owned_ids(db, first) == [a.portfolio_id]
+        assert await _owned_ids(db, second) == [b.portfolio_id]
+
+    async def test_a_second_book_under_the_same_name_is_refused(self, db, make_owner):
+        owner = await make_owner()
+        first = await create_portfolio(
+            db.pool,
+            user_id=owner,
+            name="macro book",
+            base_currency="USD",
+            opening_cash=Decimal(1000),
+            cash_venue="binance",
+        )
+
+        with pytest.raises(DuplicatePortfolio):
+            await create_portfolio(
+                db.pool,
+                user_id=owner,
+                name="macro book",
+                base_currency="USD",
+                opening_cash=Decimal(9),
+                cash_venue="kraken",
+            )
+
+        assert await _owned_ids(db, owner) == [first.portfolio_id]
+        reloaded = await load(db.pool, first.portfolio_id)
+        assert reloaded.cash == Decimal(1000), "the refused creation banked nothing"
+        assert len(reloaded.cash_positions) == 1
+
+    async def test_a_differently_named_book_is_a_second_portfolio(
+        self, db, make_owner
+    ):
+        owner = await make_owner()
+        macro = await create_portfolio(
+            db.pool,
+            user_id=owner,
+            name="macro book",
+            base_currency="USD",
+            opening_cash=Decimal(1000),
+            cash_venue="binance",
+        )
+        crypto = await create_portfolio(
+            db.pool,
+            user_id=owner,
+            name="crypto book",
+            base_currency="USD",
+            opening_cash=Decimal(250),
+            cash_venue="kraken",
+        )
+
+        assert set(await _owned_ids(db, owner)) == {
+            macro.portfolio_id,
+            crypto.portfolio_id,
+        }
+        assert (await load(db.pool, macro.portfolio_id)).cash == Decimal(1000)
+        assert (await load(db.pool, crypto.portfolio_id)).cash == Decimal(250)
+
+    async def test_concurrent_creates_of_one_name_open_one_book(self, db, make_owner):
+        owner = await make_owner()
+
+        def _create():
+            return create_portfolio(
+                db.pool,
+                user_id=owner,
+                name="macro book",
+                base_currency="USD",
+                opening_cash=Decimal(1000),
+                cash_venue="binance",
+            )
+
+        results = await asyncio.gather(
+            _create(), _create(), return_exceptions=True
+        )
+
+        assert sum(isinstance(r, DuplicatePortfolio) for r in results) == 1
+        assert len(await _owned_ids(db, owner)) == 1
+
+    async def test_an_owner_cannot_be_omitted_or_nulled(self, db):
+        unowned = "SELECT count(*) FROM portfolio WHERE user_id IS NULL"
+        before = await db.pool.fetchval(unowned)
+
+        with pytest.raises(TypeError):
+            await create_portfolio(
+                db.pool,
+                name="macro book",
+                base_currency="USD",
+                opening_cash=Decimal(1000),
+                cash_venue="binance",
+            )
+        with pytest.raises(ValueError, match="owner"):
+            await create_portfolio(
+                db.pool,
+                user_id=None,
+                name="macro book",
+                base_currency="USD",
+                opening_cash=Decimal(1000),
+                cash_venue="binance",
+            )
+
+        assert await db.pool.fetchval(unowned) == before
+
+    async def test_an_owner_that_does_not_exist_is_refused(self, db):
+        ghost = uuid4()
+
+        with pytest.raises(asyncpg.ForeignKeyViolationError):
+            await create_portfolio(
+                db.pool,
+                user_id=ghost,
+                name="macro book",
+                base_currency="USD",
+                opening_cash=Decimal(1000),
+                cash_venue="binance",
+            )
+
+        assert await _owned_ids(db, ghost) == []
+
+    async def test_the_opening_balance_must_be_a_stated_decimal(self, db, make_owner):
+        owner = await make_owner()
+
+        with pytest.raises(TypeError):
+            await create_portfolio(
+                db.pool,
+                user_id=owner,
+                name="macro book",
+                base_currency="USD",
+                cash_venue="binance",
+            )
+
+        for bad in (25000.0, 25000, "25000", None):
+            with pytest.raises(TypeError):
+                await create_portfolio(
+                    db.pool,
+                    user_id=owner,
+                    name="macro book",
+                    base_currency="USD",
+                    opening_cash=bad,
+                    cash_venue="binance",
+                )
+
+        for bad in (Decimal("NaN"), Decimal("Infinity"), Decimal("-0.01")):
+            with pytest.raises(ValueError):
+                await create_portfolio(
+                    db.pool,
+                    user_id=owner,
+                    name="macro book",
+                    base_currency="USD",
+                    opening_cash=bad,
+                    cash_venue="binance",
+                )
+
+        assert await _owned_ids(db, owner) == []
+
+    async def test_a_stated_zero_opens_an_unfunded_book(self, db, make_owner):
+        """Zero by omission is the defect; zero as a statement is a real book."""
+        owner = await make_owner()
+
+        created = await create_portfolio(
+            db.pool,
+            user_id=owner,
+            name="macro book",
+            base_currency="USD",
+            opening_cash=Decimal(0),
+            cash_venue="binance",
+        )
+
+        assert created.cash == Decimal(0)
+        assert created.nav == Decimal(0)
+        reloaded = await load(db.pool, created.portfolio_id)
+        assert reloaded.cash == Decimal(0)
+        assert [c.venue for c in reloaded.cash_positions] == ["binance"]
+
+    async def test_blank_text_fields_are_refused(self, db, make_owner):
+        owner = await make_owner()
+        stated = {
+            "user_id": owner,
+            "name": "macro book",
+            "base_currency": "USD",
+            "opening_cash": Decimal(1000),
+            "cash_venue": "binance",
+        }
+
+        for field in ("name", "base_currency", "cash_venue"):
+            with pytest.raises(ValueError, match=field):
+                await create_portfolio(db.pool, **{**stated, field: "   "})
+
+        assert await _owned_ids(db, owner) == []
 
 
 class TestApplyFill:

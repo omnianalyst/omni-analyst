@@ -73,6 +73,17 @@ class UnmarkedPosition(Exception):
     """A held position has no usable mark, so NAV cannot be computed."""
 
 
+class DuplicatePortfolio(Exception):
+    """The owner already holds a portfolio under this name.
+
+    Raised rather than opening a second book. One account holding two
+    identically-named portfolios cannot be read: every audience-scoped path
+    resolves by owner and then refuses to pick between them, so the second
+    creation takes the operator's working endpoint away rather than adding
+    anything.
+    """
+
+
 class UnaccountedClose(Exception):
     """The order ledger cannot explain the book, so realised P&L is not derivable.
 
@@ -83,6 +94,25 @@ class UnaccountedClose(Exception):
 
 
 _PORTFOLIO = "SELECT base_currency FROM portfolio WHERE id = $1"
+
+# Serialises creations for one (owner, name) so the existence check below cannot
+# be overtaken between reading and inserting. There is no unique index to lean
+# on: migration 033 does not carry one, and adding it is not this module's to
+# do, so the exclusion has to be held for the length of the transaction.
+_LOCK_OWNER_NAME = "SELECT pg_advisory_xact_lock(hashtextextended($1::text || $2::text, 0))"
+
+_PORTFOLIO_BY_OWNER_NAME = "SELECT id FROM portfolio WHERE user_id = $1 AND name = $2"
+
+_INSERT_PORTFOLIO = """
+INSERT INTO portfolio (user_id, name, base_currency)
+VALUES ($1, $2, $3)
+RETURNING id
+"""
+
+_INSERT_OPENING_CASH = """
+INSERT INTO cash_balance (portfolio_id, venue, asset, free)
+VALUES ($1, $2, $3, $4)
+"""
 
 _PORTFOLIO_LOCKED = "SELECT base_currency FROM portfolio WHERE id = $1 FOR UPDATE"
 
@@ -349,6 +379,98 @@ async def _load_on_conn(conn, portfolio_id: UUID) -> PortfolioState:
         (c.total for c in cash_positions if c.asset == base_currency), Decimal(0)
     )
     return _state(portfolio_id, cash, positions, cash_positions)
+
+
+async def create_portfolio(
+    pool,
+    *,
+    user_id: UUID,
+    name: str,
+    base_currency: str,
+    opening_cash: Decimal,
+    cash_venue: str,
+) -> PortfolioState:
+    """Open a book for an owner, funded with a stated balance.
+
+    **The owner is required and has no default.** `portfolio.user_id` is
+    nullable in the schema, and every portfolio written before this function
+    existed left it NULL -- which every audience-scoped read path treats as
+    belonging to nobody, so the rows exist and no operator can reach them. A
+    `user_id=None` parameter would put that state one forgotten argument away
+    again, so `None` is refused here rather than inserted.
+
+    **The opening balance is required too, and is a `Decimal`.** A default of
+    zero would let a caller open a portfolio that looks funded and holds
+    nothing; a `float` would carry a binary error into the NAV of every fill
+    applied on top of it. Zero is accepted when it is stated, because an
+    unfunded book waiting on a deposit is a real thing to want -- what is
+    refused is arriving at zero by omission.
+
+    Cash needs a venue because `cash_balance` is keyed by one, and it is the
+    caller's to state: choosing a venue on their behalf would put a fabricated
+    location on real money, and `reconcile` would then check that book against
+    an account holding none of it. The balance is denominated in the
+    portfolio's own `base_currency`, which is the only unit `load` counts
+    toward `cash`.
+
+    **One owner may hold several portfolios, but not two under one name.** A
+    book per strategy is the normal case and `_resolve_portfolio` in the API
+    already takes an explicit `portfolio_id` for it. A silent duplicate is the
+    case worth refusing: the second one is indistinguishable from the first at
+    every call site that names a book by its name, and it turns the owner's
+    unqualified `/trading/portfolio` from an answer into an ambiguity.
+
+    Returns the state `load` would return, read inside the creating
+    transaction.
+    """
+    if user_id is None:
+        raise ValueError(
+            "a portfolio must name its owner; a NULL user_id is a row every "
+            "audience-scoped read path steps over, so the book would exist and "
+            "no operator could reach it"
+        )
+    if not isinstance(opening_cash, Decimal):
+        raise TypeError(
+            f"opening_cash must be a Decimal, got {type(opening_cash).__name__}; "
+            f"a float opening balance carries a binary error into the NAV of "
+            f"every fill applied on top of it"
+        )
+    if not opening_cash.is_finite():
+        raise ValueError(f"opening_cash is not an amount of cash: {opening_cash}")
+    if opening_cash < 0:
+        raise ValueError(
+            f"opening_cash is negative ({opening_cash}); an opening balance is a "
+            f"deposit, and a borrow against a venue is a fill, not a starting point"
+        )
+    for field, value in (
+        ("name", name),
+        ("base_currency", base_currency),
+        ("cash_venue", cash_venue),
+    ):
+        if not value or not value.strip():
+            raise ValueError(f"{field} must be stated, got {value!r}")
+
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(_LOCK_OWNER_NAME, str(user_id), name)
+
+        existing = await conn.fetchval(_PORTFOLIO_BY_OWNER_NAME, user_id, name)
+        if existing is not None:
+            raise DuplicatePortfolio(
+                f"user {user_id} already holds a portfolio named {name!r} "
+                f"({existing}); name the new one differently or use that id"
+            )
+
+        portfolio_id = await conn.fetchval(
+            _INSERT_PORTFOLIO, user_id, name, base_currency
+        )
+        await conn.execute(
+            _INSERT_OPENING_CASH,
+            portfolio_id,
+            cash_venue,
+            base_currency,
+            opening_cash,
+        )
+        return await _load_on_conn(conn, portfolio_id)
 
 
 async def load(pool, portfolio_id: UUID) -> PortfolioState:
