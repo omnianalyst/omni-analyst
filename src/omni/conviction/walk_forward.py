@@ -71,8 +71,29 @@ _DEFAULT_TARGET = 0.6
 
 
 def _is_hit(row: PredictionRow) -> bool:
-    return (row.direction == "up" and row.outcome == "upper") or (
-        row.direction == "down" and row.outcome == "lower"
+    """Correct per the canonical definition, which lives in SQL.
+
+    `calibration_bucket` (migration 019) and `policy._BUCKETS` both score a
+    `neutral` call that expired without touching a barrier as a HIT: asserting
+    the price would go nowhere, and it going nowhere, is the assertion coming
+    true. This function omitted that case, so it scored every correct neutral
+    as a miss and understated the out-of-sample hit rate of any method that
+    emits them -- judging a producer as having failed out of sample when it had
+    not.
+
+    No producer writes `neutral` today, so nothing has been mis-scored yet.
+    That is why this was latent rather than a live defect, and it is also why
+    it had to be fixed before one does: the divergence is invisible until the
+    first neutral-emitting producer ships, at which point its walk-forward
+    would silently disagree with its own calibration bucket.
+
+    The SQL is authoritative because it is what the live gate reads. Any Python
+    restatement of it is a copy that can drift, which is exactly what happened.
+    """
+    return (
+        (row.direction == "up" and row.outcome == "upper")
+        or (row.direction == "down" and row.outcome == "lower")
+        or (row.direction == "neutral" and row.outcome == "expiry")
     )
 
 
