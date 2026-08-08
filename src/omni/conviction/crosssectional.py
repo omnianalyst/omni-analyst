@@ -153,10 +153,27 @@ def select_basket(
     """The new basket, given trailing scores and what is held now.
 
     A name enters when it ranks inside `enter_rank` and is released only once it
-    falls outside `exit_rank`; between the two it is held but not bought. So the
-    result is `top(enter_rank)` unioned with whatever was already held and is
-    still inside `top(exit_rank)`, which bounds the basket at `exit_rank` names
-    without needing an eviction rule.
+    falls outside `exit_rank`; between the two it is held but not bought.
+
+    **The basket holds at most `enter_rank` names.** Retained names are kept
+    first, and any remaining room is filled from the top of the ranking. An
+    earlier version unioned all of `top(enter_rank)` with everything retained
+    inside `top(exit_rank)`, which let the basket float up to `exit_rank` -- in
+    the measured configuration, drifting to 13.6 names against an enter rank of
+    7. That dilutes: half the capital lands in names ranked 8 through 21, which
+    by construction pay less than the top 7, and Finding 11 measured the cost of
+    it at 0.64pp of net return (+7.16% against +7.80%), more than the churn the
+    floating basket saved.
+
+    The cap also makes per-name capital knowable. A book whose size floats
+    between 7 and 21 names cannot say what fraction of NAV one position is until
+    after the selection runs, and a position that cannot be sized in advance
+    cannot be risk-limited in advance.
+
+    The trade-off is deliberate and is the hysteresis working: with the basket
+    full of retained names, a higher-ranked entrant waits. Buying it would mean
+    selling a name that has not yet left the exit band, which is the churn the
+    exit band exists to prevent.
 
     A held name absent from `scores` -- delisted, or with no funding coverage in
     the window -- cannot be ranked and therefore exits. Holding it would be a
@@ -190,9 +207,18 @@ def select_basket(
         return BasketSelection(held=held_now, abstention=ABSTAIN_UNIVERSE_TOO_SMALL)
 
     ranked = _rank(scores)
-    entrants = frozenset(ranked[:enter_rank])
-    retained = held_now & frozenset(ranked[:exit_rank])
-    return BasketSelection(held=entrants | retained, abstention=None)
+    # Retained first: a name already held and still inside the exit band keeps
+    # its slot, which is what stops the basket churning. Whatever room is left
+    # goes to the highest-ranked names not already in it, in rank order, and the
+    # basket stops at `enter_rank` names.
+    keep = list(dict.fromkeys(k for k in ranked[:exit_rank] if k in held_now))
+    del keep[enter_rank:]
+    for key in ranked[:enter_rank]:
+        if len(keep) >= enter_rank:
+            break
+        if key not in keep:
+            keep.append(key)
+    return BasketSelection(held=frozenset(keep), abstention=None)
 
 
 async def _funding_window(

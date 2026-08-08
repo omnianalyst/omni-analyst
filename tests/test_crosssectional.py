@@ -93,9 +93,11 @@ class TestHysteresis:
         with_hysteresis = select_basket(scores, held=held, enter_rank=2, exit_rank=4)
         without = select_basket(scores, held=held, enter_rank=2, exit_rank=2)
 
-        # c ranks third: outside the top 2, inside the top 4. It stays.
+        # c ranks third: outside the top 2, inside the top 4. It keeps its slot,
+        # and the basket stays at enter_rank names -- so it displaces the
+        # lower-ranked of the two entrants rather than being added alongside.
         assert "c" in with_hysteresis.held
-        assert with_hysteresis.held == frozenset({"a", "b", "c"})
+        assert with_hysteresis.held == frozenset({"a", "c"})
         # Under a single rank the same name is ejected at the rank that would
         # buy it straight back.
         assert "c" not in without.held
@@ -112,6 +114,51 @@ class TestHysteresis:
 
         assert "f" not in result.held
         assert result.held == frozenset({"a", "b"})
+
+    def test_the_basket_never_exceeds_the_entry_rank(self):
+        """The cap, and the 0.64pp it is worth.
+
+        Without it the basket is `top(enter)` unioned with everything retained
+        inside `top(exit)`, so it floats up toward `exit_rank` -- measured at
+        13.6 names against an enter rank of 7. Half the capital then sits in
+        names ranked below the entry cut, which by construction pay less, and
+        Finding 11 measured that dilution at +7.16% net against +7.80%.
+
+        It also makes per-name capital knowable before the selection runs, which
+        a floating basket cannot: a position whose size is not known in advance
+        cannot be risk-limited in advance.
+
+        Every held name ranks inside the wide exit band, so a floating selector
+        would keep all six and return six.
+        """
+        scores = _scores(
+            a="0.0009", b="0.0008", c="0.0007", d="0.0006",
+            e="0.0005", f="0.0004", g="0.0003", h="0.0002",
+        )
+        held = frozenset({"c", "d", "e", "f"})
+
+        result = select_basket(scores, held=held, enter_rank=3, exit_rank=7)
+
+        assert len(result.held) == 3
+        # Retained names keep their slots in rank order and fill the basket, so
+        # no entrant gets in at all here -- that is the churn being prevented.
+        assert result.held == frozenset({"c", "d", "e"})
+
+    def test_room_left_by_departures_goes_to_the_best_available(self):
+        # The other half of the cap: it must not become buy-and-hold. When a
+        # retained name leaves the exit band its slot is refilled from the top
+        # of the ranking, not from whatever happened to be adjacent.
+        scores = _scores(
+            a="0.0009", b="0.0008", c="0.0007", d="0.0006",
+            e="0.0005", f="0.0004", g="0.0003", h="-0.0090",
+        )
+        held = frozenset({"h", "d"})
+
+        result = select_basket(scores, held=held, enter_rank=3, exit_rank=5)
+
+        assert "h" not in result.held
+        assert len(result.held) == 3
+        assert result.held == frozenset({"d", "a", "b"})
 
     def test_an_exit_rank_tighter_than_entry_is_refused(self):
         # Not an abstention: it is a configuration that cannot be right. The
@@ -443,9 +490,11 @@ class TestTheDecisionStatesItsTurnover:
         )
 
         assert decision.abstention is None
-        # FFF and EEE enter; DDD ranks third so hysteresis retains it; AAA goes.
-        assert decision.held == frozenset({ids["FFF"], ids["EEE"], ids["DDD"]})
-        assert decision.entered == frozenset({ids["FFF"], ids["EEE"]})
+        # DDD ranks third: outside the top 2 but inside the exit band, so it
+        # keeps its slot. AAA ranks last and leaves. That fills one of the two
+        # slots, so only the single best entrant is bought.
+        assert decision.held == frozenset({ids["DDD"], ids["FFF"]})
+        assert decision.entered == frozenset({ids["FFF"]})
         assert decision.exited == frozenset({ids["AAA"]})
         # The two sets partition the change: nothing is both, and together with
         # the retained names they account for the whole book.
