@@ -115,6 +115,18 @@ class LoopConfig:
     market_type: MarketType
     limits: RiskLimits
 
+    # The gate's risk parameters. They live here for the same reason `limits`
+    # does -- they are a property of the portfolio's mandate, not of any one
+    # cycle -- and, like `limits`, they carry NO defaults. `policy.eligible`
+    # refuses to default them because a caller that never thought about the cost
+    # of a round trip is exactly the caller whose edge does not survive one, and
+    # defaulting them here would reintroduce that at one remove.
+    round_trip_cost_bps: Decimal
+    min_expectancy_bps: Decimal
+    min_effective_n: int
+    max_assumed_share: Decimal
+    max_concentration: Decimal
+
     def __post_init__(self) -> None:
         if self.max_intents_per_cycle < 1:
             raise ValueError(
@@ -271,6 +283,11 @@ async def run_cycle(
                 phase=config.phase,
                 target_hit_rate=config.target_hit_rate,
                 walk_forward_positive=walk_forward_results.get(method),
+                round_trip_cost_bps=config.round_trip_cost_bps,
+                min_expectancy_bps=config.min_expectancy_bps,
+                min_effective_n=config.min_effective_n,
+                max_assumed_share=config.max_assumed_share,
+                max_concentration=config.max_concentration,
             )
         eligibility = eligibilities[cache_key]
 

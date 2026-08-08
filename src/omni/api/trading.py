@@ -35,6 +35,17 @@ ledger's own resolved predictions -- the average distance from entry to target
 and from entry to stop, per method and kind -- rather than assumed. A method
 with no directional resolved predictions has no geometry, so its expectancy is
 null with a stated reason.
+
+**Two expectancies are reported, and they answer different questions.**
+`expectancy` is modelled: the calibrated hit rate applied to the average barrier
+geometry, which is what the method should earn if the next hundred trades look
+like the average of the last hundred. `realised` is measured: every resolved
+directional prediction's own P&L, pooled trade by trade, which is what it did
+earn -- together with the three properties that can make that number untrue
+(`effective_n`, `assumed_share`, `concentration`). The gate reads the second.
+They agree when every prediction shares one geometry and diverge exactly when
+the average barrier stops describing the individual trade, which is the
+condition under which a modelled expectancy quietly stops being true.
 """
 
 from __future__ import annotations
@@ -55,7 +66,7 @@ from omni.conviction.walk_forward_report import (
     walk_forward,
     wilson_interval,
 )
-from omni.trading.policy import TradingPhase, eligible
+from omni.trading.policy import MIN_RESOLVED_FOR_PAPER, TradingPhase, eligible
 from omni.venue.costs import BPS, gross_expectancy_bps, round_trip_cost, survives_costs
 from omni.venue.protocol import Capabilities, MarketType, OrderKind, Side, TradeIntent
 
@@ -68,6 +79,33 @@ _REPORTED_PHASES = (TradingPhase.PAPER, TradingPhase.MICRO, TradingPhase.SCALE)
 # A method choice, not a measurement: more windows means a smaller test sample
 # each and a floor that more of them fail to clear.
 DEFAULT_WALK_FORWARD_WINDOWS = 4
+
+# The reference venue the gate's single net figure is priced against. The per
+# venue rows still price all four; this is the one the verdict turns on, and it
+# is the taker row because a triple-barrier position exits when a barrier is
+# touched and a barrier exit is a taker exit by definition. Pricing the gate
+# against the maker row would admit an edge that exists only if every exit is
+# passive, which no stop is.
+GATE_COST_VENUE = "cex_taker"
+
+# The gate's risk parameters. `policy.eligible` refuses to default any of these,
+# so a report that runs the gate has to state them -- and it echoes them in the
+# payload, because a verdict whose thresholds are invisible cannot be argued
+# with.
+#
+# 5 bps is the part of the cost model that is not modelled at all: every profile
+# above passes no spread, and a half-spread on a liquid pair is a few bps a leg.
+# A net edge below that sits inside the error bar of its own cost estimate.
+GATE_MIN_EXPECTANCY_BPS = Decimal(5)
+# GATE B's thirty, unchanged. What changed is the quantity it counts: distinct
+# horizon dates rather than raw predictions -- see `policy.MIN_RESOLVED_FOR_PAPER`.
+GATE_MIN_EFFECTIVE_N = MIN_RESOLVED_FOR_PAPER
+# Past a half, most of the pooled P&L is a number nobody observed.
+GATE_MAX_ASSUMED_SHARE = Decimal("0.5")
+# Past a half, one name is the strategy. This bar is weakest where diversity is
+# lowest -- across two entities an even split is already 0.5 -- so it catches a
+# book carried by one of nine, not a book that only ever held two.
+GATE_MAX_CONCENTRATION = Decimal("0.5")
 
 
 @dataclass(frozen=True)
@@ -215,16 +253,47 @@ def _int_param(params, name: str, *, default: int, low: int, high: int) -> int:
     return value
 
 
-def _venue_expectancy(
-    profile: VenueCostProfile, *, gross_bps: Decimal, notional: Decimal
-) -> dict:
-    """What is left of `gross_bps` after this venue, or why nothing is.
+def _round_trip(profile: VenueCostProfile, notional: Decimal):
+    """This venue's round-trip cost at this size.
 
     The intent exists only to carry a notional into the cost model -- `costs.py`
     reads `intent.notional` and nothing else off it -- and is never routed
     anywhere. A quantity of `notional` at a reference price of 1 makes that
     notional exact rather than rounded through a price.
     """
+    intent = TradeIntent(
+        venue=profile.name,
+        symbol="cost-model-reference",
+        side=Side.BUY,
+        market_type=MarketType.SPOT,
+        quantity=notional,
+        reference_price=Decimal(1),
+        order_kind=OrderKind.MARKET,
+    )
+    return round_trip_cost(
+        intent,
+        profile.capabilities,
+        gas_quote=profile.gas_quote,
+        is_maker=profile.entry_is_maker,
+        exit_is_maker=profile.exit_is_maker,
+    )
+
+
+def _gate_round_trip_cost_bps(notional: Decimal) -> Decimal:
+    """What the gate's net expectancy is measured against.
+
+    Run through the same cost model as the reported rows rather than stated as
+    a constant, so the gate cannot come to disagree with the table underneath
+    it about what a round trip costs.
+    """
+    profile = next(p for p in REFERENCE_VENUES if p.name == GATE_COST_VENUE)
+    return _round_trip(profile, notional).total_bps
+
+
+def _venue_expectancy(
+    profile: VenueCostProfile, *, gross_bps: Decimal, notional: Decimal
+) -> dict:
+    """What is left of `gross_bps` after this venue, or why nothing is."""
     if notional < profile.capabilities.min_notional:
         return {
             "venue": profile.name,
@@ -237,22 +306,7 @@ def _venue_expectancy(
             ),
         }
 
-    intent = TradeIntent(
-        venue=profile.name,
-        symbol="cost-model-reference",
-        side=Side.BUY,
-        market_type=MarketType.SPOT,
-        quantity=notional,
-        reference_price=Decimal(1),
-        order_kind=OrderKind.MARKET,
-    )
-    cost = round_trip_cost(
-        intent,
-        profile.capabilities,
-        gas_quote=profile.gas_quote,
-        is_maker=profile.entry_is_maker,
-        exit_is_maker=profile.exit_is_maker,
-    )
+    cost = _round_trip(profile, notional)
     viability = survives_costs(gross_bps=gross_bps, cost=cost)
     return {
         "venue": profile.name,
@@ -336,6 +390,57 @@ def _expectancy(
     }
 
 
+def _realised_payload(
+    record, *, round_trip_cost_bps: Decimal, notional: Decimal
+) -> dict:
+    """What the method actually earned, and the shape of the sample it earned it in.
+
+    Every figure here comes off the `Eligibility` the gate returned, so the
+    report cannot quote one number while the verdict was taken on another.
+
+    `n` and `effective_n` are both reported and the gap between them is the
+    point: 424 predictions across 44 horizon dates is 44 observations for the
+    purpose of believing the mean, and a page that showed only the 424 would
+    invite exactly the confidence the first real run did not support.
+    """
+    common = {
+        "n": record.expectancy_n,
+        "effective_n": record.effective_n,
+        "positive_entities": record.positive_entities,
+        "round_trip_cost_bps": str(round_trip_cost_bps),
+        "cost_venue": GATE_COST_VENUE,
+    }
+    if record.gross_expectancy_bps is None:
+        return {
+            **common,
+            "gross_bps": None,
+            "net_bps": None,
+            "assumed_share": None,
+            "concentration": None,
+            "refusal": (
+                "no resolved directional predictions; the realised edge is "
+                "unmeasured, which is not the same as flat"
+            ),
+            "venues": [],
+        }
+    return {
+        **common,
+        "gross_bps": str(record.gross_expectancy_bps),
+        "net_bps": str(record.net_expectancy_bps),
+        "assumed_share": str(record.assumed_share),
+        "concentration": str(record.concentration),
+        "refusal": None,
+        "venues": [
+            _venue_expectancy(
+                profile,
+                gross_bps=record.gross_expectancy_bps,
+                notional=notional,
+            )
+            for profile in REFERENCE_VENUES
+        ],
+    }
+
+
 def _walk_forward_payload(result) -> dict:
     interval = result.wilson_interval
     return {
@@ -388,6 +493,8 @@ def build_router(app: App) -> Router:
             high=10_000,
         )
 
+        gate_cost_bps = _gate_round_trip_cost_bps(notional)
+
         pool = app.db.pool
         rows = await pool.fetch(_METHOD_KINDS, audience)
         geometry_rows = await pool.fetch(_BARRIER_GEOMETRY, audience)
@@ -438,6 +545,11 @@ def build_router(app: App) -> Router:
                     phase=phase,
                     target_hit_rate=target_hit_rate,
                     walk_forward_positive=walk_forward_positive,
+                    round_trip_cost_bps=gate_cost_bps,
+                    min_expectancy_bps=GATE_MIN_EXPECTANCY_BPS,
+                    min_effective_n=GATE_MIN_EFFECTIVE_N,
+                    max_assumed_share=GATE_MAX_ASSUMED_SHARE,
+                    max_concentration=GATE_MAX_CONCENTRATION,
                 )
                 for phase in _REPORTED_PHASES
             ]
@@ -484,6 +596,11 @@ def build_router(app: App) -> Router:
                         geometry=geometry.get((method, entity_kind)),
                         notional=notional,
                     ),
+                    "realised": _realised_payload(
+                        record,
+                        round_trip_cost_bps=gate_cost_bps,
+                        notional=notional,
+                    ),
                     "gates": gates,
                 }
             )
@@ -495,6 +612,18 @@ def build_router(app: App) -> Router:
             "walk_forward_windows": n_windows,
             "min_per_window": min_per_window,
             "venues_are_modelled": True,
+            # The thresholds the verdicts above were taken at. A gate whose
+            # parameters are not on the page it is read off cannot be argued
+            # with, and the whole reason the previous one survived so long is
+            # that the quantity it barred on was never printed next to it.
+            "gate_parameters": {
+                "round_trip_cost_bps": str(gate_cost_bps),
+                "cost_venue": GATE_COST_VENUE,
+                "min_expectancy_bps": str(GATE_MIN_EXPECTANCY_BPS),
+                "min_effective_n": GATE_MIN_EFFECTIVE_N,
+                "max_assumed_share": str(GATE_MAX_ASSUMED_SHARE),
+                "max_concentration": str(GATE_MAX_CONCENTRATION),
+            },
             "methods": methods,
         }
 

@@ -225,6 +225,23 @@ def _config(**overrides) -> LoopConfig:
         "max_intents_per_cycle": 5,
         "market_type": MarketType.SPOT,
         "limits": _limits(),
+        # The gate's risk parameters. Stated here rather than defaulted for the
+        # same reason policy.eligible refuses to default them: a caller that
+        # never thought about the cost of a round trip is exactly the caller
+        # whose edge does not survive one. These are the loop's own baseline,
+        # loosened deliberately -- min_effective_n=1 and max_concentration=1 --
+        # because these fixtures test the LOOP's control flow, and a fixture
+        # holding one name on one date would otherwise fail the gate's sample-
+        # shape checks and turn every test here into a policy test.
+        "round_trip_cost_bps": Decimal(20),
+        # A positive minimum, not a disabled one: the gate refuses a
+        # non-positive bar outright, and it is right to -- a strategy that does
+        # not clear its own cost model's error bar has not shown anything. Set
+        # low so these fixtures clear it on their geometry alone.
+        "min_expectancy_bps": Decimal("0.01"),
+        "min_effective_n": 1,
+        "max_assumed_share": Decimal(1),
+        "max_concentration": Decimal(1),
     }
     return LoopConfig(**{**base, **overrides})
 

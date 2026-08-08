@@ -98,6 +98,10 @@ async def _entity(db, kind="company"):
     )
 
 
+async def _entities(db, n, kind="company"):
+    return [await _entity(db, kind) for _ in range(n)]
+
+
 async def _predict(
     db,
     entity_id,
@@ -107,6 +111,9 @@ async def _predict(
     hit=True,
     confidence=0.85,
     backfilled=False,
+    horizon_days=30,
+    upper="103",
+    lower="98",
 ):
     """Entry 100, target 103, stop 98 -- 300bps up against 200bps down, the
     barrier geometry AUTOTRADE_PLAN.md section 12 prices."""
@@ -118,33 +125,43 @@ async def _predict(
         INSERT INTO prediction (entity_id, method, direction, confidence,
                                 entry_price, upper_barrier, lower_barrier,
                                 horizon_ends_at, provenance, outcome, resolved_at)
-        VALUES ($1,$2,'up',$3,100,103,98,$4,$5::jsonb,
+        VALUES ($1,$2,'up',$3,100,$8,$9,$4,$5::jsonb,
                 $6::prediction_outcome,$7)
         """,
         entity_id,
         method,
         confidence,
-        NOW + timedelta(days=30),
+        NOW + timedelta(days=horizon_days),
         json.dumps(provenance),
         "pending" if resolved_at is None else ("upper" if hit else "lower"),
         resolved_at,
+        Decimal(upper),
+        Decimal(lower),
     )
 
 
-async def _history(db, entity, *, method, n, hits, **kw):
-    """`n` resolved predictions spread over `n` hours, `hits` of them correct.
+async def _history(db, entities, *, method, n, hits, **kw):
+    """`n` resolved predictions over `n` hours and `n` horizon dates, `hits` correct.
 
-    Spread rather than simultaneous because the endpoint derives its
-    walk-forward windows from the span between the first and last outcome, and
-    a method whose whole history lands on one instant has no span to split.
+    Three things are spread rather than shared, and each one is load-bearing:
+
+    - **Resolution time**, because the endpoint derives its walk-forward windows
+      from the span between the first and last outcome, and a method whose whole
+      history lands on one instant has no span to split.
+    - **Horizon date**, because the gate's sample floor applies to `effective_n`
+      -- the count of distinct horizons -- and a fixture resolving everything on
+      one date is one observation however many rows it has.
+    - **Entity**, because the gate refuses a book carried by a single name, and
+      a one-entity fixture is 100% concentrated by definition.
     """
     for i in range(n):
         await _predict(
             db,
-            entity,
+            entities[i % len(entities)],
             method=method,
             resolved_at=NOW + timedelta(hours=i),
             hit=i < hits,
+            horizon_days=30 + i,
             **kw,
         )
 
@@ -155,8 +172,8 @@ def _find(body, method):
     return matches[0]
 
 
-def _venue(entry, name):
-    matches = [v for v in entry["expectancy"]["venues"] if v["venue"] == name]
+def _venue(entry, name, block="expectancy"):
+    matches = [v for v in entry[block]["venues"] if v["venue"] == name]
     assert len(matches) == 1, f"venue {name} missing from {entry['method']}"
     return matches[0]
 
@@ -195,8 +212,8 @@ class TestAnUncalibratedMethodIsReportedNotOmitted:
         self, db, database_url
     ):
         """Silence is how a strategy gets forgotten rather than judged."""
-        method, entity = _method(), await _entity(db)
-        await _history(db, entity, method=method, n=3, hits=3)
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=3, hits=3)
 
         app = _app(database_url)
         async with _Lifespan(app), TestClient(app) as client:
@@ -237,13 +254,25 @@ class TestAnUncalibratedMethodIsReportedNotOmitted:
         assert entry["status"] == "uncalibrated"
         # Never run, not run and failed.
         assert entry["walk_forward"] is None
+        # Nothing has resolved, so there is no realised edge -- and every figure
+        # describing it is null rather than zero. A zero here would read as "we
+        # measured it and it was flat", which is a different and false claim.
+        realised = entry["realised"]
+        assert realised["n"] == 0
+        assert realised["effective_n"] == 0
+        assert realised["gross_bps"] is None
+        assert realised["net_bps"] is None
+        assert realised["assumed_share"] is None
+        assert realised["concentration"] is None
+        assert realised["venues"] == []
+        assert "unmeasured" in realised["refusal"]
 
     async def test_the_json_carries_null_and_not_zero(self, db, database_url):
         """A serialiser coercing None to 0.0 would satisfy every assertion
         above that reads the parsed body through a `is None` check on a float
         field only if the raw JSON also says null. Read the raw text."""
-        method, entity = _method(), await _entity(db)
-        await _history(db, entity, method=method, n=3, hits=3)
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=3, hits=3)
 
         app = _app(database_url)
         async with _Lifespan(app), TestClient(app) as client:
@@ -273,8 +302,8 @@ class TestPerVenueExpectancy:
         The venue is the only thing that differs. Nothing about the signal
         changed between the first row and the last.
         """
-        method, entity = _method(), await _entity(db)
-        await _history(db, entity, method=method, n=40, hits=30)
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
 
         app = _app(database_url)
         async with _Lifespan(app), TestClient(app) as client:
@@ -306,8 +335,8 @@ class TestPerVenueExpectancy:
         all, and a cost model treating gas as a constant bps would report the
         same number twice.
         """
-        method, entity = _method(), await _entity(db)
-        await _history(db, entity, method=method, n=40, hits=30)
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
 
         app = _app(database_url)
         async with _Lifespan(app), TestClient(app) as client:
@@ -328,8 +357,8 @@ class TestPerVenueExpectancy:
     async def test_a_notional_below_a_venues_minimum_is_a_refusal_not_a_zero(
         self, db, database_url
     ):
-        method, entity = _method(), await _entity(db)
-        await _history(db, entity, method=method, n=40, hits=30)
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
 
         app = _app(database_url)
         async with _Lifespan(app), TestClient(app) as client:
@@ -348,8 +377,8 @@ class TestPerVenueExpectancy:
         assert onchain["survives"] is False
 
     async def test_money_is_serialised_as_a_string(self, db, database_url):
-        method, entity = _method(), await _entity(db)
-        await _history(db, entity, method=method, n=40, hits=30)
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
 
         app = _app(database_url)
         async with _Lifespan(app), TestClient(app) as client:
@@ -375,8 +404,8 @@ class TestGateVerdicts:
         real -- and the scale phase still refuses, because a backfill risked
         nothing and thirty free outcomes are not thirty live ones.
         """
-        method, entity = _method(), await _entity(db)
-        await _history(db, entity, method=method, n=100, hits=100, backfilled=True)
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=100, hits=100, backfilled=True)
 
         app = _app(database_url)
         async with _Lifespan(app), TestClient(app) as client:
@@ -420,14 +449,15 @@ class TestGateVerdicts:
         refusal must be NEGATIVE_EXPECTANCY (tested, failed) rather than
         NO_WALK_FORWARD (never tested).
         """
-        method, entity = _method(), await _entity(db)
+        method, entities = _method(), await _entities(db, 3)
         for i in range(100):
             await _predict(
                 db,
-                entity,
+                entities[i % len(entities)],
                 method=method,
                 resolved_at=NOW + timedelta(hours=i),
                 hit=i < 20 or ((i - 20) % 20) < 14,
+                horizon_days=30 + i,
             )
 
         app = _app(database_url)
@@ -458,10 +488,22 @@ class TestGateVerdicts:
         The gate must answer NO_WALK_FORWARD -- never tested -- rather than
         NEGATIVE_EXPECTANCY, which would retire a strategy on evidence nobody
         gathered.
+
+        One instant is the *resolution* time, which is what the walk-forward
+        splits. The horizons are still distinct, because a horizon date is a
+        property of the prediction rather than of when it was scored, and
+        collapsing them would refuse this on sample size before the question
+        under test was reached.
         """
-        method, entity = _method(), await _entity(db)
-        for _ in range(30):
-            await _predict(db, entity, method=method, resolved_at=NOW)
+        method, entities = _method(), await _entities(db, 3)
+        for i in range(30):
+            await _predict(
+                db,
+                entities[i % len(entities)],
+                method=method,
+                resolved_at=NOW,
+                horizon_days=30 + i,
+            )
 
         app = _app(database_url)
         async with _Lifespan(app), TestClient(app) as client:
@@ -475,14 +517,185 @@ class TestGateVerdicts:
         assert paper["reason"] == Ineligible.NO_WALK_FORWARD.value
 
 
+class TestTheRealisedEdgeIsReported:
+    """The quantity the gate reads, on the page the gate is read off.
+
+    A verdict whose input is not printed next to it cannot be argued with, and
+    the previous gate survived as long as it did precisely because the number it
+    barred on was never shown against the number that mattered.
+    """
+
+    async def test_every_realised_figure_appears_per_method(self, db, database_url):
+        """40 predictions over 3 names, 30 correct, 300bps against 200bps.
+
+            realised gross = (30 * 300 - 10 * 200) / 40 = +175 bps
+            net of the CEX taker round trip (20bps)     = +155 bps
+
+        `effective_n` equals `n` here because every prediction carries its own
+        horizon date. The figure exists to say when it does not.
+        """
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
+
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token = await _token(client)
+            r = await _get(client, token)
+
+        realised = _find(r.json(), method)["realised"]
+        assert realised["n"] == 40
+        assert realised["effective_n"] == 40
+        assert Decimal(realised["gross_bps"]) == Decimal(175)
+        assert Decimal(realised["net_bps"]) == Decimal(155)
+        assert Decimal(realised["round_trip_cost_bps"]) == Decimal(20)
+        assert realised["cost_venue"] == "cex_taker"
+        assert Decimal(realised["assumed_share"]) == 0
+        assert round(Decimal(realised["concentration"]), 4) == Decimal("0.3429")
+        assert realised["positive_entities"] == 3
+
+    async def test_the_realised_edge_is_priced_at_every_venue(self, db, database_url):
+        """The same +175bps against four cost models.
+
+        Identical arithmetic to the modelled block's venue table, because the
+        venue is the only thing that differs between these four rows -- nothing
+        about the record changed between the first and the last.
+        """
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
+
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token = await _token(client)
+            r = await _get(client, token)
+
+        entry = _find(r.json(), method)
+        assert Decimal(_venue(entry, "cex_taker", "realised")["net_bps"]) == Decimal(155)
+        assert Decimal(_venue(entry, "cex_maker", "realised")["net_bps"]) == Decimal(163)
+        assert Decimal(_venue(entry, "onchain_l1", "realised")["net_bps"]) == Decimal(15)
+        assert Decimal(
+            _venue(entry, "swap_service", "realised")["net_bps"]
+        ) == Decimal(25)
+        assert _venue(entry, "onchain_l1", "realised")["survives"] is True
+
+    async def test_realised_and_modelled_agree_when_every_trade_shares_a_geometry(
+        self, db, database_url
+    ):
+        """They are computed from different things and must land on the number.
+
+        The modelled figure is the calibrated hit rate applied to the *average*
+        barrier distance; the realised one is each trade's own P&L pooled. When
+        every prediction carries the same barriers those are the same
+        arithmetic, and a disagreement here would mean one of the two is reading
+        the ledger wrongly rather than that the strategy changed.
+        """
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
+
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token = await _token(client)
+            r = await _get(client, token)
+
+        entry = _find(r.json(), method)
+        assert Decimal(entry["realised"]["gross_bps"]) == Decimal(
+            entry["expectancy"]["gross_bps"]
+        )
+
+    async def test_a_method_the_gate_refuses_is_still_on_the_page(
+        self, db, database_url
+    ):
+        """67% correct, and losing money on every trade.
+
+            entry 100, target 101 (+100bps), stop 96 (-400bps)
+            45 predictions over 3 names, 30 correct
+
+            realised gross = (30 * 100 - 15 * 400) / 45 = -66.67 bps
+
+        The hit rate clears the 0.6 target that used to be the bar, so the old
+        gate would have funded this. It appears, refused, with the reason -- a
+        method that vanishes from the report stops being judged rather than
+        passing.
+        """
+        method, entities = _method(), await _entities(db, 3)
+        for i in range(45):
+            await _predict(
+                db,
+                entities[i % len(entities)],
+                method=method,
+                resolved_at=NOW + timedelta(hours=i),
+                hit=i < 30,
+                horizon_days=30 + i,
+                upper="101",
+                lower="96",
+            )
+
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token = await _token(client)
+            r = await _get(client, token)
+
+        entry = _find(r.json(), method)
+        assert entry["status"] == "calibrated"
+        assert entry["hit_rate"] == pytest.approx(2 / 3)
+        assert entry["hit_rate"] > 0.6
+        assert round(Decimal(entry["realised"]["gross_bps"]), 2) == Decimal("-66.67")
+        for gate in entry["gates"]:
+            assert gate["eligible"] is False, gate
+            assert gate["reason"] == Ineligible.BELOW_EXPECTANCY.value, gate
+
+    async def test_the_gate_parameters_are_printed_with_the_verdicts(
+        self, db, database_url
+    ):
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
+
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token = await _token(client)
+            r = await _get(client, token)
+
+        params = r.json()["gate_parameters"]
+        assert Decimal(params["round_trip_cost_bps"]) == Decimal(20)
+        assert params["cost_venue"] == "cex_taker"
+        assert Decimal(params["min_expectancy_bps"]) > 0
+        assert params["min_effective_n"] == 30
+        assert Decimal(params["max_assumed_share"]) == Decimal("0.5")
+        assert Decimal(params["max_concentration"]) == Decimal("0.5")
+
+    async def test_the_realised_money_is_serialised_as_a_string(
+        self, db, database_url
+    ):
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
+
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token = await _token(client)
+            r = await _get(client, token)
+
+        raw = json.loads(r.text)
+        realised = _find(raw, method)["realised"]
+        for field in (
+            "gross_bps",
+            "net_bps",
+            "round_trip_cost_bps",
+            "assumed_share",
+            "concentration",
+        ):
+            assert isinstance(realised[field], str), field
+            assert not isinstance(realised[field], float), field
+        for venue in realised["venues"]:
+            assert isinstance(venue["net_bps"], str), venue["venue"]
+
+
 class TestTheReportWritesNothing:
     async def test_reading_the_page_does_not_change_the_ledger(
         self, db, database_url
     ):
         """A report endpoint with a side effect is a footgun on a page someone
         refreshes while deciding whether to commit capital."""
-        method, entity = _method(), await _entity(db)
-        await _history(db, entity, method=method, n=40, hits=30)
+        method, entities = _method(), await _entities(db, 3)
+        await _history(db, entities, method=method, n=40, hits=30)
 
         async def counts():
             row = await db.pool.fetchrow(
