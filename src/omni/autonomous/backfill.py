@@ -17,14 +17,25 @@ against it.
 Idempotent: a re-run finds the earliest prediction per entity and skips
 entities that already have history, so the backfill is safe to call on every
 boot (it no-ops after the first successful run).
+
+Every prediction written here is **marked as replayed in its own provenance**.
+`trading/policy.py` counts live resolved predictions as those whose provenance
+carries no backfill marker, and GATE C opens the scale phase on that count
+alone -- so an unmarked backfill row is indistinguishable from a call the live
+scheduler risked something on, and thirty of them manufactured overnight would
+open the gate the marker exists to hold shut. The marker is what makes the two
+distinguishable by reading the row; nothing else in the row is a reliable
+witness (a live call and a replayed one differ only in `created_at`, which is a
+timestamp heuristic, not a statement of origin).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from omni.conviction.ledger import resolve_due_predictions
 from omni.conviction.trend import produce_trend_prediction_from_coverage
@@ -56,6 +67,24 @@ _ENTITIES_WITH_PRICES = """
 SELECT DISTINCT c.entity_id
 FROM claim c JOIN entity e ON e.id = c.entity_id
 WHERE c.claim_type = 'price_snapshot' AND e.kind = 'company'
+"""
+
+# The marker goes under `assumptions` because that is the only part of the
+# provenance envelope a caller controls: `record_prediction` builds the
+# envelope itself and takes `assumptions` alone from its caller. It is written
+# by UPDATE rather than passed down because the trend producer composes its own
+# assumptions and does not forward any -- and this module may not change it.
+# The merge (`||`) preserves those, so the model parameters the call was made
+# under stay readable alongside the marker.
+_STAMP_BACKFILL = """
+UPDATE prediction
+SET provenance = jsonb_set(
+        provenance,
+        '{assumptions}',
+        COALESCE(provenance -> 'assumptions', '{}'::jsonb) || $1::jsonb,
+        true
+    )
+WHERE id = $2
 """
 
 
@@ -91,6 +120,11 @@ async def backfill_trend_predictions(
     Idempotent: an entity whose earliest prediction for this method is already
     older than the lookback window is skipped, so a re-run after a successful
     backfill is a no-op for that entity.
+
+    Every prediction written carries `provenance.assumptions.backfill` naming
+    this run and the replayed decision time, so `trading/policy.py` can exclude
+    it from the live count that opens GATE C. Backfilled predictions still
+    resolve and still calibrate -- the marker withholds capital, not evidence.
     """
     method = _TREND_METHOD + method_suffix
 
@@ -101,6 +135,7 @@ async def backfill_trend_predictions(
     now = datetime.now(UTC)
     cutoff = now - timedelta(days=lookback_days)
     horizon = timedelta(days=horizon_days)
+    run_id = str(uuid4())
 
     processed = 0
     written = 0
@@ -116,22 +151,38 @@ async def backfill_trend_predictions(
         ts = cutoff
         while ts < now - horizon:
             try:
-                pid = await produce_trend_prediction_from_coverage(
-                    pool,
-                    entity_id=entity_id,
-                    audience_user_id=audience_user_id,
-                    as_of=ts,
-                    horizon_ends_at=ts + horizon,
-                    created_at=ts,
-                    window=window,
-                    target_k=target_k,
-                )
-                if pid is not None:
-                    if method_suffix:
-                        await pool.execute(
-                            "UPDATE prediction SET method = $1 WHERE id = $2",
-                            method, pid,
+                # Write and stamp in one transaction: a row committed without
+                # its marker reads as live forever, and the failure that left
+                # it unmarked is exactly the one nobody notices.
+                async with pool.acquire() as conn, conn.transaction():
+                    pid = await produce_trend_prediction_from_coverage(
+                        conn,
+                        entity_id=entity_id,
+                        audience_user_id=audience_user_id,
+                        as_of=ts,
+                        horizon_ends_at=ts + horizon,
+                        created_at=ts,
+                        window=window,
+                        target_k=target_k,
+                    )
+                    if pid is not None:
+                        if method_suffix:
+                            await conn.execute(
+                                "UPDATE prediction SET method = $1 WHERE id = $2",
+                                method, pid,
+                            )
+                        await conn.execute(
+                            _STAMP_BACKFILL,
+                            json.dumps({
+                                "backfill": {
+                                    "run_id": run_id,
+                                    "cutoff": cutoff.isoformat(),
+                                    "as_of": ts.isoformat(),
+                                }
+                            }),
+                            pid,
                         )
+                if pid is not None:
                     entity_written += 1
             except Exception:
                 logger.exception(
