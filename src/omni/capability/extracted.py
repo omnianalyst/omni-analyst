@@ -75,6 +75,10 @@ CLAIM_TYPES = frozenset(
         "protocol_fees",
         "stablecoin_supply",
         "chain_tvl",
+        # 036: microstructure. Feeds the cost model's spread estimate with a
+        # measured number instead of a configured constant.
+        "orderbook_snapshot",
+        "trade_tape",
     }
 )
 

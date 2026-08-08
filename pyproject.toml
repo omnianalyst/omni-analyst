@@ -29,6 +29,13 @@ dependencies = [
     "scikit-learn>=1.5,<2",
     "statsmodels>=0.14,<1",
     "networkx>=3.0,<4",
+    # Unifies 100+ crypto venues behind one interface. Pinned at the 4.x line:
+    # the 4.x series is the long-stable unified API (fetch_ohlcv, the exception
+    # taxonomy NetworkError/BadSymbol/etc.); a 5.x ceiling is set defensively
+    # because ccxt's major bumps have historically renamed exchange ids and
+    # reshaped the async_support surface, which would silently move the venue
+    # an adapter targets.
+    "ccxt>=4.0,<5",
 ]
 
 [project.optional-dependencies]

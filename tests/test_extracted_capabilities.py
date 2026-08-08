@@ -62,6 +62,9 @@ SCHEMA_CLAIM_TYPES = frozenset(
         "protocol_fees",
         "stablecoin_supply",
         "chain_tvl",
+        # 036: microstructure.
+        "orderbook_snapshot",
+        "trade_tape",
     }
 )
 
