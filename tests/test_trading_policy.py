@@ -1026,3 +1026,103 @@ class TestRefusesToAnswerWithoutItsInputs:
                 walk_forward_positive=True,
                 **GATE,
             )
+
+
+class TestTheGateReadsTheRecordedExitPrice:
+    """The gate and `expectancy.compute` must score an expiry the same way.
+
+    They did not. `policy.py` was written while `expectancy.ResolvedTrade` still
+    scored every expiry as an assumed zero, and migration 044 plus the
+    `exit_price` wiring landed in a different work stream. The query kept
+    selecting the pre-044 column set, so the gate silently scored expiries at
+    zero while an independent measurement of the same ledger scored them at
+    their recorded close.
+
+    On the real 2-day backfill the two disagreed by 32 bps per trade -- the gate
+    reported +10.5 bps net and refused for TOO_MUCH_ASSUMED, while the ledger
+    actually said -22.0 bps. Same rows, same code path in `compute`, opposite
+    sign, and only the reason string hinted that anything was wrong.
+    """
+
+    async def test_an_expiry_with_a_recorded_exit_is_not_counted_as_assumed(
+        self, db
+    ):
+        method, entity = _method(), await _entity(db)
+        for i in range(MIN_RESOLVED_FOR_PAPER + 2):
+            pid = await _resolved(
+                db, entity, method=method, outcome="expiry", horizon_days=5 + i
+            )
+            await db.pool.execute(
+                "UPDATE prediction SET exit_price = 108, exit_at = now() "
+                "WHERE id = $1",
+                pid,
+            )
+
+        verdict = await eligible(
+            db.pool,
+            method=method,
+            entity_kind="company",
+            audience_user_id=None,
+            phase=TradingPhase.PAPER,
+            target_hit_rate=0.6,
+            walk_forward_positive=True,
+            **SINGLE_ENTITY,
+        )
+
+        assert verdict.assumed_share == Decimal(0), (
+            "every expiry has a recorded exit, so nothing is assumed; a gate "
+            "still reading the pre-044 column set reports 1.0 here"
+        )
+        # entry 100, exit 108, direction up -> +800 bps, minus 20 round trip.
+        assert verdict.gross_expectancy_bps == Decimal(800)
+        assert verdict.net_expectancy_bps == Decimal(780)
+
+    async def test_an_expiry_without_one_is_still_assumed(self, db):
+        method, entity = _method(), await _entity(db)
+        for i in range(MIN_RESOLVED_FOR_PAPER + 2):
+            await _resolved(
+                db, entity, method=method, outcome="expiry", horizon_days=5 + i
+            )
+
+        verdict = await eligible(
+            db.pool,
+            method=method,
+            entity_kind="company",
+            audience_user_id=None,
+            phase=TradingPhase.PAPER,
+            target_hit_rate=0.6,
+            walk_forward_positive=True,
+            **SINGLE_ENTITY,
+        )
+        assert verdict.assumed_share == Decimal(1)
+        assert verdict.reason is Ineligible.TOO_MUCH_ASSUMED
+
+    async def test_a_recorded_exit_below_entry_loses_for_a_long(self, db):
+        """Sign survives the round trip through SQL.
+
+        A gate that read the exit but dropped the direction would report this
+        as a gain, which is the same inversion one layer up from the barrier
+        case.
+        """
+        method, entity = _method(), await _entity(db)
+        for i in range(MIN_RESOLVED_FOR_PAPER + 2):
+            pid = await _resolved(
+                db, entity, method=method, outcome="expiry", horizon_days=5 + i
+            )
+            await db.pool.execute(
+                "UPDATE prediction SET exit_price = 95, exit_at = now() WHERE id = $1",
+                pid,
+            )
+
+        verdict = await eligible(
+            db.pool,
+            method=method,
+            entity_kind="company",
+            audience_user_id=None,
+            phase=TradingPhase.PAPER,
+            target_hit_rate=0.6,
+            walk_forward_positive=True,
+            **SINGLE_ENTITY,
+        )
+        assert verdict.gross_expectancy_bps == Decimal(-500)
+        assert verdict.reason is Ineligible.BELOW_EXPECTANCY

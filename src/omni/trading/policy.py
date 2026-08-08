@@ -201,6 +201,10 @@ SELECT COALESCE(e.symbol, e.id::text)                       AS entity_key,
        p.entry_price,
        p.upper_barrier,
        p.lower_barrier,
+       -- Migration 044. Without it every expiry scores as an assumed zero, and
+       -- on real data that inflated pooled expectancy by roughly half while
+       -- reporting a large assumed_share the caller had to notice for itself.
+       p.exit_price,
        ((p.horizon_ends_at AT TIME ZONE 'UTC')::date)::text  AS horizon_key
 FROM prediction p
 JOIN entity e ON e.id = p.entity_id
@@ -319,6 +323,7 @@ async def eligible(
                 entry_price=r["entry_price"],
                 upper_barrier=r["upper_barrier"],
                 lower_barrier=r["lower_barrier"],
+                exit_price=r["exit_price"],
                 horizon_key=r["horizon_key"],
             )
             for r in trade_rows
