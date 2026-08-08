@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID
 
+from omni.conviction.carry import produce_carry_prediction_from_coverage
 from omni.conviction.predict import produce_dcf_prediction_from_coverage
 from omni.conviction.trend import produce_trend_prediction_from_coverage
 
@@ -43,6 +44,16 @@ PRODUCERS: tuple[Producer, ...] = (
         entity_kinds=("company", "crypto_asset"),
         produce=produce_trend_prediction_from_coverage,
         requires_claim_types=("price_snapshot",),
+    ),
+    Producer(
+        # crypto_asset only. A funding rate is a property of a perpetual
+        # market; an equity has none, so registering this for `company` would
+        # produce refusals forever while burning the fill budget doing it --
+        # the same reason DCF stays company-only.
+        method="carry.funding",
+        entity_kinds=("crypto_asset",),
+        produce=produce_carry_prediction_from_coverage,
+        requires_claim_types=("funding_rate", "price_snapshot"),
     ),
 )
 

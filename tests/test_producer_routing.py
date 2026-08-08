@@ -37,9 +37,32 @@ class TestRegistryContract:
         methods = {p.method for p in producers_for("company")}
         assert methods == {DCF, TREND}
 
-    def test_crypto_asset_routes_to_trend_only(self):
+    def test_crypto_asset_never_routes_to_a_company_only_producer(self):
+        """The invariant is exclusion, not a fixed roster.
+
+        This asserted `== {TREND}` when trend was the only crypto producer, so
+        it broke the moment carry.funding registered -- a legitimate addition
+        failing a test that was really about something else. What must hold is
+        that a producer requiring company-shaped inputs never routes to a
+        token: fundamentals.dcf_valuation reads EDGAR company facts and would
+        refuse forever on a crypto asset while burning the fill budget on every
+        sweep doing it. That is the reason the kind filter exists at all.
+        """
         methods = {p.method for p in producers_for("crypto_asset")}
-        assert methods == {TREND}
+        assert DCF not in methods
+        assert TREND in methods
+        assert methods, "crypto_asset must route to at least one producer"
+
+    def test_every_crypto_producer_declares_crypto_claim_inputs(self):
+        # A producer routed to crypto that requires a company-only claim type
+        # would abstain forever. Cheaper to catch here than in the fill budget.
+        company_only = {"fundamental_metric", "filing_event"}
+        for producer in producers_for("crypto_asset"):
+            overlap = company_only & set(producer.requires_claim_types)
+            assert not overlap, (
+                f"{producer.method} routes to crypto_asset but requires "
+                f"{overlap}, which no crypto entity will ever have"
+            )
 
     def test_an_unregistered_kind_routes_to_nothing(self):
         # A kind with no applicable producer is not an error -- it has nothing
