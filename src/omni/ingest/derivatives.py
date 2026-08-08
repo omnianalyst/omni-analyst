@@ -5,13 +5,21 @@ represent a funding rate at all before this file. Three of the planned crypto
 producers (`carry.funding`, `basis.crossvenue`, `oi.divergence`) read claim
 types this adapter writes; without it they have nothing to compute on.
 
-These endpoints are public and keyless on Binance, Bybit and OKX. That matters
-for licensing: keyless public market data is `allowed`, so unlike CoinGecko's
-`byo_only` prices these claims accumulate as shared network coverage rather than
-being pinned to one user. The adapter declares `provider_key = "binance"` -- the
-licence class of what it emits -- and produces drafts; `ClaimDraft` has no
-audience field, so the adapter cannot and does not make the redistribution
-decision. That is the writer's job, exactly as for CoinGecko and OnChain.
+These endpoints are public and keyless on Binance, Bybit and OKX, which makes
+them cheap to reach -- but keyless is not the same as redistributable, and this
+docstring previously conflated the two. `redistribution_for("binance")` resolves
+to `byo_only`: the venue's terms restrict serving its market data on to third
+parties whether or not a key was needed to fetch it. So these claims are pinned
+to the credential owner exactly like CoinGecko prices, and do NOT accumulate as
+shared network coverage. `defillama` and `etherscan` are the redistributable
+crypto sources; a venue feed is not.
+
+Nothing about the adapter changes either way. It declares
+`provider_key = "binance"` and produces drafts; `ClaimDraft` has no audience
+field, so the adapter cannot and does not make the redistribution decision.
+That is the writer's job, resolved from the catalog, exactly as for CoinGecko
+and OnChain -- which is why the mistake above was a documentation error and
+never a leak.
 
 Routing follows `OnChainAdapter`: a `"<kind>:<symbol>"` key dispatches to one of
 three parse paths, because one venue serves several claim types. An unknown kind

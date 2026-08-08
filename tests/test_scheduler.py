@@ -174,7 +174,13 @@ class TestDefaultRegistry:
     def test_the_default_registry_is_everything_runnable(self):
         r = default_registry()
         assert len(r) == r.summary()["invocable"]
-        assert len(r) == 130
+        # 130 before the Phase 1 crypto wave; +12 for derivatives.binance,
+        # defillama.fundamentals, and exchanges.* / microstructure.* across the
+        # five ccxt venues. Kept exact rather than a lower bound: the assertion
+        # above proves everything registered is runnable, and this one exists to
+        # make a mass registration or a silent loss fail loudly. Update it
+        # deliberately, with the delta accounted for, or not at all.
+        assert len(r) == 142
 
     def test_derived_capabilities_are_reachable_through_default_registry(self):
         # The defect this catches: build_derived_registry() was never merged, so

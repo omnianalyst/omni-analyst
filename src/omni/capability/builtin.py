@@ -56,11 +56,15 @@ def _adapter(
 
 def build_builtin_registry(settings=None) -> Registry:
     from omni.ingest.coingecko import CoinGeckoAdapter
+    from omni.ingest.defillama import DefiLlamaAdapter
+    from omni.ingest.derivatives import DerivativesAdapter
     from omni.ingest.edgar import EdgarAdapter
     from omni.ingest.entity_news import EntityNewsAdapter
+    from omni.ingest.exchanges import CCXTAdapter
     from omni.ingest.filings import FilingsAdapter
     from omni.ingest.fred import FredAdapter
     from omni.ingest.macro_perception import MacroPerceptionAdapter
+    from omni.ingest.microstructure import MicrostructureAdapter
     from omni.ingest.news import NewsAdapter
     from omni.ingest.onchain import OnChainAdapter
     from omni.ingest.polygon import PolygonAdapter
@@ -130,8 +134,65 @@ def build_builtin_registry(settings=None) -> Registry:
             factory=CoinGeckoAdapter,
             credentials={"api_key": cfg.coingecko_api_key} if cfg.coingecko_api_key else None,
         ),
+        _adapter(
+            "derivatives.binance",
+            "Perpetual funding rate, open interest and liquidations. The crypto "
+            "edge RESEARCH.md rates best risk-adjusted for a solo operator, and "
+            "the three claim types the carry, basis and OI producers consume. "
+            "Public endpoints, but venue terms restrict redistribution, so "
+            "private to the credential owner.",
+            provider_key="binance",
+            produces=("funding_rate", "open_interest", "liquidation_event"),
+            entity_kinds=("crypto_asset",),
+            factory=DerivativesAdapter,
+        ),
+        _adapter(
+            "defillama.fundamentals",
+            "Protocol fees, revenue, stablecoin supply and chain TVL. Crypto's "
+            "redistributable fundamentals tier -- the EDGAR counterpart, and "
+            "the only crypto source here whose output accumulates as shared "
+            "network coverage rather than being pinned to one operator.",
+            provider_key="defillama",
+            produces=(
+                "protocol_fees",
+                "protocol_revenue",
+                "stablecoin_supply",
+                "chain_tvl",
+            ),
+            entity_kinds=("protocol", "chain"),
+            factory=DefiLlamaAdapter,
+        ),
     ):
         registry.add(cap)
+
+    # ccxt venues are registered per venue rather than once, because
+    # `provider_key` carries the licence class and ccxt is a client library, not
+    # a licensor. One registration would apply one venue's terms to all of them.
+    for venue in ("binance", "coinbase", "kraken", "bybit", "okx"):
+        registry.add(_adapter(
+            f"exchanges.{venue}",
+            f"Price bars from {venue} via ccxt. Multiple venues covering one "
+            f"asset is what the cross-venue basis producer needs; a single "
+            f"aggregate price cannot express where a print happened.",
+            provider_key=venue,
+            produces=("price_snapshot",),
+            entity_kinds=("crypto_asset",),
+            factory=CCXTAdapter,
+            credentials={"venue": venue},
+        ))
+        registry.add(_adapter(
+            f"microstructure.{venue}",
+            f"Order book and trade tape from {venue}. Supplies "
+            f"venue/costs.py with a measured spread instead of a configured "
+            f"constant, which is what the router accepts or rejects strategies "
+            f"on.",
+            provider_key=venue,
+            produces=("orderbook_snapshot", "trade_tape"),
+            entity_kinds=("crypto_asset",),
+            factory=MicrostructureAdapter,
+            credentials={"venue": venue},
+            cost=2.0,
+        ))
 
     registry.add(_adapter(
         "rss.entity_sentiment",

@@ -1934,10 +1934,13 @@ class TestCompositionWithBuiltin:
             combined.add(cap)
         # The price producer (builtin) and the price consumer (extracted) coexist
         # without one shadowing the other.
-        assert {c.name for c in combined.producing("price_snapshot")} == {
-            "polygon.aggregates",
-            "coingecko.market_chart",
-        }
+        # Set equality was pinned here before the ccxt venues registered as
+        # price producers. What this test is for is that merging the two
+        # registries does not let either shadow the other, so it asserts
+        # containment from both sides rather than an exhaustive set that has to
+        # be rewritten every time a venue is added.
+        price_producers = {c.name for c in combined.producing("price_snapshot")}
+        assert {"polygon.aggregates", "coingecko.market_chart"} <= price_producers
         assert combined.get("fundamentals.risk_metrics").consumes == (
             "price_snapshot",
         )

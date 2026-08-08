@@ -51,7 +51,18 @@ class TestLicenceClassification:
         it cannot, instead of quietly using a licensed feed.
         """
         assert registry.producing("price_snapshot", allow_byo=False) == []
-        assert len(registry.producing("price_snapshot")) == 2
+
+        # Previously `len(...) == 2`, which broke the moment the ccxt venues
+        # were registered. A count was standing in for the property it could
+        # not state: it is not that there are exactly two price sources, it is
+        # that EVERY price source is licensed. Asserting the property directly
+        # survives new venues and, unlike the count, actually fails if one of
+        # them is ever misclassified as redistributable.
+        producers = registry.producing("price_snapshot")
+        assert producers, "no price producers registered at all"
+        assert all(c.touches_byo for c in producers), [
+            c.name for c in producers if not c.touches_byo
+        ]
 
     def test_the_shareable_fundamental_layer_exists_for_both_asset_classes(
         self, registry
@@ -72,9 +83,16 @@ class TestSelection:
             assert "onchain.activity" in {c.name for c in registry.producing(t)}
 
     def test_calibration_reorders_competing_producers(self, registry):
-        assert [c.name for c in registry.producing("price_snapshot")] == [
-            "coingecko.market_chart", "polygon.aggregates",
-        ]
+        # The exact list was pinned here before the ccxt venues existed. What
+        # the test is actually for is that observed reliability changes the
+        # order, so the baseline is now "polygon is not already first" -- which
+        # still fails if the reordering is removed, and does not have to be
+        # rewritten every time a venue is added.
+        before = [c.name for c in registry.producing("price_snapshot")]
+        assert "polygon.aggregates" in before
+        assert "coingecko.market_chart" in before
+        assert before[0] != "polygon.aggregates"
+
         registry.observe_reliability("polygon.aggregates", 0.9)
         assert registry.producing("price_snapshot")[0].name == "polygon.aggregates"
 

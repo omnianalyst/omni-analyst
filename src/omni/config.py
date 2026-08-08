@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     coingecko_api_key: str = ""
     etherscan_api_key: str = ""
 
+    # Exchange venues. All optional: every adapter in this wave reads public
+    # endpoints, and a key only raises the rate limit. An absent key is not an
+    # Unavailable here -- it is the normal case.
+    binance_api_key: str = ""
+    coinbase_api_key: str = ""
+    kraken_api_key: str = ""
+    bybit_api_key: str = ""
+    okx_api_key: str = ""
+
     # SEC requires a User-Agent identifying the operator, and rejects requests
     # without one. It is not a secret and not a key -- EDGAR is free.
     # Format: "Organisation contact@example.com".

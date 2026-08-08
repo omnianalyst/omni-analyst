@@ -44,6 +44,14 @@ _WIRED_PROVIDERS = frozenset({
     "coingecko",
     "etherscan",
     "rss",
+    # Wired by the Phase 1 crypto wave. Each has an adapter in `ingest/` that
+    # the planner can reach through `capability/builtin.py`.
+    "binance",
+    "defillama",
+    "coinbase",
+    "kraken",
+    "bybit",
+    "okx",
 })
 
 # --- Server-credential fallback policy -------------------------------------
@@ -181,6 +189,45 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "category": CATEGORY_CRYPTO,
         "settings_field": "messari_api_key",
         "key_required": False,  # some endpoints work keyless; key raises limits
+        "fallback": FALLBACK_BYO_ONLY,
+    },
+    # --- Exchange venues reached through ccxt ---
+    #
+    # One entry per venue rather than a single "ccxt" entry, because ccxt is a
+    # client library and not a licensor: redistribution is governed by the venue
+    # whose data was fetched. Collapsing them would apply one venue's terms to
+    # all of them, which is the licence rule AGENTS.md calls the one most likely
+    # to be broken by accident.
+    #
+    # All byo_only. Public and keyless is not the same as redistributable -- a
+    # venue's terms restrict serving its market data on to third parties whether
+    # or not a key was needed to fetch it.
+    "coinbase": {
+        "label": "Coinbase",
+        "category": CATEGORY_CRYPTO,
+        "settings_field": "coinbase_api_key",
+        "key_required": False,
+        "fallback": FALLBACK_BYO_ONLY,
+    },
+    "kraken": {
+        "label": "Kraken",
+        "category": CATEGORY_CRYPTO,
+        "settings_field": "kraken_api_key",
+        "key_required": False,
+        "fallback": FALLBACK_BYO_ONLY,
+    },
+    "bybit": {
+        "label": "Bybit",
+        "category": CATEGORY_CRYPTO,
+        "settings_field": "bybit_api_key",
+        "key_required": False,
+        "fallback": FALLBACK_BYO_ONLY,
+    },
+    "okx": {
+        "label": "OKX",
+        "category": CATEGORY_CRYPTO,
+        "settings_field": "okx_api_key",
+        "key_required": False,
         "fallback": FALLBACK_BYO_ONLY,
     },
     "defillama": {
