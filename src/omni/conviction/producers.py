@@ -25,6 +25,9 @@ from omni.conviction.oi_divergence import (
     produce_oi_divergence_prediction_from_coverage,
 )
 from omni.conviction.predict import produce_dcf_prediction_from_coverage
+from omni.conviction.reserve import (
+    produce_reserve_prediction_from_coverage,
+)
 from omni.conviction.trend import produce_trend_prediction_from_coverage
 
 
@@ -74,6 +77,15 @@ PRODUCERS: tuple[Producer, ...] = (
         entity_kinds=("crypto_asset",),
         produce=produce_oi_divergence_prediction_from_coverage,
         requires_claim_types=("open_interest", "price_snapshot"),
+    ),
+    Producer(
+        # Needs LABELLED on-chain flow. An unlabelled address is not an
+        # exchange, and only the `exchange` category counts -- a bridge is
+        # custody in transit and a fund wallet is someone accumulating.
+        method="flow.exchange_reserve",
+        entity_kinds=("crypto_asset",),
+        produce=produce_reserve_prediction_from_coverage,
+        requires_claim_types=("onchain_flow", "price_snapshot"),
     ),
 )
 
