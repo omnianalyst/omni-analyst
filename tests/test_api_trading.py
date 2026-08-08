@@ -20,6 +20,12 @@ from neutron.test import TestClient
 
 from omni.api.trading import build_router as trading_router
 from omni.main import create_app
+from omni.portfolio.reconcile import (
+    Discrepancy,
+    Divergence,
+    ReconciliationResult,
+    record,
+)
 from omni.trading.policy import Ineligible, TradingPhase
 
 GOOD_SECRET = "x" * 48
@@ -156,6 +162,54 @@ async def _cash(
         Decimal(free),
         Decimal(locked),
         updated_at,
+    )
+
+
+async def _stale_after(db, portfolio_id, *, venue, after, active=True):
+    """The operator's own bound on how old a reconciliation may be.
+
+    A `risk_alert` row of kind `reconciliation`, which is where the alerting
+    side already reads it from. Written through the real table rather than
+    stubbed, so a report that read its freshness bound from somewhere else --
+    a constant, a query parameter, a default -- would not see this.
+    """
+    await db.pool.execute(
+        """
+        INSERT INTO risk_alert (portfolio_id, kind, threshold, venue, stale_after,
+                                active)
+        VALUES ($1, 'reconciliation', $2, $3, $4, $5)
+        """,
+        portfolio_id,
+        Decimal("0.01"),
+        venue,
+        after,
+        active,
+    )
+
+
+async def _reconciliation(db, portfolio_id, *, venue, checked_at, discrepancies=()):
+    """Store one reconciliation result through the writer production uses."""
+    await record(
+        db.pool,
+        ReconciliationResult(
+            reconciled=not discrepancies,
+            discrepancies=tuple(discrepancies),
+            checked_at=checked_at,
+            venue=venue,
+        ),
+        portfolio_id=portfolio_id,
+    )
+
+
+def _missing_at_venue(venue, symbol, local):
+    """We hold it, the venue reports nothing -- so `remote` is genuinely absent."""
+    return Discrepancy(
+        kind=Divergence.POSITION_MISSING_AT_VENUE,
+        venue=venue,
+        symbol=symbol,
+        local=Decimal(local),
+        remote=None,
+        detail=f"we hold {local} {symbol} and {venue} reports no such position",
     )
 
 
@@ -1123,12 +1177,15 @@ class TestThePortfolioIsReportedAsStored:
 
 
 class TestReconciliationReportsWhatIsRecorded:
-    """No reconciliation result is persisted anywhere in this system.
+    """Four statuses, and the three that must never be mistaken for the fourth.
 
-    `portfolio/reconcile.py` returns a `ReconciliationResult` to its caller,
-    `trading/loop.py` reads its boolean and drops the object, and no migration
-    defines a table for it. So every venue is `never_run`, and these tests pin
-    that the endpoint says so rather than filling the silence.
+    Results are persisted now, so `reconciled`, `diverged` and `stale` are all
+    reachable -- which is exactly when `never_run` becomes easy to lose. A venue
+    with no stored row is not a venue that agreed, and the difference between
+    those two answers is the difference between an operator checking before they
+    commit capital and an operator not checking. These tests pin every path to
+    `reconciled` as a path that had evidence behind it: a stored pass, at this
+    venue, inside a freshness bound the operator stated.
     """
 
     async def test_an_anonymous_caller_is_refused(self, db, database_url):
@@ -1280,6 +1337,359 @@ class TestReconciliationReportsWhatIsRecorded:
         assert r.status_code == 200, r.text
         assert r.json()["venues"] == []
 
+    async def test_a_stored_pass_inside_its_freshness_bound_reads_as_reconciled(
+        self, db, database_url
+    ):
+        """The only shape that earns `reconciled`: a check, at this venue,
+        recently enough that the operator's own bound still covers it."""
+        checked_at = datetime.now(UTC) - timedelta(minutes=5)
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _stale_after(
+                db, portfolio_id, venue="binance", after=timedelta(hours=1)
+            )
+            await _reconciliation(
+                db, portfolio_id, venue="binance", checked_at=checked_at
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        row = _venue_row(r.json(), "binance")
+        assert row["status"] == "reconciled"
+        assert datetime.fromisoformat(row["checked_at"]) == checked_at
+        assert row["discrepancies"] == []
+
+    async def test_a_pass_older_than_its_freshness_bound_reads_as_stale(
+        self, db, database_url
+    ):
+        """Two hours old against a one-hour bound. The books agreed once; they
+        have not been shown to agree now, and the page must not say they do."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _stale_after(
+                db, portfolio_id, venue="binance", after=timedelta(hours=1)
+            )
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(hours=2),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        row = _venue_row(r.json(), "binance")
+        assert row["status"] == "stale"
+        assert row["status"] != "reconciled"
+        # It did run, so the moment it ran is still reported -- `stale` is a
+        # statement about the age of a real check, not the absence of one.
+        assert row["checked_at"] is not None
+
+    async def test_a_pass_with_no_freshness_bound_configured_is_not_fresh(
+        self, db, database_url
+    ):
+        """An unset threshold must not read as permission.
+
+        The result is minutes old and clean. Nothing has stated how old a pass
+        at this venue may be, so there is no bound it can be shown to be inside,
+        and an endpoint that supplied one -- a default, a constant, a query
+        parameter's fallback -- would be answering with a threshold nobody set.
+        """
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(seconds=5),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        row = _venue_row(r.json(), "binance")
+        assert row["status"] != "reconciled"
+        assert row["status"] == "stale"
+
+    async def test_a_deactivated_bound_is_not_a_bound(self, db, database_url):
+        """Switching the alert off removes the statement about freshness; it
+        does not leave the last one standing."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _stale_after(
+                db,
+                portfolio_id,
+                venue="binance",
+                after=timedelta(hours=1),
+                active=False,
+            )
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(seconds=5),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        assert _venue_row(r.json(), "binance")["status"] == "stale"
+
+    async def test_the_tighter_of_two_stated_bounds_is_the_one_that_binds(
+        self, db, database_url
+    ):
+        """Two reconciliation alerts on one venue are two bounds the operator
+        stated. The reading is outside the tighter one, so it is not current."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _stale_after(
+                db, portfolio_id, venue="binance", after=timedelta(days=7)
+            )
+            await _stale_after(
+                db, portfolio_id, venue="binance", after=timedelta(minutes=10)
+            )
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        assert _venue_row(r.json(), "binance")["status"] == "stale"
+
+    async def test_a_pass_at_one_venue_leaves_the_others_never_run(
+        self, db, database_url
+    ):
+        """The substitution the enum exists for, in the setting where it is
+        easiest to make: one venue genuinely did reconcile, and a report that
+        derived the status once rather than per venue would carry that verdict
+        across to a venue nobody has looked at."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _cash(db, portfolio_id, venue="kraken", asset="USD", free="1000")
+            await _stale_after(
+                db, portfolio_id, venue="binance", after=timedelta(hours=1)
+            )
+            await _stale_after(
+                db, portfolio_id, venue="kraken", after=timedelta(hours=1)
+            )
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(minutes=5),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        body = r.json()
+        assert _venue_row(body, "binance")["status"] == "reconciled"
+        kraken = _venue_row(body, "kraken")
+        assert kraken["status"] == "never_run"
+        assert kraken["checked_at"] is None
+        assert kraken["discrepancies"] == []
+
+    async def test_a_divergence_reports_both_sides_and_leaves_absence_absent(
+        self, db, database_url
+    ):
+        """`remote: 0` would assert the venue reported a flat position. It
+        reported no position at all, which is why the field is nullable."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _hold(
+                db,
+                portfolio_id,
+                venue="okx",
+                symbol="ETH/USD",
+                quantity="2",
+                average_entry="50",
+            )
+            await _stale_after(db, portfolio_id, venue="okx", after=timedelta(hours=1))
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="okx",
+                checked_at=datetime.now(UTC) - timedelta(minutes=1),
+                discrepancies=(_missing_at_venue("okx", "ETH/USD", "2"),),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        row = _venue_row(json.loads(r.text), "okx")
+        assert row["status"] == "diverged"
+        assert len(row["discrepancies"]) == 1
+        found = row["discrepancies"][0]
+        assert found["kind"] == "position_missing_at_venue"
+        assert found["venue"] == "okx"
+        assert found["symbol"] == "ETH/USD"
+        assert found["local"] == "2", "money and quantities are strings"
+        assert found["remote"] is None
+        assert '"remote": null' in r.text or '"remote":null' in r.text
+
+    async def test_a_divergence_is_reported_however_old_it_is(
+        self, db, database_url
+    ):
+        """An old disagreement is still the last thing known about the venue.
+        Reporting it as `stale` would replace a statement about the books with a
+        statement about the clock, and drop the discrepancies with it."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="okx", asset="USD", free="1000")
+            await _stale_after(db, portfolio_id, venue="okx", after=timedelta(hours=1))
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="okx",
+                checked_at=datetime.now(UTC) - timedelta(days=3),
+                discrepancies=(_missing_at_venue("okx", "ETH/USD", "2"),),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        row = _venue_row(r.json(), "okx")
+        assert row["status"] == "diverged"
+        assert len(row["discrepancies"]) == 1
+
+    async def test_only_the_most_recent_result_per_venue_is_reported(
+        self, db, database_url
+    ):
+        """A cleared divergence must not keep flagging, and a divergence found
+        after a pass must not be hidden by it. Both directions are stored here,
+        so a read that returned the older row is wrong whichever way it leans."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _cash(db, portfolio_id, venue="okx", asset="USD", free="1000")
+            for venue in ("binance", "okx"):
+                await _stale_after(
+                    db, portfolio_id, venue=venue, after=timedelta(hours=1)
+                )
+
+            # binance: diverged first, then passed. okx: passed first, then
+            # diverged. Written newest-first so insertion order cannot stand in
+            # for recency.
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(minutes=30),
+                discrepancies=(_missing_at_venue("binance", "BTC/USD", "1"),),
+            )
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="okx",
+                checked_at=datetime.now(UTC) - timedelta(minutes=1),
+                discrepancies=(_missing_at_venue("okx", "ETH/USD", "2"),),
+            )
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="okx",
+                checked_at=datetime.now(UTC) - timedelta(minutes=30),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        body = r.json()
+        binance = _venue_row(body, "binance")
+        assert binance["status"] == "reconciled"
+        assert binance["discrepancies"] == []
+        okx = _venue_row(body, "okx")
+        assert okx["status"] == "diverged"
+        assert len(okx["discrepancies"]) == 1
+
+    async def test_a_checked_venue_the_book_no_longer_touches_still_appears(
+        self, db, database_url
+    ):
+        """The venue holds a position we have no row for, so our book has no
+        exposure there to derive the venue list from. Listing local exposure
+        alone would drop the divergence precisely because our side is empty --
+        which is the direction in which our book is most wrong."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="kraken",
+                checked_at=datetime.now(UTC) - timedelta(minutes=1),
+                discrepancies=(
+                    Discrepancy(
+                        kind=Divergence.POSITION_MISSING_LOCALLY,
+                        venue="kraken",
+                        symbol="SOL/USD",
+                        local=None,
+                        remote=Decimal(40),
+                        detail="kraken holds 40 SOL/USD and we have no position row",
+                    ),
+                ),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        body = r.json()
+        assert {v["venue"] for v in body["venues"]} == {"binance", "kraken"}
+        kraken = _venue_row(body, "kraken")
+        assert kraken["status"] == "diverged"
+        assert kraken["discrepancies"][0]["local"] is None
+        assert kraken["discrepancies"][0]["remote"] == "40"
+
+    async def test_another_accounts_result_is_not_reported_here(
+        self, db, database_url
+    ):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            other = await _second_user(client, token)
+            mine = await _portfolio(db, user_id)
+            theirs = await _portfolio(db, other)
+            await _cash(db, mine, venue="binance", asset="USD", free="1000")
+            await _cash(db, theirs, venue="binance", asset="USD", free="1000")
+            await _stale_after(db, theirs, venue="binance", after=timedelta(hours=1))
+            await _reconciliation(
+                db,
+                theirs,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        assert _venue_row(r.json(), "binance")["status"] == "never_run"
+
 
 class TestTheReadPathsWriteNothing:
     async def test_neither_endpoint_changes_what_it_describes(
@@ -1291,11 +1701,12 @@ class TestTheReadPathsWriteNothing:
         async def counts():
             row = await db.pool.fetchrow(
                 """
-                SELECT (SELECT count(*) FROM portfolio)     AS portfolios,
-                       (SELECT count(*) FROM position)      AS positions,
-                       (SELECT count(*) FROM cash_balance)  AS cash,
-                       (SELECT count(*) FROM nav_snapshot)  AS navs,
-                       (SELECT count(*) FROM trade_order)   AS orders
+                SELECT (SELECT count(*) FROM portfolio)              AS portfolios,
+                       (SELECT count(*) FROM position)               AS positions,
+                       (SELECT count(*) FROM cash_balance)           AS cash,
+                       (SELECT count(*) FROM nav_snapshot)           AS navs,
+                       (SELECT count(*) FROM trade_order)            AS orders,
+                       (SELECT count(*) FROM reconciliation_result)  AS checks
                 """
             )
             return dict(row)
@@ -1313,6 +1724,12 @@ class TestTheReadPathsWriteNothing:
                 average_entry="100",
             )
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(minutes=1),
+            )
 
             before = await counts()
             for path in ("/trading/portfolio", "/trading/reconciliation"):
@@ -1325,3 +1742,6 @@ class TestTheReadPathsWriteNothing:
 
         assert after == before
         assert before["positions"] > 0, "the comparison must not be over zero rows"
+        # The read must not record a check of its own, and must not stamp the
+        # stored one as seen.
+        assert before["checks"] > 0

@@ -50,6 +50,15 @@ on the total while 6,000 of capital sits committed in an order we have no record
 of. Totals matching is necessary and it is not sufficient, and the case where
 they match is exactly the case worth catching.
 
+**Deciding and recording are two functions, and only one of them touches the
+database.** `reconcile` takes no pool and no portfolio: a comparison that read
+stored history could be influenced by it, and the one thing this verdict must
+depend on is the two books in front of it. `record` persists a result that has
+already been decided, and `latest_by_venue` reads the most recent one per venue
+back. A failed write therefore loses the record and never the verdict, and the
+absence of a row means nobody checked -- which is why nothing here writes a row
+it did not receive a result for.
+
 **Cash is compared, and the two sides are different types on purpose.** The
 local side is `state.CashPosition`, whose `free` is signed because a margin buy
 legitimately overdraws it; the venue side is `protocol.Balance`, whose `free`
@@ -67,6 +76,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from uuid import UUID
 
 from omni.portfolio.state import CashPosition
 from omni.venue.protocol import Balance, MarketType, Position, Venue, VenueUnavailable
@@ -459,3 +469,144 @@ async def reconcile(
         checked_at=now,
         venue=name,
     )
+
+
+_INSERT_RESULT = """
+INSERT INTO reconciliation_result (portfolio_id, venue, reconciled, checked_at)
+VALUES ($1, $2, $3, $4)
+RETURNING id
+"""
+
+_INSERT_DISCREPANCY = """
+INSERT INTO reconciliation_discrepancy
+    (result_id, seq, kind, venue, symbol, local, remote, detail)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+"""
+
+# One row per venue, the most recent by the moment the books were compared.
+#
+# The tie-break is not cosmetic. Two results stamped the same instant are
+# genuinely ambiguous, so `reconciled` ascending puts a divergent reading ahead
+# of a clean one: the answer that raises a flag wins, because the cost of
+# showing a divergence that a second reading cleared is an operator checking,
+# and the cost of the reverse is an operator not checking. `recorded_at` breaks
+# what remains, and `id` makes the order total so the same rows cannot answer
+# differently on two calls.
+_LATEST_PER_VENUE = """
+SELECT DISTINCT ON (venue) id, venue, reconciled, checked_at
+FROM reconciliation_result
+WHERE portfolio_id = $1
+ORDER BY venue, checked_at DESC, reconciled, recorded_at DESC, id
+"""
+
+_DISCREPANCIES_FOR = """
+SELECT result_id, kind, venue, symbol, local, remote, detail
+FROM reconciliation_discrepancy
+WHERE result_id = ANY($1::uuid[])
+ORDER BY result_id, seq
+"""
+
+
+async def record(
+    pool, result: ReconciliationResult, *, portfolio_id: UUID
+) -> UUID:
+    """Store a verdict that has already been reached. Returns the row id.
+
+    This is a side effect of checking and never an input to it. It takes a
+    finished `ReconciliationResult` rather than the books, so there is no path
+    by which what is on disk can move what the reconciler decided.
+
+    The result and every discrepancy commit together. A result row without its
+    evidence would read back as a divergence naming nothing, and one written
+    without the row it belongs to would be evidence about no verdict; the
+    transaction makes both unrepresentable rather than unlikely.
+
+    A discrepancy naming a venue other than the result's is refused outright. A
+    reading about one venue is not evidence about another, and stored under this
+    result it would be reported as though it were.
+    """
+    if result.checked_at.tzinfo is None:
+        raise ValueError(
+            f"checked_at is naive ({result.checked_at}); a reconciliation is "
+            f"stored in UTC and a naive stamp is silently shifted by the "
+            f"session's timezone, which moves when it goes stale"
+        )
+
+    foreign = sorted({d.venue for d in result.discrepancies if d.venue != result.venue})
+    if foreign:
+        raise ValueError(
+            f"a result for {result.venue} carries discrepancies at "
+            f"{', '.join(repr(v) for v in foreign)}; another venue's "
+            f"disagreement is not evidence about this one"
+        )
+
+    async with pool.acquire() as conn, conn.transaction():
+        result_id = await conn.fetchval(
+            _INSERT_RESULT,
+            portfolio_id,
+            result.venue,
+            result.reconciled,
+            result.checked_at,
+        )
+        for seq, discrepancy in enumerate(result.discrepancies):
+            await conn.execute(
+                _INSERT_DISCREPANCY,
+                result_id,
+                seq,
+                discrepancy.kind.value,
+                discrepancy.venue,
+                discrepancy.symbol,
+                discrepancy.local,
+                discrepancy.remote,
+                discrepancy.detail,
+            )
+    return result_id
+
+
+async def latest_by_venue(pool, portfolio_id: UUID) -> dict[str, ReconciliationResult]:
+    """The most recent stored result for each venue this portfolio has checked.
+
+    A venue with no stored result is **absent from the mapping**, and callers
+    must read that absence as "never checked". It is not represented by a
+    reconciled result, an empty result, or any other value a caller could
+    mistake for a pass -- a `ReconciliationResult` cannot even express one,
+    since a clean verdict here would be a claim that the books were compared.
+
+    Every row is rebuilt through `ReconciliationResult`, so a stored pair that
+    does not cohere -- a reconciled row carrying divergences, a divergent row
+    naming none -- raises rather than being reported. The alternative is a page
+    that renders whatever the table happens to hold.
+    """
+    async with (
+        pool.acquire() as conn,
+        conn.transaction(isolation="repeatable_read"),
+    ):
+        rows = await conn.fetch(_LATEST_PER_VENUE, portfolio_id)
+        if not rows:
+            return {}
+        evidence_rows = await conn.fetch(
+            _DISCREPANCIES_FOR, [row["id"] for row in rows]
+        )
+
+    evidence: dict[UUID, list[Discrepancy]] = {}
+    for row in evidence_rows:
+        evidence.setdefault(row["result_id"], []).append(
+            Discrepancy(
+                kind=Divergence(row["kind"]),
+                venue=row["venue"],
+                symbol=row["symbol"],
+                local=row["local"],
+                remote=row["remote"],
+                detail=row["detail"],
+            )
+        )
+
+    return {
+        row["venue"]: ReconciliationResult(
+            reconciled=row["reconciled"],
+            discrepancies=tuple(evidence.get(row["id"], ())),
+            checked_at=row["checked_at"],
+            venue=row["venue"],
+        )
+        for row in rows
+    }

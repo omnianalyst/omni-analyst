@@ -50,9 +50,9 @@ condition under which a modelled expectancy quietly stops being true.
 `/trading/portfolio` and `/trading/reconciliation` are read paths over the same
 tier and inherit the same rules. The first exposes exactly what
 `portfolio.state.load` returns and derives nothing -- a quantity it does not
-hold is a quantity this endpoint does not report. The second reports
-`never_run` for every venue, because no reconciliation result is persisted
-anywhere in this system; the reasoning is at the endpoint.
+hold is a quantity this endpoint does not report. The second reports the last
+stored result per venue, and reports the absence of one as the absence of one;
+the reasoning is at the endpoint.
 """
 
 from __future__ import annotations
@@ -74,6 +74,7 @@ from omni.conviction.walk_forward_report import (
     walk_forward,
     wilson_interval,
 )
+from omni.portfolio.reconcile import latest_by_venue
 from omni.portfolio.state import UnknownPortfolio
 from omni.portfolio.state import load as load_portfolio
 from omni.trading.policy import MIN_RESOLVED_FOR_PAPER, TradingPhase, eligible
@@ -239,14 +240,43 @@ _PORTFOLIOS_FOR_AUDIENCE = """
 SELECT id FROM portfolio WHERE user_id = $1 ORDER BY created_at, id
 """
 
-# The venues this book actually has exposure at. Cash is unioned in rather than
-# read off positions alone: cash parked at a venue with no open position is
-# still cash whose local figure nobody has checked against the venue's.
-_BOOK_VENUES = """
-SELECT venue FROM position     WHERE portfolio_id = $1
+# Every venue this report has something to say about. Cash is unioned in rather
+# than read off positions alone: cash parked at a venue with no open position is
+# still cash whose local figure nobody has checked against the venue's. Stored
+# results are unioned in for the harder case -- a venue the book holds nothing at
+# but whose last check found the venue holding something we have no row for. That
+# is a `position_missing_locally`, it is the direction in which our book is most
+# wrong, and listing only venues with local exposure would drop it from the page
+# precisely because our book is empty there.
+_REPORTED_VENUES = """
+SELECT venue FROM position                WHERE portfolio_id = $1
 UNION
-SELECT venue FROM cash_balance WHERE portfolio_id = $1
+SELECT venue FROM cash_balance            WHERE portfolio_id = $1
+UNION
+SELECT venue FROM reconciliation_result   WHERE portfolio_id = $1
 ORDER BY venue
+"""
+
+# How old a reconciliation may be before it stops counting as current, per venue.
+#
+# It comes from the operator's own `risk_alert` row -- the same value
+# `portfolio.alerts` ages results against when it decides whether to raise
+# STALE_DATA -- and from nowhere else. A second source would let this page call a
+# venue current while the alerting system calls the same reading stale, and the
+# page is what gets read before capital moves. It is deliberately not a query
+# parameter: a caller-supplied bound is one a caller can widen until nothing is
+# ever stale, and one that would need a default, which would be a permission
+# granted by omission.
+#
+# `min` because two alerts on one venue are two bounds the operator has stated
+# and the tighter one is the one they committed to. `active` because a switched
+# off alert is not a stated bound at all -- which leaves the venue with no bound,
+# and a result no bound applies to is not a result shown to be fresh.
+_RECONCILIATION_STALENESS = """
+SELECT venue, min(stale_after) AS stale_after
+FROM risk_alert
+WHERE portfolio_id = $1 AND kind = 'reconciliation' AND active
+GROUP BY venue
 """
 
 
@@ -551,6 +581,56 @@ def _cash_payload(cash) -> dict:
     }
 
 
+def _discrepancy_payload(discrepancy) -> dict:
+    """One disagreement, with an absent side left absent.
+
+    `None` stays `null`. A `position_missing_at_venue` rendered with
+    `remote: "0"` asserts the venue reported a flat position; it reported no
+    position at all, and the two are the difference between a closed trade and a
+    trade the venue has never heard of.
+    """
+    return {
+        "kind": discrepancy.kind.value,
+        "venue": discrepancy.venue,
+        "symbol": discrepancy.symbol,
+        "local": None if discrepancy.local is None else str(discrepancy.local),
+        "remote": None if discrepancy.remote is None else str(discrepancy.remote),
+        "detail": discrepancy.detail,
+    }
+
+
+def _reconciliation_status(
+    result, *, stale_after: timedelta | None, now: datetime
+) -> str:
+    """Which of the four verdicts this venue's stored result supports.
+
+    Ordered so that every path to `reconciled` is a path that had evidence.
+
+    - No stored result is `never_run`. Not `reconciled`: a venue nobody looked at
+      is not a venue that agreed, and this substitution has shipped here twice.
+    - A divergence outranks staleness. An old disagreement is still the last
+      thing known about the venue, and downgrading it to `stale` would replace a
+      statement about the books with a statement about the clock.
+    - **An unbounded age is not a fresh one.** With no `stale_after` configured
+      for the venue there is nothing this result can be shown to be inside, so it
+      reports `stale` rather than `reconciled`. Absence of a threshold cannot be
+      permission; a missing bound is how "we never set one" comes to render as
+      green.
+    - A result stamped in the future is stale too. The clocks disagree, and an
+      age computed across disagreeing clocks is not a measurement.
+    """
+    if result is None:
+        return "never_run"
+    if not result.reconciled:
+        return "diverged"
+    if stale_after is None:
+        return "stale"
+    age = now - result.checked_at
+    if age < timedelta(0) or age > stale_after:
+        return "stale"
+    return "reconciled"
+
+
 def build_router(app: App) -> Router:
     router = Router()
 
@@ -753,25 +833,30 @@ def build_router(app: App) -> Router:
 
     @router.get("/trading/reconciliation")
     async def reconciliation_report(request: Request) -> dict:
-        """The last reconciliation per venue -- which, today, is none of them.
+        """The last stored reconciliation per venue, and the silences.
 
-        Nothing in this system stores a reconciliation result.
-        `portfolio/reconcile.py` builds a `ReconciliationResult` and returns it;
-        `trading/loop.py` reads its boolean, folds the discrepancy details into
-        a halt string and drops the object; no migration defines a table for it.
-        So there is no record to report, and the honest answer for every venue
-        is `never_run`.
+        Three lookups, kept separate because they answer different questions and
+        one of them is allowed to come back empty for every venue:
 
-        That is the entire reason `never_run` is in the contract. A venue with
-        no stored check has not been shown to agree with the book -- it has not
-        been looked at -- and reporting it as `reconciled` would state a verdict
-        no evidence exists for, on the page an operator reads before committing
-        capital. `reconciled`, `diverged` and `stale` become reachable when a
-        result is persisted, and not before.
+        - which venues this report covers -- real rows, not a configured list;
+        - the most recent stored result for each, from
+          `portfolio.reconcile.latest_by_venue`, which omits a venue it has
+          nothing for rather than inventing a verdict;
+        - how old a pass at each venue may be, from the operator's own
+          reconciliation alert.
 
-        The venues listed are the ones the stored book has exposure at, which is
-        a real fact about real rows rather than a configured list. A venue the
-        book does not touch has nothing to reconcile.
+        A venue absent from the second is `never_run`, and that is the entire
+        reason the status is an enum: a venue nobody checked is not a venue that
+        agreed, and the two are indistinguishable to a page that renders a
+        missing row as a clean one.
+
+        A result is matched to a venue by name and to nothing else. A pass at
+        `binance` says nothing about `kraken`, so a venue with no row of its own
+        stays `never_run` however many other venues reconciled.
+
+        Read-only, like everything else here. It records nothing -- not the read,
+        not a "checked" marker, not a stale flag -- because the operator refreshes
+        this page while deciding whether to commit capital.
         """
         audience = resolve_audience_from_request(request)
         if audience is None:
@@ -779,19 +864,39 @@ def build_router(app: App) -> Router:
 
         pool = app.db.pool
         portfolio_id = await _resolve_portfolio(pool, audience, request.query_params)
-        rows = await pool.fetch(_BOOK_VENUES, portfolio_id)
-
-        return {
-            "as_of": datetime.now(UTC).isoformat(),
-            "venues": [
-                {
-                    "venue": row["venue"],
-                    "status": "never_run",
-                    "checked_at": None,
-                    "discrepancies": [],
-                }
-                for row in rows
-            ],
+        rows = await pool.fetch(_REPORTED_VENUES, portfolio_id)
+        latest = await latest_by_venue(pool, portfolio_id)
+        staleness = {
+            row["venue"]: row["stale_after"]
+            for row in await pool.fetch(_RECONCILIATION_STALENESS, portfolio_id)
         }
+
+        # One reading of the clock for the whole page. Ageing each venue against
+        # its own `now` would let two venues checked at the same instant land on
+        # different sides of the same bound.
+        now = datetime.now(UTC)
+
+        venues = []
+        for row in rows:
+            venue = row["venue"]
+            result = latest.get(venue)
+            venues.append(
+                {
+                    "venue": venue,
+                    "status": _reconciliation_status(
+                        result, stale_after=staleness.get(venue), now=now
+                    ),
+                    "checked_at": (
+                        None if result is None else result.checked_at.isoformat()
+                    ),
+                    "discrepancies": (
+                        []
+                        if result is None
+                        else [_discrepancy_payload(d) for d in result.discrepancies]
+                    ),
+                }
+            )
+
+        return {"as_of": now.isoformat(), "venues": venues}
 
     return router

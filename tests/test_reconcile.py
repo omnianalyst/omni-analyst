@@ -22,8 +22,9 @@ production never presents.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -31,7 +32,9 @@ from omni.portfolio.reconcile import (
     Discrepancy,
     Divergence,
     ReconciliationResult,
+    latest_by_venue,
     reconcile,
+    record,
 )
 from omni.portfolio.state import CashPosition
 from omni.venue.protocol import (
@@ -586,3 +589,345 @@ def test_a_reconciled_result_cannot_carry_divergences():
 
 def test_fake_venue_satisfies_the_protocol():
     assert isinstance(FakeVenue(), Venue)
+
+
+class TestPersistence:
+    """Storing a verdict, and reading back the one that was stored.
+
+    The weight here sits on the same asymmetry the rest of the file does, moved
+    one layer out. A store that returns something for every venue asked about
+    passes every round-trip test anybody writes and is worthless, because the
+    case it exists for is the venue nobody has checked: absence has to survive
+    the round trip as absence, or `never_run` stops being reachable and the page
+    above reports a pass nobody took.
+
+    The other three are the shapes that quietly lose information:
+
+    - an absent side (`local`/`remote` of `None`) coming back as zero, which
+      converts "the venue has never heard of this position" into "the venue
+      reports it flat";
+    - an older result outranking a newer one, which is a page reporting a
+      divergence that was fixed or a pass that has since broken;
+    - a result at one venue answering a question about another.
+    """
+
+    async def _book(self, db) -> UUID:
+        return await db.pool.fetchval(
+            """
+            INSERT INTO portfolio (name, base_currency)
+            VALUES ($1, 'USD') RETURNING id
+            """,
+            f"reconcile-{uuid4().hex[:8]}",
+        )
+
+    async def _diverged(
+        self, *, venue: str = "paper", at: datetime = NOW
+    ) -> ReconciliationResult:
+        """A real reconciler run, so the stored shape is one production produces."""
+        result = await reconcile(
+            (_position("BTC/USD", "1.5", venue=venue),),
+            (_local_cash("USD", "10000", venue=venue),),
+            FakeVenue(name=venue, balances=(_balance("USD", "9000", venue=venue),)),
+            tolerance=EXACT,
+            now=at,
+        )
+        assert result.reconciled is False
+        return result
+
+    async def _reconciled(
+        self, *, venue: str = "paper", at: datetime = NOW
+    ) -> ReconciliationResult:
+        result = await reconcile((), (), FakeVenue(name=venue), tolerance=EXACT, now=at)
+        assert result.reconciled is True
+        return result
+
+    async def test_both_sides_of_every_disagreement_survive_the_round_trip(self, db):
+        portfolio_id = await self._book(db)
+        stored = await self._diverged()
+
+        await record(db.pool, stored, portfolio_id=portfolio_id)
+        loaded = (await latest_by_venue(db.pool, portfolio_id))["paper"]
+
+        assert loaded.reconciled is False
+        assert loaded.checked_at == NOW
+        assert loaded.venue == "paper"
+        assert _kinds(loaded) == _kinds(stored), "the order the reconciler produced"
+        assert [d.detail for d in loaded.discrepancies] == [
+            d.detail for d in stored.discrepancies
+        ]
+
+        missing = next(
+            d
+            for d in loaded.discrepancies
+            if d.kind is Divergence.POSITION_MISSING_AT_VENUE
+        )
+        assert missing.local == Decimal("1.5")
+        # Absent, and absent is not zero: the venue reported no such position
+        # rather than a position of nothing.
+        assert missing.remote is None
+
+        cash = next(
+            d for d in loaded.discrepancies if d.kind is Divergence.CASH_BALANCE
+        )
+        assert (cash.local, cash.remote) == (Decimal(10000), Decimal(9000))
+
+    async def test_an_absent_side_is_stored_as_absent_and_not_as_zero(self, db):
+        """Asserted against the column, not only against what the reader returns.
+
+        A reader that mapped a stored 0 back to None would satisfy the round
+        trip above while the row itself claimed the venue answered.
+        """
+        portfolio_id = await self._book(db)
+        await record(db.pool, await self._diverged(), portfolio_id=portfolio_id)
+
+        row = await db.pool.fetchrow(
+            """
+            SELECT kind, local, remote
+            FROM reconciliation_discrepancy
+            WHERE kind = 'position_missing_at_venue'
+            """
+        )
+        assert row is not None, "the wire value of the kind, not just the enum member"
+        assert row["local"] == Decimal("1.5")
+        assert row["remote"] is None
+
+    async def test_an_unavailable_venue_is_stored_as_the_divergence_it_is(self, db):
+        """The case the whole module exists for, and the one with no numbers.
+
+        Both sides are absent and the symbol is empty, so a schema that required
+        either would refuse exactly the result that must never be lost.
+        """
+        portfolio_id = await self._book(db)
+        stored = await reconcile(
+            (),
+            (),
+            FakeVenue(unavailable="socket closed"),
+            tolerance=EXACT,
+            now=NOW,
+        )
+
+        await record(db.pool, stored, portfolio_id=portfolio_id)
+        loaded = (await latest_by_venue(db.pool, portfolio_id))["paper"]
+
+        assert loaded.reconciled is False
+        assert _kinds(loaded) == [Divergence.VENUE_UNAVAILABLE]
+        assert (loaded.discrepancies[0].local, loaded.discrepancies[0].remote) == (
+            None,
+            None,
+        )
+        assert "socket closed" in loaded.discrepancies[0].detail
+
+    async def test_a_venue_with_no_stored_result_is_absent_from_the_read(self, db):
+        """The one that keeps `never_run` reachable.
+
+        `binance` was never checked, so nothing is known about it. A mapping
+        that answered for it -- with a reconciled result, an empty result, any
+        result -- would be reporting a verdict that was never reached.
+        """
+        portfolio_id = await self._book(db)
+        await record(
+            db.pool, await self._reconciled(venue="paper"), portfolio_id=portfolio_id
+        )
+
+        latest = await latest_by_venue(db.pool, portfolio_id)
+
+        assert set(latest) == {"paper"}
+        assert "binance" not in latest
+        assert latest.get("binance") is None
+
+    async def test_a_pass_at_one_venue_is_not_evidence_about_another(self, db):
+        portfolio_id = await self._book(db)
+        await record(
+            db.pool, await self._reconciled(venue="paper"), portfolio_id=portfolio_id
+        )
+        await record(
+            db.pool, await self._diverged(venue="binance"), portfolio_id=portfolio_id
+        )
+
+        latest = await latest_by_venue(db.pool, portfolio_id)
+
+        assert latest["paper"].reconciled is True
+        assert latest["binance"].reconciled is False
+        assert latest["binance"].venue == "binance"
+
+    async def test_the_read_returns_the_most_recent_result_per_venue(self, db):
+        """Written newest-first, so an implementation returning the last row
+        inserted, or the first, or an arbitrary one, disagrees with this."""
+        portfolio_id = await self._book(db)
+        newest = await self._reconciled(at=NOW)
+        oldest = await self._diverged(at=NOW - timedelta(hours=3))
+        middle = await self._diverged(at=NOW - timedelta(hours=1))
+
+        await record(db.pool, newest, portfolio_id=portfolio_id)
+        await record(db.pool, oldest, portfolio_id=portfolio_id)
+        await record(db.pool, middle, portfolio_id=portfolio_id)
+
+        loaded = (await latest_by_venue(db.pool, portfolio_id))["paper"]
+
+        assert loaded.checked_at == NOW
+        assert loaded.reconciled is True
+        assert loaded.discrepancies == ()
+
+    async def test_a_later_divergence_supersedes_an_earlier_pass(self, db):
+        """The direction that matters: the fix must not be sticky either way."""
+        portfolio_id = await self._book(db)
+        await record(
+            db.pool,
+            await self._reconciled(at=NOW - timedelta(hours=2)),
+            portfolio_id=portfolio_id,
+        )
+        await record(db.pool, await self._diverged(at=NOW), portfolio_id=portfolio_id)
+
+        loaded = (await latest_by_venue(db.pool, portfolio_id))["paper"]
+
+        assert loaded.reconciled is False
+        assert loaded.checked_at == NOW
+        assert _kinds(loaded) != []
+
+    async def test_two_results_at_the_same_instant_report_the_divergent_one(self, db):
+        """Genuinely ambiguous, so the reading that raises a flag wins.
+
+        Showing a divergence a second reading cleared costs an operator a check.
+        The reverse costs them the check they needed to make.
+        """
+        portfolio_id = await self._book(db)
+        await record(db.pool, await self._reconciled(at=NOW), portfolio_id=portfolio_id)
+        await record(db.pool, await self._diverged(at=NOW), portfolio_id=portfolio_id)
+
+        loaded = (await latest_by_venue(db.pool, portfolio_id))["paper"]
+
+        assert loaded.reconciled is False
+
+    async def test_another_portfolios_result_is_not_this_ones(self, db):
+        mine = await self._book(db)
+        theirs = await self._book(db)
+        await record(db.pool, await self._reconciled(), portfolio_id=theirs)
+
+        assert await latest_by_venue(db.pool, mine) == {}
+        assert set(await latest_by_venue(db.pool, theirs)) == {"paper"}
+
+    async def test_a_stored_divergence_does_not_change_the_next_verdict(self, db):
+        """Persisting is a side effect of checking, never an input to it.
+
+        The books agree at this instant. A reconciler that consulted history --
+        to short-circuit, to carry a divergence forward, to skip a venue it
+        already flagged -- would answer about the stored past instead of the
+        present books.
+        """
+        portfolio_id = await self._book(db)
+        await record(
+            db.pool,
+            await self._diverged(at=NOW - timedelta(hours=1)),
+            portfolio_id=portfolio_id,
+        )
+
+        held = (_position("BTC/USD", "1.5"),)
+        again = await reconcile(
+            held,
+            (_local_cash("USD", "10000"),),
+            FakeVenue(positions=held, balances=(_balance("USD", "10000"),)),
+            tolerance=EXACT,
+            now=NOW,
+        )
+
+        assert again.reconciled is True
+        assert again.discrepancies == ()
+
+    async def test_a_naive_checked_at_is_refused(self, db):
+        portfolio_id = await self._book(db)
+        stored = await self._reconciled()
+        naive = ReconciliationResult(
+            reconciled=True,
+            discrepancies=(),
+            checked_at=stored.checked_at.replace(tzinfo=None),
+            venue="paper",
+        )
+
+        with pytest.raises(ValueError, match="naive"):
+            await record(db.pool, naive, portfolio_id=portfolio_id)
+
+        assert await latest_by_venue(db.pool, portfolio_id) == {}
+
+    async def test_a_discrepancy_at_another_venue_is_refused(self, db):
+        """A result for `paper` cannot carry `binance`'s disagreement.
+
+        Stored under this result it would be reported as this venue's, which is
+        the same substitution as reading one venue's pass as another's.
+        """
+        portfolio_id = await self._book(db)
+        mixed = ReconciliationResult(
+            reconciled=False,
+            discrepancies=(
+                Discrepancy(
+                    kind=Divergence.CASH_BALANCE,
+                    venue="binance",
+                    symbol="USD",
+                    local=Decimal(1),
+                    remote=Decimal(2),
+                    detail="a disagreement at another venue",
+                ),
+            ),
+            checked_at=NOW,
+            venue="paper",
+        )
+
+        with pytest.raises(ValueError, match="binance"):
+            await record(db.pool, mixed, portfolio_id=portfolio_id)
+
+        assert await latest_by_venue(db.pool, portfolio_id) == {}
+
+    async def test_a_divergence_whose_evidence_is_gone_is_refused_on_load(self, db):
+        """A divergent row with no discrepancies names nothing that diverged.
+
+        Read back as `reconciled=False, discrepancies=()` it would render as a
+        venue that failed for no stated reason; read back as reconciled it would
+        render as a pass. Neither is a thing that happened, so the load refuses.
+        """
+        portfolio_id = await self._book(db)
+        result_id = await record(
+            db.pool, await self._diverged(), portfolio_id=portfolio_id
+        )
+        await db.pool.execute(
+            "DELETE FROM reconciliation_discrepancy WHERE result_id = $1", result_id
+        )
+
+        with pytest.raises(ValueError, match="must name"):
+            await latest_by_venue(db.pool, portfolio_id)
+
+    async def test_the_result_and_its_evidence_commit_together(self, db):
+        """A discrepancy the schema refuses takes the whole result down with it.
+
+        A half-written result -- the verdict stored, the evidence lost -- is the
+        row the load above has to raise on, and the transaction is what keeps it
+        from ever existing.
+        """
+        portfolio_id = await self._book(db)
+        stored = await self._diverged()
+        unstorable = ReconciliationResult(
+            reconciled=False,
+            discrepancies=(
+                *stored.discrepancies,
+                Discrepancy(
+                    kind=Divergence.CASH_BALANCE,
+                    venue="paper",
+                    symbol="USD",
+                    local=Decimal(1),
+                    remote=Decimal(2),
+                    detail="",
+                ),
+            ),
+            checked_at=NOW,
+            venue="paper",
+        )
+
+        with pytest.raises(Exception, match="says_what_happened"):
+            await record(db.pool, unstorable, portfolio_id=portfolio_id)
+
+        assert await latest_by_venue(db.pool, portfolio_id) == {}
+        assert (
+            await db.pool.fetchval(
+                "SELECT count(*) FROM reconciliation_result WHERE portfolio_id = $1",
+                portfolio_id,
+            )
+            == 0
+        )
