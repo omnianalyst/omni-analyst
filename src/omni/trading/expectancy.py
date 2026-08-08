@@ -54,6 +54,11 @@ class ResolvedTrade:
     upper_barrier: Decimal
     lower_barrier: Decimal
     horizon_key: str
+    # The price the position actually closed at, when the ledger recorded one
+    # (migration 044). Only an expiry needs it -- a barrier outcome's price IS
+    # the barrier -- and `None` means the ledger has no exit for this row, which
+    # is true of every prediction resolved before 044 existed.
+    exit_price: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.entry_price <= 0:
@@ -79,11 +84,16 @@ class ResolvedTrade:
         """True when the P&L is assumed rather than measured.
 
         An expiry means neither barrier was touched, so the position closed at
-        whatever the horizon price was -- and the ledger does not store it.
-        Scoring it as zero is the only option available, and the only honest
-        thing to do with that is count how often it happens.
+        whatever the horizon price was. Before migration 044 the ledger did not
+        record that price and there was nothing to do but score it zero -- which
+        made a third of every measured expectancy a number nobody observed.
+
+        With an `exit_price` present the expiry is measured like any other
+        outcome, so only an expiry WITHOUT one is still assumed. That is exactly
+        the pre-044 rows, and `assumed_share` reports how much of a sample is
+        still of that kind rather than quietly averaging them in.
         """
-        return self.outcome == "expiry"
+        return self.outcome == "expiry" and self.exit_price is None
 
     @property
     def pnl_bps(self) -> Decimal:
@@ -96,6 +106,18 @@ class ResolvedTrade:
         barrier as the sign is how a P&L gets inverted for half the book.
         """
         if self.is_assumed:
+            return Decimal(0)
+        if self.outcome == "expiry":
+            # Measured, not assumed: the position closed at a price the ledger
+            # observed. Sign still comes from the direction -- an expiry ABOVE
+            # entry is a gain for a long and a loss for a short, and reading the
+            # move without the side inverts half the book exactly as reading a
+            # barrier without it would.
+            move = (self.exit_price - self.entry_price) / self.entry_price * BPS
+            if self.direction == "up":
+                return move
+            if self.direction == "down":
+                return -move
             return Decimal(0)
         if self.direction == "up":
             return self.target_bps if self.outcome == "upper" else -self.stop_bps

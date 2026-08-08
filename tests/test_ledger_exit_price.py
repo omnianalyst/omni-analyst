@@ -21,6 +21,7 @@ are dropped:
 import json
 from collections import Counter
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import asyncpg
@@ -417,3 +418,78 @@ class TestAudienceScopedExit:
         assert float(row["exit_price"]) == 103.0
         assert float(row["exit_price"]) != 107.0
         assert row["exit_at"] == owners_last_at
+
+
+class TestNumericPrecisionAtTheWriteBoundary:
+    """A float handed to NUMERIC persists its full binary expansion.
+
+    asyncpg does not round: a barrier of 0.1 lands in the column as
+    0.1000000000000000055511151231257827, which is seventeen digits the
+    observation never had, stored as though someone measured them.
+
+    It matters here more than it looks. Every barrier distance is
+    `(barrier - entry) / entry`, every expectancy figure is built from those
+    distances, and the gate now bars on expectancy. Fabricated precision at the
+    write boundary is fabricated precision in the number that decides whether
+    capital moves.
+
+    `Decimal(str(f))` uses the shortest repr that round-trips the float, which
+    is the honest width of what was actually computed.
+    """
+
+    async def test_a_barrier_round_trips_without_gaining_digits(self, db):
+        from omni.conviction.ledger import record_prediction
+
+        entity_id = await _entity(db)
+        pid = await record_prediction(
+            db.pool,
+            entity_id=entity_id,
+            claim_id=None,
+            capability="precision.test",
+            direction="up",
+            confidence=0.8,
+            entry_price=0.1,
+            upper_barrier=0.3,
+            lower_barrier=0.05,
+            horizon_ends_at=NOW + timedelta(days=1),
+            input_claim_ids=[],
+        )
+        row = await db.pool.fetchrow(
+            "SELECT entry_price, upper_barrier, lower_barrier "
+            "FROM prediction WHERE id = $1",
+            pid,
+        )
+        assert row["entry_price"] == Decimal("0.1")
+        assert row["upper_barrier"] == Decimal("0.3")
+        assert row["lower_barrier"] == Decimal("0.05")
+
+    async def test_the_stored_text_carries_no_invented_digits(self, db):
+        """Asserted on the TEXT, because Decimal comparison would hide it.
+
+        `Decimal("0.1") == Decimal("0.1000000000000000055511151231257827")` is
+        False, so the test above does catch it -- but this one names the actual
+        symptom, which is a column full of digits nobody produced.
+        """
+        from omni.conviction.ledger import record_prediction
+
+        entity_id = await _entity(db)
+        pid = await record_prediction(
+            db.pool,
+            entity_id=entity_id,
+            claim_id=None,
+            capability="precision.test",
+            direction="up",
+            confidence=0.8,
+            entry_price=0.1,
+            upper_barrier=0.3,
+            lower_barrier=0.05,
+            horizon_ends_at=NOW + timedelta(days=1),
+            input_claim_ids=[],
+        )
+        text = await db.pool.fetchval(
+            "SELECT entry_price::text FROM prediction WHERE id = $1", pid
+        )
+        assert text == "0.1", (
+            f"entry_price persisted as {text!r}; a float handed straight to "
+            f"NUMERIC stores its binary expansion as measured precision"
+        )

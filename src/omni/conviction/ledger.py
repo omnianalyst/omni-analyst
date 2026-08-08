@@ -204,9 +204,16 @@ async def record_prediction(
         method,
         direction,
         confidence,
-        entry_f,
-        upper_f,
-        lower_f,
+        # Decimal(str(f)), not the raw float. asyncpg encodes a Python float
+        # into NUMERIC as its full binary expansion, so a barrier of 0.1 is
+        # stored as 0.1000000000000000055511151231257827 -- digits the
+        # observation never had, persisted as though measured. Every barrier
+        # distance, and therefore every expectancy figure the gate reads, would
+        # inherit that noise. str() gives the shortest repr that round-trips the
+        # float, which is the honest width of what was actually computed.
+        Decimal(str(entry_f)),
+        Decimal(str(upper_f)),
+        Decimal(str(lower_f)),
         horizon_ends_at,
         json.dumps(provenance),
         audience_user_id,

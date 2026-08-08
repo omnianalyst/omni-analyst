@@ -29,8 +29,10 @@ def _trade(
     upper: str = "104",
     lower: str = "99",
     horizon: str = "d1",
+    exit: str | None = None,
 ) -> ResolvedTrade:
     return ResolvedTrade(
+        exit_price=Decimal(exit) if exit is not None else None,
         entity_key=entity,
         direction=direction,
         outcome=outcome,
@@ -231,3 +233,76 @@ def test_expectancy_is_frozen():
     assert isinstance(result, Expectancy)
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.n = 5  # type: ignore[misc]
+
+
+class TestMeasuredExpiry:
+    """Migration 044 turns an expiry from assumed into measured.
+
+    Before it, an expiry contributed a zero nobody observed and roughly a third
+    of every real sample was that. With an exit price the position's actual
+    close is known, so the only rows still assumed are those resolved before 044
+    existed -- and `assumed_share` reports exactly that residue.
+    """
+
+    def test_an_expiry_with_an_exit_price_is_measured(self):
+        trade = _trade(outcome="expiry", exit="102")
+        assert not trade.is_assumed
+        # (102 - 100) / 100 = 200 bps, and the call was long
+        assert trade.pnl_bps == Decimal(200)
+
+    def test_an_expiry_without_one_is_still_assumed(self):
+        trade = _trade(outcome="expiry")
+        assert trade.is_assumed
+        assert trade.pnl_bps == Decimal(0)
+
+    def test_an_expiry_below_entry_loses_for_a_long(self):
+        assert _trade(direction="up", outcome="expiry", exit="98").pnl_bps == Decimal(
+            -200
+        )
+
+    def test_the_same_expiry_is_a_gain_for_a_short(self):
+        """Sign comes from the side, exactly as it does at a barrier.
+
+        An expiry two points below entry is a loss for a long and a gain for a
+        short. Reading the move without the side inverts half the book -- the
+        same defect as reading a barrier without it, one branch further down.
+        """
+        long_ = _trade(direction="up", outcome="expiry", exit="98").pnl_bps
+        short = _trade(direction="down", outcome="expiry", exit="98").pnl_bps
+        assert long_ == Decimal(-200)
+        assert short == Decimal(200)
+
+    def test_an_expiry_exactly_at_entry_is_flat_and_still_measured(self):
+        trade = _trade(outcome="expiry", exit="100")
+        assert not trade.is_assumed
+        assert trade.pnl_bps == Decimal(0)
+
+    def test_a_neutral_expiry_earns_nothing_even_with_an_exit(self):
+        # A neutral call asserted no direction, so a move is neither right nor
+        # wrong for it. The triple-barrier schema scores it on expiry alone.
+        assert _trade(direction="neutral", outcome="expiry", exit="105").pnl_bps == (
+            Decimal(0)
+        )
+
+    def test_a_barrier_outcome_ignores_any_exit_price(self):
+        """The barrier IS the exit for a barrier outcome.
+
+        If a stale or wrong exit price were ever written alongside `upper`, the
+        barrier must still win -- it is the price the position provably touched.
+        """
+        assert _trade(
+            direction="up", outcome="upper", exit="999"
+        ).pnl_bps == Decimal(400)
+
+    def test_a_mixed_sample_reports_only_the_unmeasured_residue(self):
+        trades = [
+            _trade(outcome="expiry", exit="102", horizon="d1"),
+            _trade(outcome="expiry", exit="98", horizon="d2"),
+            _trade(outcome="expiry", horizon="d3"),
+            _trade(outcome="upper", horizon="d4"),
+        ]
+        result = compute(trades)
+        assert result.assumed_n == 1
+        assert result.assumed_share == Decimal(1) / Decimal(4)
+        # (200 - 200 + 0 + 400) / 4 = 100
+        assert result.gross_bps == Decimal(100)
