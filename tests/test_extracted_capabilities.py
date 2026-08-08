@@ -65,6 +65,9 @@ SCHEMA_CLAIM_TYPES = frozenset(
         # 036: microstructure.
         "orderbook_snapshot",
         "trade_tape",
+        # 041/042: convergence and editorial dials.
+        "convergence",
+        "dial",
     }
 )
 

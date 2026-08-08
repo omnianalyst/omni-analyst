@@ -1,0 +1,25 @@
+-- The `convergence` claim type: independent claim families agreeing about one
+-- entity inside a window.
+--
+-- coverage/gaps.py::_find_contradictions detects independent sources
+-- DISAGREEING about the same key and weights that 1000. Nothing detected them
+-- AGREEING, so the engine could only ever surface conflict. A convergence claim
+-- is the symmetric counterpart: it names the distinct claim families that
+-- co-occurred for an entity and the window they co-occurred in, and its
+-- provenance references the constituent claim ids. The claim IS the
+-- convergence -- no new table, because a convergence is an observation about an
+-- entity like any other claim.
+--
+-- The threshold is N distinct claim FAMILIES, never N events (see
+-- omni/convergence/detect.py::CLAIM_FAMILIES). Ten trade_tape rows from one
+-- venue are one family and must not produce this claim: a volume threshold
+-- fires whenever a single noisy source floods, whereas a diversity threshold
+-- only fires on genuinely independent corroboration. There is no score on this
+-- claim type -- the family count is the confidence.
+--
+-- Enum value only, following 035/036/037. Postgres will not let a transaction
+-- that ADDs an enum value also INSERT a row referencing it (migration 011's
+-- header records the empirical confirmation against this instance), so the
+-- claim_type_policy row for 'convergence' must land in a later migration.
+
+ALTER TYPE claim_type ADD VALUE IF NOT EXISTS 'convergence';

@@ -1,0 +1,29 @@
+-- The `dial` claim type: an editorial parameter stored as coverage.
+--
+-- A dial is a per-entity or global editorial input to an analysis -- a prior, a
+-- weight, a baseline, a multiplier. Reference systems keep these as code
+-- constants, and a code constant rewrites history silently: change it today and
+-- a backtest run today applies today's value to 2019 data, with nothing in the
+-- record showing that the number in force in 2019 was different. Stored as a
+-- claim, a change is a NEW claim carrying its own knowledge_date, so a
+-- point-in-time read returns the dial that was actually in force. That is the
+-- entire reason this claim type exists.
+--
+-- What a dial is NOT: a threshold. It may never set a surfacing cutoff and may
+-- never be read by conviction/gate.py. Thresholds there are derived from
+-- resolved-prediction calibration and never chosen, and a dial is by definition
+-- chosen -- routing one into the gate would launder an opinion into the number
+-- that decides what the product says out loud. A dial is consumed as a feature
+-- by a capability; it never decides whether a finding is surfaced.
+--
+-- The methodology that set a dial is recorded in the claim's `source`, so two
+-- methodology versions of the same dial name coexist rather than colliding on
+-- the (entity, type, key, source, event_date, knowledge_date) identity index.
+--
+-- Enum value only, following 035/036/037/041. Postgres will not let a
+-- transaction that ADDs an enum value also INSERT a row referencing it
+-- (migration 011's header records the empirical confirmation against this
+-- instance), so the claim_type_policy row for 'dial' must land in a later
+-- migration.
+
+ALTER TYPE claim_type ADD VALUE IF NOT EXISTS 'dial';

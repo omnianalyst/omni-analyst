@@ -79,6 +79,12 @@ CLAIM_TYPES = frozenset(
         # measured number instead of a configured constant.
         "orderbook_snapshot",
         "trade_tape",
+        # 041/042: the claim IS the convergence -- its provenance is the set
+        # of independent claim families that agreed. A dial is an editorial
+        # parameter stored bitemporally so a change is a new claim rather than a
+        # silent rewrite of what a backtest sees.
+        "convergence",
+        "dial",
     }
 )
 
