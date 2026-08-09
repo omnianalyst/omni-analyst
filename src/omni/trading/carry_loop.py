@@ -313,6 +313,14 @@ class CarryCycleResult:
     `held` is read back from the book after trading rather than predicted from
     the decision, so a name the selector chose and the venue refused is absent
     here rather than reported as held.
+
+    `funding_settled_through` is `as_of` once the settlement window has been
+    applied and `None` when the cycle halted before reaching it. It exists
+    because an empty `funding` tuple does not distinguish the two: a book that
+    holds nothing accrues nothing over a window it did settle. A caller
+    persisting the boundary for the next cycle needs that distinction, and the
+    safe direction is `None` -- a window re-walked is refused by
+    `apply_funding`'s key, a window skipped is silent.
     """
 
     as_of: datetime
@@ -327,10 +335,26 @@ class CarryCycleResult:
     abstention: str | None
     halted: bool
     halt_reason: str | None
+    funding_settled_through: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.halted and not self.halt_reason:
             raise ValueError("a halted cycle must name the reason it halted")
+        if (
+            self.funding_settled_through is not None
+            and self.funding_settled_through != self.as_of
+        ):
+            raise ValueError(
+                f"funding_settled_through is {self.funding_settled_through} against "
+                f"an as_of of {self.as_of}; the window a cycle settles closes at its "
+                f"own rebalance instant and nowhere else"
+            )
+        if self.funding and self.funding_settled_through is None:
+            raise ValueError(
+                f"{len(self.funding)} settlements were applied and the cycle reports "
+                f"settling through nothing; the next cycle would reopen a window this "
+                f"one closed"
+            )
         if not self.halted and self.halt_reason is not None:
             raise ValueError(
                 f"a cycle that ran to completion carries no halt reason, got "
@@ -826,6 +850,7 @@ def _result(
     funding: Sequence[FundingAccrual] = (),
     abstention: str | None = None,
     halt_reason: str | None = None,
+    settled: bool = False,
 ) -> CarryCycleResult:
     collected = sum(
         (
@@ -848,6 +873,10 @@ def _result(
         abstention=abstention,
         halted=halt_reason is not None,
         halt_reason=halt_reason,
+        # Default False, so a return added later that forgets to say it settled
+        # reports the conservative answer: the boundary does not advance and the
+        # window is re-walked into an idempotent write.
+        funding_settled_through=as_of if settled else None,
     )
 
 
@@ -1051,6 +1080,7 @@ async def run_carry_cycle(
             cycle=cycle,
             funding=funding,
             abstention=decision.abstention,
+            settled=True,
         )
 
     closed: list[PairExecution] = []
@@ -1145,4 +1175,7 @@ async def run_carry_cycle(
         closed=closed,
         funding=funding,
         halt_reason=halt_reason,
+        # Reached only after the funding loop, so the window is applied whether
+        # or not the trading that followed it halted.
+        settled=True,
     )
