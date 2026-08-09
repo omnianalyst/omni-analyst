@@ -24,6 +24,26 @@ class Settings(BaseSettings):
     bybit_api_key: str = ""
     okx_api_key: str = ""
 
+    # TRADING credentials, deliberately separate fields from the data keys
+    # above -- not a tidiness preference, a security boundary.
+    #
+    # A data key raises a rate limit. A trading key can empty the account. They
+    # are different powers and they should be different keys ON THE EXCHANGE
+    # too: create a second API key for this, with withdrawals DISABLED and an
+    # IP allowlist, and leave the read-only key read-only. Reusing one key for
+    # both means every process that reads a price holds the power to trade.
+    #
+    # Both halves are required to trade: ccxt signs with the secret, so a key
+    # without one authenticates nothing and every order is rejected. `venue.py`
+    # refuses a half-configured pair rather than discovering it at the first
+    # order.
+    #
+    # Empty is the correct default and means "cannot trade", which is the state
+    # `CCXTVenue` is already in by default (TradingMode.READ_ONLY). Nothing here
+    # enables trading on its own.
+    binance_trade_api_key: str = ""
+    binance_trade_api_secret: str = ""
+
     # SEC requires a User-Agent identifying the operator, and rejects requests
     # without one. It is not a secret and not a key -- EDGAR is free.
     # Format: "Organisation contact@example.com".
