@@ -233,3 +233,75 @@ class TestPassingIsDeliberatelyHardToDo:
                 name="bad", source="synthetic", signal=lambda _p: 42,
                 prices=prices, horizons=(1,), registry=registry,
             )
+
+
+class TestTheStatisticDoesNotDivideByFloatingPointDust:
+    """A constant spread returned |t| = 1.8e16 and a PASSING verdict.
+
+    `np.std(ddof=1)` of a constant series is 2.1e-17, not 0.0, so the original
+    `se > 0` test was always True. This is the float-compared-to-zero failure the
+    house rules forbid, and it was live in code that had already been
+    mutation-tested — the mutation testing checked the guards, not the
+    arithmetic under them.
+    """
+
+    def test_a_constant_series_yields_no_evidence_rather_than_infinite_evidence(self):
+        from omni.research.harness import _stat
+
+        leg = _stat(np.full(60, 0.05), 1)
+
+        assert leg.t == 0.0
+        assert leg.mean_ann_pct > 0  # the mean is real; only the t is undefined
+
+    def test_a_near_constant_series_is_also_refused(self):
+        # Differences at the last bit are floating point, not variance.
+        from omni.research.harness import _stat
+
+        near = np.array([0.05] * 30 + [0.05 + 1e-18] * 30)
+
+        assert _stat(near, 1).t == 0.0
+
+    def test_a_real_spread_still_produces_a_statistic(self):
+        # The guard must not swallow genuine low-variance signal.
+        from omni.research.harness import _stat
+
+        rng = np.random.default_rng(0)
+        leg = _stat(0.001 + 0.0005 * rng.normal(0, 1, 200), 1)
+
+        assert abs(leg.t) > 5.0
+
+    def test_one_observation_raises_rather_than_reporting_a_zero(self):
+        # A measured zero and an unmeasurable one must not look the same.
+        from omni.research.harness import _stat
+
+        with pytest.raises(ValueError, match="at least two observations"):
+            _stat(np.array([0.01]), 1)
+
+
+class TestDegeneratePeriodsAreSkippedNotZeroFilled:
+    def test_the_information_coefficient_is_not_padded_with_invented_zeros(self):
+        """Appending 0.0 for a degenerate period shrinks the variance.
+
+        The IC statistic would then be biased by however many degenerate periods
+        the panel happens to contain — a fabricated observation wearing the
+        clothes of a measured one.
+        """
+        from omni.research.harness import _periods
+
+        dates = pd.date_range("2021-01-01", periods=300, freq="D")
+        cols = [f"A{i:02d}" for i in range(20)]
+        rng = np.random.default_rng(2)
+        prices = pd.DataFrame(
+            100 * np.exp(np.cumsum(0.02 * rng.normal(0, 1, (300, 20)), axis=0)),
+            index=dates, columns=cols,
+        )
+        scores = pd.DataFrame(
+            rng.normal(0, 1, (300, 20)), index=dates, columns=cols
+        )
+        # Make every score identical on a subset of dates: rank is undefined.
+        scores.iloc[::4] = 1.0
+
+        _r, _c, ics = _periods(scores, prices, horizon=1, offset=0, quantile=5)
+
+        assert len(ics) > 0
+        assert not np.any(ics == 0.0), "a substituted zero survived into the ICs"

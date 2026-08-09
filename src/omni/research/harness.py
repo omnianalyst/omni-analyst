@@ -39,9 +39,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
-from typing import Any
-
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
@@ -109,15 +107,36 @@ class Verdict:
 
 
 def _stat(returns: np.ndarray, horizon: int) -> Leg:
-    if len(returns) < 2:
-        return Leg(0.0, 0.0, len(returns))
+    """Mean, t and n for one series of period returns.
+
+    Raises on fewer than two observations rather than returning a zero: a
+    measured zero and an unmeasurable one must not be indistinguishable in the
+    Verdict that follows.
+
+    The degenerate-variance branch is not defensive padding. `np.std(ddof=1)` of
+    a constant series returns **2.1e-17**, not `0.0`, so a `se > 0` test is
+    always True and a spread with no variation at all produced `|t| = 1.8e16`
+    and a passing verdict. Comparing a float to zero is exactly what the house
+    rules forbid, and this is why: the quantity has to be judged on its own
+    scale.
+    """
+    n = len(returns)
+    if n < 2:
+        raise ValueError(
+            f"a statistic needs at least two observations, got {n}; returning a "
+            f"zero here would make an unmeasured result look like a measured one"
+        )
     mean = float(returns.mean())
-    se = float(returns.std(ddof=1)) / math.sqrt(len(returns))
+    se = float(returns.std(ddof=1)) / math.sqrt(n)
     periods = 365.0 / horizon
+    scale = max(abs(mean), float(np.abs(returns).max()))
+    degenerate = not math.isfinite(se) or se <= scale * 1e-12
     return Leg(
         mean_ann_pct=mean * periods * 100.0,
-        t=mean / se if se > 0 else 0.0,
-        n=len(returns),
+        # No variation is no evidence, so the t is zero and the verdict fails.
+        # That is the safe direction: the alternative divides by 2e-17.
+        t=0.0 if degenerate else mean / se,
+        n=n,
     )
 
 
@@ -163,10 +182,13 @@ def _periods(
         costs.append((len(now - held) / max(1, len(now))) if held else 1.0)
         held = now
 
+        # A degenerate period is SKIPPED, not recorded as zero. Appending a
+        # substituted 0.0 would shrink the variance and pull the mean toward
+        # zero, so the IC statistic would be biased by however many degenerate
+        # periods the panel happens to contain -- a fabricated observation
+        # dressed as a measured one.
         if s.nunique() > 1 and fwd.nunique() > 1:
             ics.append(float(s.rank().corr(fwd.rank())))
-        else:
-            ics.append(0.0)
 
     return np.array(rets), np.array(costs), np.array(ics)
 
@@ -189,11 +211,19 @@ def _permutation_p95(
     """
     rng = np.random.default_rng(seed)
     cols = list(scores.columns)
+    # Assets differ in when they existed, so permuting labels alone lands a
+    # short-lived name's scores on a long-lived name's prices and changes how
+    # many assets are rankable each period. The null would then be measured on a
+    # different sample than the statistic it calibrates -- minor on a panel of
+    # survivors, material once delisted names are present, which a
+    # survivorship-corrected source makes routine. Re-imposing the original
+    # availability mask keeps the sample fixed and permutes only the values.
+    available = scores.notna()
     ts: list[float] = []
     for _ in range(draws):
         shuffled = scores.copy()
         shuffled.columns = list(rng.permutation(cols))
-        shuffled = shuffled.reindex(columns=cols)
+        shuffled = shuffled.reindex(columns=cols).where(available)
         r, _c, _i = _periods(
             shuffled, prices, horizon=horizon, offset=0, quantile=quantile
         )
@@ -285,7 +315,9 @@ def evaluate(
             )
 
         # Guard 4: rank IC measures the median asset, the portfolio earns the mean.
-        ic = _stat(ics, horizon)
+        # `ics` can be shorter than the return series now that degenerate
+        # periods are skipped rather than zero-filled.
+        ic = _stat(ics, horizon) if len(ics) >= 2 else Leg(0.0, 0.0, len(ics))
         if abs(ic.t) > bar and abs(gross.t) <= bar:
             warnings.append(
                 f"rank IC is significant (t {ic.t:.2f}) while the portfolio is not; "
