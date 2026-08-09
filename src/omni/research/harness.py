@@ -324,6 +324,19 @@ def evaluate(
                 f"the signal orders the typical asset but the tail sits elsewhere, "
                 f"so it does not monetise"
             )
+        elif abs(ic.t) > bar and abs(gross.t) > bar and ic.t * gross.t < 0:
+            # Found by use: eight oscillator cells had a significant IC pointing
+            # one way and a significant portfolio pointing the other. That is a
+            # stronger version of the median-versus-mean trap, not a weaker one
+            # -- the score genuinely orders the typical asset while the fat tail
+            # sits in the decile being shorted -- and the branch above misses it
+            # because it only looks at an INSIGNIFICANT portfolio.
+            warnings.append(
+                f"rank IC (t {ic.t:.2f}) and portfolio (t {gross.t:.2f}) point in "
+                f"OPPOSITE directions, both significant; the score orders the "
+                f"median asset one way while the tail pays the other, so the sign "
+                f"that ranks is not the sign that earns"
+            )
 
         # The rule that killed five of six candidates.
         thirds: list[Leg] = []

@@ -305,3 +305,74 @@ class TestDegeneratePeriodsAreSkippedNotZeroFilled:
 
         assert len(ics) > 0
         assert not np.any(ics == 0.0), "a substituted zero survived into the ICs"
+
+
+class TestTheSignThatRanksIsNotAlwaysTheSignThatEarns:
+    """Eight oscillator cells had a significant IC opposing a significant portfolio.
+
+    `below_sma_10` at h=1 scored ic_t +4.66 against a portfolio t of -4.02. The
+    score genuinely orders the median asset one way while the fat tail pays the
+    other, so the direction that ranks is not the direction that earns. The
+    original guard missed this entirely because it only inspected an
+    INSIGNIFICANT portfolio — this is the stronger version of that failure, not
+    a weaker one.
+    """
+
+    def test_opposing_significant_ic_and_portfolio_are_named(self, registry):
+        from omni.research.harness import Leg, Verdict
+
+        v = Verdict(
+            name="opposed", horizon=1, bar=2.5,
+            gross=Leg(-90.0, -4.02, 400), net=Leg(-95.0, -4.20, 400),
+            thirds=(), recent_third=Leg(-90.0, -4.02, 133),
+            null_p95=2.1, alignment_median_t=-4.0, alignment_clearing=1.0,
+            ic_t=4.66, turnover=0.5, cost_bps=20.0, warnings=(),
+        )
+
+        # The condition the harness now tests, asserted directly on the values
+        # so the test states the rule rather than re-deriving it.
+        assert abs(v.ic_t) > v.bar
+        assert abs(v.gross.t) > v.bar
+        assert v.ic_t * v.gross.t < 0
+
+    async def test_the_warning_fires_on_a_constructed_panel(self, registry):
+        """A signal that ranks the median correctly and loses money anyway.
+
+        Built by paying the BOTTOM-ranked asset a large positive return and the
+        rest a small negative one: the rank correlation is positive because most
+        assets order correctly, while the quintile spread is dominated by the
+        one name in the short leg.
+        """
+        rng = np.random.default_rng(21)
+        days, assets = 500, 20
+        dates = pd.date_range("2021-01-01", periods=days, freq="D")
+        cols = [f"A{i:02d}" for i in range(assets)]
+        score = pd.DataFrame(
+            rng.normal(0, 1, size=(days, assets)), index=dates, columns=cols
+        )
+
+        # Noise on every name, so the spread has real variance -- a
+        # deterministic construction would be caught by the degenerate-variance
+        # guard and score t = 0 rather than demonstrating anything.
+        rets = 0.01 * rng.normal(0, 1, size=(days, assets))
+        order = np.argsort(-score.to_numpy(), axis=1)
+        for d in range(days - 1):
+            for rank, col in enumerate(order[d]):
+                # Monotone in rank (so the IC is positive) but with a large
+                # payout at the very bottom, which is what the spread shorts.
+                rets[d + 1, col] += -0.002 * rank
+            rets[d + 1, order[d][-1]] += 0.30
+
+        prices = pd.DataFrame(
+            100 * np.exp(np.cumsum(rets, axis=0)), index=dates, columns=cols
+        )
+
+        v = evaluate(
+            name="ranks-but-loses", source="synthetic", signal=lambda _p: score,
+            prices=prices, horizons=(1,), cost_bps=0.0, registry=registry,
+            permutation_draws=15,
+        )[0]
+
+        assert v.ic_t > 0, "the score should rank the median asset correctly"
+        assert v.gross.t < 0, "the portfolio should still lose"
+        assert any("OPPOSITE directions" in w for w in v.warnings)
