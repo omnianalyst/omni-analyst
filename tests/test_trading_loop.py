@@ -311,7 +311,11 @@ def _write_fails(monkeypatch, message: str = "the reconciliation write went nowh
     async def _boom(*args, **kwargs):
         raise RuntimeError(message)
 
-    monkeypatch.setattr("omni.trading.loop.record", _boom)
+    # `record` moved to `trading.pretrade`, which both loops share so the
+    # directional and carry books cannot disagree about what a failed
+    # reconciliation write means. Patching the old name would no longer
+    # reach anything, and the test would pass by not exercising the path.
+    monkeypatch.setattr("omni.trading.pretrade.record", _boom)
     return message
 
 
@@ -568,7 +572,10 @@ class TestAFailedWriteLosesTheRecordAndNeverTheVerdict:
         alert_id = await _reconciliation_alert(db, portfolio)
         _write_fails(monkeypatch)
 
-        with caplog.at_level(logging.ERROR, logger="omni.trading.loop"):
+        # The failure is now logged by `trading.pretrade`, which owns the
+        # write. Watching the old logger would capture nothing and the
+        # assertion below would fail for the right reason by accident.
+        with caplog.at_level(logging.ERROR, logger="omni.trading.pretrade"):
             result = await _cycle(db, portfolio, _venue(symbol))
 
         assert result.halted is False
@@ -578,7 +585,7 @@ class TestAFailedWriteLosesTheRecordAndNeverTheVerdict:
         reported = [
             r
             for r in caplog.records
-            if r.name == "omni.trading.loop" and r.levelno >= logging.ERROR
+            if r.name == "omni.trading.pretrade" and r.levelno >= logging.ERROR
         ]
         assert reported, "a write that failed and was never reported is a swallowed one"
         assert reported[0].exc_info is not None
