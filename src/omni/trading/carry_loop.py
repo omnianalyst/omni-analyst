@@ -365,8 +365,24 @@ def _payload(raw: object) -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
-async def _symbols(pool, entity_ids: Sequence[UUID]) -> dict[UUID, str]:
-    """Tradeable symbol per entity. Raises when two entities share one.
+async def _symbols(pool, entity_ids: Sequence[UUID], venue: Venue) -> dict[UUID, str]:
+    """The VENUE symbol per entity. Raises when two entities share one.
+
+    An entity row carries an asset -- `BTC` -- and a venue trades an instrument
+    on a pair. The asset is resolved through `venue.symbol_for` rather than used
+    directly, because the two namespaces are not the same and passing a ticker
+    straight through is how a fill came to settle in an asset called `MKR` while
+    the venue's cash never moved (Finding 21). A live venue is blunter: it does
+    not list `MKR`, so the order is rejected and the pair half-opens on whichever
+    leg went first.
+
+    Both legs must resolve. A name the venue lists for spot but not as a
+    perpetual cannot be held delta neutral at all, and taking the spot leg alone
+    is an outright long in a strategy with no view on direction.
+
+    An asset the venue does not list is simply absent from the mapping, which
+    the caller reads as `NO_SYMBOL` and skips -- routine for a 30-name universe
+    against one exchange, where two names are currently delisted.
 
     Two entities on one symbol cannot both be held: their legs would net into a
     single pair of position rows and the book would report one name holding
@@ -376,9 +392,26 @@ async def _symbols(pool, entity_ids: Sequence[UUID]) -> dict[UUID, str]:
     by_entity: dict[UUID, str] = {}
     seen: dict[str, UUID] = {}
     for row in rows:
-        symbol = row["symbol"]
-        if not symbol or not symbol.strip():
+        asset = row["symbol"]
+        if not asset or not asset.strip():
             continue
+        spot = venue.symbol_for(asset, MarketType.SPOT)
+        perp = venue.symbol_for(asset, MarketType.PERPETUAL)
+        if spot is None or perp is None:
+            # Not listed here, or listed on only one side. Either way there is
+            # no delta-neutral pair to hold.
+            continue
+        if spot != perp:
+            # ccxt spells the perpetual differently from the spot market, so a
+            # single symbol cannot address both legs. Supporting that needs a
+            # per-leg symbol on the position key, which the book does not carry.
+            raise NotImplementedError(
+                f"{venue.name} lists {asset} as {spot!r} spot and {perp!r} "
+                f"perpetual, and this loop carries one symbol per pair. Holding "
+                f"both legs needs a per-leg symbol through the position rows and "
+                f"the order ledger"
+            )
+        symbol = spot
         if symbol in seen:
             raise ValueError(
                 f"entities {seen[symbol]} and {row['id']} both trade as {symbol!r}; "
@@ -801,7 +834,7 @@ async def run_carry_cycle(
             )
 
     cycle = _Cycle(pool, venue=venue, portfolio_id=portfolio_id, config=config)
-    by_entity = await _symbols(pool, entity_ids)
+    by_entity = await _symbols(pool, entity_ids, venue)
     by_symbol = {symbol: entity_id for entity_id, symbol in by_entity.items()}
 
     book = await state.load(pool, portfolio_id)
