@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     binance_trade_api_key: str = ""
     binance_trade_api_secret: str = ""
 
+    # Hyperliquid authenticates with a wallet, not a key pair. Use an AGENT
+    # wallet: approved to trade on behalf of the account, unable to withdraw
+    # from it. The advice above -- disable withdrawals on the key -- has no
+    # equivalent for a raw private key, because a private key IS the wallet.
+    hyperliquid_wallet_address: str = ""
+    hyperliquid_private_key: str = ""
+
     # SEC requires a User-Agent identifying the operator, and rejects requests
     # without one. It is not a secret and not a key -- EDGAR is free.
     # Format: "Organisation contact@example.com".

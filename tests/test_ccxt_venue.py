@@ -846,3 +846,145 @@ class TestCancel:
 
         with pytest.raises(VenueUnavailable, match="never placed it"):
             await venue.cancel("someone-elses-order")
+
+
+class TestWalletVenuesAuthenticateDifferently:
+    """Hyperliquid takes a wallet, not a key pair, and `connect` must not care.
+
+    The credential object carries its own ccxt shape so that adding a venue that
+    authenticates differently does not mean teaching `connect` about it. What
+    `connect` does owe is a refusal to accept two sources for one field: with
+    both passed, which wins is a precedence question nobody stated, and the
+    losing one is a credential the operator believes is in use.
+    """
+
+    async def test_passing_both_shapes_is_refused_before_any_network_call(self):
+        from omni.venue.ccxt_venue import CCXTVenue
+        from omni.venue.credentials import WalletCredentials
+
+        wallet = WalletCredentials(
+            venue="hyperliquid",
+            wallet_address="0x" + "a1" * 20,
+            private_key="0x" + "b2" * 32,
+        )
+
+        with pytest.raises(ValueError, match="not both"):
+            await CCXTVenue.connect(
+                venue="hyperliquid", credentials=wallet, api_key="k"
+            )
+
+    def test_each_credential_shape_reports_what_its_venue_requires(self):
+        """The mapping asserted against ccxt itself rather than against a memory.
+
+        `requiredCredentials` is the venue's own statement of what it needs; if
+        ccxt changes it, this fails rather than the first live order.
+        """
+        import ccxt
+
+        from omni.venue.credentials import TradingCredentials, WalletCredentials
+
+        wallet = WalletCredentials(
+            venue="hyperliquid",
+            wallet_address="0x" + "a1" * 20,
+            private_key="0x" + "b2" * 32,
+        )
+        key_pair = TradingCredentials(
+            venue="binance", api_key="k", api_secret="s"
+        )
+
+        for creds, exchange_cls in (
+            (wallet, ccxt.hyperliquid),
+            (key_pair, ccxt.binance),
+        ):
+            required = {
+                name
+                for name, needed in exchange_cls().requiredCredentials.items()
+                if needed
+            }
+            assert required <= set(creds.ccxt_options()), (
+                f"{creds.venue} needs {required}, "
+                f"credentials supply {set(creds.ccxt_options())}"
+            )
+
+
+class TestAVenueThatPricesEachMarketRatherThanItself:
+    """Hyperliquid reports `fees.trading` as all None and prices each market.
+
+    Reading only the venue-level default refuses a venue that does in fact
+    state its fees -- which is what happened: `CCXTVenue.connect(venue=
+    "hyperliquid")` raised "publishes no usable trading fee" against a venue
+    whose markets carry 4/7 bps spot and 1.5/4.5 bps perpetual.
+    """
+
+    def _priced(self, *, spot_taker: float, perp_taker: float) -> dict:
+        spot = {**SPOT_BTC, "maker": spot_taker / 2, "taker": spot_taker}
+        perp = {**PERP_BTC, "maker": perp_taker / 2, "taker": perp_taker}
+        return {m["symbol"]: m for m in (spot, perp)}
+
+    async def test_per_market_fees_are_read_when_the_venue_publishes_none(self):
+        venue = _venue(
+            FakeExchange(
+                fees={"trading": {"maker": None, "taker": None}},
+                markets=self._priced(spot_taker=0.0007, perp_taker=0.00045),
+            )
+        )
+
+        assert venue.capabilities.taker_fee_bps == Decimal(7)
+        assert venue.capabilities.maker_fee_bps == Decimal("3.5")
+
+    async def test_the_dearest_market_sets_the_fee_not_the_average(self):
+        """`Capabilities` carries one fee and it is charged to every leg.
+
+        A delta-neutral pair always holds one spot and one perpetual, so an
+        average undercharges the dearer leg on every single trade. Overcharging
+        refuses marginal trades, which is the direction that cannot lose money.
+        """
+        venue = _venue(
+            FakeExchange(
+                fees={"trading": {}},
+                markets=self._priced(spot_taker=0.0007, perp_taker=0.00045),
+            )
+        )
+
+        assert venue.capabilities.taker_fee_bps == Decimal(7)
+
+    async def test_a_venue_priced_nowhere_at_all_is_still_refused(self):
+        # The fallback must not become a way for an unpriced venue to slip
+        # through with a zero.
+        with pytest.raises(ValueError, match="markets in scope"):
+            _venue(FakeExchange(fees={"trading": {}}))
+
+
+class TestConnectDoesNotLeakTheSessionItOpened:
+    async def test_a_venue_that_fails_validation_is_closed(self, monkeypatch):
+        """`load_markets` succeeds, then the constructor rejects the venue.
+
+        Nothing owns the exchange at that point, so without an explicit close
+        the aiohttp session leaks and its unclosed-connector warning buries the
+        error that actually explains the failure.
+        """
+        import ccxt.async_support as ccxt_async
+
+        closed: list[bool] = []
+
+        class _Unpriced:
+            id = "unpriced"
+            has = HAS
+            fees = {"trading": {}}
+            markets = {k: {**v} for k, v in MARKETS.items()}
+
+            def __init__(self, options):
+                self.options = options
+
+            async def load_markets(self):
+                return self.markets
+
+            async def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(ccxt_async, "unpriced", _Unpriced, raising=False)
+
+        with pytest.raises(ValueError, match="trading fee"):
+            await CCXTVenue.connect(venue="unpriced")
+
+        assert closed == [True], "connect left the exchange session open"

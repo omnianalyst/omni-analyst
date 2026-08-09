@@ -64,6 +64,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, NoReturn
 
+from omni.venue.credentials import TradingCredentials, WalletCredentials
 from omni.venue.protocol import (
     Balance,
     Capabilities,
@@ -288,9 +289,25 @@ def _derive_capabilities(
     maker = _decimal(trading.get("maker"))
     taker = _decimal(trading.get("taker"))
     if maker is None or taker is None:
+        # Not every venue publishes a schedule at the exchange level. Hyperliquid
+        # reports `fees.trading` as all None and prices each market instead --
+        # spot at 4/7 bps against perpetuals at 1.5/4.5 -- so reading only the
+        # top-level default refuses a venue that in fact states its fees.
+        #
+        # The maximum across markets in scope, not the mean or the per-market
+        # value, because `Capabilities` carries one number and this one is
+        # charged to every leg. Overcharging refuses marginal trades; the mean
+        # would undercharge the expensive leg, and a delta-neutral pair always
+        # has one of each.
+        per_market_maker = [f for f in (_decimal(m.get("maker")) for m in entries) if f is not None]
+        per_market_taker = [f for f in (_decimal(m.get("taker")) for m in entries) if f is not None]
+        maker = max(per_market_maker) if per_market_maker else maker
+        taker = max(per_market_taker) if per_market_taker else taker
+    if maker is None or taker is None:
         raise ValueError(
             f"{venue} publishes no usable trading fee (maker={trading.get('maker')!r} "
-            f"taker={trading.get('taker')!r}); refusing to assume one, because a "
+            f"taker={trading.get('taker')!r}) at the venue level or on any of its "
+            f"{len(entries)} markets in scope; refusing to assume one, because a "
             f"fee this tier invents is a fee no strategy is measured against"
         )
 
@@ -398,8 +415,10 @@ class CCXTVenue:
         venue: str,
         api_key: str | None = None,
         api_secret: str | None = None,
+        credentials: TradingCredentials | WalletCredentials | None = None,
         mode: TradingMode = TradingMode.READ_ONLY,
         symbols: Sequence[str] | None = None,
+        quote_asset: str | None = None,
     ) -> CCXTVenue:
         import ccxt.async_support as ccxt_async
 
@@ -409,6 +428,17 @@ class CCXTVenue:
             raise VenueUnavailable(f"ccxt has no venue named {venue!r}") from exc
 
         options: dict[str, Any] = {"enableRateLimit": True}
+        # `credentials` carries its own ccxt shape, which is what lets this stay
+        # generic: a key/secret venue and a wallet venue differ in what they
+        # authenticate with, and neither this method nor its callers should have
+        # to know which is which.
+        if credentials is not None:
+            if api_key or api_secret:
+                raise ValueError(
+                    "pass credentials or api_key/api_secret, not both; two "
+                    "sources for one field is a silent precedence question"
+                )
+            options.update(credentials.ccxt_options())
         if api_key:
             options["apiKey"] = api_key
         if api_secret:
@@ -421,9 +451,23 @@ class CCXTVenue:
             await exchange.close()
             _translate(exc, venue, "load_markets")
             raise
-        return cls(
-            exchange, mode=mode, symbols=symbols, name=venue, owns_exchange=True
-        )
+        try:
+            return cls(
+                exchange,
+                mode=mode,
+                symbols=symbols,
+                name=venue,
+                owns_exchange=True,
+                quote_asset=quote_asset,
+            )
+        except Exception:
+            # The constructor validates -- an unpriced venue raises here, after
+            # load_markets succeeded. Without this the session leaks: nothing
+            # owns the exchange yet, so nobody is left to close it, and the
+            # traceback arrives buried under aiohttp's unclosed-connector
+            # warning.
+            await exchange.close()
+            raise
 
     @property
     def mode(self) -> TradingMode:
