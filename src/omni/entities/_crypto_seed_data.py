@@ -120,6 +120,12 @@ CHAINS: tuple[Chain, ...] = (
     Chain("nem", "NEM"),
     Chain("lisk", "Lisk"),
     Chain("ark", "ARK"),
+    # Added for the Hyperliquid carry universe (Findings 23-25). HYPE and PURR
+    # are native to Hyperliquid's own L1 and BERA to Berachain; mapping them to
+    # an existing chain would be a wrong `issued_on` edge rather than a missing
+    # one, and the deduction chain walks those edges.
+    Chain("hyperliquid", "Hyperliquid"),
+    Chain("berachain", "Berachain"),
 )
 
 
@@ -228,6 +234,14 @@ class CryptoAsset:
                 f"defillama_slug {self.defillama_slug!r} for {self.symbol} "
                 f"has no matching PROTOCOLS entry"
             )
+
+
+def _hl(sym: str) -> dict[str, str]:
+    # Hyperliquid's ccxt unified symbol for the PERPETUAL, which is the leg that
+    # pays funding. It settles in USDC rather than USDT, and the symbol carries
+    # its own colon -- `split_part(key, ':', 1)` still yields the venue because
+    # the venue prefix comes first.
+    return {"hyperliquid": f"{sym}/USDC:USDC"}
 
 
 def _b(sym: str) -> dict[str, str]:
@@ -464,4 +478,40 @@ CRYPTO_ASSETS: tuple[CryptoAsset, ...] = (
     ),
     CryptoAsset("PYTH", "Pyth Network", "pyth-network", "solana", None, None, _b("PYTH"), "infra"),
     CryptoAsset("JTO", "Jito", "jito-governance-token", "solana", None, "jito", _b("JTO"), "defi"),
+    # The Hyperliquid carry universe (Findings 23-25): every asset pairable
+    # there -- spot and perpetual both listed -- with at least 540 days of
+    # funding history. `venue_symbols` carries the ccxt unified symbol for the
+    # PERPETUAL leg, which is the instrument that pays funding; Hyperliquid
+    # settles in USDC, not USDT, so `_b()` does not apply.
+    #
+    # coingecko ids verified against /coins/markets rather than assumed from the
+    # ticker: HYPE and PURR both collide with namesakes (`hype-3`,
+    # `purrcoin`), and TRUMP with three. The ones here are ranked 10 and 519 and
+    # 114 by market cap, which is what identifies them.
+    CryptoAsset("HYPE", "Hyperliquid", "hyperliquid", "hyperliquid", None, None, _hl("HYPE"), "l1"),
+    CryptoAsset("PURR", "Purr", "purr-2", "hyperliquid", None, None, _hl("PURR"), "meme"),
+    CryptoAsset(
+        "PENGU", "Pudgy Penguins", "pudgy-penguins", "solana", None, None,
+        _hl("PENGU") | _b("PENGU"), "meme",
+    ),
+    CryptoAsset(
+        "WLD", "Worldcoin", "worldcoin-wld", "ethereum", None, None,
+        _hl("WLD") | _b("WLD"), "infra",
+    ),
+    CryptoAsset(
+        "ENA", "Ethena", "ethena", "ethereum", None, None,
+        _hl("ENA") | _b("ENA"), "defi",
+    ),
+    CryptoAsset(
+        "TRUMP", "Official Trump", "official-trump", "solana", None, None,
+        _hl("TRUMP") | _b("TRUMP"), "meme",
+    ),
+    CryptoAsset(
+        "BERA", "Berachain", "berachain-bera", "berachain", None, None,
+        _hl("BERA") | _b("BERA"), "l1",
+    ),
+    CryptoAsset(
+        "SPX", "SPX6900", "spx6900", "ethereum", None, None,
+        _hl("SPX") | _b("SPX"), "meme",
+    ),
 )

@@ -156,6 +156,19 @@ SYMBOL_TO_ID: dict[str, str] = {
     "jto": "jito-governance-token",
     "tiao": "tiao",
     "bome": "book-of-meme",
+    # The Hyperliquid carry universe. Four of these tickers collide with
+    # namesakes on CoinGecko -- HYPE with `hype-3` and `hyperbolic-protocol`,
+    # PURR with `purrcoin`, TRUMP with `maga` and two others, SPX with nothing
+    # but listed for symmetry -- so each id here was read off /coins/markets by
+    # market-cap rank rather than inferred from the ticker.
+    "hype": "hyperliquid",
+    "purr": "purr-2",
+    "pengu": "pudgy-penguins",
+    "wld": "worldcoin-wld",
+    "ena": "ethena",
+    "trump": "official-trump",
+    "bera": "berachain-bera",
+    "spx": "spx6900",
 }
 
 

@@ -230,6 +230,17 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "key_required": False,
         "fallback": FALLBACK_BYO_ONLY,
     },
+    "hyperliquid": {
+        # Reads need no credential at all -- market data is served from a public
+        # endpoint, and trading authenticates with a wallet rather than an API
+        # key, so `settings_field` names no key to hold. byo_only regardless,
+        # for the reason stated above: keyless is not redistributable.
+        "label": "Hyperliquid",
+        "category": CATEGORY_CRYPTO,
+        "settings_field": "",
+        "key_required": False,
+        "fallback": FALLBACK_BYO_ONLY,
+    },
     "defillama": {
         # v2: keyless public source v1 omitted. DefiLlama TVL: public, keyless,
         # permissively redistributable.

@@ -308,7 +308,11 @@ async def _price(db, entity_id, symbol, price, at, audience):
         entity_id,
         "price_snapshot",
         f"{VENUE}:{symbol}",
-        {"close": str(price)},
+        # `venue` in the payload, not only in the key: `_price_at` filters on
+        # it, because one entity carries price_snapshot claims from every source
+        # that ever quoted it and the book must mark against the venue it
+        # trades.
+        {"close": str(price), "venue": VENUE},
         at,
         audience,
         "prices",
@@ -1249,3 +1253,66 @@ class TestTheTwoLegsCanHaveDifferentSymbols:
         legs = _legs_by_asset(book, venue_name=VENUE, asset_of=asset_of)
 
         assert _unpaired(legs) == ["DOGE/USDT"]
+
+
+class TestTheMarkComesFromTheVenueTheBookTrades:
+    """One entity carries prices from every source that ever quoted it.
+
+    BTC in the live store holds `price_snapshot` claims from binance, okx,
+    bybit, kraken, hyperliquid, and coingecko -- which names no venue at all.
+    Without a venue filter `_price_at` returns whichever published most
+    recently: a source chosen by luck, changing between cycles, stated nowhere.
+    Spot arbitrages tightly enough that the error stays small, which is exactly
+    what lets it survive -- the book is valued against a venue it does not
+    trade, and the reconciler reports the difference as a divergence.
+    """
+
+    async def test_another_venues_price_does_not_mark_this_book(
+        self, db, venue, portfolio_id, owner
+    ):
+        ids = await _world(db, owner)
+        # A far richer, more recent price from a venue this book cannot trade.
+        # If it is read, every pair is sized off it and the quantity is wrong by
+        # three orders of magnitude rather than subtly.
+        for symbol, entity_id in ids.items():
+            await _claim(
+                db, entity_id, "price_snapshot", f"elsewhere:{symbol}",
+                {"close": str(PRICE * 1000), "venue": "elsewhere"},
+                NOW - timedelta(days=1), owner, "prices",
+            )
+
+        result = await _run(
+            db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        assert result.halt_reason is None
+        assert result.opened, "nothing opened, so the mark was never exercised"
+        for pair in result.opened:
+            assert pair.spot.filled_quantity == NOTIONAL / PRICE, (
+                "the pair was sized off another venue's price"
+            )
+
+    async def test_a_venue_that_has_not_priced_an_asset_refuses_rather_than_marks(
+        self, db, venue, portfolio_id, owner
+    ):
+        """The safe direction, and why the filter cannot fall back.
+
+        Returning None makes the cycle refuse the name. Falling back to another
+        venue would open a pair sized off a price the trading venue never
+        quoted, which is the naked-residual failure arriving through the mark.
+        """
+        ids = await _world(db, owner)
+        await db.pool.execute(
+            "UPDATE claim SET value = jsonb_set(value, '{venue}', '\"elsewhere\"') "
+            "WHERE entity_id = $1 AND claim_type = 'price_snapshot'",
+            ids["AAA/USD"],
+        )
+
+        result = await _run(
+            db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        assert result.refused.get(CarryRefusal.NO_REFERENCE_PRICE.value) == 1
+        assert all(pair.symbol != "AAA/USD" for pair in result.opened)

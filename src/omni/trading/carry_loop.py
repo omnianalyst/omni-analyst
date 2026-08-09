@@ -157,6 +157,15 @@ ORDER BY c.entity_id, c.event_date, c.knowledge_date DESC
 
 # The mark, point-in-time on both axes against the instant it values: a price
 # that happened later, or became knowable later, is lookahead.
+#
+# And **from the venue the book trades on**. BTC carries price_snapshot claims
+# from six sources (binance, okx, bybit, kraken, hyperliquid, and coingecko
+# which names no venue at all), so without this filter the mark is whichever one
+# published most recently -- a source chosen by luck, changing between cycles,
+# and never stated anywhere. Spot arbitrages tightly enough that the error is
+# small, which is exactly what makes it survive: it values a book against a
+# venue it does not trade on, and the reconciler then compares that valuation to
+# the real one and calls the difference a divergence.
 _PRICE_AT = """
 WITH visible AS (
 {visible}
@@ -165,6 +174,7 @@ SELECT c.value
 FROM visible c
 WHERE c.entity_id = $2
   AND c.claim_type = 'price_snapshot'
+  AND c.value->>'venue' = $4
   AND c.event_date <= $3
   AND c.knowledge_date <= $3
 ORDER BY c.event_date DESC, c.knowledge_date DESC
@@ -420,11 +430,28 @@ async def _symbols(
 
 
 async def _price_at(
-    pool, *, entity_id: UUID, audience: UUID | None, at: datetime
+    pool,
+    *,
+    entity_id: UUID,
+    audience: UUID | None,
+    at: datetime,
+    venue: str,
 ) -> Decimal | None:
-    """The last price knowable at `at`, or None. Never substituted."""
+    """The last price knowable at `at` **on `venue`**, or None. Never substituted.
+
+    `venue` is required rather than defaulted, on the same reasoning as
+    `funding_venue`: a book marked against the wrong venue is not obviously
+    wrong at any single price, and every default here picks one silently.
+    Returning None when the trading venue has not priced an asset is the safe
+    outcome -- the cycle refuses that name with `NO_MARK` rather than valuing it
+    off a venue it cannot trade.
+    """
     row = await pool.fetchrow(
-        _PRICE_AT.format(visible=visible_claims_cte("$1")), audience, entity_id, at
+        _PRICE_AT.format(visible=visible_claims_cte("$1")),
+        audience,
+        entity_id,
+        at,
+        venue,
     )
     if row is None:
         return None
@@ -970,7 +997,11 @@ async def run_carry_cycle(
         until=as_of,
     ):
         mark = await _price_at(
-            pool, entity_id=entity_id, audience=audience_user_id, at=funding_time
+            pool,
+            entity_id=entity_id,
+            audience=audience_user_id,
+            at=funding_time,
+            venue=venue.name,
         )
         if mark is None:
             cycle.refuse(CarryRefusal.NO_MARK)
@@ -1032,7 +1063,11 @@ async def run_carry_cycle(
             cycle.refuse(CarryRefusal.NO_SYMBOL)
             continue
         price = await _price_at(
-            pool, entity_id=entity_id, audience=audience_user_id, at=as_of
+            pool,
+            entity_id=entity_id,
+            audience=audience_user_id,
+            at=as_of,
+            venue=venue.name,
         )
         if price is None:
             cycle.refuse(CarryRefusal.NO_REFERENCE_PRICE)
@@ -1057,7 +1092,11 @@ async def run_carry_cycle(
                 cycle.refuse(CarryRefusal.NO_SYMBOL)
                 continue
             price = await _price_at(
-                pool, entity_id=entity_id, audience=audience_user_id, at=as_of
+                pool,
+                entity_id=entity_id,
+                audience=audience_user_id,
+                at=as_of,
+                venue=venue.name,
             )
             if price is None:
                 cycle.refuse(CarryRefusal.NO_REFERENCE_PRICE)
