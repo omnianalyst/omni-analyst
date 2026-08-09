@@ -74,6 +74,45 @@ class Registry:
         """Every statistic this project has ever computed against the null."""
         return sum(e.cells for e in self.entries())
 
+    def fdr_bar(self, *, pending_cells: int, q: float = 0.10) -> float:
+        """The Benjamini-Hochberg threshold, expressed as a |t|.
+
+        `bar()` controls the FAMILY-WISE error rate -- the probability of even
+        one false positive across every test ever run. That is the right target
+        when hunting a single true effect among nulls, and it is brutal when you
+        believe several real effects exist, because it treats the hundredth test
+        as harshly as if it were the only one.
+
+        FDR instead controls the expected PROPORTION of discoveries that are
+        false. At q = 0.10 it accepts that roughly one in ten survivors is
+        noise, in exchange for a materially lower bar. For a genuine search
+        across many families that is the honest correction.
+
+        Computed from the recorded per-test statistics rather than assumed, so
+        it tightens as the history fills with nulls -- which is the behaviour
+        that makes it trustworthy. With no recorded statistics it falls back to
+        the crypto null floor rather than inventing a threshold.
+        """
+        from math import erfc, sqrt
+
+        stats = sorted(
+            (abs(float(t)) for e in self.entries()
+             if (t := e.detail.get("best_recent_third_t")) is not None),
+            reverse=True,
+        )
+        if not stats:
+            return 2.5
+        m = len(stats) + max(0, pending_cells)
+        # Two-sided normal p-value for each observed |t|, largest t first.
+        threshold = None
+        for rank, t in enumerate(stats, start=1):
+            p = erfc(t / sqrt(2.0))
+            if p <= q * rank / m:
+                threshold = t
+            else:
+                break
+        return max(2.5, threshold if threshold is not None else 2.5)
+
     def bar(self, *, pending_cells: int) -> float:
         """The |t| a result must clear, given everything tested before AND now.
 

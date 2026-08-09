@@ -376,3 +376,118 @@ class TestTheSignThatRanksIsNotAlwaysTheSignThatEarns:
         assert v.ic_t > 0, "the score should rank the median asset correctly"
         assert v.gross.t < 0, "the portfolio should still lose"
         assert any("OPPOSITE directions" in w for w in v.warnings)
+
+
+class TestTheKnobsAreRealAndStated:
+    """Weighting, strictness and combination — built to test whether the system
+    was biased toward rejection. They change no conclusion on real data, which
+    is itself the answer, but a knob that cannot be shown to DO anything is
+    decoration and would be worse than absent."""
+
+    def test_inverse_vol_weighting_actually_reweights(self, registry):
+        # One wild name and nine calm ones: equal weight is dominated by the
+        # wild one, inverse-vol is not, so the two must disagree.
+        rng = np.random.default_rng(31)
+        days, assets = 400, 20
+        dates = pd.date_range("2021-01-01", periods=days, freq="D")
+        cols = [f"A{i:02d}" for i in range(assets)]
+        vols = np.full(assets, 0.01)
+        vols[0] = 0.15
+        prices = pd.DataFrame(
+            100 * np.exp(np.cumsum(vols * rng.normal(0, 1, (days, assets)), axis=0)),
+            index=dates, columns=cols,
+        )
+        score = pd.DataFrame(
+            rng.normal(0, 1, (days, assets)), index=dates, columns=cols
+        )
+
+        eq = evaluate(
+            name="w.eq", source="synthetic", signal=lambda _p: score, prices=prices,
+            horizons=(7,), cost_bps=0.0, registry=registry, permutation_draws=10,
+            weighting="equal",
+        )[0]
+        iv = evaluate(
+            name="w.iv", source="synthetic", signal=lambda _p: score, prices=prices,
+            horizons=(7,), cost_bps=0.0, registry=registry, permutation_draws=10,
+            weighting="inverse_vol",
+        )[0]
+
+        assert eq.gross.mean_ann_pct != iv.gross.mean_ann_pct
+        assert eq.weighting == "equal" and iv.weighting == "inverse_vol"
+
+    def test_an_unknown_weighting_is_refused(self, registry):
+        prices, _d, _c = _panel()
+        rng = np.random.default_rng(0)
+        score = pd.DataFrame(
+            rng.normal(0, 1, prices.shape), index=prices.index, columns=prices.columns
+        )
+        with pytest.raises(ValueError, match="weighting must be"):
+            evaluate(
+                name="w.bad", source="synthetic", signal=lambda _p: score,
+                prices=prices, horizons=(1,), registry=registry, weighting="magic",
+            )
+
+    def test_strictness_changes_what_passes(self):
+        """`strict` demands the full sample too; `balanced` does not.
+
+        A strategy that works NOW and not historically is a legitimate object,
+        and requiring both is how a regime change gets mistaken for no edge.
+        """
+        from omni.research.harness import Leg, Verdict
+
+        def _v(strictness):
+            return Verdict(
+                name="x", horizon=1, bar=2.5,
+                gross=Leg(10.0, 1.20, 400),          # full sample: NOT significant
+                net=Leg(9.0, 1.10, 400),
+                thirds=(), recent_third=Leg(40.0, 3.10, 133),   # recent: strong
+                null_p95=2.0, alignment_median_t=3.0, alignment_clearing=0.8,
+                ic_t=1.0, turnover=0.4, cost_bps=20.0, warnings=(),
+                strictness=strictness,
+            )
+
+        assert not _v("strict").passed
+        assert _v("balanced").passed
+        assert _v("exploratory").passed
+
+    def test_an_unknown_strictness_is_refused(self, registry):
+        prices, _d, _c = _panel()
+        rng = np.random.default_rng(0)
+        score = pd.DataFrame(
+            rng.normal(0, 1, prices.shape), index=prices.index, columns=prices.columns
+        )
+        with pytest.raises(ValueError, match="strictness must be"):
+            evaluate(
+                name="s.bad", source="synthetic", signal=lambda _p: score,
+                prices=prices, horizons=(1,), registry=registry, strictness="loose",
+            )
+
+    def test_combination_is_scale_invariant_and_reports_correlation(self):
+        """The correlation matrix is the whole point of the return value.
+
+        Blending two signals that correlate at 0.95 buys a longer name and
+        nothing else, and this project's price signals are near-duplicates by
+        construction.
+        """
+        from omni.research.harness import combine
+
+        prices, dates, cols = _panel(seed=41, days=300, assets=15)
+        rng = np.random.default_rng(41)
+        a = pd.DataFrame(rng.normal(0, 1, (300, 15)), index=dates, columns=cols)
+        b = a * 300.0 + 7.0        # identical information, wildly different scale
+        c = pd.DataFrame(rng.normal(0, 1, (300, 15)), index=dates, columns=cols)
+
+        blended, corr = combine({"a": a, "b": b, "c": c}, prices=prices)
+
+        assert abs(corr.loc["a", "b"] - 1.0) < 1e-6, "scale must not survive z-scoring"
+        assert abs(corr.loc["a", "c"]) < 0.15
+        assert blended.shape == prices.shape
+
+    def test_combination_refuses_a_signal_with_no_weight(self):
+        from omni.research.harness import combine
+
+        prices, dates, cols = _panel(seed=42, days=200, assets=12)
+        f = pd.DataFrame(np.zeros((200, 12)), index=dates, columns=cols)
+
+        with pytest.raises(ValueError, match="no weight given"):
+            combine({"a": f, "b": f}, prices=prices, weights={"a": 1.0})

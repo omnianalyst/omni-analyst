@@ -51,6 +51,28 @@ MIN_ASSETS = 10
 MIN_PERIODS = 20
 PERMUTATION_DRAWS = 200
 
+# How hard it is to pass, made an explicit choice rather than a property of the
+# code. The default is STRICT because the operator this was built for has small
+# capital and no track record, so a false positive that gets funded and levered
+# can end the experiment while a false negative only costs opportunity. That
+# asymmetry is a fact about the situation, not about statistics, and somebody
+# else's situation may invert it.
+#
+#   strict       family-wise error control, sqrt(2 ln N). Assumes you are
+#                hunting ONE true effect among N nulls -- the strictest
+#                correction there is.
+#   balanced     false-discovery-rate control (Benjamini-Hochberg). Appropriate
+#                when you believe SEVERAL real effects exist, and materially
+#                looser. This is the honest default for a genuine search.
+#   exploratory  a fixed floor at the measured crypto null. Gates nothing;
+#                surfaces candidates for a second, stricter look.
+STRICTNESS = ("strict", "balanced", "exploratory")
+
+# Portfolio weighting. Equal-weight is the default because it is the assumption
+# every prior measurement in this project used, so changing it silently would
+# make new numbers incomparable with recorded ones.
+WEIGHTINGS = ("equal", "inverse_vol", "signal")
+
 
 @dataclass(frozen=True)
 class Leg:
@@ -85,12 +107,30 @@ class Verdict:
     turnover: float
     cost_bps: float
     warnings: tuple[str, ...]
+    strictness: str = "strict"
+    weighting: str = "equal"
 
     @property
     def passed(self) -> bool:
-        return (
+        """Deliberately conservative, and the degree is now a stated choice.
+
+        `strict` demands all four conditions. `balanced` drops the full-sample
+        requirement -- a strategy that works NOW and not historically is a
+        legitimate object, and demanding both is how a regime change gets
+        mistaken for an absent edge. `exploratory` gates on the recent third
+        alone and exists to surface candidates for a second, stricter look, not
+        to fund anything.
+        """
+        recent_ok = (
             abs(self.recent_third.t) > self.bar
             and self.recent_third.mean_ann_pct > 0
+        )
+        if self.strictness == "exploratory":
+            return recent_ok
+        if self.strictness == "balanced":
+            return recent_ok and self.alignment_clearing >= 0.5
+        return (
+            recent_ok
             and abs(self.gross.t) > self.bar
             and self.alignment_clearing >= 0.5
         )
@@ -147,18 +187,58 @@ def _periods(
     horizon: int,
     offset: int,
     quantile: int,
+    weighting: str = "equal",
+    vol_window: int = 30,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Non-overlapping long-short returns, their costs, and the rank ICs.
 
     Long-short rather than long-only because crypto has one dominant factor: a
     long-only book measures market beta and calls it signal. The spread removes
     it, which is the only way what remains is attributable to the ranking.
+
+    `weighting` was equal in every prior measurement here, and that was an
+    inherited default rather than a decision. It matters: crypto asset
+    volatilities differ by several times, so an equal-weight basket is dominated
+    by whichever name happens to be wildest, and its measured t-statistic is
+    mostly a statement about that name. `inverse_vol` equalises risk
+    contribution instead of dollars, which is what almost every real book does
+    and is the single cheapest available improvement to a Sharpe ratio.
     """
+    if weighting not in WEIGHTINGS:
+        raise ValueError(f"weighting must be one of {WEIGHTINGS}, got {weighting!r}")
+
     dates = prices.index
     rets: list[float] = []
     costs: list[float] = []
     ics: list[float] = []
     held: set = set()
+    # Trailing realised vol, known at the decision date -- never the forward vol
+    # of the period being weighted, which would be lookahead disguised as risk
+    # management.
+    trailing_vol = (
+        np.log(prices).diff().rolling(vol_window).std()
+        if weighting == "inverse_vol"
+        else None
+    )
+
+    def _weights(names: list[str], d0, scores: pd.Series) -> np.ndarray:
+        if weighting == "equal" or not names:
+            return np.full(len(names), 1.0 / max(1, len(names)))
+        if weighting == "inverse_vol":
+            v = trailing_vol.loc[d0, names].to_numpy(float)
+            # A name with no measurable trailing vol gets the basket's median
+            # rather than an infinite weight; dropping it would change the
+            # universe between weighting schemes and make them incomparable.
+            finite = v[np.isfinite(v) & (v > 0)]
+            med = float(np.median(finite)) if finite.size else 1.0
+            v = np.where(np.isfinite(v) & (v > 0), v, med)
+            w = 1.0 / v
+        else:  # signal-proportional, on the absolute score within the leg
+            w = np.abs(scores[names].to_numpy(float))
+            if not np.isfinite(w).all() or w.sum() <= 0:
+                w = np.ones(len(names))
+        total = w.sum()
+        return w / total if total > 0 else np.full(len(names), 1.0 / len(names))
 
     for i in range(offset, len(dates) - horizon, horizon):
         d0, d1 = dates[i], dates[i + horizon]
@@ -176,7 +256,11 @@ def _periods(
         ranked = s.sort_values(ascending=False)
         longs = list(ranked.index[:k])
         shorts = list(ranked.index[-k:])
-        rets.append(float(fwd[longs].mean() - fwd[shorts].mean()))
+        wl = _weights(longs, d0, s)
+        ws = _weights(shorts, d0, s)
+        rets.append(
+            float(fwd[longs].to_numpy(float) @ wl - fwd[shorts].to_numpy(float) @ ws)
+        )
 
         now = set(longs) | set(shorts)
         costs.append((len(now - held) / max(1, len(now))) if held else 1.0)
@@ -245,6 +329,8 @@ def evaluate(
     permutation_draws: int = PERMUTATION_DRAWS,
     seed: int = 0,
     record: bool = True,
+    strictness: str = "strict",
+    weighting: str = "equal",
 ) -> list[Verdict]:
     """Measure one signal across horizons, with every guard applied.
 
@@ -257,13 +343,20 @@ def evaluate(
         raise TypeError(f"{name}: signal must return a DataFrame of scores")
     scores = scores.reindex(index=prices.index, columns=prices.columns)
 
-    bar = reg.bar(pending_cells=len(horizons))
+    if strictness not in STRICTNESS:
+        raise ValueError(f"strictness must be one of {STRICTNESS}, got {strictness!r}")
+    bar = (
+        reg.bar(pending_cells=len(horizons))
+        if strictness == "strict"
+        else reg.fdr_bar(pending_cells=len(horizons))
+    )
     verdicts: list[Verdict] = []
 
     for horizon in horizons:
         warnings: list[str] = []
         rets, turn, ics = _periods(
-            scores, prices, horizon=horizon, offset=0, quantile=quantile
+            scores, prices, horizon=horizon, offset=0, quantile=quantile,
+            weighting=weighting,
         )
         if len(rets) < MIN_PERIODS:
             warnings.append(
@@ -279,6 +372,7 @@ def evaluate(
                     alignment_clearing=0.0, ic_t=float("nan"),
                     turnover=float("nan"), cost_bps=cost_bps,
                     warnings=tuple(warnings),
+                    strictness=strictness, weighting=weighting,
                 )
             )
             continue
@@ -299,7 +393,8 @@ def evaluate(
         align_ts = []
         for off in range(horizon):
             r, _c, _i = _periods(
-                scores, prices, horizon=horizon, offset=off, quantile=quantile
+                scores, prices, horizon=horizon, offset=off, quantile=quantile,
+                weighting=weighting,
             )
             if len(r) >= MIN_PERIODS:
                 align_ts.append(_stat(r, horizon).t)
@@ -369,6 +464,7 @@ def evaluate(
                 alignment_median_t=align_median, alignment_clearing=align_clear,
                 ic_t=ic.t, turnover=float(turn.mean()), cost_bps=cost_bps,
                 warnings=tuple(warnings),
+                strictness=strictness, weighting=weighting,
             )
         )
 
@@ -436,3 +532,61 @@ def self_test(*, seed: int = 0) -> None:
         )
     if scratch.path.exists():
         scratch.path.unlink()
+
+
+def combine(
+    signals: dict[str, pd.DataFrame],
+    *,
+    prices: pd.DataFrame,
+    weights: dict[str, float] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Blend several signals into one score, and report how independent they are.
+
+    Every measurement in this project tested ONE signal at a time, which is a
+    real blind spot: a portfolio of weak uncorrelated signals is the standard
+    way high-Sharpe books are actually built, and it is a different object from
+    any of its parts.
+
+    Each signal is cross-sectionally z-scored per date before blending, because
+    the inputs are on wildly different scales -- a funding rate is 1e-4 and a
+    momentum is 1e-1, so an unnormalised sum is whichever signal has the largest
+    units wearing an ensemble's name.
+
+    Returns the blended score AND the pairwise correlation of the components,
+    because the correlation is the whole question. Combining two signals that
+    correlate at 0.95 buys nothing but a longer name, and this project's price
+    signals are near-duplicates of each other by construction -- `williams_r_n`
+    is exactly `100 * (1 - range_position_n)`. Look at the matrix before
+    believing the blend.
+    """
+    if not signals:
+        raise ValueError("combine needs at least one signal")
+    w = weights or {name: 1.0 for name in signals}
+    missing = set(signals) - set(w)
+    if missing:
+        raise ValueError(f"no weight given for {sorted(missing)}")
+
+    z_frames: dict[str, pd.DataFrame] = {}
+    for name, frame in signals.items():
+        f = frame.reindex(index=prices.index, columns=prices.columns).astype(float)
+        mu = f.mean(axis=1)
+        sd = f.std(axis=1)
+        # A date where every asset scores the same carries no cross-sectional
+        # information; it becomes NaN rather than a divide-by-dust.
+        z_frames[name] = f.sub(mu, axis=0).div(sd.where(sd > 0), axis=0)
+
+    total = float(sum(abs(v) for v in w.values()))
+    if total <= 0:
+        raise ValueError("weights sum to zero; the blend would be undefined")
+    blended = sum(z_frames[n] * (w[n] / total) for n in signals)
+
+    names = list(signals)
+    corr = pd.DataFrame(index=names, columns=names, dtype=float)
+    stacked = {n: z_frames[n].stack(future_stack=True) for n in names}
+    for a in names:
+        for b in names:
+            pair = pd.concat([stacked[a], stacked[b]], axis=1).dropna()
+            corr.loc[a, b] = (
+                float(pair.iloc[:, 0].corr(pair.iloc[:, 1])) if len(pair) > 2 else float("nan")
+            )
+    return blended, corr
