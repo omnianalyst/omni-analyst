@@ -350,6 +350,7 @@ class CCXTVenue:
         *,
         mode: TradingMode = TradingMode.READ_ONLY,
         symbols: Sequence[str] | None = None,
+        quote_asset: str | None = None,
         name: str | None = None,
         owns_exchange: bool = False,
     ) -> None:
@@ -372,6 +373,7 @@ class CCXTVenue:
         self._mode = mode
         self._owns_exchange = owns_exchange
         self._markets = markets
+        self._quote_asset = quote_asset.strip() if quote_asset else None
 
         if symbols is None:
             self._symbols: list[str] | None = None
@@ -430,6 +432,82 @@ class CCXTVenue:
     async def aclose(self) -> None:
         if self._owns_exchange:
             await self._exchange.close()
+
+    def symbol_for(self, asset: str, market_type: MarketType) -> str | None:
+        """The symbol this exchange lists for an asset, or `None` if it lists none.
+
+        Resolved from the exchange's OWN market metadata rather than composed
+        from a template. A template would be a guess, and the guess is wrong in
+        both directions here: ccxt spells the perpetual `BTC/USDT:USDT` and the
+        spot market `BTC/USDT`, the quote asset differs per exchange and per
+        listing, and an asset delisted yesterday still formats perfectly. The
+        markets dict is the only thing that knows what is actually tradable, and
+        it is already loaded.
+
+        The market's own `base`, `quote` and type flags are matched rather than
+        the symbol string parsed, because the string is a rendering of those
+        fields and not their definition.
+
+        The QUOTE ASSET is stated on the venue, never inferred. Binance lists
+        BTC against ARS, AUD, BRL, USDT and more; the first implementation of
+        this took whichever sorted first and returned `BTC/ARS` for spot and
+        `BTC/U:U` for the perpetual -- deterministic, and stably wrong, which is
+        worse than unstable because it looks reliable. Which quote a book trades
+        is a real decision (liquidity, depeg risk, what the funding stream is
+        actually denominated in) and belongs to the caller.
+
+        `None` when the asset is not listed, which is routine: a 30-name universe
+        against one exchange always contains names it does not carry, and a
+        caller skips them. An asset already carrying a `/` is treated as a symbol
+        and confirmed against the markets, so a caller that resolved elsewhere
+        gets a check rather than a bypass.
+        """
+        asset = asset.strip()
+        if not asset:
+            return None
+        if "/" in asset:
+            market = self._markets.get(asset)
+            if not isinstance(market, dict):
+                return None
+            return asset if self._is_market_type(market, market_type) else None
+
+        if self._quote_asset is None:
+            raise ValueError(
+                f"{self.name} cannot resolve {asset!r} without a quote asset. "
+                f"Binance lists BTC against ARS, AUD, BRL, USDT and a dozen "
+                f"more; picking one of them here would be a stable, silent, "
+                f"wrong choice of market. Construct the venue with "
+                f"quote_asset='USDT' (or whichever you mean to trade)"
+            )
+        matches = sorted(
+            symbol
+            for symbol, market in self._markets.items()
+            if isinstance(market, dict)
+            and isinstance(symbol, str)
+            and market.get("base") == asset
+            and market.get("quote") == self._quote_asset
+            and market.get("active") is not False
+            and self._is_market_type(market, market_type)
+        )
+        # Sorted for stability rather than preference: with base, quote, type
+        # and active all pinned, anything still matching is an equivalent
+        # listing, and an arbitrary-but-stable pick is fine where an unstable
+        # one would have the book holding one market today and another tomorrow.
+        return matches[0] if matches else None
+
+    @staticmethod
+    def _is_market_type(market: dict[str, Any], market_type: MarketType) -> bool:
+        """Whether a ccxt market IS the requested instrument.
+
+        ccxt marks a perpetual as `swap` with `linear`/`inverse` set, and dated
+        futures as `future`; a dated future is not a perpetual and must not
+        answer for one, because it expires and a carry book does not roll.
+        """
+        if market_type is MarketType.PERPETUAL:
+            return bool(market.get("swap"))
+        if market_type is MarketType.SPOT:
+            return bool(market.get("spot"))
+        return bool(market.get("margin"))
 
     def min_notional_for(self, symbol: str) -> Decimal | None:
         """The venue's own minimum order cost for this symbol.

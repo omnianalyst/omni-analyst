@@ -371,10 +371,33 @@ class Venue(Protocol):
     `cancel` returns False for a venue with nothing to cancel rather than
     raising, because an atomic-swap venue legitimately has no resting order --
     but it must never return True for a cancellation that did not happen.
+
+    `symbol_for` is how an ASSET becomes something this venue can trade. A
+    strategy reasons about assets -- `entity.symbol` is `BTC` -- and a venue
+    trades instruments on pairs: `BTC/USDT` spot, `BTC/USDT:USDT` perpetual on
+    ccxt, and something else again elsewhere. Nothing but the venue knows its
+    own naming, so nothing but the venue should build it.
+
+    It exists because the carry loop passed `MKR` straight through as a venue
+    symbol and every test passed: tests construct venue symbols directly, so no
+    test ever took a symbol from an entity row and handed it to a venue, which
+    is the only path production has. `PaperVenue` then settled the fill in an
+    asset called `MKR`, its cash never moved, and reconciliation halted the
+    book. A live venue would have rejected the order outright and half-opened
+    the pair on whichever leg went first (Finding 21).
+
+    **`None` means this venue does not list that asset**, which is a normal
+    answer and not an error: a caller skips the name. It is deliberately not an
+    exception, because an unlisted asset on one venue is routine and a strategy
+    must be able to pass over it without a try/except around every candidate --
+    and deliberately not a best-guess string, because a guessed symbol is an
+    order on a market nobody chose.
     """
 
     name: str
     capabilities: Capabilities
+
+    def symbol_for(self, asset: str, market_type: MarketType) -> str | None: ...
 
     async def quote(self, intent: TradeIntent) -> Quote: ...
 

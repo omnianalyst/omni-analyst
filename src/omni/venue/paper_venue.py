@@ -34,6 +34,7 @@ property that made the ingest adapters testable.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -132,6 +133,8 @@ class PaperVenue:
         participation_cap: Decimal = DEFAULT_PARTICIPATION_CAP,
         impact_bps: Decimal = DEFAULT_IMPACT_BPS,
         starting_balances: dict[str, Decimal] | None = None,
+        quote_asset: str = "USD",
+        listed: Collection[str] | None = None,
     ) -> None:
         if participation_cap <= 0 or participation_cap > 1:
             raise ValueError(
@@ -146,6 +149,15 @@ class PaperVenue:
         self._spread_bps = spread_bps
         self._participation_cap = participation_cap
         self._impact_bps = impact_bps
+        if not quote_asset or not quote_asset.strip():
+            raise ValueError("quote_asset must name the asset this venue settles in")
+        self._quote_asset_name = quote_asset
+        # `None` means every asset is listed, which is what a paper venue with no
+        # stated universe should mean. An empty collection means none are, and
+        # the two must not collapse: `listed=[]` is a venue that lists nothing,
+        # and silently treating it as "everything" would trade a universe the
+        # caller explicitly emptied.
+        self._listed = None if listed is None else frozenset(listed)
         self._balances: dict[str, Decimal] = dict(starting_balances or {})
         self._positions: dict[tuple[str, MarketType], Position] = {}
         self._fills: list[Fill] = []
@@ -292,10 +304,52 @@ class PaperVenue:
         self._fills.append(fill)
         return fill
 
+    def symbol_for(self, asset: str, market_type: MarketType) -> str | None:
+        """The tradable symbol for an asset here, or `None` if it is not listed.
+
+        A strategy holds assets -- `entity.symbol` is `BTC` -- and a venue trades
+        pairs. This venue quotes everything in one asset, so `BTC` becomes
+        `BTC/USD`, and both market types share a symbol because positions here
+        are keyed `(symbol, market_type)` and the market type already separates
+        them. A real exchange does not have that luxury: ccxt spells the
+        perpetual `BTC/USDT:USDT`, which is why the resolver belongs on the
+        venue rather than in the strategy composing a string.
+
+        `None` for an asset outside a stated universe, so a caller skips the
+        name rather than sizing an order on a market that does not exist. An
+        asset already carrying a quote is returned unchanged, which keeps every
+        caller that already speaks in venue symbols working.
+        """
+        if not self.capabilities.supports(market_type):
+            return None
+        asset = asset.strip()
+        if not asset:
+            return None
+        if "/" in asset:
+            # Already a venue symbol. Passing it through is what lets a test or
+            # a caller that resolved elsewhere hand one straight in.
+            return asset
+        if self._listed is not None and asset not in self._listed:
+            return None
+        return f"{asset}/{self._quote_asset_name}"
+
     def _quote_asset(self, symbol: str) -> str:
-        """The asset a fill is paid in. `BTC/USD` settles in USD."""
-        _, _, quote = symbol.partition("/")
-        return quote or symbol
+        """The asset a fill is paid in. `BTC/USD` settles in USD.
+
+        A bare ticker has no quote to find, and returning the ticker itself is
+        how this venue came to hold balances in `MKR` and `APT` while its cash
+        never moved (Finding 21). `symbol_for` is what stops a bare ticker
+        arriving; this refuses one that does, because a fill settling in an
+        asset the account never agreed to trade is worse than a loud failure.
+        """
+        _, sep, quote = symbol.partition("/")
+        if not sep or not quote:
+            raise ValueError(
+                f"{symbol!r} is an asset, not a symbol this venue can settle: "
+                f"it names no quote currency, so a fill against it would credit "
+                f"or debit {symbol!r} itself. Resolve it with symbol_for() first"
+            )
+        return quote
 
     def credit_funding(self, symbol: str, amount: Decimal) -> None:
         """Credit a funding settlement the way an exchange would.

@@ -493,3 +493,60 @@ class TestFundingIsCredited:
 
         assert venue._balances["USD"] == Decimal(100_005)
         assert "BTC" not in venue._balances
+
+
+class TestSymbolResolution:
+    """An asset is not a symbol, and this venue must say which is which.
+
+    `entity.symbol` is `BTC`; a venue trades `BTC/USD`. The carry loop passed
+    the ticker straight through and every test passed, because tests build
+    venue symbols directly -- no test ever took a symbol from an entity row and
+    handed it to a venue, which is the only path production has. The fill then
+    settled in an asset called `MKR` and the venue's cash never moved
+    (Finding 21).
+    """
+
+    def test_an_asset_becomes_a_symbol_in_the_venues_quote(self):
+        venue = _venue(quote_asset="USD")
+
+        assert venue.symbol_for("BTC", MarketType.SPOT) == "BTC/USD"
+
+    def test_a_symbol_is_returned_unchanged(self):
+        # Callers that already speak in venue symbols keep working, which is
+        # what makes this safe to introduce underneath existing code.
+        venue = _venue(quote_asset="USD")
+
+        assert venue.symbol_for("BTC/USD", MarketType.SPOT) == "BTC/USD"
+
+    def test_an_asset_outside_a_stated_universe_is_not_listed(self):
+        # None is a normal answer: a caller skips the name. An exception would
+        # force a try/except around every candidate in a 30-name universe.
+        venue = _venue(quote_asset="USD", listed=["BTC", "ETH"])
+
+        assert venue.symbol_for("BTC", MarketType.SPOT) == "BTC/USD"
+        assert venue.symbol_for("DOGE", MarketType.SPOT) is None
+
+    def test_an_empty_universe_lists_nothing_rather_than_everything(self):
+        """`listed=[]` is a venue that lists nothing and `listed=None` is one
+        with no stated universe. Collapsing them would trade a universe the
+        caller explicitly emptied."""
+        assert _venue(quote_asset="USD", listed=[]).symbol_for("BTC", MarketType.SPOT) is None
+        assert _venue(quote_asset="USD").symbol_for("BTC", MarketType.SPOT) == "BTC/USD"
+
+    def test_a_market_type_the_venue_cannot_trade_has_no_symbol(self):
+        # Resolving a perpetual on a spot-only venue would hand back a symbol
+        # that `execute` then refuses, which is a rejection one layer too late.
+        caps = _caps(perpetuals=False)
+        venue = _venue(caps=caps, quote_asset="USD")
+
+        assert venue.symbol_for("BTC", MarketType.SPOT) == "BTC/USD"
+        assert venue.symbol_for("BTC", MarketType.PERPETUAL) is None
+
+    def test_a_bare_ticker_cannot_settle_a_fill(self):
+        """The defect itself. `_quote_asset` returned the ticker for a symbol
+        with no quote, so a fill on `MKR` credited an asset called `MKR` and the
+        venue's USD never moved -- silently, for as long as the book ran."""
+        venue = _venue(quote_asset="USD")
+
+        with pytest.raises(ValueError, match="is an asset, not a symbol"):
+            venue._quote_asset("MKR")
