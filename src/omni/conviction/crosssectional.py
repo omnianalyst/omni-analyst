@@ -228,6 +228,7 @@ async def _funding_window(
     audience: UUID | None,
     as_of: datetime,
     lookback_days: int,
+    funding_venue: str,
 ) -> dict[UUID, list[tuple[datetime, Decimal]]]:
     """Trailing funding settlements per entity, oldest-first, as-of `as_of`.
 
@@ -248,7 +249,18 @@ async def _funding_window(
     stamps carry a millisecond of jitter (consecutive deltas run 28,799,999 /
     28,800,000 / 28,800,001), so rounding to an eight-hour bucket would merge
     two settlements or split one. `key` carries the venue (`binance:BTCUSDT`),
-    which keeps two venues' streams distinct.
+    which stops one venue's settlement being mistaken for a restatement of
+    another's.
+
+    **One venue per ranking**, matched to the accrual path's `funding_venue`.
+    Keeping the streams distinct is not the same as keeping them apart: without
+    this filter every venue's settlements pool into one window, and
+    `_trailing_score` averages them. That average has no unit. Hyperliquid
+    settles hourly and Binance every eight hours, so the same annual carry
+    arrives as a per-settlement mean eight times smaller, and a blended mean
+    ranks a name by which venues happen to cover it. Worse, the score would then
+    disagree with the book: `carry_loop._settlements` filters on this same venue,
+    so the strategy would select against one number and accrue another.
 
     Rates are parsed to `Decimal` from the store's exact decimal string. A
     non-finite one (`NaN`, `Infinity`) is KEPT so it can poison the score into
@@ -266,6 +278,7 @@ async def _funding_window(
         FROM visible c
         WHERE c.entity_id = ANY($1::uuid[])
           AND c.claim_type = 'funding_rate'
+          AND split_part(c.key, ':', 1) = $5
           AND c.knowledge_date <= $2
           AND c.event_date >= $4
         ORDER BY c.entity_id, c.key, c.event_date, c.knowledge_date DESC
@@ -274,6 +287,7 @@ async def _funding_window(
         as_of,
         audience,
         cutoff,
+        funding_venue,
     )
 
     windows: dict[UUID, list[tuple[datetime, Decimal]]] = {}
@@ -329,6 +343,7 @@ async def select_carry_basket(
     held: Iterable[UUID],
     enter_rank: int,
     exit_rank: int,
+    funding_venue: str,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     min_settlements: int = MIN_SETTLEMENTS,
 ) -> BasketDecision:
@@ -339,6 +354,12 @@ async def select_carry_basket(
     the cross-section under the enter/exit hysteresis. `as_of` is required and
     has no clock default, exactly as `trend.produce_trend_prediction_from_coverage`
     requires one: a replay that silently reads *now* is a replay with lookahead.
+
+    `funding_venue` is required and has no default, for the same reason `as_of`
+    does not default to the clock: the wrong one is silent. It must be the venue
+    the book accrues against, because a score taken from one venue and a
+    settlement taken from another are two different strategies sharing a
+    portfolio.
 
     A name with fewer than `min_settlements` in the window is not scored and so
     is not part of the universe -- it has no trailing funding to be ranked on.
@@ -369,6 +390,7 @@ async def select_carry_basket(
         audience=audience_user_id,
         as_of=as_of,
         lookback_days=lookback_days,
+        funding_venue=funding_venue,
     )
     if not windows:
         return BasketDecision(

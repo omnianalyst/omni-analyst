@@ -328,6 +328,7 @@ class TestTheReaderIsPointInTime:
             held=(),
             enter_rank=2,
             exit_rank=4,
+            funding_venue="binance",
         )
 
         assert decision.abstention is None
@@ -353,6 +354,7 @@ class TestTheReaderIsPointInTime:
             enter_rank=2,
             exit_rank=4,
             lookback_days=7,
+            funding_venue="binance",
         )
 
         assert ids["AAA"] not in decision.held
@@ -382,6 +384,7 @@ class TestTheReaderRespectsTheAudience:
             held=(),
             enter_rank=2,
             exit_rank=4,
+            funding_venue="binance",
         )
 
         assert other not in decision.held
@@ -403,6 +406,7 @@ class TestTheReaderRespectsTheAudience:
             held=held,
             enter_rank=1,
             exit_rank=2,
+            funding_venue="binance",
         )
 
         assert decision.abstention == ABSTAIN_NO_COVERAGE
@@ -435,6 +439,7 @@ class TestTheScore:
             held=(),
             enter_rank=1,
             exit_rank=3,
+            funding_venue="binance",
         )
 
         assert decision.held == frozenset({ids["QUIET"]})
@@ -459,6 +464,7 @@ class TestTheScore:
             held=(),
             enter_rank=2,
             exit_rank=4,
+            funding_venue="binance",
         )
 
         assert thin not in decision.scores
@@ -487,6 +493,7 @@ class TestTheDecisionStatesItsTurnover:
             held=held,
             enter_rank=2,
             exit_rank=4,
+            funding_venue="binance",
         )
 
         assert decision.abstention is None
@@ -500,3 +507,102 @@ class TestTheDecisionStatesItsTurnover:
         # the retained names they account for the whole book.
         assert not (decision.entered & decision.exited)
         assert decision.held - decision.entered == held - decision.exited
+
+
+async def _funding_at(db, entity_id, rate, event_date, *, venue):
+    """One settlement filed under a named venue, so a key carries it."""
+    await db.pool.execute(
+        "INSERT INTO claim (entity_id, claim_type, key, value, source, "
+        "event_date, knowledge_date, confidence, redistributable, audience_user_id) "
+        f"VALUES ($1,'funding_rate','{venue}:TEST',$2::jsonb,'derivatives',$3,$3,1.0,"
+        "'allowed',NULL)",
+        entity_id,
+        json.dumps({"rate": str(rate), "venue": venue, "symbol": "TEST"}),
+        event_date,
+    )
+
+
+class TestOneVenuePerRanking:
+    """Keeping two venues' streams distinct is not keeping them apart.
+
+    `DISTINCT ON (entity_id, key, event_date)` stops one venue's settlement being
+    read as a restatement of another's -- but without a venue filter both still
+    pool into one window, and the score is their average. That average has no
+    unit: Hyperliquid settles hourly against Binance's eight-hourly, so the same
+    annual carry arrives as a per-settlement mean eight times smaller.
+    """
+
+    async def test_another_venues_settlements_do_not_enter_the_score(self, db):
+        # AAA is the worst payer on binance and would be dragged up into the
+        # basket by a rich hyperliquid stream it does not trade.
+        ids = await _universe(db, {
+            "AAA": ["0.0001", "0.0001"],
+            "BBB": ["0.0002", "0.0002"],
+            "CCC": ["0.0003", "0.0003"],
+            "DDD": ["0.0004", "0.0004"],
+            "EEE": ["0.0005", "0.0005"],
+            "FFF": ["0.0006", "0.0006"],
+        })
+        for i in range(4):
+            await _funding_at(
+                db, ids["AAA"], "0.9", NOW - SETTLEMENT * (i + 1),
+                venue="hyperliquid",
+            )
+
+        decision = await select_carry_basket(
+            db.pool,
+            entity_ids=list(ids.values()),
+            audience_user_id=None,
+            as_of=NOW,
+            held=(),
+            enter_rank=2,
+            exit_rank=4,
+            funding_venue="binance",
+        )
+
+        assert decision.abstention is None
+        assert ids["AAA"] not in decision.held
+        assert decision.held == frozenset({ids["FFF"], ids["EEE"]})
+
+    async def test_the_named_venue_is_the_one_that_scores(self, db):
+        """The mirror image, so the filter is not passing by reading nothing.
+
+        A test that only asserts the other venue is excluded also passes when
+        the filter matches nothing at all and every name abstains.
+        """
+        ids = await _universe(db, {
+            "AAA": ["0.0001", "0.0001"],
+            "BBB": ["0.0002", "0.0002"],
+            "CCC": ["0.0003", "0.0003"],
+            "DDD": ["0.0004", "0.0004"],
+            "EEE": ["0.0005", "0.0005"],
+            "FFF": ["0.0006", "0.0006"],
+        })
+        # On hyperliquid the ranking is upside down: AAA pays the most there.
+        for name, rate in (
+            ("AAA", "0.0009"),
+            ("BBB", "0.0008"),
+            ("CCC", "0.0007"),
+            ("DDD", "0.0003"),
+            ("EEE", "0.0002"),
+            ("FFF", "0.0001"),
+        ):
+            for i in range(4):
+                await _funding_at(
+                    db, ids[name], rate, NOW - SETTLEMENT * (i + 1),
+                    venue="hyperliquid",
+                )
+
+        decision = await select_carry_basket(
+            db.pool,
+            entity_ids=list(ids.values()),
+            audience_user_id=None,
+            as_of=NOW,
+            held=(),
+            enter_rank=2,
+            exit_rank=4,
+            funding_venue="hyperliquid",
+        )
+
+        assert decision.abstention is None
+        assert decision.held == frozenset({ids["AAA"], ids["BBB"]})

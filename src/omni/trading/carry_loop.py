@@ -1007,6 +1007,9 @@ async def run_carry_cycle(
         held=held_ids,
         enter_rank=config.enter_rank,
         exit_rank=config.exit_rank,
+        # The same venue the accrual above reads. Scoring one venue's funding
+        # while settling another's is two strategies sharing a portfolio.
+        funding_venue=config.funding_venue,
         lookback_days=config.lookback_days,
         min_settlements=config.min_settlements,
     )
