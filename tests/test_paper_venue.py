@@ -442,3 +442,54 @@ class TestPerpetualCashSettlement:
 
         assert after_spot == Decimal(99_799)          # notional AND fee
         assert venue._balances["USD"] == Decimal(99_798)  # fee only
+
+
+class TestFundingIsCredited:
+    """A venue that models a perpetual but not its funding does not model a
+    perpetual. Funding IS the return on the position.
+
+    A real exchange settles on its own schedule and a caller learns of it by
+    reading `balances()`. A simulated one has to be told, and not telling it is
+    not a neutral omission: the book credits the settlement through
+    `portfolio.state.apply_funding` and the venue does not, so the two diverge
+    by exactly the carry earned and compound it every cycle. The carry loop's
+    two-cycle test found this the moment reconciliation was wired in, diverging
+    by 1.10 on a 100k book -- the first cycle's accrual, to the cent.
+    """
+
+    def test_a_received_settlement_raises_the_venues_cash(self):
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+
+        venue.credit_funding("BTC/USD", Decimal("1.10"))
+
+        assert venue._balances["USD"] == Decimal("100001.10")
+
+    def test_a_paid_settlement_lowers_it(self):
+        """Signed as the book signs it, so a caller mirrors `FundingAccrual.
+        amount` without reinterpreting it. Reinterpreting the sign here would
+        make the venue and the book disagree about the direction of the only
+        cash flow this strategy earns."""
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+
+        venue.credit_funding("BTC/USD", Decimal("-1.10"))
+
+        assert venue._balances["USD"] == Decimal("99998.90")
+
+    def test_a_float_amount_is_refused(self):
+        # The venue's cash is compared against the book's to the cent. A binary
+        # float here reintroduces the divergence this method exists to close.
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+
+        with pytest.raises(TypeError, match="must be a Decimal"):
+            venue.credit_funding("BTC/USD", 1.10)
+
+    def test_it_settles_in_the_quote_asset_of_the_symbol(self):
+        # Funding on BTC/USD is paid in USD, not in BTC. Crediting the base
+        # would leave the quote balance untouched and the books diverging while
+        # inventing an asset the account never received.
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+
+        venue.credit_funding("BTC/USD", Decimal(5))
+
+        assert venue._balances["USD"] == Decimal(100_005)
+        assert "BTC" not in venue._balances

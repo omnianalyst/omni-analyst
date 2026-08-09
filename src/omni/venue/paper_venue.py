@@ -297,6 +297,37 @@ class PaperVenue:
         _, _, quote = symbol.partition("/")
         return quote or symbol
 
+    def credit_funding(self, symbol: str, amount: Decimal) -> None:
+        """Credit a funding settlement the way an exchange would.
+
+        A real venue does this on its own schedule: funding settles, the
+        exchange moves the cash, and a caller learns about it by reading
+        `balances()`. A simulated venue has no such schedule, so it must be
+        told, and **not telling it is not a neutral omission** -- the book
+        applies the settlement through `portfolio.state.apply_funding` and the
+        venue does not, so the two diverge by exactly the carry the book earned,
+        growing every cycle. A reconcile-first loop then halts on the second
+        rebalance and every one after it.
+
+        That is not a hypothetical: it is what the carry loop's own two-cycle
+        test found the moment reconciliation was wired in, diverging by 1.10 on
+        a 100k book, which was precisely the first cycle's accrual.
+
+        `amount` is signed the way the book signs it -- positive is received --
+        so a caller mirrors `FundingAccrual.amount` without reinterpreting it.
+        Reinterpreting the sign here would make the venue and the book disagree
+        about the direction of the only cash flow this strategy earns.
+        """
+        if not isinstance(amount, Decimal):
+            raise TypeError(
+                f"funding amount must be a Decimal, got {type(amount).__name__}; "
+                f"a float carries a binary error into the venue's own cash"
+            )
+        if not amount.is_finite():
+            raise ValueError(f"funding amount must be finite, got {amount}")
+        asset = self._quote_asset(symbol)
+        self._balances[asset] = self._balances.get(asset, Decimal(0)) + amount
+
     def _debit_cash(
         self, fill: Fill, market_type: MarketType, existing: Position | None
     ) -> None:

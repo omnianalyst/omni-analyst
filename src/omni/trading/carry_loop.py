@@ -98,7 +98,9 @@ from omni.conviction.crosssectional import (
 from omni.coverage.visibility import visible_claims_cte
 from omni.portfolio import orders, state
 from omni.portfolio.orders import OrderStatus
+from omni.portfolio.reconcile import reconcile
 from omni.portfolio.state import FundingAccrual, FundingOutcome, PortfolioState
+from omni.trading import pretrade
 from omni.venue.costs import BPS, entry_cost
 from omni.venue.protocol import (
     Fill,
@@ -185,6 +187,7 @@ class CarryHalt(str, Enum):
 
     BOOK_NOT_PAIRED = "the_book_already_held_a_leg_that_is_not_half_of_a_pair"
     UNWIND_FAILED = "a_half_filled_pair_could_not_be_unwound"
+    VENUE_DISAGREES = "the_venue_and_the_book_do_not_agree"
 
 
 @dataclass(frozen=True)
@@ -202,6 +205,14 @@ class CarryConfig:
     taker leg, and a default of zero is the permissive value: it hands the
     strategy the spread on every leg of the turnover Finding 9 measured this
     strategy as being destroyed by.
+
+    `reconciliation_tolerance` has no default either, and for a sharper reason:
+    the permissive value is not zero here but a LARGE one. A tolerance wide
+    enough to swallow a real divergence turns the reconciliation into a
+    formality that always passes, and the wider it is the more it looks like
+    working code. It is stated per deployment because what counts as noise
+    depends on the venue's rounding and the size of the book, and nothing in
+    this module knows either.
     """
 
     enter_rank: int
@@ -209,6 +220,7 @@ class CarryConfig:
     notional_per_pair: Decimal
     funding_venue: str
     spread_bps: Decimal
+    reconciliation_tolerance: Decimal
     lookback_days: int = DEFAULT_LOOKBACK_DAYS
     min_settlements: int = MIN_SETTLEMENTS
 
@@ -230,6 +242,19 @@ class CarryConfig:
             )
         if not self.spread_bps.is_finite() or self.spread_bps < 0:
             raise ValueError(f"spread_bps must not be negative, got {self.spread_bps}")
+        if not isinstance(self.reconciliation_tolerance, Decimal):
+            raise TypeError(
+                f"reconciliation_tolerance must be a Decimal, got "
+                f"{type(self.reconciliation_tolerance).__name__}"
+            )
+        if (
+            not self.reconciliation_tolerance.is_finite()
+            or self.reconciliation_tolerance < 0
+        ):
+            raise ValueError(
+                f"reconciliation_tolerance must not be negative, got "
+                f"{self.reconciliation_tolerance}"
+            )
         if not self.funding_venue or not self.funding_venue.strip():
             raise ValueError(
                 "funding_venue must name the data venue whose funding stream is "
@@ -811,6 +836,46 @@ async def run_carry_cycle(
             ),
         )
 
+    # Reconciliation, AFTER the pair-integrity gate and before anything else.
+    #
+    # The order is deliberate and was arrived at by getting it wrong first. With
+    # reconciliation first, a book already holding a naked leg never reaches
+    # BOOK_NOT_PAIRED: a leg the book holds and the venue does not is also a
+    # position divergence, so the cash and position comparison fires and reports
+    # the same fact in a less useful vocabulary. The pair gate names the symbol
+    # and which side is missing; the reconciler names a quantity mismatch. Both
+    # are true, and the operator wants the first.
+    #
+    # Before funding, because a settlement applied against a book the venue does
+    # not confirm is carry credited to a position that may not exist, and
+    # `apply_funding` is idempotent on `(portfolio, venue, symbol, funding_time)`
+    # -- so the wrong accrual, once written, is the one that stands.
+    verified = await reconcile(
+        book.positions,
+        book.cash_positions,
+        venue,
+        tolerance=config.reconciliation_tolerance,
+        now=as_of,
+    )
+    unrecorded = await pretrade.record_reconciliation(
+        pool, verified, portfolio_id=portfolio_id
+    )
+    await pretrade.evaluate_risk_alerts(pool, portfolio_id=portfolio_id, now=as_of)
+
+    if not verified:
+        halt_reason = (
+            f"{CarryHalt.VENUE_DISAGREES.value}: "
+            + "; ".join(d.detail for d in verified.discrepancies)
+        )
+        # The halt is computed from `verified` alone. A write that failed is
+        # named here so the operator learns the evidence is not in the store,
+        # and it must never be able to turn a divergence into a pass.
+        if unrecorded is not None:
+            halt_reason = f"{halt_reason} -- and {unrecorded}"
+        return _result(
+            as_of=as_of, held=held_ids, cycle=cycle, halt_reason=halt_reason
+        )
+
     funding: list[FundingAccrual] = []
     for funding_time, entity_id, rate in await _settlements(
         pool,
@@ -826,17 +891,27 @@ async def run_carry_cycle(
         if mark is None:
             cycle.refuse(CarryRefusal.NO_MARK)
             continue
-        funding.append(
-            await state.apply_funding(
-                pool,
-                portfolio_id,
-                venue=venue.name,
-                symbol=by_entity[entity_id],
-                funding_time=funding_time,
-                funding_rate=rate,
-                mark=mark,
-            )
+        accrual = await state.apply_funding(
+            pool,
+            portfolio_id,
+            venue=venue.name,
+            symbol=by_entity[entity_id],
+            funding_time=funding_time,
+            funding_rate=rate,
+            mark=mark,
         )
+        funding.append(accrual)
+        # A real exchange settles funding itself and a caller learns of it by
+        # reading balances. A simulated venue has no schedule of its own, so it
+        # is told -- and only if it says it can be told. Omitting this is not
+        # neutral: the book credits the settlement and the venue does not, so
+        # the two diverge by exactly the carry earned, compounding every cycle
+        # until reconciliation halts the book. Guarded by capability rather than
+        # by venue type, because a live venue that needed telling would be a
+        # venue whose exchange was not paying us.
+        credit = getattr(venue, "credit_funding", None)
+        if credit is not None and accrual.outcome is FundingOutcome.ACCRUED:
+            credit(by_entity[entity_id], accrual.amount)
 
     decision = await select_carry_basket(
         pool,

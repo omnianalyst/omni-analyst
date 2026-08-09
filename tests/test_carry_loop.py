@@ -33,6 +33,7 @@ from omni.conviction.crosssectional import (
     ABSTAIN_NO_COVERAGE,
     ABSTAIN_UNIVERSE_TOO_SMALL,
 )
+from omni.portfolio.reconcile import latest_by_venue
 from omni.portfolio.state import (
     FundingOutcome,
     create_portfolio,
@@ -105,6 +106,10 @@ def _config(**overrides) -> CarryConfig:
         "notional_per_pair": NOTIONAL,
         "funding_venue": FUNDING_VENUE,
         "spread_bps": SPREAD_BPS,
+        # Tight on purpose. A tolerance wide enough to absorb a real divergence
+        # makes the reconciliation a formality that always passes, and every
+        # test below would then be asserting over a check that cannot fail.
+        "reconciliation_tolerance": Decimal("0.01"),
         "lookback_days": 7,
     }
     settings.update(overrides)
@@ -139,8 +144,7 @@ async def portfolio_id(db, owner) -> UUID:
     return book.portfolio_id
 
 
-@pytest.fixture
-def venue() -> PaperVenue:
+def _bars() -> RecordedBars:
     bars = RecordedBars()
     for symbol in RATES:
         bars.add(
@@ -157,8 +161,13 @@ def venue() -> PaperVenue:
                 at=NOW - timedelta(days=30),
             )
         )
+    return bars
+
+
+@pytest.fixture
+def venue() -> PaperVenue:
     return PaperVenue(
-        bars, CAPABILITIES, name=VENUE, spread_bps=SPREAD_BPS,
+        _bars(), CAPABILITIES, name=VENUE, spread_bps=SPREAD_BPS,
         starting_balances={"USD": Decimal(100000)},
     )
 
@@ -170,6 +179,14 @@ class _RefusingVenue:
     refusal still runs through the real fill, position and cash path, so a test
     of the unwind is a test of the unwind and not of a stub.
     """
+
+    def __getattr__(self, name):
+        # Delegate everything not deliberately overridden. Without this a
+        # wrapper silently lacks whatever the cycle grows a use for next --
+        # `positions` and `balances` when reconciliation landed -- and the test
+        # fails with an AttributeError describing the harness rather than the
+        # behaviour under test.
+        return getattr(self._inner, name)
 
     def __init__(self, inner, refuse):
         self._inner = inner
@@ -201,6 +218,14 @@ class _LedgerWatchingVenue:
     written before it. The only place the difference exists is during the venue
     call, so the observation is taken there.
     """
+
+    def __getattr__(self, name):
+        # Delegate everything not deliberately overridden. Without this a
+        # wrapper silently lacks whatever the cycle grows a use for next --
+        # `positions` and `balances` when reconciliation landed -- and the test
+        # fails with an AttributeError describing the harness rather than the
+        # behaviour under test.
+        return getattr(self._inner, name)
 
     def __init__(self, inner, pool):
         self._inner = inner
@@ -1050,3 +1075,82 @@ class TestTheOrderLedger:
         assert await realised_pnl(
             db.pool, portfolio_id, since=SINCE, until=UNTIL
         ) == expected
+
+
+class TestTheVenueMustAgreeBeforeItTrades:
+    """Reconciliation gates the cycle, the way `loop.py` gates the directional
+    one.
+
+    A book that does not match its venue is a book whose every size is computed
+    against a position that may not exist. Trading on top of that compounds a
+    disagreement instead of surfacing it, and the funding settlement is worse
+    still: `apply_funding` is idempotent on `(portfolio, venue, symbol,
+    funding_time)`, so carry credited against an unconfirmed position is the
+    accrual that stands.
+    """
+
+    async def test_a_cash_divergence_halts_before_anything_is_traded(
+        self, db, owner, portfolio_id
+    ):
+        ids = await _world(db, owner)
+        # The venue holds a different cash figure from the book. Nothing else
+        # differs, so a cycle that trades here is one that never looked.
+        venue = PaperVenue(
+            _bars(),
+            CAPABILITIES,
+            name=VENUE,
+            spread_bps=SPREAD_BPS,
+            starting_balances={"USD": Decimal(90_000)},
+        )
+
+        result = await _run(
+            db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        assert result.halted is True
+        assert CarryHalt.VENUE_DISAGREES.value in result.halt_reason
+        # Halted BEFORE trading, not after: an empty book is the proof, and the
+        # detail names the asset so an operator has somewhere to look.
+        book = await load(db.pool, portfolio_id)
+        assert book.positions == ()
+        assert "USD" in result.halt_reason
+
+    async def test_the_verdict_is_recorded_even_though_it_halted(
+        self, db, owner, portfolio_id
+    ):
+        ids = await _world(db, owner)
+        """Recording only the passes deletes exactly the evidence an operator
+        needs: the venue that diverged is the one whose history would then read
+        `never_run`."""
+        venue = PaperVenue(
+            _bars(),
+            CAPABILITIES,
+            name=VENUE,
+            spread_bps=SPREAD_BPS,
+            starting_balances={"USD": Decimal(90_000)},
+        )
+
+        await _run(
+            db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        stored = await latest_by_venue(db.pool, portfolio_id)
+        assert VENUE in stored
+        assert stored[VENUE].reconciled is False
+        assert stored[VENUE].discrepancies
+
+    async def test_an_agreeing_venue_does_not_halt(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+        # The pair test: without this, a reconciler that refused everything
+        # would satisfy both assertions above and stop the strategy dead.
+        result = await _run(
+            db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        assert result.halted is False
+        assert (await load(db.pool, portfolio_id)).positions != ()
