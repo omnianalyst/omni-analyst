@@ -285,13 +285,29 @@ def _permutation_p95(
     quantile: int,
     draws: int,
     seed: int,
-) -> float:
-    """The null's own 95th percentile |t|, measured rather than assumed.
+) -> tuple[float, float, float]:
+    """The null's own 95th percentile |t|, and the cross-section it measured on.
 
     Columns are permuted, so each asset keeps a real score history and a real
     price history -- they are simply the wrong pair. That preserves the market
     factor and the autocorrelation while destroying only the association under
     test, which is the thing that makes crypto's null run hot.
+
+    **The sample the null ranks is returned next to the sample the statistic
+    ranks, because they are not always the same and the difference is silent.**
+    Re-imposing `available` intersects two masks: the permuted score's and the
+    original's. When the signal scores every column they are the same mask and
+    the intersection is a no-op -- which is why this held for every signal
+    measured before one restricted its universe. When the signal scores n of N
+    columns, the two masks agree on about n/N of the n, so the null ranks
+    roughly n^2/N names against the statistic's n. Measured on this panel: a
+    138-name cross-section fell to 18, and a 30-name one fell to 1, which is
+    below `MIN_ASSETS` on every date and returns NaN -- the guard vanishing
+    without saying so.
+
+    Returning the counts does not fix the shrink. It makes the caller able to
+    say the guard did not apply to the sample it was asked about, which is the
+    difference between a measurement and a blank.
     """
     rng = np.random.default_rng(seed)
     cols = list(scores.columns)
@@ -303,17 +319,26 @@ def _permutation_p95(
     # survivorship-corrected source makes routine. Re-imposing the original
     # availability mask keeps the sample fixed and permutes only the values.
     available = scores.notna()
+    priced = prices.notna()
+    real_rankable = (available & priced).sum(axis=1)
+    real_names = float(real_rankable[real_rankable > 0].median())
+
     ts: list[float] = []
+    null_counts: list[float] = []
     for _ in range(draws):
         shuffled = scores.copy()
         shuffled.columns = list(rng.permutation(cols))
         shuffled = shuffled.reindex(columns=cols).where(available)
+        rankable = (shuffled.notna() & priced).sum(axis=1)
+        null_counts.append(float(rankable[rankable > 0].median()))
         r, _c, _i = _periods(
             shuffled, prices, horizon=horizon, offset=0, quantile=quantile
         )
         if len(r) >= MIN_PERIODS:
             ts.append(abs(_stat(r, horizon).t))
-    return float(np.percentile(ts, 95)) if ts else float("nan")
+    null_names = float(np.median(null_counts)) if null_counts else float("nan")
+    p95 = float(np.percentile(ts, 95)) if ts else float("nan")
+    return p95, null_names, real_names
 
 
 def evaluate(
@@ -446,10 +471,28 @@ def evaluate(
                 "strategy retired in this project looked exactly like this"
             )
 
-        null_p95 = _permutation_p95(
+        null_p95, null_names, real_names = _permutation_p95(
             scores, prices, horizon=horizon, quantile=quantile,
             draws=permutation_draws, seed=seed,
         )
+        # Guard 2 is the one that most looks like it ran when it did not: a NaN
+        # p95 fails every comparison below, so the absence reads as a pass.
+        if math.isnan(null_p95):
+            warnings.append(
+                "the permutation null could not be measured -- no draw produced "
+                f"{MIN_PERIODS} rankable periods -- so this result is NOT calibrated "
+                f"against the market factor. A signal scoring a subset of the panel "
+                f"shrinks the null's cross-section to roughly n^2/N; here that is a "
+                f"median of {null_names:.0f} names against the {real_names:.0f} the "
+                f"statistic ranked"
+            )
+        elif not math.isnan(real_names) and null_names < 0.9 * real_names:
+            warnings.append(
+                f"the permutation null ranked a median of {null_names:.0f} names "
+                f"against the statistic's {real_names:.0f}, so its 95th percentile "
+                f"({null_p95:.2f}) calibrates a smaller cross-section than the one "
+                f"under test"
+            )
         if not math.isnan(null_p95) and abs(gross.t) <= null_p95:
             warnings.append(
                 f"|t| {abs(gross.t):.2f} does not exceed the permuted null's own "
