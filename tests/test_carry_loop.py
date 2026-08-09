@@ -36,6 +36,7 @@ from omni.conviction.crosssectional import (
 from omni.portfolio.reconcile import latest_by_venue
 from omni.portfolio.state import (
     FundingOutcome,
+    PortfolioState,
     create_portfolio,
     load,
     realised_pnl,
@@ -44,12 +45,16 @@ from omni.trading.carry_loop import (
     CarryConfig,
     CarryHalt,
     CarryRefusal,
+    _legs_by_asset,
+    _PairSymbols,
+    _unpaired,
     run_carry_cycle,
 )
 from omni.venue.paper_venue import Bar, PaperVenue, RecordedBars
 from omni.venue.protocol import (
     Capabilities,
     MarketType,
+    Position,
     Side,
     TradeIntent,
     VenueUnavailable,
@@ -1154,3 +1159,93 @@ class TestTheVenueMustAgreeBeforeItTrades:
 
         assert result.halted is False
         assert (await load(db.pool, portfolio_id)).positions != ()
+
+
+def _book_with(*rows) -> PortfolioState:
+    """A book holding exactly these positions, with no database.
+
+    `_legs_by_asset` is pure over a PortfolioState, so its tests do not need
+    one -- and building the book directly is what lets a test state two legs
+    under two different symbols, which is the case a real venue always presents
+    and no DB fixture here produces.
+    """
+    return PortfolioState(
+        portfolio_id=uuid4(),
+        nav=Decimal(0),
+        cash=Decimal(0),
+        positions=tuple(
+            Position(
+                venue=venue,
+                symbol=symbol,
+                market_type=market_type,
+                quantity=quantity,
+                average_entry=Decimal(100),
+                as_of=NOW,
+            )
+            for venue, symbol, market_type, quantity in rows
+        ),
+        as_of=NOW,
+    )
+
+
+class TestTheTwoLegsCanHaveDifferentSymbols:
+    """A real exchange does not name the two legs alike.
+
+    ccxt spells the spot market `BTC/USDT` and the perpetual `BTC/USDT:USDT`.
+    While the loop carried one symbol per pair it could not address both legs,
+    so `CCXTVenue` could not drive it at all and only `PaperVenue` -- which
+    returns the same string for both -- kept the paper path working.
+
+    Grouping the book by symbol instead of by asset is the specific failure:
+    a perfectly hedged pair whose legs carry two symbols reads as two broken
+    ones and halts a cycle that should trade.
+    """
+
+    def test_a_pair_addresses_each_leg_by_its_own_symbol(self):
+        pair = _PairSymbols(asset="BTC", spot="BTC/USDT", perp="BTC/USDT:USDT")
+
+        assert pair.for_market(MarketType.SPOT) == "BTC/USDT"
+        assert pair.for_market(MarketType.PERPETUAL) == "BTC/USDT:USDT"
+
+    def test_a_hedged_pair_under_two_symbols_is_still_one_pair(self):
+        """The halt this prevents. Both legs are present and offsetting; only
+        their names differ."""
+        book = _book_with(
+            (VENUE, "BTC/USDT", MarketType.SPOT, Decimal(2)),
+            (VENUE, "BTC/USDT:USDT", MarketType.PERPETUAL, Decimal(-2)),
+        )
+        asset_of = {"BTC/USDT": "BTC", "BTC/USDT:USDT": "BTC"}
+
+        legs = _legs_by_asset(book, venue_name=VENUE, asset_of=asset_of)
+
+        assert set(legs) == {"BTC"}
+        assert legs["BTC"].is_pair is True
+        assert _unpaired(legs) == []
+
+    def test_grouping_by_symbol_would_have_read_it_as_two_naked_legs(self):
+        # The same book with no asset mapping: each symbol stands alone, each
+        # looks like half a pair, and the cycle halts on a hedged book.
+        book = _book_with(
+            (VENUE, "BTC/USDT", MarketType.SPOT, Decimal(2)),
+            (VENUE, "BTC/USDT:USDT", MarketType.PERPETUAL, Decimal(-2)),
+        )
+
+        legs = _legs_by_asset(book, venue_name=VENUE, asset_of={})
+
+        assert set(legs) == {"BTC/USDT", "BTC/USDT:USDT"}
+        assert _unpaired(legs) == ["BTC/USDT", "BTC/USDT:USDT"]
+
+    def test_a_position_the_cycle_cannot_map_still_halts(self):
+        """A leg at this venue that this cycle does not recognise is exactly
+        the directional exposure the pair gate exists to catch. Dropping it
+        would make the book look clean by not looking at it."""
+        book = _book_with(
+            (VENUE, "BTC/USDT", MarketType.SPOT, Decimal(2)),
+            (VENUE, "BTC/USDT:USDT", MarketType.PERPETUAL, Decimal(-2)),
+            (VENUE, "DOGE/USDT", MarketType.SPOT, Decimal(100)),
+        )
+        asset_of = {"BTC/USDT": "BTC", "BTC/USDT:USDT": "BTC"}
+
+        legs = _legs_by_asset(book, venue_name=VENUE, asset_of=asset_of)
+
+        assert _unpaired(legs) == ["DOGE/USDT"]

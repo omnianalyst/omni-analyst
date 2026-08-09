@@ -83,7 +83,7 @@ position parked in the same portfolio reads as a broken pair and halts it.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -365,7 +365,9 @@ def _payload(raw: object) -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
-async def _symbols(pool, entity_ids: Sequence[UUID], venue: Venue) -> dict[UUID, str]:
+async def _symbols(
+    pool, entity_ids: Sequence[UUID], venue: Venue
+) -> dict[UUID, _PairSymbols]:
     """The VENUE symbol per entity. Raises when two entities share one.
 
     An entity row carries an asset -- `BTC` -- and a venue trades an instrument
@@ -389,7 +391,7 @@ async def _symbols(pool, entity_ids: Sequence[UUID], venue: Venue) -> dict[UUID,
     twice the size.
     """
     rows = await pool.fetch(_SYMBOLS, list(entity_ids))
-    by_entity: dict[UUID, str] = {}
+    by_entity: dict[UUID, _PairSymbols] = {}
     seen: dict[str, UUID] = {}
     for row in rows:
         asset = row["symbol"]
@@ -399,26 +401,21 @@ async def _symbols(pool, entity_ids: Sequence[UUID], venue: Venue) -> dict[UUID,
         perp = venue.symbol_for(asset, MarketType.PERPETUAL)
         if spot is None or perp is None:
             # Not listed here, or listed on only one side. Either way there is
-            # no delta-neutral pair to hold.
+            # no delta-neutral pair to hold, and taking the leg that does exist
+            # is an outright position in a strategy with no view on direction.
             continue
-        if spot != perp:
-            # ccxt spells the perpetual differently from the spot market, so a
-            # single symbol cannot address both legs. Supporting that needs a
-            # per-leg symbol on the position key, which the book does not carry.
-            raise NotImplementedError(
-                f"{venue.name} lists {asset} as {spot!r} spot and {perp!r} "
-                f"perpetual, and this loop carries one symbol per pair. Holding "
-                f"both legs needs a per-leg symbol through the position rows and "
-                f"the order ledger"
-            )
-        symbol = spot
-        if symbol in seen:
-            raise ValueError(
-                f"entities {seen[symbol]} and {row['id']} both trade as {symbol!r}; "
-                f"their legs would net into one pair of position rows"
-            )
-        seen[symbol] = row["id"]
-        by_entity[row["id"]] = symbol
+        for symbol in {spot, perp}:
+            # Collision on EITHER leg. Two assets sharing one venue symbol would
+            # net into a single pair of position rows and the book would report
+            # one name holding twice the size.
+            if symbol in seen and seen[symbol] != row["id"]:
+                raise ValueError(
+                    f"entities {seen[symbol]} and {row['id']} both trade as "
+                    f"{symbol!r}; their legs would net into one pair of position "
+                    f"rows"
+                )
+            seen[symbol] = row["id"]
+        by_entity[row["id"]] = _PairSymbols(asset=asset, spot=spot, perp=perp)
     return by_entity
 
 
@@ -482,8 +479,30 @@ async def _settlements(
 
 
 @dataclass(frozen=True)
+class _PairSymbols:
+    """What one asset is called on this venue, per leg.
+
+    A real exchange does not name the two legs alike: ccxt spells the spot
+    market `BTC/USDT` and the perpetual `BTC/USDT:USDT`. So a pair is addressed
+    by ASSET and traded by two symbols, and everything downstream that reaches
+    the venue -- the intent, the order ledger key, the funding accrual -- has to
+    carry the one that belongs to its leg.
+
+    `PaperVenue` returns the same string for both, which is why the paper path
+    worked while this was a single symbol and live could not have.
+    """
+
+    asset: str
+    spot: str
+    perp: str
+
+    def for_market(self, market_type: MarketType) -> str:
+        return self.spot if market_type is MarketType.SPOT else self.perp
+
+
+@dataclass(frozen=True)
 class _Legs:
-    """The two position quantities held for one symbol at one venue."""
+    """The two position quantities held for one asset at one venue."""
 
     spot: Decimal
     perp: Decimal
@@ -495,19 +514,35 @@ class _Legs:
         return self.spot > 0 and self.perp < 0 and self.spot + self.perp == 0
 
 
-def _legs_by_symbol(book: PortfolioState, *, venue_name: str) -> dict[str, _Legs]:
+def _legs_by_asset(
+    book: PortfolioState, *, venue_name: str, asset_of: Mapping[str, str]
+) -> dict[str, _Legs]:
+    """The book's two legs per asset at this venue.
+
+    Grouped by ASSET rather than by symbol, because the two legs of one pair
+    carry different symbols wherever the venue names them differently, and
+    grouping by symbol would then read every leg as half of a broken pair and
+    halt the cycle on a book that is perfectly hedged.
+
+    A position whose symbol this cycle cannot map back to an asset is keyed by
+    its raw symbol. It is still counted, and still halts as unpaired, because a
+    position at this venue that the cycle does not recognise is exactly the
+    directional exposure the pair gate exists to catch -- and dropping it would
+    make the book look clean by not looking.
+    """
     legs: dict[str, tuple[Decimal, Decimal]] = {}
     for position in book.positions:
         if position.venue != venue_name:
             continue
         if position.market_type not in (MarketType.SPOT, MarketType.PERPETUAL):
             continue
-        spot, perp = legs.get(position.symbol, (Decimal(0), Decimal(0)))
+        key = asset_of.get(position.symbol, position.symbol)
+        spot, perp = legs.get(key, (Decimal(0), Decimal(0)))
         if position.market_type is MarketType.SPOT:
             spot = position.quantity
         else:
             perp = position.quantity
-        legs[position.symbol] = (spot, perp)
+        legs[key] = (spot, perp)
     return {symbol: _Legs(spot=s, perp=p) for symbol, (s, p) in legs.items()}
 
 
@@ -626,7 +661,7 @@ class _Cycle:
     async def unwind(
         self,
         *,
-        symbol: str,
+        symbols: _PairSymbols,
         filled: dict[MarketType, Fill],
         reference_price: Decimal,
         as_of: datetime,
@@ -648,7 +683,7 @@ class _Cycle:
                 _leg_intent(
                     portfolio_id=self.portfolio_id,
                     venue_name=self.venue.name,
-                    symbol=symbol,
+                    symbol=symbols.for_market(market_type),
                     market_type=market_type,
                     side=opposite,
                     quantity=fill.filled_quantity,
@@ -660,13 +695,13 @@ class _Cycle:
             )
             if back is None:
                 return (
-                    f"{symbol} filled {fill.filled_quantity} on the "
+                    f"{symbols.asset} filled {fill.filled_quantity} on the "
                     f"{market_type.value} leg and the venue could not execute the "
                     f"unwind; the book holds a naked {fill.side.value}"
                 )
             if back.filled_quantity != fill.filled_quantity:
                 return (
-                    f"{symbol} filled {fill.filled_quantity} on the "
+                    f"{symbols.asset} filled {fill.filled_quantity} on the "
                     f"{market_type.value} leg and only {back.filled_quantity} of it "
                     f"could be unwound; the remainder is naked exposure"
                 )
@@ -675,7 +710,7 @@ class _Cycle:
     async def trade_pair(
         self,
         *,
-        symbol: str,
+        symbols: _PairSymbols,
         entity_id: UUID,
         quantity: Decimal,
         reference_price: Decimal,
@@ -690,6 +725,10 @@ class _Cycle:
         Only an unwind that fails halts, and it halts because at that point the
         book is holding an exposure nothing else can see.
         """
+        # `symbols` rather than one string: on a real venue the two legs are
+        # different instruments with different names, and sending the spot
+        # symbol on the perpetual leg opens a second spot position instead of
+        # the hedge.
         order = _OPEN_ORDER if opening else _CLOSE_ORDER
         sides = (
             {MarketType.SPOT: Side.BUY, MarketType.PERPETUAL: Side.SELL}
@@ -706,7 +745,7 @@ class _Cycle:
                 _leg_intent(
                     portfolio_id=self.portfolio_id,
                     venue_name=self.venue.name,
-                    symbol=symbol,
+                    symbol=symbols.for_market(market_type),
                     market_type=market_type,
                     side=sides[market_type],
                     quantity=quantity,
@@ -736,11 +775,16 @@ class _Cycle:
             and spot.filled_quantity == perp.filled_quantity
         )
         if balanced and neutral:
-            return PairExecution(entity_id=entity_id, symbol=symbol, spot=spot, perp=perp), None
+            return (
+                PairExecution(
+                    entity_id=entity_id, symbol=symbols.asset, spot=spot, perp=perp
+                ),
+                None,
+            )
 
         self.refuse(CarryRefusal.PAIR_DID_NOT_BALANCE)
         halt = await self.unwind(
-            symbol=symbol, filled=filled, reference_price=reference_price, as_of=as_of
+            symbols=symbols, filled=filled, reference_price=reference_price, as_of=as_of
         )
         return None, halt
 
@@ -835,14 +879,21 @@ async def run_carry_cycle(
 
     cycle = _Cycle(pool, venue=venue, portfolio_id=portfolio_id, config=config)
     by_entity = await _symbols(pool, entity_ids, venue)
-    by_symbol = {symbol: entity_id for entity_id, symbol in by_entity.items()}
+    # Asset -> entity, and every leg symbol -> asset. Two maps because the pair
+    # is identified by its asset and addressed by two symbols.
+    by_asset = {pair.asset: entity_id for entity_id, pair in by_entity.items()}
+    asset_of = {
+        symbol: pair.asset
+        for pair in by_entity.values()
+        for symbol in (pair.spot, pair.perp)
+    }
 
     book = await state.load(pool, portfolio_id)
-    legs = _legs_by_symbol(book, venue_name=venue.name)
+    legs = _legs_by_asset(book, venue_name=venue.name, asset_of=asset_of)
     held_ids = frozenset(
-        by_symbol[symbol]
+        by_asset[symbol]
         for symbol, held in legs.items()
-        if held.is_pair and symbol in by_symbol
+        if held.is_pair and symbol in by_asset
     )
 
     # A pair the universe no longer names can be neither ranked nor settled, so
@@ -850,7 +901,7 @@ async def run_carry_cycle(
     # position quietly ceasing to accrue is the same silent understatement of
     # carry as a skipped settlement, and it lasts for as long as the name is out.
     for symbol, held in legs.items():
-        if held.is_pair and symbol not in by_symbol:
+        if held.is_pair and symbol not in by_asset:
             cycle.refuse(CarryRefusal.OUTSIDE_UNIVERSE)
 
     unpaired = _unpaired(legs)
@@ -928,7 +979,9 @@ async def run_carry_cycle(
             pool,
             portfolio_id,
             venue=venue.name,
-            symbol=by_entity[entity_id],
+            # The perpetual leg: funding exists only there, and the accrual
+            # key must name the instrument that actually pays it.
+            symbol=by_entity[entity_id].perp,
             funding_time=funding_time,
             funding_rate=rate,
             mark=mark,
@@ -944,7 +997,7 @@ async def run_carry_cycle(
         # venue whose exchange was not paying us.
         credit = getattr(venue, "credit_funding", None)
         if credit is not None and accrual.outcome is FundingOutcome.ACCRUED:
-            credit(by_entity[entity_id], accrual.amount)
+            credit(by_entity[entity_id].perp, accrual.amount)
 
     decision = await select_carry_basket(
         pool,
@@ -971,8 +1024,8 @@ async def run_carry_cycle(
     halt_reason: str | None = None
 
     for entity_id in sorted(decision.exited, key=str):
-        symbol = by_entity.get(entity_id)
-        if symbol is None:
+        symbols = by_entity.get(entity_id)
+        if symbols is None:
             cycle.refuse(CarryRefusal.NO_SYMBOL)
             continue
         price = await _price_at(
@@ -982,9 +1035,9 @@ async def run_carry_cycle(
             cycle.refuse(CarryRefusal.NO_REFERENCE_PRICE)
             continue
         pair, halt_reason = await cycle.trade_pair(
-            symbol=symbol,
+            symbols=symbols,
             entity_id=entity_id,
-            quantity=legs[symbol].spot,
+            quantity=legs[symbols.asset].spot,
             reference_price=price,
             as_of=as_of,
             opening=False,
@@ -996,8 +1049,8 @@ async def run_carry_cycle(
 
     if halt_reason is None:
         for entity_id in sorted(decision.entered, key=str):
-            symbol = by_entity.get(entity_id)
-            if symbol is None:
+            symbols = by_entity.get(entity_id)
+            if symbols is None:
                 cycle.refuse(CarryRefusal.NO_SYMBOL)
                 continue
             price = await _price_at(
@@ -1007,7 +1060,7 @@ async def run_carry_cycle(
                 cycle.refuse(CarryRefusal.NO_REFERENCE_PRICE)
                 continue
             pair, halt_reason = await cycle.trade_pair(
-                symbol=symbol,
+                symbols=symbols,
                 entity_id=entity_id,
                 # One quantity for both legs, derived once from one price. Sizing
                 # each leg off its own price is how a pair opens delta-imbalanced
@@ -1022,7 +1075,9 @@ async def run_carry_cycle(
             if halt_reason is not None:
                 break
 
-    final = _legs_by_symbol(await state.load(pool, portfolio_id), venue_name=venue.name)
+    final = _legs_by_asset(
+        await state.load(pool, portfolio_id), venue_name=venue.name, asset_of=asset_of
+    )
     still_unpaired = _unpaired(final)
     if halt_reason is None and still_unpaired:
         halt_reason = (
@@ -1039,9 +1094,9 @@ async def run_carry_cycle(
     return _result(
         as_of=as_of,
         held=frozenset(
-            by_symbol[symbol]
+            by_asset[symbol]
             for symbol, held in final.items()
-            if held.is_pair and symbol in by_symbol
+            if held.is_pair and symbol in by_asset
         ),
         cycle=cycle,
         opened=opened,
