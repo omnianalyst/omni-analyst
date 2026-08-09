@@ -943,3 +943,91 @@ class TestPersistence:
             )
             == 0
         )
+
+
+class TestOneBookAcrossSeveralVenues:
+    """Reconciliation is scoped to the venue it is checking.
+
+    A portfolio may hold positions at more than one venue -- the rows are keyed
+    `(venue, symbol, market_type)` precisely so it can -- and both trading loops
+    hand `reconcile` the WHOLE book. `reconcile` filters to `venue.name` before
+    comparing anything, so a holding at another venue is not a divergence here.
+
+    Without that filter, every position held elsewhere reads as
+    `position_missing_at_venue` and the cycle halts on a book that is fine.
+    Removing it fails two of the three tests below.
+
+    These tests were written after mistaking the filter for absent: both loops
+    pass unfiltered books, which looks like the omission, and the filter is 27
+    lines further down than where the call sites suggest looking. It was there
+    all along. What was NOT there was any test holding two venues at once, so
+    the guarantee was real and undefended -- which is the state a refactor
+    quietly deletes.
+    """
+
+    async def test_another_venues_positions_are_not_missing_from_this_one(self):
+        local = [
+            _position("BTC/USD", "1", venue="paper"),
+            # Held at a different venue entirely. Not this venue's business.
+            _position("ETH/USD", "50", venue="other"),
+        ]
+        venue = FakeVenue(
+            positions=[_position("BTC/USD", "1", venue="paper")],
+            balances=(_balance("USD", "10000"),),
+        )
+
+        result = await reconcile(
+            local,
+            [_local_cash("USD", "10000", venue="paper")],
+            venue,
+            tolerance=Decimal("0.01"),
+            now=NOW,
+        )
+
+        assert result.reconciled is True
+        assert result.discrepancies == ()
+
+    async def test_another_venues_cash_is_not_a_divergence_here(self):
+        venue = FakeVenue(
+            positions=[], balances=(_balance("USD", "10000"),)
+        )
+
+        result = await reconcile(
+            [],
+            [
+                _local_cash("USD", "10000", venue="paper"),
+                # A second venue's cash. Counting it would report 60,000 local
+                # against 10,000 remote and halt.
+                _local_cash("USD", "50000", venue="other"),
+            ],
+            venue,
+            tolerance=Decimal("0.01"),
+            now=NOW,
+        )
+
+        assert result.reconciled is True
+
+    async def test_this_venues_own_divergence_still_surfaces(self):
+        """The pair test. A filter that dropped everything would satisfy both
+        assertions above while reporting every book as reconciled, which is the
+        worst possible outcome for a pre-trade check."""
+        venue = FakeVenue(
+            positions=[_position("BTC/USD", "1", venue="paper")],
+            balances=(_balance("USD", "10000"),),
+        )
+
+        result = await reconcile(
+            [
+                _position("BTC/USD", "2", venue="paper"),
+                _position("ETH/USD", "50", venue="other"),
+            ],
+            [_local_cash("USD", "10000", venue="paper")],
+            venue,
+            tolerance=Decimal("0.01"),
+            now=NOW,
+        )
+
+        assert result.reconciled is False
+        assert Divergence.POSITION_QUANTITY in _kinds(result)
+        # And it is OUR venue's symbol that is named, not the other one's.
+        assert [d.symbol for d in result.discrepancies] == ["BTC/USD"]
