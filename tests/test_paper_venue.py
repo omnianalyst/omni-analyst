@@ -27,6 +27,7 @@ import pytest
 from omni.venue.paper_venue import Bar, PaperVenue, RecordedBars
 from omni.venue.protocol import (
     Capabilities,
+    Fill,
     MarketType,
     OrderKind,
     Side,
@@ -354,3 +355,90 @@ class TestQuote:
             await venue.quote(
                 _intent(order_kind=OrderKind.LIMIT, limit_price=Decimal(90))
             )
+
+
+class TestPerpetualCashSettlement:
+    """A perpetual does not settle in cash, and this venue must say so the same
+    way `portfolio.state` does.
+
+    The two are one question asked of two components -- "what did this fill do
+    to cash" -- and `portfolio.reconcile` compares their answers directly. When
+    they disagreed, they disagreed by the entire perpetual notional, and a
+    reconcile-first trading loop halted on every cycle after the first.
+
+    The figures below are the SAME worked example asserted in
+    `tests/test_portfolio_state.py::TestPerpetualSettlement`. They are written
+    as literals in both files on purpose: deriving either side from the other,
+    or from shared code, would let one drift and take the test with it.
+    """
+
+    def _fill(self, side, qty, price, fee="0"):
+        return Fill(
+            intent_id="i-1",
+            venue="paper",
+            symbol="BTC/USD",
+            side=side,
+            filled_quantity=Decimal(qty),
+            average_price=Decimal(price),
+            fee_paid=Decimal(fee),
+            filled_at=AT,
+        )
+
+    def test_opening_a_short_perp_costs_the_fee_and_nothing_else(self):
+        # The defect: this credited +200, the notional, so the venue reported
+        # cash the book had never received.
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+
+        venue._apply(self._fill(Side.SELL, "2", "100", "1"), MarketType.PERPETUAL)
+
+        assert venue._balances["USD"] == Decimal(99_999)
+
+    def test_opening_a_long_perp_costs_the_fee_and_nothing_else(self):
+        # The mirror, which the notional-settling version got wrong by -200.
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+
+        venue._apply(self._fill(Side.BUY, "2", "100", "1"), MarketType.PERPETUAL)
+
+        assert venue._balances["USD"] == Decimal(99_999)
+
+    def test_closing_a_short_perp_realises_its_gain_into_cash(self):
+        """Where the cash actually arrives. A close that realised nothing would
+        make a profitable carry book show no profit at all."""
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+        venue._apply(self._fill(Side.SELL, "2", "100"), MarketType.PERPETUAL)
+
+        venue._apply(self._fill(Side.BUY, "2", "90"), MarketType.PERPETUAL)
+
+        # Short 2 from 100 to 90: 2 * 10 = 20 realised.
+        assert venue._balances["USD"] == Decimal(100_020)
+
+    def test_closing_a_short_perp_at_a_loss_takes_cash(self):
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+        venue._apply(self._fill(Side.SELL, "2", "100"), MarketType.PERPETUAL)
+
+        venue._apply(self._fill(Side.BUY, "2", "110"), MarketType.PERPETUAL)
+
+        assert venue._balances["USD"] == Decimal(99_980)
+
+    def test_adding_to_a_perp_realises_nothing(self):
+        # Same direction closes nothing. Realising here would book a profit on
+        # a trade that is still open.
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+        venue._apply(self._fill(Side.SELL, "2", "100"), MarketType.PERPETUAL)
+
+        venue._apply(self._fill(Side.SELL, "2", "90"), MarketType.PERPETUAL)
+
+        assert venue._balances["USD"] == Decimal(100_000)
+
+    def test_spot_still_settles_in_cash_beside_a_perp_that_does_not(self):
+        """The two market types must not be collapsed. A fix that made spot
+        stop settling in cash would trade one accounting error for another, and
+        this venue is where a spot leg of a carry pair is actually bought."""
+        venue = _venue(starting_balances={"USD": Decimal(100_000)})
+
+        venue._apply(self._fill(Side.BUY, "2", "100", "1"), MarketType.SPOT)
+        after_spot = venue._balances["USD"]
+        venue._apply(self._fill(Side.SELL, "2", "100", "1"), MarketType.PERPETUAL)
+
+        assert after_spot == Decimal(99_799)          # notional AND fee
+        assert venue._balances["USD"] == Decimal(99_798)  # fee only

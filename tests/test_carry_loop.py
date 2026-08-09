@@ -33,7 +33,12 @@ from omni.conviction.crosssectional import (
     ABSTAIN_NO_COVERAGE,
     ABSTAIN_UNIVERSE_TOO_SMALL,
 )
-from omni.portfolio.state import FundingOutcome, create_portfolio, load
+from omni.portfolio.state import (
+    FundingOutcome,
+    create_portfolio,
+    load,
+    realised_pnl,
+)
 from omni.trading.carry_loop import (
     CarryConfig,
     CarryHalt,
@@ -41,10 +46,22 @@ from omni.trading.carry_loop import (
     run_carry_cycle,
 )
 from omni.venue.paper_venue import Bar, PaperVenue, RecordedBars
-from omni.venue.protocol import Capabilities, MarketType, TradeIntent, VenueUnavailable
+from omni.venue.protocol import (
+    Capabilities,
+    MarketType,
+    Side,
+    TradeIntent,
+    VenueUnavailable,
+)
 
 NOW = datetime(2026, 3, 1, tzinfo=UTC)
 SETTLEMENT = timedelta(hours=8)
+
+# Wide enough on both sides that no fill this file produces falls outside it.
+# `realised_pnl` is being asked whether it can account for the book at all, and a
+# window that clipped a fill would answer a different question.
+SINCE = NOW - timedelta(days=365)
+UNTIL = NOW + timedelta(days=365)
 
 VENUE = "paper"
 FUNDING_VENUE = "binance"
@@ -174,6 +191,50 @@ class _RefusingVenue:
         if self._refuse(intent):
             raise VenueUnavailable(f"refused {intent.market_type.value} {intent.side.value}")
         return await self._inner.execute(intent)
+
+
+class _LedgerWatchingVenue:
+    """The real venue, with the order ledger read from inside `execute`.
+
+    The property under test is an ordering, and an ordering is invisible
+    afterwards: a ledger written after the venue answered reads exactly like one
+    written before it. The only place the difference exists is during the venue
+    call, so the observation is taken there.
+    """
+
+    def __init__(self, inner, pool):
+        self._inner = inner
+        self._pool = pool
+        self.seen: list[tuple[str, str | None]] = []
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    @property
+    def capabilities(self) -> Capabilities:
+        return self._inner.capabilities
+
+    @property
+    def fills(self):
+        return self._inner.fills
+
+    async def execute(self, intent: TradeIntent):
+        status = await self._pool.fetchval(
+            "SELECT status FROM trade_order WHERE idempotency_key = $1",
+            intent.idempotency_key,
+        )
+        self.seen.append((intent.idempotency_key, status))
+        return await self._inner.execute(intent)
+
+
+async def _orders(db, portfolio_id):
+    return await db.pool.fetch(
+        "SELECT idempotency_key, symbol, market_type, side, status, quantity, "
+        "filled_quantity, average_fill_price, fee_paid "
+        "FROM trade_order WHERE portfolio_id = $1 ORDER BY created_at, id",
+        portfolio_id,
+    )
 
 
 async def _entity(db, symbol: str) -> UUID:
@@ -765,3 +826,227 @@ class TestCostsAndClock:
             )
         with pytest.raises(TypeError, match="Decimal"):
             _config(notional_per_pair=1000.0)
+
+
+class TestTheOrderLedger:
+    """Every leg the cycle sends is an order, and the book replays from them.
+
+    The reason is the kill switch. `portfolio.state.realised_pnl` derives its
+    number by replaying the order ledger and refuses to return one the ledger
+    cannot account for -- so a carry book whose fills went straight to the
+    position rows raises `UnaccountedClose`, and `risk.check`'s daily-loss limit
+    has no input at all on it. Every test here is a way that accounting can be
+    broken while every other number in the result object still looks right.
+    """
+
+    async def test_a_cycle_leaves_a_book_the_ledger_can_account_for(
+        self, db, owner, portfolio_id, venue
+    ):
+        """The headline: realised P&L is derivable after the cycle, not raising.
+
+        Two pairs open and nothing closes, so the honest answer is exactly zero
+        -- an open position realises nothing however far it has moved. The
+        assertion that matters is that a number comes back at all: before the
+        legs went through the ledger this call raised `UnaccountedClose` on any
+        carry book that had traded, which is a daily-loss kill switch with no
+        input.
+        """
+        ids = await _world(db, owner)
+
+        result = await _run(
+            db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        assert len(result.opened) == 2
+        assert await realised_pnl(
+            db.pool, portfolio_id, since=SINCE, until=UNTIL
+        ) == Decimal(0)
+
+    async def test_the_order_exists_before_the_venue_is_asked_to_fill_it(
+        self, db, owner, portfolio_id, venue
+    ):
+        """Recorded first, or the record is of something that already happened.
+
+        A ledger written after the venue answered cannot survive the case it
+        exists for: the process dies between the two, the venue has the position
+        and nothing on our side ever instructed it. Read from inside `execute`,
+        which is the only instant at which the two orderings differ.
+        """
+        ids = await _world(db, owner)
+        watching = _LedgerWatchingVenue(venue, db.pool)
+
+        await _run(
+            db, venue=watching, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        assert len(watching.seen) == 4
+        assert [status for _, status in watching.seen] == ["submitted"] * 4
+
+    async def test_each_leg_is_accumulated_into_the_order_that_instructed_it(
+        self, db, owner, portfolio_id, venue
+    ):
+        """The ledger carries what filled, not what was asked for.
+
+        Asserted against the venue's own fills rather than against the requested
+        quantity, because the two are the same only when nothing went wrong, and
+        an order reporting the requested size on a partial fill misstates its own
+        entry and every P&L derived from it.
+        """
+        ids = await _world(db, owner)
+
+        await _run(
+            db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        rows = await _orders(db, portfolio_id)
+        assert len(rows) == 4
+        assert {row["status"] for row in rows} == {"filled"}
+        # Keyed on the intent the venue was handed, not on anything inferred
+        # from the fill: the claim is that this order carries the fill it
+        # instructed, and matching by symbol and side would still hold if two
+        # orders had swapped their fills.
+        ledger = {
+            row["idempotency_key"]: (
+                row["symbol"],
+                row["side"],
+                row["filled_quantity"],
+                row["average_fill_price"],
+                row["fee_paid"],
+            )
+            for row in rows
+        }
+        assert len(venue.fills) == 4
+        for fill in venue.fills:
+            assert ledger[fill.intent_id] == (
+                fill.symbol,
+                fill.side.value,
+                fill.filled_quantity,
+                fill.average_price,
+                fill.fee_paid,
+            )
+
+    async def test_an_unwound_leg_is_in_the_ledger_and_can_be_valued(
+        self, db, owner, portfolio_id, venue
+    ):
+        """The leg it is most tempting to skip and least survivable to skip.
+
+        The perp is refused, the spot leg that already filled is bought back, and
+        the book comes back flat. An unwind missing from the ledger leaves a
+        replay holding a long the position rows do not, which is exactly the
+        state `UnaccountedClose` refuses to value -- so the kill switch would go
+        blind at the moment something had already gone wrong.
+
+        The realised number is the round trip itself, computed from the venue's
+        own fills: crossed twice and paid for twice, so it is a loss, and a
+        signed assertion catches an unwind booked on the wrong side.
+        """
+        ids = await _world(db, owner)
+        refusing = _RefusingVenue(
+            venue, lambda intent: intent.market_type is MarketType.PERPETUAL
+        )
+
+        result = await _run(
+            db, venue=refusing, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        assert result.held == frozenset()
+        assert not result.halted
+
+        rows = await _orders(db, portfolio_id)
+        by_role = {}
+        for row in rows:
+            by_role.setdefault(row["idempotency_key"].rsplit(":", 1)[1], []).append(row)
+        assert {role: len(found) for role, found in by_role.items()} == {
+            "open": 4, "unwind": 2
+        }
+        assert {row["status"] for row in by_role["unwind"]} == {"filled"}
+        # The refused perp legs are in the ledger too: an instruction that was
+        # sent and turned down has a record of having been sent.
+        assert sorted(row["status"] for row in by_role["open"]) == [
+            "filled", "filled", "rejected", "rejected"
+        ]
+
+        buys = [f for f in venue.fills if f.side is Side.BUY]
+        sells = [f for f in venue.fills if f.side is Side.SELL]
+        assert len(buys) == len(sells) == 2
+        expected = sum(
+            (
+                sell.filled_quantity * (sell.average_price - buy.average_price)
+                - sell.fee_paid
+                for buy, sell in zip(buys, sells, strict=True)
+            ),
+            Decimal(0),
+        )
+        assert expected < 0
+        assert await realised_pnl(
+            db.pool, portfolio_id, since=SINCE, until=UNTIL
+        ) == expected
+
+    async def test_an_unwind_is_a_separate_order_from_the_close_it_reverses(
+        self, db, owner, portfolio_id, venue
+    ):
+        """Same symbol, same leg, same instant, both reduce_only -- one key apart.
+
+        An exit whose spot leg is refused leaves the perp already covered, so the
+        unwind re-shorts it. Nothing but the role distinguishes that intent from
+        the close it is undoing, and a shared key would make the ledger read the
+        second as a replay of the first: one order, one fill, and a position
+        change with no instruction behind it.
+        """
+        ids = await _world(db, owner)
+        await _run(
+            db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=NOW, since=NOW - timedelta(days=1),
+        )
+
+        later = NOW + timedelta(days=3)
+        flipped = {
+            "AAA/USD": "-0.0009", "BBB/USD": "-0.0008", "CCC/USD": "0.0009",
+            "DDD/USD": "0.0008", "EEE/USD": "0.0007", "FFF/USD": "0.0006",
+        }
+        for symbol, entity_id in ids.items():
+            for step in (2, 1):
+                await _funding(
+                    db, entity_id, symbol, flipped[symbol], later - SETTLEMENT * step, owner
+                )
+        refusing = _RefusingVenue(
+            venue,
+            lambda intent: (
+                intent.market_type is MarketType.SPOT and intent.side is Side.SELL
+            ),
+        )
+
+        result = await _run(
+            db, venue=refusing, portfolio_id=portfolio_id, ids=ids, owner=owner,
+            as_of=later, since=NOW, config=_config(lookback_days=1),
+        )
+
+        assert result.closed == ()
+        assert result.refused[CarryRefusal.PAIR_DID_NOT_BALANCE.value] == 2
+        # The pair the exit could not take off is intact rather than half gone.
+        for symbol in ("AAA/USD", "BBB/USD"):
+            spot, perp = await _legs(db, portfolio_id, symbol)
+            assert spot.quantity == -perp.quantity == NOTIONAL / PRICE
+
+        stamp = later.isoformat()
+        keys = {row["idempotency_key"] for row in await _orders(db, portfolio_id)}
+        for symbol in ("AAA/USD", "BBB/USD"):
+            assert f"{portfolio_id}:carry:{stamp}:{symbol}:perpetual:close" in keys
+            assert f"{portfolio_id}:carry:{stamp}:{symbol}:perpetual:unwind" in keys
+
+        # A short opened at the sell price and covered at the buy price loses the
+        # crossing plus the fee on the covering leg; the two names that could not
+        # exit are the only closes on the book.
+        quantity = NOTIONAL / PRICE
+        buy_price = next(f.average_price for f in venue.fills if f.side is Side.BUY)
+        sell_price = next(f.average_price for f in venue.fills if f.side is Side.SELL)
+        cover_fee = buy_price * quantity * TAKER_BPS / Decimal(10_000)
+        expected = 2 * (quantity * (sell_price - buy_price) - cover_fee)
+        assert expected < 0
+        assert await realised_pnl(
+            db.pool, portfolio_id, since=SINCE, until=UNTIL
+        ) == expected

@@ -297,7 +297,9 @@ class PaperVenue:
         _, _, quote = symbol.partition("/")
         return quote or symbol
 
-    def _debit_cash(self, fill: Fill) -> None:
+    def _debit_cash(
+        self, fill: Fill, market_type: MarketType, existing: Position | None
+    ) -> None:
         """Move cash the way a fill actually moves it.
 
         `balances()` previously reported whatever the constructor was handed and
@@ -305,10 +307,28 @@ class PaperVenue:
         real figure by the full notional of the very first fill, and any caller
         reconciling cash against this venue halted immediately.
 
-        A buy pays notional plus the fee; a sell receives notional less the fee.
-        The fee is subtracted in BOTH directions -- it is a cost, not a signed
-        flow -- which is the sign error worth naming, because charging it as a
-        credit on the sell side makes a round trip look free.
+        **Spot and margin** settle in cash: a buy pays notional plus the fee, a
+        sell receives notional less the fee. The fee is subtracted in BOTH
+        directions -- it is a cost, not a signed flow -- which is the sign error
+        worth naming, because charging it as a credit on the sell side makes a
+        round trip look free.
+
+        **A perpetual does not settle in cash.** Opening one posts margin rather
+        than spending, so the only cash it costs is the fee; closing one
+        realises P&L, and that realisation is the whole of the cash the contract
+        ever returns. This mirrors `portfolio.state._cash_delta` exactly, and it
+        has to: the two are the venue's and the book's answer to one question,
+        and a reconciler compares them directly.
+
+        That symmetry was broken. `portfolio.state` was corrected first, and
+        this side kept crediting a short perpetual's full notional -- so a carry
+        book and this venue disagreed on cash by exactly the perpetual notional
+        after any perp trade, and a reconcile-first loop halted on every cycle
+        after the first. The logic is duplicated rather than shared because
+        `omni.venue` sits BELOW `omni.portfolio` and may not import from it; the
+        duplication is the price of that direction, and the tests on both sides
+        assert the same worked figures so a future change to one shows up as a
+        failure in the other.
 
         The balance may go negative here. That is correct for a paper book with
         no funding model, and `Balance` refuses it, so `balances()` clamps at
@@ -317,15 +337,20 @@ class PaperVenue:
         `portfolio.state.CashPosition` exists as a separate type.
         """
         asset = self._quote_asset(fill.symbol)
-        notional = fill.notional
-        delta = -notional if fill.side is Side.BUY else notional
+        if market_type is MarketType.PERPETUAL:
+            delta = _closed_pnl(fill, existing)
+        else:
+            delta = -fill.notional if fill.side is Side.BUY else fill.notional
         self._balances[asset] = (
             self._balances.get(asset, Decimal(0)) + delta - fill.fee_paid
         )
 
     def _apply(self, fill: Fill, market_type: MarketType) -> None:
-        self._debit_cash(fill)
         key = (fill.symbol, market_type)
+        # Read the position BEFORE the update: a perpetual's cash flow is the
+        # P&L realised against the entry it is closing, which the updated row no
+        # longer carries.
+        self._debit_cash(fill, market_type, self._positions.get(key))
         signed = fill.filled_quantity if fill.side is Side.BUY else -fill.filled_quantity
         existing = self._positions.get(key)
 
@@ -389,6 +414,29 @@ class PaperVenue:
 
 
 _EPOCH = datetime.fromtimestamp(0).astimezone()
+
+
+def _closed_pnl(fill: Fill, existing: Position | None) -> Decimal:
+    """The P&L a perpetual fill realises against the position it lands on.
+
+    Only the part of the fill that CLOSES realises anything. A fill that opens,
+    adds to, or flips beyond an existing position realises only on the quantity
+    it actually closed -- the remainder is a new position at a new entry, and
+    counting it as realised would book a profit on a trade still open.
+
+    Mirrors `portfolio.state._closed_pnl`. See `_debit_cash` for why the two are
+    duplicated rather than shared.
+    """
+    if existing is None or existing.quantity == 0:
+        return Decimal(0)
+    signed = fill.filled_quantity if fill.side is Side.BUY else -fill.filled_quantity
+    if (existing.quantity > 0) == (signed > 0):
+        # Same direction: adding to the position closes nothing.
+        return Decimal(0)
+    closed = min(abs(signed), abs(existing.quantity))
+    if existing.quantity > 0:
+        return closed * (fill.average_price - existing.average_entry)
+    return closed * (existing.average_entry - fill.average_price)
 
 
 def _now_from(intent: TradeIntent) -> datetime:

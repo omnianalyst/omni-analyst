@@ -25,6 +25,25 @@ sizes it as an ordinary long or short because that is all it can see. So:
   point the book holds an exposure nothing downstream recognises, and every
   further size computed against it is computed against a book that is wrong.
 
+**Every leg goes through the order ledger, including the unwinds.**
+`portfolio.state.realised_pnl` derives its number by replaying that ledger and
+refuses to report one the ledger cannot account for, so a book whose fills were
+applied straight to the position rows raises `UnaccountedClose` -- and the
+daily-loss kill switch that reads realised P&L has no input at all on it. The
+unwind is the leg it would be most tempting to skip and the one it is least
+survivable to skip: it is a position change made precisely when something has
+already gone wrong, and a position change the ledger cannot see is the exact
+case the kill switch exists for.
+
+The write is a side effect of a decision already taken. Nothing is read back
+from the ledger to decide what to trade -- no "have we sent this" gate, no
+status check that could refuse a leg -- because a pair whose second leg were
+refused by bookkeeping is a naked first leg. What the ledger does provide is
+idempotency: the key is
+`(portfolio, as_of, symbol, market type, role)`, and the role is what keeps an
+unwind distinct from the close it is reversing, which are otherwise the same
+symbol, the same leg, the same instant and both `reduce_only`.
+
 **An abstention is not a liquidation.** When the selector abstains -- no visible
 funding coverage, too small a universe, a non-finite score -- the book holds
 still and no intent is built. Finding 9 measured turnover destroying this
@@ -77,7 +96,8 @@ from omni.conviction.crosssectional import (
     select_carry_basket,
 )
 from omni.coverage.visibility import visible_claims_cte
-from omni.portfolio import state
+from omni.portfolio import orders, state
+from omni.portfolio.orders import OrderStatus
 from omni.portfolio.state import FundingAccrual, FundingOutcome, PortfolioState
 from omni.venue.costs import BPS, entry_cost
 from omni.venue.protocol import (
@@ -94,6 +114,21 @@ from omni.venue.protocol import (
 # is never the one left alone on the book while the other is still in flight.
 _OPEN_ORDER = (MarketType.SPOT, MarketType.PERPETUAL)
 _CLOSE_ORDER = (MarketType.PERPETUAL, MarketType.SPOT)
+
+
+class _LegRole(str, Enum):
+    """What a leg was sent to do, and the part of its ledger key that says so.
+
+    An unwind reverses a close on the same symbol, the same leg and the same
+    instant, and both are `reduce_only`; without the role the two collapse onto
+    one idempotency key and the second is silently read as a replay of the
+    first.
+    """
+
+    OPEN = "open"
+    CLOSE = "close"
+    UNWIND = "unwind"
+
 
 _SYMBOLS = "SELECT id, symbol FROM entity WHERE id = ANY($1::uuid[])"
 
@@ -424,6 +459,7 @@ def _unpaired(legs: dict[str, _Legs]) -> list[str]:
 
 def _leg_intent(
     *,
+    portfolio_id: UUID,
     venue_name: str,
     symbol: str,
     market_type: MarketType,
@@ -432,6 +468,7 @@ def _leg_intent(
     reference_price: Decimal,
     as_of: datetime,
     reduce_only: bool,
+    role: _LegRole,
 ) -> TradeIntent:
     return TradeIntent(
         venue=venue_name,
@@ -442,6 +479,10 @@ def _leg_intent(
         reference_price=reference_price,
         reduce_only=reduce_only,
         provenance={"as_of": as_of, "strategy": "carry.crosssectional"},
+        idempotency_key=(
+            f"{portfolio_id}:carry:{as_of.isoformat()}:{symbol}:"
+            f"{market_type.value}:{role.value}"
+        ),
     )
 
 
@@ -476,23 +517,51 @@ class _Cycle:
         self.refused[reason.value] = self.refused.get(reason.value, 0) + 1
 
     async def send(self, intent: TradeIntent) -> Fill | None:
-        """Execute one leg and apply it to the book. None when the venue refused.
+        """Execute one leg, record it, and apply it to the book. None when refused.
+
+        The ledger write happens before the venue is called and the venue's
+        answer is written back to it, on every outcome. That ordering is what
+        makes a leg the ledger cannot explain impossible rather than unlikely: a
+        fill that arrives against an order nobody instructed is a position
+        `realised_pnl` refuses to value, and the daily-loss kill switch reading
+        it goes blind on the whole book rather than on the one leg.
+
+        Nothing is read back from the ledger to decide anything. There is no
+        status gate here of the kind `loop.py` carries, because a leg refused by
+        bookkeeping is half a pair, and half a pair is the naked directional
+        position this entire strategy is built to not hold.
 
         The fill is applied here rather than after both legs are known, because a
         fill that happened is on the book whether or not its partner filled --
         recording it only on the happy path is how a real position stops being
         visible to everything downstream.
         """
+        order_id = await orders.record_intent(self.pool, self.portfolio_id, intent)
+        await orders.transition(self.pool, order_id, OrderStatus.SUBMITTED)
         try:
             fill = await self.venue.execute(intent)
-        except VenueUnavailable:
+        except VenueUnavailable as exc:
+            await orders.transition(
+                self.pool,
+                order_id,
+                OrderStatus.REJECTED,
+                payload={"venue_unavailable": str(exc)},
+            )
             return None
         self.modelled_cost += _leg_cost(
             intent, fill, venue=self.venue, spread_bps=self.config.spread_bps
         )
         if fill.is_empty:
+            await orders.transition(
+                self.pool,
+                order_id,
+                OrderStatus.REJECTED,
+                external_id=fill.external_id,
+                payload={"empty_fill": fill.raw},
+            )
             return fill
         self.fees_paid += fill.fee_paid
+        await orders.record_fill(self.pool, order_id, fill)
         await state.apply_fill(self.pool, self.portfolio_id, fill, intent.market_type)
         return fill
 
@@ -519,6 +588,7 @@ class _Cycle:
             opposite = Side.SELL if fill.side is Side.BUY else Side.BUY
             back = await self.send(
                 _leg_intent(
+                    portfolio_id=self.portfolio_id,
                     venue_name=self.venue.name,
                     symbol=symbol,
                     market_type=market_type,
@@ -527,6 +597,7 @@ class _Cycle:
                     reference_price=reference_price,
                     as_of=as_of,
                     reduce_only=True,
+                    role=_LegRole.UNWIND,
                 )
             )
             if back is None:
@@ -568,11 +639,14 @@ class _Cycle:
             else {MarketType.SPOT: Side.SELL, MarketType.PERPETUAL: Side.BUY}
         )
 
+        role = _LegRole.OPEN if opening else _LegRole.CLOSE
+
         filled: dict[MarketType, Fill] = {}
         balanced = True
         for market_type in order:
             fill = await self.send(
                 _leg_intent(
+                    portfolio_id=self.portfolio_id,
                     venue_name=self.venue.name,
                     symbol=symbol,
                     market_type=market_type,
@@ -581,6 +655,7 @@ class _Cycle:
                     reference_price=reference_price,
                     as_of=as_of,
                     reduce_only=not opening,
+                    role=role,
                 )
             )
             if fill is None or fill.is_empty or fill.filled_quantity != quantity:
