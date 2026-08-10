@@ -82,34 +82,41 @@ async def _leg_bps(
 ) -> Decimal:
     """Fee plus adverse selection on one leg, in bps of the notional traded.
 
-    Quoted at one unit and scaled. Both components of `CCXTVenue.quote` are
-    linear in quantity -- fee is `price * qty * taker`, slippage is
-    `(expected - mid) * qty` -- so the scaling is exact rather than an
-    approximation. It is exact *because* the quote reads a ticker and never the
-    book, which is the same reason it cannot see depth. Charging a size the
-    venue never consulted would imply a size-aware model that does not exist.
+    **Quoted at the size actually intended.** An earlier version quoted one unit
+    and scaled, which was exact only while `CCXTVenue.quote` read a ticker and
+    was therefore blind to size. Now that it walks the book, quantity changes
+    the answer -- which is the entire point -- so a unit quote would report the
+    smallest possible order's price for every order. Measured on PURR: the touch
+    said 83 bps and walking $70 said 121.
 
-    `reference_price` is a required positive field on `TradeIntent` and is
-    unused by `quote`, so the probe carries 1. This intent is never executed.
+    Two calls: one to learn the price, one to quote the size that price implies.
+    The first is discarded except for its price. Sizing off a stale or invented
+    price would put the wrong quantity through the book and misprice the walk.
+
+    `reference_price` is required and positive on `TradeIntent`, unused by
+    `quote`, and carries 1 on the probe. Neither intent is ever executed.
     """
-    quote = await venue.quote(
-        TradeIntent(
+
+    def _probe(quantity: Decimal) -> TradeIntent:
+        return TradeIntent(
             venue=venue.name,
             symbol=symbol,
             side=side,
             market_type=market_type,
-            quantity=Decimal(1),
+            quantity=quantity,
             reference_price=Decimal(1),
             provenance={"as_of": as_of, "strategy": "carry.affordability"},
             idempotency_key=f"probe:{venue.name}:{symbol}:{as_of.isoformat()}",
         )
-    )
-    price = quote.expected_price
-    if price <= 0:
-        raise VenueUnavailable(f"{symbol} quoted a non-positive price {price}")
-    quantity = notional / price
-    cost = (quote.fee + quote.slippage) * quantity
-    return cost / notional * BPS
+
+    touch = await venue.quote(_probe(Decimal(1)))
+    if touch.expected_price <= 0:
+        raise VenueUnavailable(
+            f"{symbol} quoted a non-positive price {touch.expected_price}"
+        )
+    quantity = notional / touch.expected_price
+    sized = await venue.quote(_probe(quantity))
+    return (sized.fee + sized.slippage) / notional * BPS
 
 
 async def affordability(

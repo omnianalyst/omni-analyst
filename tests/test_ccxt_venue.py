@@ -735,6 +735,43 @@ class TestQuote:
 
         assert quote.expected_price == Decimal(10010)
 
+    async def test_a_market_order_is_priced_by_walking_the_book(self):
+        """The touch is the small order's price, not every order's.
+
+        Measured on Hyperliquid: PURR quoted 83 bps from the touch and cost 121
+        when $70 was walked through it. A cost model that charges the touch for
+        any size understates exactly the names where size matters.
+        """
+        exchange = FakeExchange(
+            ticker={"bid": 9990.0, "ask": 10000.0, "timestamp": TS},
+            order_book={
+                "bids": [[9990.0, 1.0]],
+                # One unit at the touch, then the book thins sharply.
+                "asks": [[10000.0, 1.0], [10100.0, 1.0], [10500.0, 8.0]],
+            },
+        )
+
+        touch = await _venue(exchange).quote(_intent(quantity="1"))
+        deep = await _venue(exchange).quote(_intent(quantity="3"))
+
+        assert touch.expected_price == Decimal(10000)
+        # 1 @ 10000 + 1 @ 10100 + 1 @ 10500 = 30600 / 3
+        assert deep.expected_price == Decimal(10200)
+        assert deep.slippage > touch.slippage * 3
+
+    async def test_a_size_the_book_cannot_fill_falls_back_to_the_touch(self):
+        """Not a guess at invisible depth. An order the book cannot fill is a
+        refusal `execute` makes; inventing a worse price here would be the cost
+        model imagining levels it cannot see."""
+        exchange = FakeExchange(
+            ticker={"bid": 9990.0, "ask": 10000.0, "timestamp": TS},
+            order_book={"bids": [[9990.0, 1.0]], "asks": [[10000.0, 1.0]]},
+        )
+
+        quote = await _venue(exchange).quote(_intent(quantity="500"))
+
+        assert quote.expected_price == Decimal(10000)
+
     async def test_a_ticker_and_book_both_one_sided_still_refuse(self):
         exchange = FakeExchange(
             ticker={"bid": 9990.0, "ask": None, "timestamp": TS},

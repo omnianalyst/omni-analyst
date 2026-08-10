@@ -105,6 +105,12 @@ _MARKET_FLAG = {
 }
 
 
+# Levels to walk when pricing a market order. Deep enough that a retail
+# size fills inside it on any venue here, shallow enough to stay one
+# cheap call: a quote that pages the book is a quote nobody runs per leg.
+BOOK_DEPTH = 50
+
+
 class TradingMode(str, Enum):
     """Whether this adapter may place orders.
 
@@ -628,6 +634,44 @@ class CCXTVenue:
             )
         return rounded
 
+    async def _walk(self, intent: TradeIntent) -> Decimal | None:
+        """The size-weighted price of filling `intent.quantity` against the book.
+
+        Returns None when the visible levels cannot fill the size, so the caller
+        can fall back rather than receive a price for a fill that would not
+        happen. A venue that refuses the order book entirely also returns None:
+        depth is an improvement on the touch, and losing it must degrade the
+        quote rather than fail it.
+        """
+        try:
+            book = await self._exchange.fetch_order_book(intent.symbol, limit=BOOK_DEPTH)
+        except Exception:  # noqa: BLE001 - depth is an improvement, never a requirement
+            # Deliberately broad. ccxt raises its own taxonomy plus whatever the
+            # transport does, and every one of them means the same thing here:
+            # no depth this time, quote from the touch. Translating to
+            # VenueUnavailable would turn a better cost model failing into a
+            # venue outage, which is a strictly worse answer than the one this
+            # method already had before it walked anything.
+            return None
+        levels = book.get("asks") if intent.side is Side.BUY else book.get("bids")
+        if not levels:
+            return None
+
+        remaining = intent.quantity
+        spent = Decimal(0)
+        for level in levels:
+            price = _decimal(level[0])
+            size = _decimal(level[1])
+            if price is None or size is None or price <= 0 or size <= 0:
+                continue
+            take = min(size, remaining)
+            spent += take * price
+            remaining -= take
+            if remaining <= 0:
+                filled = intent.quantity - remaining
+                return spent / filled if filled > 0 else None
+        return None
+
     async def quote(self, intent: TradeIntent) -> Quote:
         market = self._market(intent.symbol)
         self._require_market_type(market, intent)
@@ -681,7 +725,20 @@ class CCXTVenue:
             assert intent.limit_price is not None  # TradeIntent.__post_init__
             expected = intent.limit_price
         else:
-            expected = ask if intent.side is Side.BUY else bid
+            # A market order takes the touch only if the touch is big enough to
+            # fill it. Quoting the top of book for any size charges a large
+            # order the small order's price, and understates it by exactly the
+            # amount that matters on a thin name: PURR modelled at 83 bps from
+            # the touch and cost 121 bps when the book was walked, on $70.
+            #
+            # `_walk` returns None when the visible book cannot fill the size at
+            # all, and the touch is then the honest fallback -- an unfillable
+            # order is a different refusal, made by `execute`, and inventing a
+            # worse price here would be a cost model guessing at depth it cannot
+            # see rather than reporting what it can.
+            expected = await self._walk(intent) or (
+                ask if intent.side is Side.BUY else bid
+            )
 
         adverse = expected - mid if intent.side is Side.BUY else mid - expected
         # A limit resting inside the mid is price improvement, not slippage.
