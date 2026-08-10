@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
@@ -285,3 +285,61 @@ async def known_pools(pool, network: str, *, since: datetime) -> list[str]:
     """Pools last seen alive at or after `since`, which is the follow-up set."""
     rows = await pool.fetch(_KNOWN, network, since)
     return [r["pool_address"] for r in rows]
+
+
+NETWORKS = ("eth", "base", "solana", "bsc", "arbitrum")
+FOLLOW_DAYS = 45
+
+
+async def sweep(pool, *, networks: Sequence[str] = NETWORKS, now: datetime) -> dict:
+    """One full pass: discover new pools, then re-read everything still tracked.
+
+    A network that fails is logged and skipped rather than aborting the pass.
+    The alternative loses the other four networks' cohorts for that day over one
+    venue's outage, and a missing cohort cannot be backfilled.
+    """
+    from datetime import timedelta
+
+    counts: dict[str, int] = {}
+    for network in networks:
+        try:
+            found = await discover(network)
+            await record(pool, network=network, kind="discover",
+                         observations=found, observed_at=now)
+            counts[f"{network}.discovered"] = len(found)
+        except FeedUnavailable as exc:
+            logger.warning("discover %s failed, cohort not recorded: %s", network, exc)
+
+        try:
+            tracked = await known_pools(
+                pool, network, since=now - timedelta(days=FOLLOW_DAYS)
+            )
+            if tracked:
+                seen = await reobserve(network, tracked)
+                await record(pool, network=network, kind="reobserve",
+                             observations=seen, observed_at=now)
+                counts[f"{network}.reobserved"] = len(seen)
+                counts[f"{network}.gone"] = sum(1 for o in seen if not o.present)
+        except FeedUnavailable as exc:
+            logger.warning("reobserve %s failed: %s", network, exc)
+    return counts
+
+
+async def main() -> int:
+    from omni.config import settings
+    from omni.db import connect
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+    )
+    client = await connect(settings.database_url)
+    try:
+        counts = await sweep(client.pool, now=datetime.now(UTC))
+        logger.info("launch sweep: %s", counts)
+    finally:
+        await client.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
