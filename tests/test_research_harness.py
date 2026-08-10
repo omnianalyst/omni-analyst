@@ -301,7 +301,9 @@ class TestDegeneratePeriodsAreSkippedNotZeroFilled:
         # Make every score identical on a subset of dates: rank is undefined.
         scores.iloc[::4] = 1.0
 
-        _r, _c, ics = _periods(scores, prices, horizon=1, offset=0, quantile=5)
+        _r, _c, ics, _offered = _periods(
+            scores, prices, horizon=1, offset=0, quantile=5
+        )
 
         assert len(ics) > 0
         assert not np.any(ics == 0.0), "a substituted zero survived into the ICs"

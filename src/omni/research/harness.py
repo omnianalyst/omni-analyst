@@ -40,6 +40,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
@@ -107,6 +108,12 @@ class Verdict:
     turnover: float
     cost_bps: float
     warnings: tuple[str, ...]
+    # How many rebalances the calendar offered, against how many the signal
+    # actually took. A strategy that abstains most of the time is a
+    # legitimate object -- it is what waiting for a setup looks like -- but
+    # its statistic rests on the trades it took, and a reader who cannot see
+    # both numbers cannot tell selectivity from a small sample.
+    periods_offered: int = 0
     strictness: str = "strict"
     weighting: str = "equal"
 
@@ -134,6 +141,13 @@ class Verdict:
             and abs(self.gross.t) > self.bar
             and self.alignment_clearing >= 0.5
         )
+
+    @property
+    def selectivity(self) -> float:
+        """Fraction of offered rebalances the signal declined to trade."""
+        if self.periods_offered <= 0:
+            return 0.0
+        return 1.0 - (self.gross.n / self.periods_offered)
 
     def summary(self) -> str:
         flag = "PASS" if self.passed else "fail"
@@ -189,7 +203,7 @@ def _periods(
     quantile: int,
     weighting: str = "equal",
     vol_window: int = 30,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """Non-overlapping long-short returns, their costs, and the rank ICs.
 
     Long-short rather than long-only because crypto has one dominant factor: a
@@ -208,6 +222,7 @@ def _periods(
         raise ValueError(f"weighting must be one of {WEIGHTINGS}, got {weighting!r}")
 
     dates = prices.index
+    offered = 0
     rets: list[float] = []
     costs: list[float] = []
     ics: list[float] = []
@@ -241,6 +256,7 @@ def _periods(
         return w / total if total > 0 else np.full(len(names), 1.0 / len(names))
 
     for i in range(offset, len(dates) - horizon, horizon):
+        offered += 1
         d0, d1 = dates[i], dates[i + horizon]
         if d0 not in scores.index:
             continue
@@ -274,7 +290,7 @@ def _periods(
         if s.nunique() > 1 and fwd.nunique() > 1:
             ics.append(float(s.rank().corr(fwd.rank())))
 
-    return np.array(rets), np.array(costs), np.array(ics)
+    return np.array(rets), np.array(costs), np.array(ics), offered
 
 
 def _permutation_p95(
@@ -331,7 +347,7 @@ def _permutation_p95(
         shuffled = shuffled.reindex(columns=cols).where(available)
         rankable = (shuffled.notna() & priced).sum(axis=1)
         null_counts.append(float(rankable[rankable > 0].median()))
-        r, _c, _i = _periods(
+        r, _c, _i, _o = _periods(
             shuffled, prices, horizon=horizon, offset=0, quantile=quantile
         )
         if len(r) >= MIN_PERIODS:
@@ -379,7 +395,7 @@ def evaluate(
 
     for horizon in horizons:
         warnings: list[str] = []
-        rets, turn, ics = _periods(
+        rets, turn, ics, offered = _periods(
             scores, prices, horizon=horizon, offset=0, quantile=quantile,
             weighting=weighting,
         )
@@ -398,6 +414,7 @@ def evaluate(
                     turnover=float("nan"), cost_bps=cost_bps,
                     warnings=tuple(warnings),
                     strictness=strictness, weighting=weighting,
+                    periods_offered=offered,
                 )
             )
             continue
@@ -417,7 +434,7 @@ def evaluate(
         # Guard 5: the rebalance start offset is arbitrary.
         align_ts = []
         for off in range(horizon):
-            r, _c, _i = _periods(
+            r, _c, _i, _o = _periods(
                 scores, prices, horizon=horizon, offset=off, quantile=quantile,
                 weighting=weighting,
             )
@@ -500,6 +517,21 @@ def evaluate(
                 f"market factor"
             )
 
+        # Guard 6: a selective strategy is a legitimate object and a dangerous
+        # statistic. Waiting for a setup means the t rests on the trades taken,
+        # and with few of them the bar it must clear is not the bar an always-on
+        # strategy faces -- the same |t| bought with 22 trades instead of 200 is
+        # a much weaker claim, because the search over WHICH periods to trade is
+        # itself a search nobody counted.
+        if offered > 0 and gross.n < offered * 0.5:
+            warnings.append(
+                f"traded {gross.n} of {offered} offered rebalances "
+                f"({1 - gross.n / offered:.0%} abstention). A conditional entry is "
+                f"a legitimate shape, but the choice of WHEN to trade is a search "
+                f"that no multiplicity correction here counts -- treat this |t| as "
+                f"weaker than the same |t| from an always-on strategy"
+            )
+
         verdicts.append(
             Verdict(
                 name=name, horizon=horizon, bar=bar, gross=gross, net=net,
@@ -508,6 +540,7 @@ def evaluate(
                 ic_t=ic.t, turnover=float(turn.mean()), cost_bps=cost_bps,
                 warnings=tuple(warnings),
                 strictness=strictness, weighting=weighting,
+                periods_offered=offered,
             )
         )
 
