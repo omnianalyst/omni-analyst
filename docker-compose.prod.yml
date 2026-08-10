@@ -96,6 +96,22 @@ services:
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
       LICENSED_REDISTRIBUTION_PROVIDERS: ${LICENSED_REDISTRIBUTION_PROVIDERS:-}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-3600}
+      # Trading credentials, scheduler ONLY -- deliberately absent from the api
+      # service above. The api serves reads; a process that answers public
+      # requests has no use for a key that can place orders, and the cheapest
+      # way to keep it that way is to never hand it one.
+      #
+      # An agent wallet, never an account key. A private key IS the wallet: it
+      # can move every asset out and no setting disables withdrawals, which is
+      # the whole reason Hyperliquid's agent wallets exist. `wallet_credentials`
+      # rejects a half pair at construction, and neither value appears in any
+      # repr.
+      #
+      # Present is necessary and NEVER sufficient: `CCXTVenue` defaults to
+      # TradingMode.READ_ONLY and refuses to place an order before any network
+      # call, so these being set does not by itself let anything trade.
+      HYPERLIQUID_WALLET_ADDRESS: ${HYPERLIQUID_WALLET_ADDRESS:-}
+      HYPERLIQUID_PRIVATE_KEY: ${HYPERLIQUID_PRIVATE_KEY:-}
       # Conviction gate bar: surface only confidence buckets historically right
       # at least this often. 0.65 = "high conviction" (~7-in-10), tuned from the
       # trend.sma calibration buckets. Raise for stricter/more silence, lower
