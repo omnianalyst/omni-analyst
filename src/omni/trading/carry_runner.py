@@ -43,9 +43,11 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID
 
 from omni.trading.carry_loop import CarryConfig, CarryCycleResult, run_carry_cycle
+from omni.trading.tradeable import affordability, affordable_ids
 from omni.venue.protocol import Venue
 
 logger = logging.getLogger("omni.trading.carry")
@@ -167,6 +169,8 @@ async def run_due_cycle(
     inception: datetime | None = None,
     ignore_window: bool = False,
     ignore_cadence: bool = False,
+    max_execution_bps: Decimal | None = None,
+    assets: dict[UUID, str] | None = None,
 ) -> CarryCycleResult:
     """Run one rebalance if one is due, and record the boundary it settled.
 
@@ -226,12 +230,41 @@ async def run_due_cycle(
             f"run anyway"
         )
 
+    # Execution-cost filter, BEFORE the selector ranks. `select_carry_basket`
+    # scores gross funding and cannot see a spread -- `conviction` may not import
+    # `venue` -- so on a venue whose richest names are its thinnest, the ranking
+    # it produces and the ranking that pays disagree. Measured on Hyperliquid:
+    # PURR ranked first at 12.2%/yr gross and earned 1.65% net against SOL's
+    # 8.4% gross and 6.88% net. Filtering the universe here keeps the selector
+    # doing the one job it can do correctly.
+    universe = list(entity_ids)
+    if max_execution_bps is not None:
+        if assets is None:
+            raise ValueError(
+                "max_execution_bps was given without `assets`; the filter needs "
+                "each entity's asset symbol to ask the venue what it costs"
+            )
+        measured = await affordability(
+            venue,
+            assets={e: assets[e] for e in universe if e in assets},
+            notional_per_pair=config.notional_per_pair,
+            as_of=now,
+        )
+        universe = affordable_ids(measured, max_execution_bps=max_execution_bps)
+        if not universe:
+            raise CarryRunRefused(
+                f"no name in the universe trades within {max_execution_bps} bps "
+                f"round trip at {config.notional_per_pair} a pair. Trading the "
+                f"cheapest of a bad set is how a cost floor gets crossed by "
+                f"default; raise the ceiling deliberately or wait for spreads"
+            )
+
     result = await run_carry_cycle(
         pool,
         venue=venue,
         portfolio_id=portfolio_id,
         config=config,
-        entity_ids=entity_ids,
+        entity_ids=universe,
         audience_user_id=audience_user_id,
         as_of=now,
         funding_since=funding_since,

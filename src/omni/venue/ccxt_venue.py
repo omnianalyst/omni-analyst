@@ -645,11 +645,30 @@ class CCXTVenue:
             )
         bid = _decimal(ticker.get("bid"))
         ask = _decimal(ticker.get("ask"))
+
+        # Not every venue publishes a two-sided ticker. Hyperliquid populates
+        # bid/ask on its perpetuals and leaves both None on SPOT, so a quote
+        # taken from the ticker alone cannot price half of any cash-and-carry
+        # pair on the one venue this book trades. The top of the order book is
+        # the same two numbers from a different endpoint, so fall back to it
+        # rather than refusing -- and only then give up, because a cost quoted
+        # without a spread really is a cost with the spread left out.
+        if bid is None or ask is None or bid <= 0 or ask <= 0:
+            try:
+                book = await self._exchange.fetch_order_book(intent.symbol, limit=1)
+            except Exception as exc:
+                _translate(exc, self.name, intent.symbol)
+                raise
+            bids = book.get("bids") or []
+            asks = book.get("asks") or []
+            bid = _decimal(bids[0][0]) if bids else None
+            ask = _decimal(asks[0][0]) if asks else None
+
         if bid is None or ask is None or bid <= 0 or ask <= 0:
             raise VenueUnavailable(
                 f"{self.name} published no two-sided market for {intent.symbol} "
-                f"(bid={ticker.get('bid')!r} ask={ticker.get('ask')!r}); a cost "
-                f"quoted without a spread is a cost with the spread left out"
+                f"in either its ticker or its order book; a cost quoted without "
+                f"a spread is a cost with the spread left out"
             )
         if ask < bid:
             raise VenueUnavailable(

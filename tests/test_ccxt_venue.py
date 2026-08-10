@@ -121,6 +121,7 @@ class FakeExchange:
         fetched_order: dict | None = None,
         fetch_error: BaseException | None = None,
         ticker: dict | None = None,
+        order_book: dict | None = None,
         balance: dict | None = None,
         positions: list | None = None,
         cancel_result: dict | None = None,
@@ -133,6 +134,7 @@ class FakeExchange:
         self._create_error = create_error
         self._fetched_order = fetched_order
         self._fetch_error = fetch_error
+        self._order_book = order_book
         self._ticker = ticker
         self._balance = balance
         self._positions = positions
@@ -197,6 +199,12 @@ class FakeExchange:
         if self._ticker is None:
             raise AssertionError("fetch_ticker called with no ticker configured")
         return self._ticker
+
+    async def fetch_order_book(self, symbol, limit=None) -> dict:
+        # Empty unless a test configures one: the adapter falls back here when a
+        # ticker is one-sided, and a fake that invented a book would hide the
+        # refusal that behaviour is supposed to produce.
+        return self._order_book or {"bids": [], "asks": []}
 
     async def fetch_balance(self) -> dict:
         if self._balance is None:
@@ -706,6 +714,32 @@ class TestQuote:
 
     async def test_a_one_sided_book_cannot_be_quoted(self):
         exchange = FakeExchange(ticker={"bid": 9990.0, "ask": None, "timestamp": TS})
+
+        with pytest.raises(VenueUnavailable, match="two-sided"):
+            await _venue(exchange).quote(_intent())
+
+    async def test_a_ticker_without_a_side_falls_back_to_the_order_book(self):
+        """Hyperliquid publishes bid/ask on its perpetuals and neither on SPOT.
+
+        Refusing there would leave `quote` unable to price half of every
+        cash-and-carry pair on the one venue this book trades, while the same
+        two numbers sit at the top of the order book. Measured 2026-08-10:
+        SOL/USDC ticker bid=None ask=None, book bid=76.861 ask=76.862.
+        """
+        exchange = FakeExchange(
+            ticker={"bid": None, "ask": None, "timestamp": TS},
+            order_book={"bids": [[9990.0, 5.0]], "asks": [[10010.0, 5.0]]},
+        )
+
+        quote = await _venue(exchange).quote(_intent())
+
+        assert quote.expected_price == Decimal(10010)
+
+    async def test_a_ticker_and_book_both_one_sided_still_refuse(self):
+        exchange = FakeExchange(
+            ticker={"bid": 9990.0, "ask": None, "timestamp": TS},
+            order_book={"bids": [[9990.0, 5.0]], "asks": []},
+        )
 
         with pytest.raises(VenueUnavailable, match="two-sided"):
             await _venue(exchange).quote(_intent())
