@@ -13,8 +13,12 @@ careful agent, and every one of them is mechanical enough to check every time:
    nothing when it finds none. `self_test()` plants a known signal in synthetic
    data and refuses to run until it recovers it.
 2. **Crypto's null runs hot.** One dominant market factor correlates every
-   asset, so the null's own 95th percentile |t| is 2.2-2.5, not 1.96. A
-   permutation null measures it per test rather than assuming.
+   asset, so the null's own 95th percentile |t| runs near 2.0-2.3 rather than
+   1.96, and it is measured per test rather than assumed. It must be measured on
+   the SAME cross-section the statistic used: an earlier design permuted labels
+   across the panel and re-imposed availability, collapsing the null's sample to
+   roughly n^2/N and returning NaN -- a guard that had silently not applied --
+   on any signal that restricted its universe (Findings 39, 49).
 3. **Subtracting costs inflates |t| on a loser.** Costs are near deterministic,
    so they shift the mean without touching the variance. A result significant
    NET but not GROSS is an artifact; both are always reported.
@@ -293,6 +297,41 @@ def _periods(
     return np.array(rets), np.array(costs), np.array(ics), offered
 
 
+def _relabel(values: np.ndarray, rank: np.ndarray) -> np.ndarray:
+    """Move each row's scores onto different assets, keeping membership exact.
+
+    One draw is a fixed random `rank` over columns. At every date the row's
+    scored positions are re-sorted by that rank and the values reassigned along
+    it, so an asset that ranks early consistently receives an early column's
+    values. That is what preserves PERSISTENCE: a score that was sticky on one
+    asset is sticky on its replacement, and the null's holdings turn over at the
+    same rate the strategy's do.
+
+    Two properties this has and a global label permutation does not:
+
+    - **Membership is exact.** Targets are drawn from the row's own scored
+      positions, so the null ranks the same number of names on the same dates as
+      the statistic. The previous design permuted labels across the whole panel
+      and then re-imposed availability, intersecting two masks into roughly
+      n^2/N -- which returned NaN, and a silently absent guard, on any signal
+      that restricted its universe.
+    - **The market factor survives.** Prices are untouched; only the pairing
+      moves.
+
+    What it gives up is the block structure of a single global permutation,
+    where an asset kept one other asset's entire history. Persistence is
+    reproduced by the fixed rank rather than inherited, which is the trade that
+    buys back the sample.
+    """
+    out = np.full_like(values, np.nan)
+    for i in range(values.shape[0]):
+        idx = np.flatnonzero(~np.isnan(values[i]))
+        if idx.size == 0:
+            continue
+        out[i, idx[np.argsort(rank[idx], kind="stable")]] = values[i, idx]
+    return out
+
+
 def _permutation_p95(
     scores: pd.DataFrame,
     prices: pd.DataFrame,
@@ -304,47 +343,35 @@ def _permutation_p95(
 ) -> tuple[float, float, float]:
     """The null's own 95th percentile |t|, and the cross-section it measured on.
 
-    Columns are permuted, so each asset keeps a real score history and a real
-    price history -- they are simply the wrong pair. That preserves the market
-    factor and the autocorrelation while destroying only the association under
-    test, which is the thing that makes crypto's null run hot.
+    Crypto's null runs hot -- one dominant market factor correlates every asset,
+    so the null's 95th percentile |t| is 2.2-2.5 rather than 1.96. Assuming 1.96
+    here would pass results that are indistinguishable from beta.
 
-    **The sample the null ranks is returned next to the sample the statistic
-    ranks, because they are not always the same and the difference is silent.**
-    Re-imposing `available` intersects two masks: the permuted score's and the
-    original's. When the signal scores every column they are the same mask and
-    the intersection is a no-op -- which is why this held for every signal
-    measured before one restricted its universe. When the signal scores n of N
-    columns, the two masks agree on about n/N of the n, so the null ranks
-    roughly n^2/N names against the statistic's n. Measured on this panel: a
-    138-name cross-section fell to 18, and a 30-name one fell to 1, which is
-    below `MIN_ASSETS` on every date and returns NaN -- the guard vanishing
-    without saying so.
+    The permutation moves scores onto the wrong assets while leaving prices, the
+    per-date universe and the sample size exactly as the statistic found them.
+    See `_relabel` for why membership is preserved by construction rather than
+    re-imposed afterwards -- the earlier design did the latter and collapsed the
+    null's cross-section to roughly n^2/N on any universe-restricted signal,
+    returning NaN and a guard that had silently not applied.
 
-    Returning the counts does not fix the shrink. It makes the caller able to
-    say the guard did not apply to the sample it was asked about, which is the
-    difference between a measurement and a blank.
+    The two counts are still returned, because a null measured on a different
+    sample than the statistic is worth saying out loud even when the difference
+    is small.
     """
     rng = np.random.default_rng(seed)
-    cols = list(scores.columns)
-    # Assets differ in when they existed, so permuting labels alone lands a
-    # short-lived name's scores on a long-lived name's prices and changes how
-    # many assets are rankable each period. The null would then be measured on a
-    # different sample than the statistic it calibrates -- minor on a panel of
-    # survivors, material once delisted names are present, which a
-    # survivorship-corrected source makes routine. Re-imposing the original
-    # availability mask keeps the sample fixed and permutes only the values.
-    available = scores.notna()
+    values = scores.to_numpy(dtype=float, copy=True)
     priced = prices.notna()
+    available = scores.notna()
     real_rankable = (available & priced).sum(axis=1)
     real_names = float(real_rankable[real_rankable > 0].median())
 
     ts: list[float] = []
     null_counts: list[float] = []
     for _ in range(draws):
-        shuffled = scores.copy()
-        shuffled.columns = list(rng.permutation(cols))
-        shuffled = shuffled.reindex(columns=cols).where(available)
+        rank = rng.permutation(values.shape[1])
+        shuffled = pd.DataFrame(
+            _relabel(values, rank), index=scores.index, columns=scores.columns
+        )
         rankable = (shuffled.notna() & priced).sum(axis=1)
         null_counts.append(float(rankable[rankable > 0].median()))
         r, _c, _i, _o = _periods(
