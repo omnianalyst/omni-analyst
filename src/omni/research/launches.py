@@ -177,9 +177,26 @@ def parse_pool(entry: dict) -> Observation | None:
     )
 
 
+# One throttle for the whole module rather than a sleep at each call site.
+# The first version spaced calls within a network and not between them, so a
+# five-network pass fired ten requests in a second and the venue 429'd the last
+# two -- which the sweep then logged as "no cohort recorded". Pacing belongs
+# where every request must pass, not where a caller remembers to put it.
+_throttle = asyncio.Lock()
+_last_call = 0.0
+
+
 async def _get(url: str, *, fetch: Any = None) -> dict:
     if fetch is not None:
         return await fetch(url)
+
+    global _last_call
+    async with _throttle:
+        loop = asyncio.get_running_loop()
+        wait = CALL_SPACING_SECONDS - (loop.time() - _last_call)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call = loop.time()
 
     def _blocking() -> dict:
         request = urllib.request.Request(url, headers={"User-Agent": "omni-research"})
