@@ -26,6 +26,7 @@ from omni.portfolio.reconcile import (
     ReconciliationResult,
     record,
 )
+from omni.portfolio.state import create_portfolio
 from omni.trading.policy import Ineligible, TradingPhase
 
 GOOD_SECRET = "x" * 48
@@ -884,6 +885,63 @@ class TestTheReportWritesNothing:
         before = await counts()
         await _predict(db, entity, method=_method(), resolved_at=NOW)
         assert await counts() != before
+
+
+class TestNavHistory:
+    async def test_an_anonymous_caller_is_refused(self, db, database_url):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            r = await client.get("/trading/nav-history")
+        assert r.status_code == 401
+
+    async def test_a_book_with_no_snapshots_returns_an_empty_series(
+        self, db, database_url
+    ):
+        """Empty, not absent, and not a fabricated starting point.
+
+        A book that has never been marked has no history, and inventing an
+        opening point at its cash would draw a valuation nobody took.
+        """
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user = await _operator(client)
+            book = await create_portfolio(
+                db.pool, user_id=user, name="carry", base_currency="USD",
+                opening_cash=Decimal(1000), cash_venue="paper",
+            )
+            r = await _read(client, token, "/trading/nav-history")
+        assert r.status_code == 200
+        assert r.json()["points"] == []
+        assert r.json()["portfolio_id"] == str(book.portfolio_id)
+
+    async def test_recorded_points_come_back_oldest_first_as_strings(
+        self, db, database_url
+    ):
+        """Every monetary value is a JSON string, per the frozen contract: a
+        float round trip loses precision on exactly the values that matter."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user = await _operator(client)
+            book = await create_portfolio(
+                db.pool, user_id=user, name="carry", base_currency="USD",
+                opening_cash=Decimal(1000), cash_venue="paper",
+            )
+            # Inserted newest-first on purpose: the endpoint must order by taken_at,
+            # not by insertion. Two days ago is the lower NAV, so a correct
+            # response reads as a rising curve.
+            for day, nav in ((1, "1002.50"), (2, "1001.25")):
+                await db.pool.execute(
+                    "INSERT INTO nav_snapshot (portfolio_id, nav, cash, "
+                    "gross_exposure, net_exposure, taken_at) "
+                    "VALUES ($1,$2,$3,0,0,$4)",
+                    book.portfolio_id, Decimal(nav), Decimal(1000),
+                    NOW - timedelta(days=day),
+                )
+            r = await _read(client, token, "/trading/nav-history")
+
+        points = r.json()["points"]
+        assert [p["nav"] for p in points] == ["1001.25", "1002.50"]
+        assert all(isinstance(p["nav"], str) for p in points)
 
 
 class TestPortfolioAccess:

@@ -845,6 +845,46 @@ def build_router(app: App) -> Router:
 
         return portfolio_payload(book)
 
+    @router.get("/trading/nav-history")
+    async def nav_history(request: Request) -> dict:
+        """The recorded NAV series for one book, oldest first.
+
+        A deliberate addition to a frozen contract, made rather than drifted:
+        `/trading/portfolio` answers "what is the book worth now" and nothing
+        answered "what has it been worth", so the UI had a number and no curve.
+
+        Reads `nav_snapshot` and returns exactly what is stored. **It does not
+        interpolate, forward-fill or synthesise a point for a day with no
+        snapshot.** A gap in this series is a day the recorder did not run or
+        could not mark the book, and a chart that draws through it would assert
+        a valuation nobody took -- which is the same lie as a partially marked
+        NAV, drawn instead of stored.
+        """
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+
+        pool = app.db.pool
+        portfolio_id = await _resolve_portfolio(pool, audience, request.query_params)
+        rows = await pool.fetch(
+            "SELECT nav, cash, gross_exposure, net_exposure, taken_at "
+            "FROM nav_snapshot WHERE portfolio_id = $1 ORDER BY taken_at",
+            portfolio_id,
+        )
+        return {
+            "portfolio_id": str(portfolio_id),
+            "points": [
+                {
+                    "taken_at": r["taken_at"].isoformat(),
+                    "nav": str(r["nav"]),
+                    "cash": str(r["cash"]),
+                    "gross_exposure": str(r["gross_exposure"]),
+                    "net_exposure": str(r["net_exposure"]),
+                }
+                for r in rows
+            ],
+        }
+
     @router.get("/trading/reconciliation")
     async def reconciliation_report(request: Request) -> dict:
         """The last stored reconciliation per venue, and the silences.
