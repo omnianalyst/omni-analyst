@@ -887,6 +887,51 @@ class TestTheReportWritesNothing:
         assert await counts() != before
 
 
+class TestCarryCycles:
+    async def test_an_anonymous_caller_is_refused(self, db, database_url):
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            r = await client.get("/trading/cycles")
+        assert r.status_code == 401
+
+    async def test_halts_and_abstentions_are_returned_not_filtered(
+        self, db, database_url
+    ):
+        """A halt is the most important thing this endpoint can say.
+
+        A reader shown only successful cycles cannot tell a book that is working
+        from one that has been refusing every night for a month.
+        """
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user = await _operator(client)
+            book = await create_portfolio(
+                db.pool, user_id=user, name="carry", base_currency="USD",
+                opening_cash=Decimal(1000), cash_venue="paper",
+            )
+            for day, halted, reason in ((2, True, "venue_disagrees"), (1, False, None)):
+                await db.pool.execute(
+                    "INSERT INTO carry_cycle (portfolio_id, venue, as_of, "
+                    "funding_since, funding_settled_through, halted, halt_reason, "
+                    "abstention, funding_collected, fees_paid, "
+                    "modelled_turnover_cost, pairs_opened, pairs_closed, pairs_held) "
+                    "VALUES ($1,'paper',$2,$3,$4,$5,$6,NULL,0,0,0,0,0,0)",
+                    book.portfolio_id, NOW - timedelta(days=day),
+                    NOW - timedelta(days=day + 1),
+                    None if halted else NOW - timedelta(days=day),
+                    halted, reason,
+                )
+            r = await _read(client, token, "/trading/cycles")
+
+        cycles = r.json()["cycles"]
+        assert len(cycles) == 2
+        # Newest first, and the halted one is present with its reason.
+        assert cycles[0]["halted"] is False
+        assert cycles[1]["halted"] is True
+        assert cycles[1]["halt_reason"] == "venue_disagrees"
+        assert cycles[1]["funding_settled_through"] is None
+
+
 class TestNavHistory:
     async def test_an_anonymous_caller_is_refused(self, db, database_url):
         app = _app(database_url)

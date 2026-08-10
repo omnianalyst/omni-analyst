@@ -172,6 +172,41 @@ def _limit(market: Any, name: str) -> Decimal | None:
     return _decimal(bucket.get("min"))
 
 
+def _walk_book(book: Any, intent: TradeIntent) -> Decimal | None:
+    """Size-weighted price of filling `intent.quantity` against `book`.
+
+    A pure function over a book already fetched, not a second call: `quote`
+    needs the top of that same book for its bid/ask, so making this fetch its
+    own would double the request count of every market quote.
+
+    Returns None when the visible levels cannot fill the size, so the caller
+    falls back to the touch rather than receiving a price for a fill that would
+    not happen. Inventing a worse price for the invisible remainder would be a
+    cost model guessing at depth it cannot see; an order the book cannot fill is
+    a refusal `execute` makes.
+    """
+    if not isinstance(book, dict):
+        return None
+    levels = book.get("asks") if intent.side is Side.BUY else book.get("bids")
+    if not levels:
+        return None
+
+    remaining = intent.quantity
+    spent = Decimal(0)
+    for level in levels:
+        price = _decimal(level[0])
+        size = _decimal(level[1])
+        if price is None or size is None or price <= 0 or size <= 0:
+            continue
+        take = min(size, remaining)
+        spent += take * price
+        remaining -= take
+        if remaining <= 0:
+            filled = intent.quantity - remaining
+            return spent / filled if filled > 0 else None
+    return None
+
+
 def _translate(exc: BaseException, venue: str, subject: str) -> NoReturn:
     """Map ccxt's exception taxonomy onto `VenueUnavailable`.
 
@@ -634,79 +669,48 @@ class CCXTVenue:
             )
         return rounded
 
-    async def _walk(self, intent: TradeIntent) -> Decimal | None:
-        """The size-weighted price of filling `intent.quantity` against the book.
-
-        Returns None when the visible levels cannot fill the size, so the caller
-        can fall back rather than receive a price for a fill that would not
-        happen. A venue that refuses the order book entirely also returns None:
-        depth is an improvement on the touch, and losing it must degrade the
-        quote rather than fail it.
-        """
-        try:
-            book = await self._exchange.fetch_order_book(intent.symbol, limit=BOOK_DEPTH)
-        except Exception:  # noqa: BLE001 - depth is an improvement, never a requirement
-            # Deliberately broad. ccxt raises its own taxonomy plus whatever the
-            # transport does, and every one of them means the same thing here:
-            # no depth this time, quote from the touch. Translating to
-            # VenueUnavailable would turn a better cost model failing into a
-            # venue outage, which is a strictly worse answer than the one this
-            # method already had before it walked anything.
-            return None
-        levels = book.get("asks") if intent.side is Side.BUY else book.get("bids")
-        if not levels:
-            return None
-
-        remaining = intent.quantity
-        spent = Decimal(0)
-        for level in levels:
-            price = _decimal(level[0])
-            size = _decimal(level[1])
-            if price is None or size is None or price <= 0 or size <= 0:
-                continue
-            take = min(size, remaining)
-            spent += take * price
-            remaining -= take
-            if remaining <= 0:
-                filled = intent.quantity - remaining
-                return spent / filled if filled > 0 else None
-        return None
-
     async def quote(self, intent: TradeIntent) -> Quote:
         market = self._market(intent.symbol)
         self._require_market_type(market, intent)
 
+        # ONE book fetch, reused for both jobs it can do: its top two levels are
+        # the same bid/ask a ticker publishes, and its depth is what prices a
+        # market order. Fetching a ticker and then a book doubled every quote's
+        # API cost for no information -- the affordability filter makes eight
+        # quotes per asset, which was 96 calls a pass against a venue that
+        # rate-limits.
+        #
+        # The ticker remains the fallback rather than the primary, because a
+        # venue can serve one and not the other: Hyperliquid publishes bid/ask
+        # on its perpetuals and leaves both None on SPOT, so a quote taken from
+        # the ticker alone cannot price half of any cash-and-carry pair here.
+        book: dict | None = None
+        ticker: dict | None = None
         try:
-            ticker = await self._exchange.fetch_ticker(intent.symbol)
-        except Exception as exc:
-            _translate(exc, self.name, intent.symbol)
-            raise
+            book = await self._exchange.fetch_order_book(intent.symbol, limit=BOOK_DEPTH)
+        except Exception:  # noqa: BLE001 - the ticker is still to be tried
+            book = None
 
-        if not isinstance(ticker, dict):
-            raise VenueUnavailable(
-                f"{self.name} returned {type(ticker).__name__} for a "
-                f"{intent.symbol} ticker"
-            )
-        bid = _decimal(ticker.get("bid"))
-        ask = _decimal(ticker.get("ask"))
-
-        # Not every venue publishes a two-sided ticker. Hyperliquid populates
-        # bid/ask on its perpetuals and leaves both None on SPOT, so a quote
-        # taken from the ticker alone cannot price half of any cash-and-carry
-        # pair on the one venue this book trades. The top of the order book is
-        # the same two numbers from a different endpoint, so fall back to it
-        # rather than refusing -- and only then give up, because a cost quoted
-        # without a spread really is a cost with the spread left out.
-        if bid is None or ask is None or bid <= 0 or ask <= 0:
-            try:
-                book = await self._exchange.fetch_order_book(intent.symbol, limit=1)
-            except Exception as exc:
-                _translate(exc, self.name, intent.symbol)
-                raise
+        bid = ask = None
+        if isinstance(book, dict):
             bids = book.get("bids") or []
             asks = book.get("asks") or []
             bid = _decimal(bids[0][0]) if bids else None
             ask = _decimal(asks[0][0]) if asks else None
+
+        if bid is None or ask is None or bid <= 0 or ask <= 0:
+            try:
+                ticker = await self._exchange.fetch_ticker(intent.symbol)
+            except Exception as exc:
+                _translate(exc, self.name, intent.symbol)
+                raise
+            if not isinstance(ticker, dict):
+                raise VenueUnavailable(
+                    f"{self.name} returned {type(ticker).__name__} for a "
+                    f"{intent.symbol} ticker"
+                )
+            bid = _decimal(ticker.get("bid"))
+            ask = _decimal(ticker.get("ask"))
 
         if bid is None or ask is None or bid <= 0 or ask <= 0:
             raise VenueUnavailable(
@@ -736,7 +740,7 @@ class CCXTVenue:
             # order is a different refusal, made by `execute`, and inventing a
             # worse price here would be a cost model guessing at depth it cannot
             # see rather than reporting what it can.
-            expected = await self._walk(intent) or (
+            expected = _walk_book(book, intent) or (
                 ask if intent.side is Side.BUY else bid
             )
 
@@ -757,7 +761,15 @@ class CCXTVenue:
             fee=fee,
             slippage=slippage,
             gas=Decimal(0),
-            as_of=_moment(ticker.get("timestamp")) or datetime.now(UTC),
+            # Whichever source actually answered. The book carries its own
+            # timestamp and is the primary read now, so preferring the
+            # ticker's would stamp most quotes from an endpoint that was
+            # never called.
+            as_of=(
+                _moment((book or {}).get("timestamp"))
+                or _moment((ticker or {}).get("timestamp"))
+                or datetime.now(UTC)
+            ),
         )
 
     async def execute(self, intent: TradeIntent) -> Fill:

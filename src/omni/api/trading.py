@@ -845,6 +845,59 @@ def build_router(app: App) -> Router:
 
         return portfolio_payload(book)
 
+    @router.get("/trading/cycles")
+    async def carry_cycles(request: Request) -> dict:
+        """Every rebalance this book has run, newest first.
+
+        The `carry_cycle` log existed with no way to read it, so "did it trade
+        last night, and what happened" was answerable only by opening a log file
+        over SSH. A book that runs itself has to be legible without one.
+
+        Halts and abstentions are returned like any other row, not filtered out.
+        A halt is the most important thing this endpoint can say -- it means the
+        cycle stopped rather than trading on top of something it could not
+        account for -- and a reader who only sees successes cannot tell a book
+        that is working from one that has been refusing for a month.
+        """
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+
+        pool = app.db.pool
+        portfolio_id = await _resolve_portfolio(pool, audience, request.query_params)
+        rows = await pool.fetch(
+            "SELECT venue, as_of, funding_since, funding_settled_through, halted, "
+            "halt_reason, abstention, funding_collected, fees_paid, "
+            "modelled_turnover_cost, pairs_opened, pairs_closed, pairs_held "
+            "FROM carry_cycle WHERE portfolio_id = $1 ORDER BY as_of DESC",
+            portfolio_id,
+        )
+        return {
+            "portfolio_id": str(portfolio_id),
+            "cycles": [
+                {
+                    "venue": r["venue"],
+                    "as_of": r["as_of"].isoformat(),
+                    "funding_since": r["funding_since"].isoformat(),
+                    "funding_settled_through": (
+                        r["funding_settled_through"].isoformat()
+                        if r["funding_settled_through"]
+                        else None
+                    ),
+                    "halted": r["halted"],
+                    "halt_reason": r["halt_reason"],
+                    "abstention": r["abstention"],
+                    "funding_collected": str(r["funding_collected"]),
+                    "fees_paid": str(r["fees_paid"]),
+                    "modelled_turnover_cost": str(r["modelled_turnover_cost"]),
+                    "pairs_opened": r["pairs_opened"],
+                    "pairs_closed": r["pairs_closed"],
+                    "pairs_held": r["pairs_held"],
+                }
+                for r in rows
+            ],
+        }
+
     @router.get("/trading/nav-history")
     async def nav_history(request: Request) -> dict:
         """The recorded NAV series for one book, oldest first.
