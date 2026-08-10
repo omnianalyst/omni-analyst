@@ -51,7 +51,12 @@ MULTI_BATCH = 30
 # The free tier throttles around 30 calls a minute. Deliberately conservative:
 # a collector that gets itself rate-limited returns short pages, and a short page
 # is indistinguishable from a quiet day.
-CALL_SPACING_SECONDS = 2.5
+CALL_SPACING_SECONDS = 6.0
+
+# A 429 costs a whole cohort if it is treated as a failure, so the collector
+# waits it out rather than giving up. Total patience is about ten minutes.
+RETRY_ATTEMPTS = 6
+RETRY_BACKOFF_SECONDS = 20.0
 
 _SWEEP = """
 INSERT INTO launch_sweep (network, kind, swept_at, pools_seen)
@@ -203,10 +208,23 @@ async def _get(url: str, *, fetch: Any = None) -> dict:
         with urllib.request.urlopen(request, timeout=45) as response:
             return json.load(response)
 
-    try:
-        return await asyncio.to_thread(_blocking)
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise FeedUnavailable(f"{url}: {exc}") from exc
+    # 429 is the venue asking us to wait, not refusing. Treating it as a failure
+    # drops a cohort that was there for the asking, and a cohort cannot be
+    # backfilled -- so it is worth several minutes of patience. Every other
+    # error fails fast: a 404 will not improve by being asked again.
+    delay = RETRY_BACKOFF_SECONDS
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            return await asyncio.to_thread(_blocking)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt == RETRY_ATTEMPTS - 1:
+                raise FeedUnavailable(f"{url}: {exc}") from exc
+            logger.info("rate limited, waiting %.0fs then retrying", delay)
+            await asyncio.sleep(delay)
+            delay *= 2
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise FeedUnavailable(f"{url}: {exc}") from exc
+    raise FeedUnavailable(f"{url}: still rate limited after {RETRY_ATTEMPTS} attempts")
 
 
 async def discover(network: str, *, pages: int = 1, fetch: Any = None) -> list[Observation]:
