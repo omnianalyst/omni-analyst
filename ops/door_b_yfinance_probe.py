@@ -15,7 +15,7 @@ classification, paid Polygon, or Alpha Vantage) is made separately.
 
 Run on deployment-host (fundamentals live on prod):
 
-  pip install --target=/tmp/yflib yfinance  # if not already present
+  pip install --target=/tmp/yflib --no-deps yfinance multitasking peewee
   PYTHONPATH=/tmp/yflib docker compose -f docker-compose.prod.yml exec -T \
     -e PYTHONPATH=/tmp/yflib scheduler python - < ops/door_b_yfinance_probe.py
 
@@ -169,10 +169,12 @@ async def main() -> int:
         shares_f = shares_f.sort_values("knowledge_date")[["knowledge_date", "val"]].rename(
             columns={"knowledge_date": "date", "val": "shares"})
         pdf = pseries.rename("close").reset_index()
-        m = pd.merge_asof(pdf.sort_values("Date"), book_f, on="Date", direction="backward")
-        m = pd.merge_asof(m.sort_values("Date"), shares_f, on="Date", direction="backward")
+        if "Date" in pdf.columns:
+            pdf = pdf.rename(columns={"Date": "date"})
+        m = pd.merge_asof(pdf.sort_values("date"), book_f, on="date", direction="backward")
+        m = pd.merge_asof(m.sort_values("date"), shares_f, on="date", direction="backward")
         m["bm"] = m["book"] / (m["shares"] * m["close"])
-        s = pd.Series(m["bm"].values, index=m["Date"])
+        s = pd.Series(m["bm"].values, index=m["date"])
         bm_series[sym] = s[~s.index.duplicated(keep="last")]
 
     bm = pd.DataFrame(bm_series).sort_index()
