@@ -36,6 +36,7 @@ dependencies = [
     # reshaped the async_support surface, which would silently move the venue
     # an adapter targets.
     "ccxt>=4.0,<5",
+    "yfinance>=1.5.2",
 ]
 
 [project.optional-dependencies]

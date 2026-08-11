@@ -1630,3 +1630,47 @@ tr.row.tier-unknown td:first-child {
   color: var(--text);
   border-bottom-color: var(--accent);
 }
+
+.scanner-buckets {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.scanner-bucket-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.scanner-bucket-role {
+  font-size: 12px;
+}
+.scanner-table .scanner-symbol {
+  font-weight: 600;
+  font-size: 14px;
+  display: block;
+}
+.scanner-table .scanner-name {
+  font-size: 11px;
+  display: block;
+}
+.scanner-top td {
+  border-top: 2px solid var(--accent);
+}
+.scanner-alpha {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+.scanner-alpha-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.scanner-symbol {
+  font-weight: 700;
+}
+.scanner-funding {
+  color: var(--green, #4ade80);
+  font-weight: 600;
+}
