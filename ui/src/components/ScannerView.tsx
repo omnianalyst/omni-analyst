@@ -51,6 +51,35 @@ const VERDICT_LABELS: Record<string, string> = {
   no_portfolio: "No portfolio",
 };
 
+type ViewMode = "tiers" | "sectors";
+
+const SECTORS = [
+  {
+    name: "Growth",
+    risk: "Medium risk",
+    desc: "Broad equity exposure. The most reliable long-term wealth engine.",
+    assets: ["VTI", "QQQ", "VXUS"],
+  },
+  {
+    name: "Debasement",
+    risk: "Medium-high risk",
+    desc: "Hard assets that preserve value when fiat devalues. Gold for stability, BTC for upside.",
+    assets: ["GLD", "SLV", "BTC", "ETH", "SOL"],
+  },
+  {
+    name: "Deflation",
+    risk: "Low-medium risk",
+    desc: "Long bonds rally when rates fall.",
+    assets: ["TLT"],
+  },
+  {
+    name: "Safety",
+    risk: "Very low risk",
+    desc: "T-bills preserve capital with near-zero risk.",
+    assets: ["SHV"],
+  },
+] as const;
+
 const TIERS = [
   {
     name: "Low Risk",
@@ -81,14 +110,16 @@ function retColor(n: number | null): string {
   return n >= 0 ? "var(--green, #4ade80)" : "var(--red, #f87171)";
 }
 function bestReturn(a: AssetMetric): { value: number | null; label: string } {
-  if (a.returns["365d"] !== null) return { value: a.returns["365d"], label: "1yr" };
-  if (a.returns["90d"] !== null) return { value: a.returns["90d"], label: "90d" };
-  if (a.returns["30d"] !== null) return { value: a.returns["30d"], label: "30d" };
+  if (!a.returns) return { value: null, label: "" };
+  if (a.returns["365d"] !== null && a.returns["365d"] !== undefined) return { value: a.returns["365d"], label: "1yr" };
+  if (a.returns["90d"] !== null && a.returns["90d"] !== undefined) return { value: a.returns["90d"], label: "90d" };
+  if (a.returns["30d"] !== null && a.returns["30d"] !== undefined) return { value: a.returns["30d"], label: "30d" };
   return { value: null, label: "" };
 }
 
 export function ScannerView() {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [view, setView] = useState<ViewMode>("tiers");
 
   useEffect(() => {
     let cancelled = false;
@@ -115,6 +146,7 @@ export function ScannerView() {
   const { buckets, as_of } = state.data;
   const allAssets: Map<string, AssetMetric> = new Map();
   for (const b of buckets) {
+    if (b.name === "Alpha") continue;
     for (const a of b.assets) allAssets.set(a.symbol, a);
   }
 
@@ -126,32 +158,51 @@ export function ScannerView() {
       <header class="page-head">
         <h1>Portfolio</h1>
         <p class="muted">
-          Three risk tiers. Top picks in each. One carry book underneath it all.
+          Top picks across every asset class. Backed by long-term data.
         </p>
       </header>
 
-      {TIERS.map((tier) => {
-        const tierAssets = tier.assets
-          .map((sym) => allAssets.get(sym))
-          .filter((a): a is AssetMetric => a !== undefined);
-        if (tierAssets.length === 0) return null;
-        const ranked = [...tierAssets].sort((a, b) => (b.sharpe ?? -99) - (a.sharpe ?? -99));
+      <div class="view-toggle">
+        <button
+          class={`toggle-btn ${view === "tiers" ? "toggle-active" : ""}`}
+          onClick={() => setView("tiers")}
+        >
+          Risk Tiers
+        </button>
+        <button
+          class={`toggle-btn ${view === "sectors" ? "toggle-active" : ""}`}
+          onClick={() => setView("sectors")}
+        >
+          Sectors
+        </button>
+      </div>
 
-        return (
-          <section key={tier.name} class="tier-section">
-            <div class="tier-header">
-              <h2 class="tier-name">{tier.name}</h2>
-              <span class="tier-subtitle">{tier.subtitle}</span>
-            </div>
-            <p class="tier-desc">{tier.desc}</p>
-            <div class="tile-row">
-              {ranked.map((a, i) => (
-                <Tile key={a.symbol} asset={a} top={i === 0} />
-              ))}
-            </div>
-          </section>
-        );
-      })}
+      {(() => {
+        const groups = view === "tiers" ? TIERS : SECTORS;
+        return groups.map((group) => {
+          const groupAssets = group.assets
+            .map((sym) => allAssets.get(sym))
+            .filter((a): a is AssetMetric => a !== undefined);
+          if (groupAssets.length === 0) return null;
+          const ranked = [...groupAssets].sort((a, b) => (b.sharpe ?? -99) - (a.sharpe ?? -99));
+          const subtitle = "subtitle" in group ? group.subtitle : "risk" in group ? group.risk : "";
+
+          return (
+            <section key={group.name} class="tier-section">
+              <div class="tier-header">
+                <h2 class="tier-name">{group.name}</h2>
+                <span class="tier-subtitle">{subtitle}</span>
+              </div>
+              <p class="tier-desc">{group.desc}</p>
+              <div class="tile-row">
+                {ranked.map((a, i) => (
+                  <Tile key={a.symbol} asset={a} top={i === 0} />
+                ))}
+              </div>
+            </section>
+          );
+        });
+      })()}
 
       <section class="tier-section tier-alpha">
         <div class="tier-header">
@@ -160,7 +211,7 @@ export function ScannerView() {
         </div>
         <p class="tier-desc">
           The carry book collects funding rates from perpetual futures. It earns
-          regardless of what any asset does. Uncorrelated to all three tiers above.
+          regardless of what any asset does. Uncorrelated to everything above.
         </p>
         <div class="tile-row">
           <AlphaTile bucket={alpha} risk={risk} />

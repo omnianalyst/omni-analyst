@@ -1870,6 +1870,31 @@ tr.row.tier-unknown td:first-child {
 .tier-section {
   margin-bottom: 32px;
 }
+.view-toggle {
+  display: inline-flex;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+.toggle-btn {
+  background: none;
+  border: none;
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.toggle-btn:hover {
+  color: var(--text);
+}
+.toggle-active {
+  background: var(--accent);
+  color: var(--bg);
+}
 .tier-header {
   display: flex;
   align-items: baseline;
