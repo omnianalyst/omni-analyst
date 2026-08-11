@@ -29,6 +29,7 @@ _cache: dict[str, Any] = {"data": None, "ts": 0.0}
 ASSETS: dict[str, list[dict[str, str]]] = {
     "Growth": [
         {"symbol": "VTI", "name": "Vanguard Total Stock Market", "yf": "VTI"},
+        {"symbol": "SPY", "name": "S&P 500 ETF", "yf": "SPY"},
         {"symbol": "QQQ", "name": "Invesco QQQ Trust", "yf": "QQQ"},
         {"symbol": "VXUS", "name": "Vanguard Total International", "yf": "VXUS"},
     ],

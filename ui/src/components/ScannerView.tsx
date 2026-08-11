@@ -52,13 +52,14 @@ const VERDICT_LABELS: Record<string, string> = {
 };
 
 type ViewMode = "tiers" | "sectors";
+type LayoutMode = "stacked" | "columns";
 
 const SECTORS = [
   {
     name: "Growth",
     risk: "Medium risk",
     desc: "Broad equity exposure. The most reliable long-term wealth engine.",
-    assets: ["VTI", "QQQ", "VXUS"],
+    assets: ["VTI", "SPY", "QQQ", "VXUS"],
   },
   {
     name: "Debasement",
@@ -91,7 +92,7 @@ const TIERS = [
     name: "Medium Risk",
     subtitle: "Steady growth",
     desc: "Broad equities and precious metals. The reliable long-term wealth engine.",
-    assets: ["VTI", "QQQ", "VXUS", "GLD", "SLV"],
+    assets: ["VTI", "SPY", "QQQ", "VXUS", "GLD", "SLV"],
   },
   {
     name: "High Risk",
@@ -120,6 +121,7 @@ function bestReturn(a: AssetMetric): { value: number | null; label: string } {
 export function ScannerView() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [view, setView] = useState<ViewMode>("tiers");
+  const [layout, setLayout] = useState<LayoutMode>("stacked");
 
   useEffect(() => {
     let cancelled = false;
@@ -175,11 +177,17 @@ export function ScannerView() {
         >
           Sectors
         </button>
+        <button
+          class={`toggle-btn ${layout === "columns" ? "toggle-active" : ""}`}
+          onClick={() => setLayout(layout === "columns" ? "stacked" : "columns")}
+        >
+          {layout === "columns" ? "Stacked" : "Columns"}
+        </button>
       </div>
 
       {(() => {
         const groups = view === "tiers" ? TIERS : SECTORS;
-        return groups.map((group) => {
+        const sections = groups.map((group) => {
           const groupAssets = group.assets
             .map((sym) => allAssets.get(sym))
             .filter((a): a is AssetMetric => a !== undefined);
@@ -188,7 +196,7 @@ export function ScannerView() {
           const subtitle = "subtitle" in group ? group.subtitle : "risk" in group ? group.risk : "";
 
           return (
-            <section key={group.name} class="tier-section">
+            <section key={group.name} class={`tier-section ${layout === "columns" ? "tier-column" : ""}`}>
               <div class="tier-header">
                 <h2 class="tier-name">{group.name}</h2>
                 <span class="tier-subtitle">{subtitle}</span>
@@ -202,6 +210,11 @@ export function ScannerView() {
             </section>
           );
         });
+
+        if (layout === "columns") {
+          return <div class="columns-grid">{sections}</div>;
+        }
+        return <>{sections}</>;
       })()}
 
       <section class="tier-section tier-alpha">

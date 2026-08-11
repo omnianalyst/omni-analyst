@@ -1895,6 +1895,22 @@ tr.row.tier-unknown td:first-child {
   background: var(--accent);
   color: var(--bg);
 }
+.columns-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+.tier-column {
+  margin-bottom: 0;
+}
+.tier-column .tile-row {
+  flex-direction: column;
+  gap: 8px;
+}
+.tier-column .tile {
+  width: 100%;
+}
 .tier-header {
   display: flex;
   align-items: baseline;
