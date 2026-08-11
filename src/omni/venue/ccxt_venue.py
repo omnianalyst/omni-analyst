@@ -833,11 +833,6 @@ class CCXTVenue:
 
         market = self._market(intent.symbol)
         self._require_market_type(market, intent)
-        if intent.reduce_only and intent.market_type is MarketType.SPOT:
-            raise VenueUnavailable(
-                f"reduce_only has no meaning on the spot market {intent.symbol}; "
-                f"a spot sell is not a position close"
-            )
 
         amount = self._rounded_amount(intent.symbol, intent.quantity)
         price: Decimal | None = None
@@ -876,7 +871,7 @@ class CCXTVenue:
         params: dict[str, Any] = {
             CLIENT_ORDER_ID_PARAM: self._client_order_id(intent.idempotency_key)
         }
-        if intent.reduce_only:
+        if intent.reduce_only and intent.market_type is not MarketType.SPOT:
             params["reduceOnly"] = True
 
         try:
@@ -884,8 +879,8 @@ class CCXTVenue:
                 intent.symbol,
                 eff_kind,
                 intent.side.value,
-                amount,
-                price=price,
+                float(amount),
+                price=float(price) if price is not None else None,
                 params=params,
             )
         except Exception as exc:

@@ -437,11 +437,15 @@ class TestThePairIsOneUnit:
         The naked leg is deliberately left in place. Deleting it is not available
         -- only a trade removes a position -- and a halt that also erased the
         record would leave an operator with nothing to act on.
+
+        With perp-first ordering, the perp fills first. The spot is refused,
+        and the unwind (perp close with reduce_only) is also refused. The perp
+        position is the naked leg that halts the cycle.
         """
         ids = await _world(db, owner)
         refusing = _RefusingVenue(
             venue,
-            lambda intent: intent.market_type is MarketType.PERPETUAL or intent.reduce_only,
+            lambda intent: intent.market_type is MarketType.SPOT or intent.reduce_only,
         )
 
         result = await _run(
@@ -453,15 +457,14 @@ class TestThePairIsOneUnit:
         assert result.halt_reason is not None
         assert CarryHalt.UNWIND_FAILED.value in result.halt_reason
         assert result.opened == ()
-        # Exactly one name was attempted: the halt stops the cycle rather than
-        # working through the rest of the basket on top of a naked leg.
         opened_legs = [
-            symbol for symbol in RATES if (await _legs(db, portfolio_id, symbol))[0] is not None
+            symbol for symbol in RATES if (await _legs(db, portfolio_id, symbol))[1] is not None
         ]
         assert len(opened_legs) == 1
         spot, perp = await _legs(db, portfolio_id, opened_legs[0])
-        assert spot.quantity == NOTIONAL / PRICE
-        assert perp is None
+        assert perp is not None
+        assert perp.quantity == -(NOTIONAL / PRICE)
+        assert spot is None
 
     async def test_a_book_already_holding_a_naked_leg_halts_before_it_trades(
         self, db, owner, portfolio_id, venue
@@ -967,11 +970,11 @@ class TestTheOrderLedger:
     ):
         """The leg it is most tempting to skip and least survivable to skip.
 
-        The perp is refused, the spot leg that already filled is bought back, and
-        the book comes back flat. An unwind missing from the ledger leaves a
-        replay holding a long the position rows do not, which is exactly the
-        state `UnaccountedClose` refuses to value -- so the kill switch would go
-        blind at the moment something had already gone wrong.
+        The spot is refused (second leg), the perp leg that already filled is
+        bought back, and the book comes back flat. An unwind missing from the
+        ledger leaves a replay holding a short the position rows do not, which
+        is exactly the state `UnaccountedClose` refuses to value -- so the kill
+        switch would go blind at the moment something had already gone wrong.
 
         The realised number is the round trip itself, computed from the venue's
         own fills: crossed twice and paid for twice, so it is a loss, and a
@@ -979,7 +982,7 @@ class TestTheOrderLedger:
         """
         ids = await _world(db, owner)
         refusing = _RefusingVenue(
-            venue, lambda intent: intent.market_type is MarketType.PERPETUAL
+            venue, lambda intent: intent.market_type is MarketType.SPOT
         )
 
         result = await _run(
@@ -1010,7 +1013,7 @@ class TestTheOrderLedger:
         expected = sum(
             (
                 sell.filled_quantity * (sell.average_price - buy.average_price)
-                - sell.fee_paid
+                - buy.fee_paid
                 for buy, sell in zip(buys, sells, strict=True)
             ),
             Decimal(0),

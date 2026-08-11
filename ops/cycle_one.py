@@ -45,6 +45,8 @@ from omni.venue.credentials import wallet_credentials
 OWNER = UUID("97e7737f-cad3-439a-b8b3-3ae4536a7eac")
 UNIVERSE = ["BTC", "ETH", "SOL", "HYPE", "PENGU", "PURR"]
 LIVE = "--live" in sys.argv
+IGNORE_WINDOW = "--ignore-window" in sys.argv
+IGNORE_CADENCE = "--ignore-cadence" in sys.argv
 
 
 async def main() -> int:
@@ -92,6 +94,8 @@ async def main() -> int:
             inception=inception,
             max_execution_bps=Decimal(40),
             assets=assets,
+            ignore_window=IGNORE_WINDOW,
+            ignore_cadence=IGNORE_CADENCE,
         )
 
         print(f"as_of          {result.as_of}")

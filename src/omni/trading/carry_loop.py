@@ -111,10 +111,12 @@ from omni.venue.protocol import (
     VenueUnavailable,
 )
 
-# The pair's two legs, in the order they are sent. Spot first on the way in and
-# perp first on the way out, so the leg that can be rejected for lack of margin
-# is never the one left alone on the book while the other is still in flight.
-_OPEN_ORDER = (MarketType.SPOT, MarketType.PERPETUAL)
+# Perp first on the way in: perpetuals typically have coarser amount precision
+# than spot (SOL perp = 0.01 vs SOL spot = 0.001), and sizing the spot leg at
+# the perp's fill quantity ensures the pair balances. Spot first on the way
+# out. Both unwind directions work: spot sells no longer carry reduceOnly, and
+# perp buy-backs always did.
+_OPEN_ORDER = (MarketType.PERPETUAL, MarketType.SPOT)
 _CLOSE_ORDER = (MarketType.PERPETUAL, MarketType.SPOT)
 
 
@@ -791,6 +793,10 @@ class _Cycle:
 
         filled: dict[MarketType, Fill] = {}
         balanced = True
+        # The second leg is sized at the first leg's fill quantity, not the raw
+        # quantity, so both legs fill the same amount even when the two markets
+        # have different amount precisions (SOL perp = 0.01 vs spot = 0.001).
+        send_qty = quantity
         for market_type in order:
             fill = await self.send(
                 _leg_intent(
@@ -799,19 +805,20 @@ class _Cycle:
                     symbol=symbols.for_market(market_type),
                     market_type=market_type,
                     side=sides[market_type],
-                    quantity=quantity,
+                    quantity=send_qty,
                     reference_price=reference_price,
                     as_of=as_of,
                     reduce_only=not opening,
                     role=role,
                 )
             )
-            if fill is None or fill.is_empty or fill.filled_quantity != quantity:
+            if fill is None or fill.is_empty or fill.raw.get("partial", False):
                 balanced = False
                 if fill is not None:
                     filled[market_type] = fill
                 break
             filled[market_type] = fill
+            send_qty = fill.filled_quantity
 
         spot = filled.get(MarketType.SPOT)
         perp = filled.get(MarketType.PERPETUAL)

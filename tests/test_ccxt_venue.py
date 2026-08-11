@@ -444,6 +444,65 @@ class TestIdempotency:
         )
 
 
+class TestHyperliquidCloidFormat:
+    """Hyperliquid requires 0x-prefixed 128-bit hex for client order ids.
+
+    The carry loop generates descriptive keys (portfolio:carry:timestamp:
+    symbol:...) for traceability. Those fail Hyperliquid's EIP-712 signing
+    path. The adapter formats them deterministically; other venues pass
+    the key through unchanged.
+    """
+
+    def test_cloid_is_0x_prefixed_128_bit_hex(self):
+        from omni.venue.ccxt_venue import _venue_cloid
+
+        cloid = _venue_cloid("any descriptive key with: colons and / slashes")
+        assert cloid.startswith("0x")
+        hex_part = cloid[2:]
+        assert len(hex_part) == 32
+        int(hex_part, 16)
+
+    def test_cloid_is_deterministic(self):
+        from omni.venue.ccxt_venue import _venue_cloid
+
+        key = "97e7737f:carry:2026-08-11T04:00:00:ETH/USDC:spot:long"
+        assert _venue_cloid(key) == _venue_cloid(key)
+
+    def test_different_keys_produce_different_cloids(self):
+        from omni.venue.ccxt_venue import _venue_cloid
+
+        a = _venue_cloid("portfolio:carry:ETH:spot:long")
+        b = _venue_cloid("portfolio:carry:ETH:perp:short")
+        assert a != b
+
+    async def test_hyperliquid_venue_formats_the_cloid_on_execute(self):
+        exchange = FakeExchange()
+        venue = CCXTVenue(
+            exchange, mode=TradingMode.LIVE, name="hyperliquid"
+        )
+        intent = _intent(idempotency_key="portfolio:carry:ETH:spot:long")
+
+        await venue.execute(intent)
+
+        from omni.venue.ccxt_venue import _venue_cloid
+
+        sent = exchange.created[0]["params"]
+        assert sent[CLIENT_ORDER_ID_PARAM] == _venue_cloid(
+            "portfolio:carry:ETH:spot:long"
+        )
+        assert sent[CLIENT_ORDER_ID_PARAM] != "portfolio:carry:ETH:spot:long"
+
+    async def test_non_hyperliquid_venue_passes_key_through(self):
+        exchange = FakeExchange()
+        venue = _live(exchange)
+        intent = _intent(idempotency_key="descriptive:key:with:colons")
+
+        await venue.execute(intent)
+
+        sent = exchange.created[0]["params"]
+        assert sent[CLIENT_ORDER_ID_PARAM] == "descriptive:key:with:colons"
+
+
 class TestTimeoutDuringPlacement:
     """The one event where the venue's state and ours can genuinely diverge."""
 
@@ -577,7 +636,7 @@ class TestPrecision:
         fill = await _live(exchange).execute(intent)
 
         submitted = exchange.created[0]["amount"]
-        assert submitted == Decimal("0.00123"), "BTC/USDT takes 5 decimals of size"
+        assert submitted == float(Decimal("0.00123")), "BTC/USDT takes 5 decimals of size"
         assert submitted != intent.quantity
         assert fill.filled_quantity == Decimal("0.00123")
         assert fill.raw["submitted_quantity"] == "0.00123"
@@ -589,7 +648,7 @@ class TestPrecision:
             _intent(order_kind=OrderKind.LIMIT, limit_price=Decimal("9000.129"))
         )
 
-        assert exchange.created[0]["price"] == Decimal("9000.12")
+        assert exchange.created[0]["price"] == float(Decimal("9000.12"))
 
     async def test_a_size_that_rounds_away_is_not_submitted(self):
         exchange = FakeExchange()
@@ -658,13 +717,15 @@ class TestSymbolAndMarketTypeAgree:
 
         assert exchange.created == []
 
-    async def test_reduce_only_is_refused_on_spot(self):
+    async def test_reduce_only_is_silently_dropped_on_spot(self):
         exchange = FakeExchange()
 
-        with pytest.raises(VenueUnavailable, match="reduce_only"):
-            await _live(exchange).execute(_intent(reduce_only=True))
+        fill = await _live(exchange).execute(_intent(reduce_only=True))
 
-        assert exchange.created == []
+        assert not fill.is_empty
+        assert exchange.created[0]["params"] == {
+            CLIENT_ORDER_ID_PARAM: exchange.created[0]["params"][CLIENT_ORDER_ID_PARAM]
+        }
 
     async def test_reduce_only_reaches_the_venue_for_a_perpetual(self):
         exchange = FakeExchange()
