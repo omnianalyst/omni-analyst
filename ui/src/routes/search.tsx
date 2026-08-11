@@ -1,11 +1,11 @@
-import { SearchView } from "../components/SearchView";
+import { DiscoverView } from "../components/DiscoverView";
 
 export const config = { mode: "app", hydrate: true };
 
 export function head() {
-  return { title: "Search | Omni Analyst" };
+  return { title: "Discover | Omni Analyst" };
 }
 
 export default function SearchPage() {
-  return <SearchView />;
+  return <DiscoverView />;
 }

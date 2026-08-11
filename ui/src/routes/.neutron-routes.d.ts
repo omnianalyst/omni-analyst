@@ -3,18 +3,13 @@ declare module "@neutron-build/core" {
   interface NeutronGeneratedRouteMap {
     paths:
     | "/"
-    | "/alerts"
-    | "/briefing"
     | "/console"
     | `/entity/${string}`
     | "/login"
     | "/objective"
-    | "/regime"
     | "/search"
-    | "/sectors"
     | "/setup"
     | "/system"
-    | "/watchlist"
   }
 }
 

@@ -1,11 +1,11 @@
-import { TodayView } from "../components/TodayView";
+import { BookView } from "../components/BookView";
 
 export const config = { mode: "app", hydrate: true };
 
 export function head() {
-  return { title: "Omni Analyst — today's read" };
+  return { title: "Book | Omni Analyst" };
 }
 
-export default function HomePage() {
-  return <TodayView />;
+export default function BookPage() {
+  return <BookView />;
 }
