@@ -39,10 +39,7 @@ function isPublicPath(pathname: string): boolean {
 // it was a third rendering of the feed already on "/" and /briefing, and the
 // route now redirects.
 const NAV = [
-  { href: "/", label: "Book" },
-  { href: "/scanner", label: "Scanner" },
-  { href: "/search", label: "Discover" },
-  { href: "/objective", label: "Ask" },
+  { href: "/", label: "Portfolio" },
   { href: "/system", label: "System" },
 ];
 

@@ -1,11 +1,11 @@
-import { BookView } from "../components/BookView";
+import { ScannerView } from "../components/ScannerView";
 
 export const config = { mode: "app", hydrate: true };
 
 export function head() {
-  return { title: "Book | Omni Analyst" };
+  return { title: "Portfolio | Omni Analyst" };
 }
 
-export default function BookPage() {
-  return <BookView />;
+export default function PortfolioPage() {
+  return <ScannerView />;
 }

@@ -1759,3 +1759,110 @@ tr.row.tier-unknown td:first-child {
   border-radius: 50%;
   display: inline-block;
 }
+
+.sector-section {
+  margin-bottom: 28px;
+}
+.sector-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.sector-name {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+}
+.sector-risk {
+  font-size: 11px;
+  color: var(--muted);
+}
+.sector-why {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 12px;
+  line-height: 1.4;
+}
+.tile-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.asset-tile {
+  background: var(--card, var(--bg-alt, #1a1a2e));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  width: 160px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.asset-tile-top {
+  border-color: var(--accent);
+  border-width: 2px;
+}
+.asset-tile-badge {
+  position: absolute;
+  top: -8px;
+  right: 12px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.asset-tile-symbol {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.asset-tile-name {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.asset-tile-return {
+  font-size: 22px;
+  font-weight: 700;
+}
+.asset-tile-period {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.asset-tile-sharpe {
+  font-size: 11px;
+  color: var(--faint, var(--muted));
+}
+.asset-tile-funding {
+  font-size: 11px;
+  color: var(--green, #4ade80);
+  font-weight: 600;
+}
+.asset-tile-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.scanner-updated {
+  font-size: 11px;
+  margin-top: 20px;
+}
