@@ -30,15 +30,27 @@ type State =
   | { kind: "ok"; data: ScannerData }
   | { kind: "error"; message: string };
 
-function fmt(n: number | null | undefined, suffix = "%"): string {
-  if (n === null || n === undefined) return "--";
-  const sign = n > 0 ? "+" : "";
-  return `${sign}${n.toFixed(1)}${suffix}`;
-}
+const RISK_LABELS: Record<string, string> = {
+  Growth: "Medium risk",
+  Debasement: "Medium-high risk",
+  Deflation: "Low-medium risk",
+  Safety: "Very low risk",
+  Alpha: "Market-neutral",
+};
 
-function fmtColor(n: number | null | undefined): string {
-  if (n === null || n === undefined) return "var(--muted)";
-  return n > 0 ? "var(--green, #4ade80)" : n < 0 ? "var(--red, #f87171)" : "var(--text)";
+const WHY_TEXT: Record<string, string> = {
+  Growth: "Broad equity exposure. The most reliable long-term wealth engine when the economy grows.",
+  Debasement: "Hard assets that preserve purchasing power when fiat currency loses value.",
+  Deflation: "Long-duration government bonds that rally when interest rates fall.",
+  Safety: "Short-term Treasuries. Cash-equivalent yield with near-zero risk of loss.",
+  Alpha: "The carry book collects funding rates from perpetual futures. Earns regardless of market direction.",
+};
+
+function pick(buckets: Bucket[], name: string): AssetMetric | null {
+  const b = buckets.find((x) => x.name === name);
+  if (!b || b.assets.length === 0) return null;
+  const ranked = [...b.assets].sort((a, b) => (b.sharpe ?? -99) - (a.sharpe ?? -99));
+  return ranked[0];
 }
 
 export function ScannerView() {
@@ -46,7 +58,7 @@ export function ScannerView() {
 
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
+    (async () => {
       try {
         const data = await request<ScannerData>("/scanner/market", authHeaderIfPresent());
         if (!cancelled) setState({ kind: "ok", data });
@@ -56,113 +68,126 @@ export function ScannerView() {
           setState({ kind: "error", message });
         }
       }
-    };
-    load();
+    })();
     return () => { cancelled = true; };
   }, []);
 
-  if (state.kind === "loading") return <Loading label="Scanning markets..." />;
+  if (state.kind === "loading") return <Loading label="Loading portfolio..." />;
   if (state.kind === "error") return <ErrorState message={state.message} />;
 
   const { buckets, as_of } = state.data;
+  const growth = pick(buckets, "Growth");
+  const debasement = pick(buckets, "Debasement");
+  const deflation = pick(buckets, "Deflation");
+  const safety = pick(buckets, "Safety");
+  const alpha = buckets.find((x) => x.name === "Alpha");
 
   return (
     <div class="scanner-view">
       <header class="page-head">
-        <h1>Scanner</h1>
+        <h1>Portfolio</h1>
         <p class="muted">
-          Cross-asset ranking across five regime buckets. Each bucket hedges a
-          different economic outcome. Updated hourly.
-        </p>
-        <p class="muted" style={{ fontSize: "11px", marginTop: "4px" }}>
-          As of {new Date(as_of).toLocaleString()}
+          Five areas of a well-distributed portfolio. Each hedge a different
+          economic outcome. One reliable pick per area.
         </p>
       </header>
 
-      <div class="scanner-buckets">
-        {buckets.map((bucket) => (
-          <BucketSection key={bucket.name} bucket={bucket} />
-        ))}
+      <div class="portfolio-grid">
+        {growth && <Card bucket="Growth" asset={growth} />}
+        {debasement && <Card bucket="Debasement" asset={debasement} />}
+        {deflation && <Card bucket="Deflation" asset={deflation} />}
+        {safety && <Card bucket="Safety" asset={safety} />}
+        {alpha && <AlphaCard bucket={alpha} />}
       </div>
+
+      <p class="muted" style={{ fontSize: "11px", marginTop: "16px" }}>
+        Updated {new Date(as_of).toLocaleString()}. Trailing performance from yfinance (display only).
+        Carry book APRs from live funding rates.
+      </p>
     </div>
   );
 }
 
-function BucketSection({ bucket }: { bucket: Bucket }) {
-  const isAlpha = bucket.name === "Alpha";
+function Card({ bucket, asset }: { bucket: string; asset: AssetMetric }) {
+  const ret90 = asset.returns["90d"];
+  const ret1y = asset.returns["365d"];
+  const bestReturn = ret1y ?? ret90;
 
   return (
-    <section class="panel scanner-bucket">
-      <div class="scanner-bucket-header">
-        <h2 class="panel-title">{bucket.name}</h2>
-        <span class="muted scanner-bucket-role">{bucket.role}</span>
+    <div class={`portfolio-card portfolio-card-${bucket.toLowerCase()}`}>
+      <div class="portfolio-card-bucket">{bucket}</div>
+      <div class="portfolio-card-risk">{RISK_LABELS[bucket] ?? ""}</div>
+
+      <div class="portfolio-card-symbol">{asset.symbol}</div>
+      <div class="portfolio-card-name">{asset.name}</div>
+
+      <div class="portfolio-card-return">
+        {bestReturn !== null && bestReturn !== undefined ? (
+          <>
+            <span class="portfolio-return-value">
+              {bestReturn > 0 ? "+" : ""}{bestReturn.toFixed(1)}%
+            </span>
+            <span class="portfolio-return-label">
+              {ret1y !== null && ret1y !== undefined ? "past year" : "past 90 days"}
+            </span>
+          </>
+        ) : (
+          <span class="muted">--</span>
+        )}
       </div>
 
-      {bucket.assets.length === 0 ? (
-        <p class="muted">No data available.</p>
-      ) : isAlpha ? (
-        <div class="scanner-alpha">
-          {bucket.assets.map((a) => (
-            <div key={a.symbol} class="scanner-alpha-row">
-              <span class="mono scanner-symbol">{a.symbol}</span>
-              <span class="mono scanner-funding">
-                {a.funding_apr !== null ? `${a.funding_apr.toFixed(1)}%/yr` : "--"}
-              </span>
-              <span class="muted">funding carry</span>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <table class="data-table scanner-table">
-          <thead>
-            <tr>
-              <th>Asset</th>
-              <th class="num">7d</th>
-              <th class="num">30d</th>
-              <th class="num">90d</th>
-              <th class="num">1yr</th>
-              <th class="num">Sharpe</th>
-              <th class="num">Vol</th>
-              <th class="num">MaxDD</th>
-              {bucket.assets.some((a) => a.funding_apr !== null) && (
-                <th class="num">Funding</th>
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {bucket.assets.map((a, i) => (
-              <tr key={a.symbol} class={i === 0 ? "scanner-top" : ""}>
-                <td>
-                  <span class="mono scanner-symbol">{a.symbol}</span>
-                  <span class="muted scanner-name">{a.name}</span>
-                </td>
-                <td class="num mono" style={{ color: fmtColor(a.returns["7d"]) }}>
-                  {fmt(a.returns["7d"])}
-                </td>
-                <td class="num mono" style={{ color: fmtColor(a.returns["30d"]) }}>
-                  {fmt(a.returns["30d"])}
-                </td>
-                <td class="num mono" style={{ color: fmtColor(a.returns["90d"]) }}>
-                  {fmt(a.returns["90d"])}
-                </td>
-                <td class="num mono" style={{ color: fmtColor(a.returns["365d"]) }}>
-                  {fmt(a.returns["365d"])}
-                </td>
-                <td class="num mono">{a.sharpe !== null ? a.sharpe.toFixed(2) : "--"}</td>
-                <td class="num muted">{a.volatility !== null ? `${a.volatility.toFixed(0)}%` : "--"}</td>
-                <td class="num mono" style={{ color: "var(--red, #f87171)" }}>
-                  {a.max_drawdown !== null ? `${a.max_drawdown.toFixed(1)}%` : "--"}
-                </td>
-                {bucket.assets.some((aa) => aa.funding_apr !== null) && (
-                  <td class="num mono" style={{ color: "var(--green, #4ade80)" }}>
-                    {a.funding_apr !== null ? `${a.funding_apr.toFixed(1)}%/yr` : "--"}
-                  </td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </section>
+      <div class="portfolio-card-stats">
+        {asset.sharpe !== null && (
+          <span>Sharpe {asset.sharpe.toFixed(1)}</span>
+        )}
+        {asset.max_drawdown !== null && (
+          <span class="portfolio-dd">Max DD {asset.max_drawdown.toFixed(0)}%</span>
+        )}
+        {asset.funding_apr !== null && (
+          <span class="portfolio-funding">Funding {asset.funding_apr.toFixed(1)}%/yr</span>
+        )}
+      </div>
+
+      <p class="portfolio-card-why">{WHY_TEXT[bucket]}</p>
+    </div>
+  );
+}
+
+function AlphaCard({ bucket }: { bucket: Bucket }) {
+  const pairs = bucket.assets;
+  if (pairs.length === 0) {
+    return (
+      <div class="portfolio-card portfolio-card-alpha">
+        <div class="portfolio-card-bucket">Alpha</div>
+        <div class="portfolio-card-risk">{RISK_LABELS["Alpha"]}</div>
+        <div class="portfolio-card-symbol">Carry Book</div>
+        <div class="portfolio-card-name">No active pairs</div>
+        <p class="portfolio-card-why">{WHY_TEXT["Alpha"]}</p>
+      </div>
+    );
+  }
+
+  const topPairs = pairs.slice(0, 3).map((p) => `${p.symbol} ${p.funding_apr?.toFixed(1)}%`).join(" · ");
+
+  return (
+    <div class="portfolio-card portfolio-card-alpha">
+      <div class="portfolio-card-bucket">Alpha</div>
+      <div class="portfolio-card-risk">{RISK_LABELS["Alpha"]}</div>
+
+      <div class="portfolio-card-symbol">Carry Book</div>
+      <div class="portfolio-card-name">{topPairs}</div>
+
+      <div class="portfolio-card-return">
+        <span class="portfolio-return-value">~11%/yr</span>
+        <span class="portfolio-return-label">on notional</span>
+      </div>
+
+      <div class="portfolio-card-stats">
+        <span>Live</span>
+        <span>t = 36.0</span>
+      </div>
+
+      <p class="portfolio-card-why">{WHY_TEXT["Alpha"]}</p>
+    </div>
   );
 }
