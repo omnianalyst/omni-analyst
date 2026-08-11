@@ -1866,3 +1866,103 @@ tr.row.tier-unknown td:first-child {
   font-size: 11px;
   margin-top: 20px;
 }
+
+.tier-section {
+  margin-bottom: 32px;
+}
+.tier-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.tier-name {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0;
+}
+.tier-subtitle {
+  font-size: 13px;
+  color: var(--accent);
+  font-weight: 500;
+}
+.tier-desc {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 16px;
+  line-height: 1.5;
+  max-width: 600px;
+}
+.tile-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.tile {
+  background: var(--card, var(--bg-alt, #1a1a2e));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px;
+  min-width: 150px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transition: border-color 0.15s, transform 0.1s;
+}
+.tile:hover {
+  border-color: var(--faint, var(--border));
+}
+.tile-top {
+  border: 2px solid var(--accent);
+}
+.tile-badge {
+  position: absolute;
+  top: -8px;
+  right: 12px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 8px;
+}
+.tile-symbol {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.tile-name {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile-return {
+  font-size: 24px;
+  font-weight: 700;
+}
+.tile-period {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.tile-sharpe {
+  font-size: 11px;
+  color: var(--faint, var(--muted));
+}
+.tile-funding {
+  font-size: 11px;
+  color: var(--green, #4ade80);
+  font-weight: 600;
+}
+.tile-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-top: 6px;
+}
