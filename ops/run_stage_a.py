@@ -123,6 +123,12 @@ def _parse_args() -> argparse.Namespace:
                    help="run the harness once per derived category and print a per-category summary")
     p.add_argument("--min-per-category", type=int, default=5,
                    help="skip categories with fewer than this many snapshots (default 5)")
+    p.add_argument("--pnl-threshold", type=float, default=0.05,
+                   help="min |llm_prob - mkt_price| to count a trade in the P&L backtest (default 0.05 = 5%%)")
+    p.add_argument("--size-usd", type=float, default=5.0,
+                   help="per-trade stake for the P&L backtest (default $5)")
+    p.add_argument("--taker", action="store_true",
+                   help="use taker fee curve for the P&L backtest (default maker=0)")
     p.add_argument("--horizon-days", type=int, default=7)
     p.add_argument("--tolerance-hours", type=int, default=6)
     p.add_argument("--max-concurrent", type=int, default=1)
@@ -180,6 +186,22 @@ def _print_human_report(report, prep_exclusions: list[Exclusion], args: argparse
         print(f"  edge (LLM-mkt):  {sign}{report.brier_edge:.4f}   ({'LLM WORSE' if report.brier_edge > 0 else 'LLM BETTER' if report.brier_edge < 0 else 'tie'})")
     if report.log_loss is not None:
         print(f"  log loss (LLM):  {report.log_loss:.4f}")
+
+    if report.pnl_summary is not None and report.pnl_summary.n_closed > 0:
+        ps = report.pnl_summary
+        wr = ps.win_rate
+        wr_str = f"{wr * 100:.1f}%" if wr is not None else "-"
+        roi = ps.avg_roi_pct if ps.avg_roi_pct is not None else 0.0
+        print(f"\n  Backtest P&L (threshold={args.pnl_threshold}, size=${args.size_usd}, "
+              f"{'taker' if args.taker else 'maker'}):")
+        print(f"    trades closed: {ps.n_closed} ({wr_str} win rate)")
+        print(f"    gross P&L:     ${ps.gross_pnl:+.2f}")
+        print(f"    fees:          ${ps.fee_pnl:+.2f}")
+        print(f"    net P&L:       ${ps.net_pnl:+.2f}")
+        print(f"    avg ROI/trade: {roi:+.2f}%")
+        print(f"    worst DD:      ${ps.worst_drawdown_usd:.2f}")
+    elif report.pnl_summary is not None:
+        print(f"\n  Backtest P&L: 0 trades crossed threshold={args.pnl_threshold}")
 
     print(f"\nCalibration buckets ({report.method}):")
     print(f"  {'bucket':<12} {'n':>5} {'hit':>6} {'mean_conf':>10} {'mkt_mean':>10} {'n_bm':>5}")
@@ -265,7 +287,12 @@ def _build_document_provider(args: argparse.Namespace):
 async def _run_single(model, snapshots, args) -> tuple:
     """One harness run over all snapshots. Returns (report,)."""
     from omni.polymarket.calibrate import run_stage_a
-    report = await run_stage_a(model, snapshots, method=args.method)
+    report = await run_stage_a(
+        model, snapshots, method=args.method,
+        pnl_threshold=args.pnl_threshold,
+        pnl_size_usd=args.size_usd,
+        pnl_taker=args.taker,
+    )
     return (report,)
 
 
@@ -290,6 +317,9 @@ async def _run_per_category(model, snapshots, args) -> dict[str, object]:
         _stderr(f"  running {cat}: {len(group_snaps)} snapshots...")
         report = await run_stage_a(
             model, group_snaps, method=f"{args.method}:{cat}",
+            pnl_threshold=args.pnl_threshold,
+            pnl_size_usd=args.size_usd,
+            pnl_taker=args.taker,
         )
         reports[cat] = report
     return reports
@@ -297,7 +327,10 @@ async def _run_per_category(model, snapshots, args) -> dict[str, object]:
 
 def _print_per_category_summary(reports: dict[str, object], prep_exclusions, args) -> None:
     print(f"\nPer-category Stage A summary — base method={args.method}")
-    print(f"  {'category':<14} {'n':>5} {'brier_llm':>10} {'brier_mkt':>10} {'edge':>9} {'log_loss':>9}")
+    print(
+        f"  {'category':<14} {'n':>5} {'brier_llm':>10} {'brier_mkt':>10} "
+        f"{'edge':>9} {'log_loss':>9}   P&L (n_trades, net, roi)"
+    )
     for cat, report in reports.items():
         bl = f"{report.brier_score:.4f}" if report.brier_score is not None else "-"
         bm = f"{report.market_brier_score:.4f}" if report.market_brier_score is not None else "-"
@@ -306,7 +339,16 @@ def _print_per_category_summary(reports: dict[str, object], prep_exclusions, arg
             edge = f"{report.brier_edge:+.4f}"
         else:
             edge = "-"
-        print(f"  {cat:<14} {report.n_estimated:>5} {bl:>10} {bm:>10} {edge:>9} {ll:>9}")
+        pnl_str = "-"
+        if report.pnl_summary is not None and report.pnl_summary.n_closed > 0:
+            ps = report.pnl_summary
+            roi = ps.avg_roi_pct if ps.avg_roi_pct is not None else 0.0
+            pnl_str = f"({ps.n_closed}, ${ps.net_pnl:+.2f}, {roi:+.1f}%)"
+        elif report.pnl_summary is not None and report.pnl_summary.n_closed == 0:
+            pnl_str = "(0 trades below threshold)"
+        print(
+            f"  {cat:<14} {report.n_estimated:>5} {bl:>10} {bm:>10} {edge:>9} {ll:>9}   {pnl_str}"
+        )
     print(f"\n  prep exclusions: {len(prep_exclusions)}")
     for cat, report in reports.items():
         if report.exclusions:

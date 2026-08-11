@@ -31,6 +31,7 @@ from omni.ingest.protocol import Unavailable
 from omni.llm.protocol import LanguageModel
 from omni.polymarket.estimator import estimate, estimation_id
 from omni.polymarket.gamma import fetch_price_history
+from omni.polymarket.pnl import DEFAULT_FEE_RATE, Fill, PnLSummary, summarise
 from omni.polymarket.types import Document, Estimation, MarketAtCutoff, ResolvedMarket
 
 DEFAULT_HORIZON = timedelta(days=7)
@@ -80,7 +81,13 @@ class StageAReport:
     single comparison `brier_score - market_brier_score` is what Stage A
     exists to measure: a negative number says our estimate beat the market on
     raw accuracy. (It says nothing yet about whether the edge survives fees,
-    slippage or fill risk — that is Stage B.)
+    slippage or fill risk — that is what `pnl_summary` is for.)
+
+    `pnl_summary` is the dollar view: what trading each prediction at the
+    market's cutoff price (with the V2 fee curve applied) would have earned,
+    filtering to trades where `|llm_prob - market_prob| >= pnl_threshold`.
+    `None` means no threshold-crossing trades — the model agreed with the
+    market on everything, so there was nothing to trade.
     """
 
     method_buckets: dict[str, list[BenchmarkCalibrationBucket]]
@@ -90,6 +97,7 @@ class StageAReport:
     market_brier_score: float | None = None
     log_loss: float | None = None
     method: str = "polymarket_llm_v1"
+    pnl_summary: PnLSummary | None = None
 
     @property
     def n_excluded(self) -> int:
@@ -204,11 +212,60 @@ async def prepare_snapshot(
         return Exclusion(market=market, reason=f"snapshot invalid: {exc}")
 
 
+def _backtest_pnl(
+    trades: list[tuple[Estimation, MarketAtCutoff]],
+    *,
+    threshold: float,
+    size_usd: float,
+    taker: bool,
+) -> PnLSummary:
+    """Dollar view of Stage A's predictions: what trading each one at the
+    market's cutoff price would have earned, filtered to threshold-crossing
+    disagreements.
+
+    Each trade is sized at `size_usd` of capital deployed, not equal shares.
+    The entry price is the market's YES price at cutoff for YES trades, or
+    (1 - that) for NO trades. Fee rate defaults to the median category rate;
+    a real Stage B backtest would use the per-category rate from Gamma, but
+    Stage A's data does not carry it.
+
+    `threshold` is the minimum `|llm_prob - market_prob|` required to open a
+    trade. Lower = more trades, more fees, more sample. Higher = fewer
+    trades, cleaner signals. The right value emerges from running this with
+    several thresholds and looking at the P&L-vs-threshold curve.
+    """
+    fills: list[Fill] = []
+    for est, snap in trades:
+        llm_p_yes = _p_yes_of(est)
+        edge = abs(llm_p_yes - snap.market_probability)
+        if edge < threshold:
+            continue
+        direction = "YES" if est.direction == "up" else "NO"
+        entry_price = snap.market_probability if direction == "YES" else (1.0 - snap.market_probability)
+        if not (0.0 < entry_price < 1.0):
+            continue
+        size_shares = size_usd / entry_price
+        fills.append(
+            Fill(
+                direction=direction,
+                entry_price=entry_price,
+                size_shares=size_shares,
+                outcome_yes=snap.market.resolved_yes,
+                fee_rate=DEFAULT_FEE_RATE,
+                taker=taker,
+            )
+        )
+    return summarise(fills)
+
+
 async def run_stage_a(
     model: LanguageModel,
     snapshots: Sequence[MarketAtCutoff],
     *,
     method: str = "polymarket_llm_v1",
+    pnl_threshold: float | None = None,
+    pnl_size_usd: float = 5.0,
+    pnl_taker: bool = False,
 ) -> StageAReport:
     """Run the LLM over each snapshot and bucket the results.
 
@@ -216,6 +273,10 @@ async def run_stage_a(
     recorded as an exclusion with the refusal's `reason`. The calibration
     function still gets the remaining predictions; a single refusal does not
     abort the run.
+
+    If `pnl_threshold` is supplied (e.g. 0.05), the report also carries a
+    `pnl_summary` computed by `_backtest_pnl`. Pass `None` to skip the
+    dollar view (calibration only).
     """
     predictions: list[_Prediction] = []
     benchmarks: dict[str, Benchmark] = {}
@@ -223,6 +284,7 @@ async def run_stage_a(
     p_yes_markets: list[float] = []
     outcomes: list[bool] = []
     exclusions: list[Exclusion] = []
+    trade_pairs: list[tuple[Estimation, MarketAtCutoff]] = []
 
     for snap in snapshots:
         try:
@@ -244,8 +306,19 @@ async def run_stage_a(
         p_yes_estimates.append(_p_yes_of(est))
         p_yes_markets.append(float(snap.market_probability))
         outcomes.append(snap.market.resolved_yes)
+        trade_pairs.append((est, snap))
 
     buckets = calibration_with_benchmark(predictions, benchmarks)
+    pnl_summary = (
+        _backtest_pnl(
+            trade_pairs,
+            threshold=pnl_threshold,
+            size_usd=pnl_size_usd,
+            taker=pnl_taker,
+        )
+        if pnl_threshold is not None
+        else None
+    )
     return StageAReport(
         method_buckets=buckets,
         n_estimated=len(predictions),
@@ -254,6 +327,7 @@ async def run_stage_a(
         market_brier_score=_brier(p_yes_markets, outcomes),
         log_loss=_log_loss(p_yes_estimates, outcomes),
         method=method,
+        pnl_summary=pnl_summary,
     )
 
 

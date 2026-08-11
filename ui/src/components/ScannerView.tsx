@@ -31,9 +31,33 @@ interface RiskData {
   pc1_label?: string;
 }
 
+interface Position {
+  symbol: string;
+  market_type: string;
+  quantity: string;
+}
+interface Portfolio {
+  nav: string;
+  cash: string;
+  positions: Position[];
+  cash_positions: { asset: string; free: string; locked: string }[];
+}
+interface Cycle {
+  as_of: string;
+  halted: boolean;
+  funding_collected: string;
+  fees_paid: string;
+  pairs_opened: number;
+  pairs_held: number;
+}
+interface TradingData {
+  portfolio: Portfolio | null;
+  cycles: Cycle[];
+}
+
 type State =
   | { kind: "loading" }
-  | { kind: "ok"; data: ScannerData; risk: RiskData | null }
+  | { kind: "ok"; data: ScannerData; risk: RiskData | null; trading: TradingData | null }
   | { kind: "error"; message: string };
 
 const VERDICT_COLORS: Record<string, string> = {
@@ -127,11 +151,24 @@ export function ScannerView() {
     let cancelled = false;
     (async () => {
       try {
+        const headers = authHeaderIfPresent();
         const [data, risk] = await Promise.all([
-          request<ScannerData>("/scanner/market", authHeaderIfPresent()),
-          request<RiskData>("/scanner/risk", authHeaderIfPresent()).catch(() => null),
+          request<ScannerData>("/scanner/market", headers),
+          request<RiskData>("/scanner/risk", headers).catch(() => null),
         ]);
-        if (!cancelled) setState({ kind: "ok", data, risk });
+
+        let trading: TradingData | null = null;
+        if (headers.authorization) {
+          const [portfolio, cyclesResp] = await Promise.all([
+            request<Portfolio>("/trading/portfolio", headers).catch(() => null),
+            request<{ cycles: Cycle[] }>("/trading/cycles", headers).catch(() => null),
+          ]);
+          if (portfolio || cyclesResp) {
+            trading = { portfolio, cycles: cyclesResp?.cycles ?? [] };
+          }
+        }
+
+        if (!cancelled) setState({ kind: "ok", data, risk, trading });
       } catch (err) {
         if (!cancelled) {
           const { message } = describeError(err);
@@ -227,7 +264,7 @@ export function ScannerView() {
           regardless of what any asset does. Uncorrelated to everything above.
         </p>
         <div class="tile-row">
-          <AlphaTile bucket={alpha} risk={risk} />
+          <AlphaTile bucket={alpha} risk={risk} trading={state.trading} />
         </div>
       </section>
 
@@ -259,19 +296,33 @@ function Tile({ asset, top }: { asset: AssetMetric; top: boolean }) {
   );
 }
 
-function AlphaTile({ bucket, risk }: { bucket: Bucket | undefined; risk: RiskData | null }) {
+function AlphaTile({ bucket, risk, trading }: { bucket: Bucket | undefined; risk: RiskData | null; trading: TradingData | null }) {
   const verdict = risk?.verdict ?? "unknown";
   const color = VERDICT_COLORS[verdict] ?? "var(--muted)";
   const label = VERDICT_LABELS[verdict] ?? verdict;
   const pairs = bucket?.assets ?? [];
 
+  const portfolio = trading?.portfolio;
+  const cycles = trading?.cycles ?? [];
+  const lastCycle = cycles[0];
+  const totalFunding = cycles
+    .filter((c) => c.funding_collected)
+    .reduce((sum, c) => sum + parseFloat(c.funding_collected), 0);
+  const totalFees = cycles
+    .filter((c) => c.fees_paid)
+    .reduce((sum, c) => sum + parseFloat(c.fees_paid), 0);
+
+  const openPairs = portfolio?.positions
+    ? portfolio.positions
+        .filter((p) => p.market_type === "spot" && parseFloat(p.quantity) > 0)
+        .map((p) => p.symbol.split("/")[0])
+    : pairs.map((p) => p.symbol);
+
   return (
-    <div class="tile tile-top tile-alpha">
+    <div class="tile tile-top tile-alpha tile-alpha-wide">
       <span class="tile-badge">Live</span>
       <div class="tile-symbol">Carry Book</div>
-      <div class="tile-name">
-        {pairs.length > 0 ? pairs.map((p) => p.symbol).join(" + ") : "No active pairs"}
-      </div>
+      <div class="tile-name">{openPairs.length > 0 ? openPairs.join(" + ") : "No active pairs"}</div>
       <div class="tile-return" style={{ color: "var(--green, #4ade80)" }}>~11%/yr</div>
       <div class="tile-period">on notional</div>
       <div class="tile-sharpe">t = 36.0</div>
@@ -279,6 +330,45 @@ function AlphaTile({ bucket, risk }: { bucket: Bucket | undefined; risk: RiskDat
         <span class="status-dot" style={{ background: color }} />
         {label}
       </div>
+
+      {portfolio && (
+        <div class="tile-details">
+          <div class="tile-detail-row">
+            <span class="muted">NAV</span>
+            <span class="mono">${parseFloat(portfolio.nav).toFixed(2)}</span>
+          </div>
+          <div class="tile-detail-row">
+            <span class="muted">Cash free</span>
+            <span class="mono">${parseFloat(portfolio.cash).toFixed(2)}</span>
+          </div>
+          {totalFunding > 0 && (
+            <div class="tile-detail-row">
+              <span class="muted">Funding collected</span>
+              <span class="mono" style={{ color: "var(--green, #4ade80)" }}>${totalFunding.toFixed(4)}</span>
+            </div>
+          )}
+          {totalFees > 0 && (
+            <div class="tile-detail-row">
+              <span class="muted">Fees paid</span>
+              <span class="mono">${totalFees.toFixed(4)}</span>
+            </div>
+          )}
+          {lastCycle && (
+            <div class="tile-detail-row">
+              <span class="muted">Last cycle</span>
+              <span class="mono">{new Date(lastCycle.as_of).toLocaleDateString()}</span>
+            </div>
+          )}
+          {lastCycle && (
+            <div class="tile-detail-row">
+              <span class="muted">Result</span>
+              <span class="mono" style={{ color: lastCycle.halted ? "var(--red, #f87171)" : "var(--green, #4ade80)" }}>
+                {lastCycle.halted ? "Halted" : `${lastCycle.pairs_held} held`}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

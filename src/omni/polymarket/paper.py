@@ -120,15 +120,24 @@ def _active_market_to_resolved_shape(market: ActiveMarket) -> ResolvedMarket:
     we use the market's end_date as a stand-in `resolution_date` and a
     placeholder `resolved_yes=False`. The placeholder is never read by the
     elicitation — only by the resolver, which does not run on live markets.
+
+    For active markets whose `end_date` is in the past (Gamma occasionally
+    returns these as still-open), the resolution_date is bumped to a future
+    placeholder so `ResolvedMarket`'s `resolution >= created_at` invariant
+    is not violated. The LLM only reads `question` / `category` / `condition_id`
+    / `yes_token_id` from this object, so the placeholder is harmless.
     """
-    resolution_date = market.end_date or (datetime.now(UTC) + timedelta(days=30))
+    now = datetime.now(UTC)
+    resolution_date = market.end_date or (now + timedelta(days=30))
+    if resolution_date <= now:
+        resolution_date = now + timedelta(days=7)
     return ResolvedMarket(
         condition_id=market.condition_id,
         question=market.question,
         category=market.category,
         resolved_yes=False,
         resolution_date=resolution_date,
-        created_at=datetime.now(UTC) - timedelta(days=1),
+        created_at=now - timedelta(days=1),
         yes_token_id=market.yes_token_id,
         no_token_id=market.no_token_id,
         neg_risk=market.neg_risk,

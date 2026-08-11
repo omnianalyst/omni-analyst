@@ -40,6 +40,7 @@ function isPublicPath(pathname: string): boolean {
 // route now redirects.
 const NAV = [
   { href: "/", label: "Portfolio" },
+  { href: "/search", label: "Discover" },
   { href: "/system", label: "System" },
 ];
 

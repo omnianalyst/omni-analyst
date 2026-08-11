@@ -2007,3 +2007,23 @@ tr.row.tier-unknown td:first-child {
   font-weight: 600;
   margin-top: 6px;
 }
+.tile-alpha-wide {
+  min-width: 280px;
+}
+.tile-details {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tile-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+}
+.tile-detail-row .muted {
+  font-size: 12px;
+}
