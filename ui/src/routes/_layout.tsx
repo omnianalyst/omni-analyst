@@ -42,6 +42,7 @@ const NAV = [
   { href: "/", label: "Portfolio" },
   { href: "/search", label: "Discover" },
   { href: "/system", label: "System" },
+  { href: "/settings", label: "Settings" },
 ];
 
 // The command palette jumps from the same set of destinations as the topbar,

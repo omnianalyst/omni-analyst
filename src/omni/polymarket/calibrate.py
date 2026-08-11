@@ -88,6 +88,11 @@ class StageAReport:
     filtering to trades where `|llm_prob - market_prob| >= pnl_threshold`.
     `None` means no threshold-crossing trades — the model agreed with the
     market on everything, so there was nothing to trade.
+
+    `trade_pairs` is the in-memory record of `(Estimation, MarketAtCutoff)`
+    for each successful LLM call. Not persisted — lives only as long as the
+    report. Used by `sweep_thresholds()` to apply multiple P&L thresholds to
+    the same LLM outputs without re-calling the model.
     """
 
     method_buckets: dict[str, list[BenchmarkCalibrationBucket]]
@@ -98,6 +103,7 @@ class StageAReport:
     log_loss: float | None = None
     method: str = "polymarket_llm_v1"
     pnl_summary: PnLSummary | None = None
+    trade_pairs: list = field(default_factory=list)
 
     @property
     def n_excluded(self) -> int:
@@ -328,7 +334,29 @@ async def run_stage_a(
         log_loss=_log_loss(p_yes_estimates, outcomes),
         method=method,
         pnl_summary=pnl_summary,
+        trade_pairs=trade_pairs,
     )
+
+
+def sweep_thresholds(
+    trade_pairs: list,
+    *,
+    thresholds: tuple[float, ...],
+    size_usd: float = 5.0,
+    taker: bool = False,
+) -> dict[float, PnLSummary]:
+    """Apply multiple P&L thresholds to the same LLM outputs.
+
+    The expensive thing is the LLM call; the threshold is a post-LLM filter.
+    This helper exists so a single Stage A run can produce a P&L-vs-threshold
+    curve without re-calling the model per threshold. The curve identifies
+    the P&L-optimal threshold for the strategy and shows how sensitive the
+    trade count is to that choice.
+    """
+    return {
+        t: _backtest_pnl(trade_pairs, threshold=t, size_usd=size_usd, taker=taker)
+        for t in thresholds
+    }
 
 
 __all__ = [
@@ -339,4 +367,5 @@ __all__ = [
     "StageAReport",
     "prepare_snapshot",
     "run_stage_a",
+    "sweep_thresholds",
 ]

@@ -9,6 +9,7 @@ declare module "@neutron-build/core" {
     | "/objective"
     | "/scanner"
     | "/search"
+    | "/settings"
     | "/setup"
     | "/system"
   }

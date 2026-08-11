@@ -37,6 +37,7 @@ def create_app(database_url: str | None = None) -> App:
     from omni.api.portfolio import build_router as portfolio_router
     from omni.api.risk_monitor import build_router as risk_monitor_router
     from omni.api.scanner import build_router as scanner_router
+    from omni.api.settings import build_router as settings_router
     from omni.api.system import build_router as system_router
     from omni.api.trading import build_router as trading_router
     from omni.api.watchlist import build_router as watchlist_router
@@ -54,6 +55,7 @@ def create_app(database_url: str | None = None) -> App:
     app.include_router(exposure_router(app))
     app.include_router(scanner_router(app))
     app.include_router(risk_monitor_router(app))
+    app.include_router(settings_router(app))
     return app
 
 
