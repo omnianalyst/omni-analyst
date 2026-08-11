@@ -85,6 +85,9 @@ CLAIM_TYPES = frozenset(
         # silent rewrite of what a backtest sees.
         "convergence",
         "dial",
+        # 050: ETF/fund holdings from issuer disclosures. The exposure tool maps
+        # these to compute overlap and concentration across the portfolio.
+        "holding",
     }
 )
 

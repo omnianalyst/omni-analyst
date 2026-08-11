@@ -88,6 +88,14 @@ class Capabilities:
     router needs them before it builds an intent. Everything else that varies
     per trade -- spread, gas, funding accrual, borrow -- belongs to `costs.py`,
     which computes against a specific intent.
+
+    Venues that charge different fees for spot and perpetuals (Hyperliquid:
+    4/7 bps spot vs 1.5/4.5 bps perp) populate ``perp_maker_fee_bps`` /
+    ``perp_taker_fee_bps``. When ``None``, the cost model falls back to the
+    spot fees. This prevents the delta-neutral carry pair -- which has two
+    spot legs and two perp legs -- from being charged at the spot rate on
+    every leg, a 5 bps overcharge on a 23 bps round trip that refused
+    marginal trades the edge survives.
     """
 
     spot: bool
@@ -99,6 +107,8 @@ class Capabilities:
     maker_fee_bps: Decimal
     taker_fee_bps: Decimal
     min_notional: Decimal
+    perp_maker_fee_bps: Decimal | None = None
+    perp_taker_fee_bps: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.maker_fee_bps < 0 or self.taker_fee_bps < 0:
@@ -106,6 +116,12 @@ class Capabilities:
                 f"negative fees are not a discount to model: "
                 f"maker={self.maker_fee_bps} taker={self.taker_fee_bps}"
             )
+        for name in ("perp_maker_fee_bps", "perp_taker_fee_bps"):
+            val = getattr(self, name)
+            if val is not None and val < 0:
+                raise ValueError(
+                    f"negative {name} is not a discount to model: {val}"
+                )
         if self.min_notional < 0:
             raise ValueError(f"min_notional must not be negative: {self.min_notional}")
         if self.perpetuals and not self.shorting:

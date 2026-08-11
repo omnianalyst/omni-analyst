@@ -147,6 +147,77 @@ class TestEntryCost:
             entry_cost(_intent(), _caps(), spread_bps=Decimal(-1))
 
 
+class TestPerpFeeCorrection:
+    """A venue with different spot/perp fees charges the right fee per leg.
+
+    The carry pair is 2 spot legs + 2 perp legs. The Hyperliquid schedule is
+    spot 7/4 bps (taker/maker) and perp 4.5/1.5. Charging the spot taker on
+    every leg overstates the round trip from 23 bps to 28 bps and refuses
+    marginal trades the edge survives.
+    """
+
+    def _hl_caps(self) -> Capabilities:
+        return _caps(
+            maker="4",
+            taker="7",
+            perp_maker_fee_bps=Decimal("1.5"),
+            perp_taker_fee_bps=Decimal("4.5"),
+        )
+
+    def test_perp_taker_leg_uses_perp_fee(self):
+        intent = _intent(market_type=MarketType.PERPETUAL)
+        cost = entry_cost(intent, self._hl_caps(), is_maker=False)
+        assert cost.fee_bps == Decimal("4.5")
+
+    def test_perp_maker_leg_uses_perp_fee(self):
+        intent = _intent(market_type=MarketType.PERPETUAL)
+        cost = entry_cost(intent, self._hl_caps(), is_maker=True)
+        assert cost.fee_bps == Decimal("1.5")
+
+    def test_spot_leg_unchanged_by_perp_fields(self):
+        intent = _intent(market_type=MarketType.SPOT)
+        cost = entry_cost(intent, self._hl_caps(), is_maker=False)
+        assert cost.fee_bps == Decimal(7)
+
+    def test_carry_round_trip_uses_per_market_fees(self):
+        """The carry pair: buy spot, sell perp, sell spot, buy perp. All taker.
+
+        With the correction: 2 * 7 + 2 * 4.5 = 23 bps.
+        Without it (max-fee model): 4 * 7 = 28 bps.
+        """
+        caps = self._hl_caps()
+        buy_spot = entry_cost(
+            _intent(side=Side.BUY, market_type=MarketType.SPOT), caps
+        )
+        sell_perp = entry_cost(
+            _intent(side=Side.SELL, market_type=MarketType.PERPETUAL), caps
+        )
+        sell_spot = entry_cost(
+            _intent(side=Side.SELL, market_type=MarketType.SPOT), caps
+        )
+        buy_perp = entry_cost(
+            _intent(side=Side.BUY, market_type=MarketType.PERPETUAL), caps
+        )
+        total = buy_spot + sell_perp + sell_spot + buy_perp
+        assert total.fee_bps == Decimal(23)
+
+    def test_none_perp_fees_fall_back_to_spot(self):
+        """A venue without perp-specific fees charges the spot fee on all legs."""
+        intent = _intent(market_type=MarketType.PERPETUAL)
+        cost = entry_cost(intent, _caps(taker="10"), is_maker=False)
+        assert cost.fee_bps == Decimal(10)
+
+    def test_negative_perp_fee_refused(self):
+        with pytest.raises(ValueError, match="negative perp"):
+            Capabilities(
+                spot=True, margin=False, perpetuals=True, limit_orders=True,
+                shorting=True, funding_data=True,
+                maker_fee_bps=Decimal(4), taker_fee_bps=Decimal(7),
+                min_notional=Decimal(10),
+                perp_taker_fee_bps=Decimal(-1),
+            )
+
+
 class TestCarryCostFundingSign:
     """Positive funding rate means longs pay shorts."""
 

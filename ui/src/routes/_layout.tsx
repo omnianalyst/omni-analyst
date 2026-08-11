@@ -43,6 +43,7 @@ const NAV = [
   { href: "/briefing", label: "Track record" },
   { href: "/regime", label: "Regime" },
   { href: "/sectors", label: "Sectors" },
+  { href: "/exposure", label: "Exposure" },
   { href: "/search", label: "Search" },
   { href: "/watchlist", label: "Watchlists" },
   { href: "/alerts", label: "Alerts" },

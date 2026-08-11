@@ -58,6 +58,7 @@ exception translation still resolves against the real taxonomy on the live path.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -329,21 +330,32 @@ def _derive_capabilities(
     trading = trading if isinstance(trading, dict) else {}
     maker = _decimal(trading.get("maker"))
     taker = _decimal(trading.get("taker"))
+    perp_maker = None
+    perp_taker = None
     if maker is None or taker is None:
         # Not every venue publishes a schedule at the exchange level. Hyperliquid
         # reports `fees.trading` as all None and prices each market instead --
         # spot at 4/7 bps against perpetuals at 1.5/4.5 -- so reading only the
         # top-level default refuses a venue that in fact states its fees.
         #
-        # The maximum across markets in scope, not the mean or the per-market
-        # value, because `Capabilities` carries one number and this one is
-        # charged to every leg. Overcharging refuses marginal trades; the mean
-        # would undercharge the expensive leg, and a delta-neutral pair always
-        # has one of each.
-        per_market_maker = [f for f in (_decimal(m.get("maker")) for m in entries) if f is not None]
-        per_market_taker = [f for f in (_decimal(m.get("taker")) for m in entries) if f is not None]
-        maker = max(per_market_maker) if per_market_maker else maker
-        taker = max(per_market_taker) if per_market_taker else taker
+        # The spot fees are the max across spot markets; perp fees the max
+        # across swap markets. Keeping them separate stops a carry pair (2 spot
+        # legs, 2 perp legs) from being charged at the spot rate on every leg --
+        # a 5 bps overcharge that refused marginal trades the edge survives.
+        spot_entries = [m for m in entries if m.get("spot")]
+        perp_entries = [m for m in entries if m.get("swap")]
+        spot_maker = [f for f in (_decimal(m.get("maker")) for m in spot_entries) if f is not None]
+        spot_taker = [f for f in (_decimal(m.get("taker")) for m in spot_entries) if f is not None]
+        perp_maker_list = [f for f in (_decimal(m.get("maker")) for m in perp_entries) if f is not None]
+        perp_taker_list = [f for f in (_decimal(m.get("taker")) for m in perp_entries) if f is not None]
+
+        maker = max(spot_maker) if spot_maker else (max(perp_maker_list) if perp_maker_list else maker)
+        taker = max(spot_taker) if spot_taker else (max(perp_taker_list) if perp_taker_list else taker)
+
+        if perp_entries and perp_maker_list:
+            perp_maker = max(perp_maker_list)
+        if perp_entries and perp_taker_list:
+            perp_taker = max(perp_taker_list)
     if maker is None or taker is None:
         raise ValueError(
             f"{venue} publishes no usable trading fee (maker={trading.get('maker')!r} "
@@ -370,6 +382,8 @@ def _derive_capabilities(
         ),
         maker_fee_bps=maker * BPS,
         taker_fee_bps=taker * BPS,
+        perp_maker_fee_bps=(perp_maker * BPS) if perp_maker is not None else None,
+        perp_taker_fee_bps=(perp_taker * BPS) if perp_taker is not None else None,
         min_notional=max(minimums) if minimums else Decimal(0),
     )
 
@@ -389,6 +403,20 @@ def _rejected_fill(
         external_id=None,
         raw={"rejected": reason, "requested_quantity": str(intent.quantity)},
     )
+
+
+def _venue_cloid(key: str) -> str:
+    """Deterministic 128-bit hex cloid for Hyperliquid from any idempotency key.
+
+    Hyperliquid requires a client order id as 0x-prefixed 128-bit hex. The
+    carry loop's idempotency key is a descriptive string (portfolio:carry:
+    timestamp:symbol:...) for traceability; a sha256 prefix of it is
+    deterministic -- same key always maps to the same cloid, so the venue's
+    duplicate-rejection still works -- and wire-valid. The 128-bit truncation
+    leaves a collision space of 2^128, effectively zero for the thousands of
+    orders this book will ever place.
+    """
+    return "0x" + hashlib.sha256(key.encode()).hexdigest()[:32]
 
 
 class CCXTVenue:
@@ -468,7 +496,12 @@ class CCXTVenue:
         except AttributeError as exc:
             raise VenueUnavailable(f"ccxt has no venue named {venue!r}") from exc
 
-        options: dict[str, Any] = {"enableRateLimit": True}
+        # defaultSlippage: Hyperliquid spot market orders require a price to
+        # derive a max-slippage price, and reject a market order with none
+        # ("market orders require price to calculate the max slippage price").
+        # Setting it lets ccxt synthesise that price for any spot market order.
+        # Other venues ignore the option.
+        options: dict[str, Any] = {"enableRateLimit": True, "defaultSlippage": 0.05}
         # `credentials` carries its own ccxt shape, which is what lets this stay
         # generic: a key/secret venue and a wallet venue differ in what they
         # authenticate with, and neither this method nor its callers should have
@@ -513,6 +546,17 @@ class CCXTVenue:
     @property
     def mode(self) -> TradingMode:
         return self._mode
+
+    def _client_order_id(self, key: str) -> str:
+        """The idempotency key in the venue's own client-order-id format.
+
+        Hyperliquid requires 0x-prefixed 128-bit hex; a descriptive key with
+        colons and timestamps fails its EIP-712 signing path. Other venues
+        accept the key as-is.
+        """
+        if self.name == "hyperliquid":
+            return _venue_cloid(key)
+        return key
 
     async def aclose(self) -> None:
         if self._owns_exchange:
@@ -797,9 +841,24 @@ class CCXTVenue:
 
         amount = self._rounded_amount(intent.symbol, intent.quantity)
         price: Decimal | None = None
+        eff_kind = intent.order_kind.value
         if intent.order_kind is OrderKind.LIMIT:
             assert intent.limit_price is not None  # TradeIntent.__post_init__
             price = self._rounded_price(intent.symbol, intent.limit_price)
+        else:
+            # Hyperliquid (ccxt 4.5.x) rejects spot MARKET orders with "market
+            # orders require price to calculate the max slippage price" and
+            # ignores both the defaultSlippage option and an explicit price on
+            # the market path. Its LIMIT path works. So a market intent becomes
+            # an aggressive LIMIT at reference +/- 5% (the venue's own default
+            # slippage): it crosses the book and fills like a market order, on
+            # the working limit path, with a hard worst-price bound. The
+            # pair-integrity guard still catches any pathological fill.
+            slippage = Decimal("0.05")
+            ref = intent.reference_price
+            raw = ref * (Decimal(1) + slippage) if intent.side is Side.BUY else ref * (Decimal(1) - slippage)
+            price = self._rounded_price(intent.symbol, raw)
+            eff_kind = OrderKind.LIMIT.value
 
         notional = amount * (price if price is not None else intent.reference_price)
         minimum = self.min_notional_for(intent.symbol)
@@ -814,14 +873,16 @@ class CCXTVenue:
                 ),
             )
 
-        params: dict[str, Any] = {CLIENT_ORDER_ID_PARAM: intent.idempotency_key}
+        params: dict[str, Any] = {
+            CLIENT_ORDER_ID_PARAM: self._client_order_id(intent.idempotency_key)
+        }
         if intent.reduce_only:
             params["reduceOnly"] = True
 
         try:
             order = await self._exchange.create_order(
                 intent.symbol,
-                intent.order_kind.value,
+                eff_kind,
                 intent.side.value,
                 amount,
                 price=price,
@@ -864,7 +925,9 @@ class CCXTVenue:
 
         try:
             order = await fetch_order(
-                None, intent.symbol, {CLIENT_ORDER_ID_PARAM: key}
+                None,
+                intent.symbol,
+                {CLIENT_ORDER_ID_PARAM: self._client_order_id(key)},
             )
         except Exception as probe:
             if _is_missing_order(probe):

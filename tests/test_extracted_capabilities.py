@@ -68,6 +68,8 @@ SCHEMA_CLAIM_TYPES = frozenset(
         # 041/042: convergence and editorial dials.
         "convergence",
         "dial",
+        # 050: ETF/fund holdings.
+        "holding",
     }
 )
 

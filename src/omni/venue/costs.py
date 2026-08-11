@@ -133,6 +133,13 @@ def entry_cost(
 
     A taker crosses the spread; a maker does not. The half-spread is charged
     because the reference price is the mid.
+
+    For venues that charge different fees for spot and perpetuals
+    (Hyperliquid: 7 bps spot taker vs 4.5 bps perp taker), the perp fee is
+    used when the intent targets a perpetual market. Without this, a carry
+    pair's two perp legs are overcharged at the spot rate, which overstates
+    the round trip by 5 bps (28 modelled vs 23 actual) and refuses marginal
+    trades the edge survives.
     """
     if spread_bps < 0:
         raise ValueError(f"spread_bps must not be negative, got {spread_bps}")
@@ -143,7 +150,15 @@ def entry_cost(
     if notional <= 0:
         raise ValueError(f"cannot cost a non-positive notional: {notional}")
 
-    fee_bps = capabilities.maker_fee_bps if is_maker else capabilities.taker_fee_bps
+    if intent.market_type is MarketType.PERPETUAL:
+        if is_maker and capabilities.perp_maker_fee_bps is not None:
+            fee_bps = capabilities.perp_maker_fee_bps
+        elif not is_maker and capabilities.perp_taker_fee_bps is not None:
+            fee_bps = capabilities.perp_taker_fee_bps
+        else:
+            fee_bps = capabilities.maker_fee_bps if is_maker else capabilities.taker_fee_bps
+    else:
+        fee_bps = capabilities.maker_fee_bps if is_maker else capabilities.taker_fee_bps
     crossed_spread_bps = Decimal(0) if is_maker else spread_bps / Decimal(2)
 
     return CostBreakdown(

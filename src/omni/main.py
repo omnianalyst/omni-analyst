@@ -32,6 +32,7 @@ def create_app(database_url: str | None = None) -> App:
     from omni.api.autonomous import build_router as autonomous_router
     from omni.api.briefing import build_router as briefing_router
     from omni.api.coverage import build_router as coverage_router
+    from omni.api.exposure import build_router as exposure_router
     from omni.api.objective import build_router as objective_router
     from omni.api.portfolio import build_router as portfolio_router
     from omni.api.system import build_router as system_router
@@ -48,6 +49,7 @@ def create_app(database_url: str | None = None) -> App:
     app.include_router(system_router(app))
     app.include_router(trading_router(app))
     app.include_router(portfolio_router(app))
+    app.include_router(exposure_router(app))
     return app
 
 
