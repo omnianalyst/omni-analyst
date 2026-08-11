@@ -169,7 +169,7 @@ export function PortfolioView() {
         </table>
 
         {risk?.pc1_label && (
-          <p class="muted" style={{ fontSize: "12px", marginTop: "12px" }}>{risk.pc1_label}</p>
+          <p class="muted" style={{ fontSize: "12px", margin: "12px 16px 16px" }}>{risk.pc1_label}</p>
         )}
       </section>
 
