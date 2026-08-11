@@ -1745,3 +1745,17 @@ tr.row.tier-unknown td:first-child {
   color: var(--muted);
   margin-top: auto;
 }
+.portfolio-risk-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.portfolio-risk-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}

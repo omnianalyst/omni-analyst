@@ -6,7 +6,6 @@ import { ErrorState } from "./ErrorState";
 interface AssetMetric {
   symbol: string;
   name: string;
-  price: number | null;
   returns: { "7d": number | null; "30d": number | null; "90d": number | null; "365d": number | null };
   sharpe: number | null;
   volatility: number | null;
@@ -25,32 +24,53 @@ interface ScannerData {
   as_of: string;
 }
 
+interface RiskData {
+  verdict: string;
+  net_ratio?: number;
+  pc1_share?: number;
+  pc1_label?: string;
+  detail?: string;
+}
+
 type State =
   | { kind: "loading" }
-  | { kind: "ok"; data: ScannerData }
+  | { kind: "ok"; data: ScannerData; risk: RiskData | null }
   | { kind: "error"; message: string };
 
-const RISK_LABELS: Record<string, string> = {
-  Growth: "Medium risk",
-  Debasement: "Medium-high risk",
-  Deflation: "Low-medium risk",
-  Safety: "Very low risk",
-  Alpha: "Market-neutral",
+const PICKS: Record<string, { symbol: string; reason: string }> = {
+  Growth: {
+    symbol: "VTI",
+    reason: "Broad US market. The most reliable long-term growth engine — the S&P 500 equivalent. ~10%/yr over decades through every cycle.",
+  },
+  Debasement: {
+    symbol: "GLD",
+    reason: "Gold preserves purchasing power when fiat devalues. BTC adds asymmetric upside; both hedge the inflation/stagflation quadrant.",
+  },
+  Deflation: {
+    symbol: "TLT",
+    reason: "Long-duration Treasuries rally when rates fall. The only asset that wins in a deflationary downturn.",
+  },
+  Safety: {
+    symbol: "SHV",
+    reason: "Short-term T-bills. Cash-equivalent yield with near-zero risk. Capital preservation when nothing else works.",
+  },
 };
 
-const WHY_TEXT: Record<string, string> = {
-  Growth: "Broad equity exposure. The most reliable long-term wealth engine when the economy grows.",
-  Debasement: "Hard assets that preserve purchasing power when fiat currency loses value.",
-  Deflation: "Long-duration government bonds that rally when interest rates fall.",
-  Safety: "Short-term Treasuries. Cash-equivalent yield with near-zero risk of loss.",
-  Alpha: "The carry book collects funding rates from perpetual futures. Earns regardless of market direction.",
+const VERDICT_LABELS: Record<string, { label: string; color: string }> = {
+  delta_neutral: { label: "Delta-neutral", color: "var(--green, #4ade80)" },
+  slight_drift: { label: "Slight drift", color: "var(--yellow, #fbbf24)" },
+  factor_exposed: { label: "Factor exposed", color: "var(--red, #f87171)" },
+  flat: { label: "Flat", color: "var(--muted)" },
+  insufficient_data: { label: "Insufficient data", color: "var(--muted)" },
+  no_portfolio: { label: "No portfolio", color: "var(--muted)" },
 };
 
-function pick(buckets: Bucket[], name: string): AssetMetric | null {
-  const b = buckets.find((x) => x.name === name);
-  if (!b || b.assets.length === 0) return null;
-  const ranked = [...b.assets].sort((a, b) => (b.sharpe ?? -99) - (a.sharpe ?? -99));
-  return ranked[0];
+function pickAsset(buckets: Bucket[], bucketName: string): AssetMetric | null {
+  const preferred = PICKS[bucketName];
+  if (!preferred) return null;
+  const bucket = buckets.find((b) => b.name === bucketName);
+  if (!bucket) return null;
+  return bucket.assets.find((a) => a.symbol === preferred.symbol) ?? bucket.assets[0] ?? null;
 }
 
 export function ScannerView() {
@@ -60,8 +80,11 @@ export function ScannerView() {
     let cancelled = false;
     (async () => {
       try {
-        const data = await request<ScannerData>("/scanner/market", authHeaderIfPresent());
-        if (!cancelled) setState({ kind: "ok", data });
+        const [data, risk] = await Promise.all([
+          request<ScannerData>("/scanner/market", authHeaderIfPresent()),
+          request<RiskData>("/scanner/risk", authHeaderIfPresent()).catch(() => null),
+        ]);
+        if (!cancelled) setState({ kind: "ok", data, risk });
       } catch (err) {
         if (!cancelled) {
           const { message } = describeError(err);
@@ -76,19 +99,20 @@ export function ScannerView() {
   if (state.kind === "error") return <ErrorState message={state.message} />;
 
   const { buckets, as_of } = state.data;
-  const growth = pick(buckets, "Growth");
-  const debasement = pick(buckets, "Debasement");
-  const deflation = pick(buckets, "Deflation");
-  const safety = pick(buckets, "Safety");
+  const growth = pickAsset(buckets, "Growth");
+  const debasement = pickAsset(buckets, "Debasement");
+  const deflation = pickAsset(buckets, "Deflation");
+  const safety = pickAsset(buckets, "Safety");
   const alpha = buckets.find((x) => x.name === "Alpha");
+  const risk = state.risk;
 
   return (
     <div class="scanner-view">
       <header class="page-head">
         <h1>Portfolio</h1>
         <p class="muted">
-          Five areas of a well-distributed portfolio. Each hedge a different
-          economic outcome. One reliable pick per area.
+          Five areas. One reliable pick each. Backed by long-term data, not
+          short-term speculation.
         </p>
       </header>
 
@@ -97,12 +121,12 @@ export function ScannerView() {
         {debasement && <Card bucket="Debasement" asset={debasement} />}
         {deflation && <Card bucket="Deflation" asset={deflation} />}
         {safety && <Card bucket="Safety" asset={safety} />}
-        {alpha && <AlphaCard bucket={alpha} />}
+        {alpha && <AlphaCard bucket={alpha} risk={risk} />}
       </div>
 
       <p class="muted" style={{ fontSize: "11px", marginTop: "16px" }}>
-        Updated {new Date(as_of).toLocaleString()}. Trailing performance from yfinance (display only).
-        Carry book APRs from live funding rates.
+        Updated {new Date(as_of).toLocaleString()}. Picks are structural, not
+        trading signals.
       </p>
     </div>
   );
@@ -112,11 +136,11 @@ function Card({ bucket, asset }: { bucket: string; asset: AssetMetric }) {
   const ret90 = asset.returns["90d"];
   const ret1y = asset.returns["365d"];
   const bestReturn = ret1y ?? ret90;
+  const pick = PICKS[bucket];
 
   return (
-    <div class={`portfolio-card portfolio-card-${bucket.toLowerCase()}`}>
+    <div class="portfolio-card">
       <div class="portfolio-card-bucket">{bucket}</div>
-      <div class="portfolio-card-risk">{RISK_LABELS[bucket] ?? ""}</div>
 
       <div class="portfolio-card-symbol">{asset.symbol}</div>
       <div class="portfolio-card-name">{asset.name}</div>
@@ -124,7 +148,10 @@ function Card({ bucket, asset }: { bucket: string; asset: AssetMetric }) {
       <div class="portfolio-card-return">
         {bestReturn !== null && bestReturn !== undefined ? (
           <>
-            <span class="portfolio-return-value">
+            <span
+              class="portfolio-return-value"
+              style={{ color: bestReturn >= 0 ? "var(--green, #4ade80)" : "var(--red, #f87171)" }}
+            >
               {bestReturn > 0 ? "+" : ""}{bestReturn.toFixed(1)}%
             </span>
             <span class="portfolio-return-label">
@@ -136,58 +163,48 @@ function Card({ bucket, asset }: { bucket: string; asset: AssetMetric }) {
         )}
       </div>
 
-      <div class="portfolio-card-stats">
-        {asset.sharpe !== null && (
-          <span>Sharpe {asset.sharpe.toFixed(1)}</span>
-        )}
-        {asset.max_drawdown !== null && (
-          <span class="portfolio-dd">Max DD {asset.max_drawdown.toFixed(0)}%</span>
-        )}
-        {asset.funding_apr !== null && (
-          <span class="portfolio-funding">Funding {asset.funding_apr.toFixed(1)}%/yr</span>
-        )}
-      </div>
-
-      <p class="portfolio-card-why">{WHY_TEXT[bucket]}</p>
+      {pick && <p class="portfolio-card-why">{pick.reason}</p>}
     </div>
   );
 }
 
-function AlphaCard({ bucket }: { bucket: Bucket }) {
+function AlphaCard({ bucket, risk }: { bucket: Bucket; risk: RiskData | null }) {
   const pairs = bucket.assets;
-  if (pairs.length === 0) {
-    return (
-      <div class="portfolio-card portfolio-card-alpha">
-        <div class="portfolio-card-bucket">Alpha</div>
-        <div class="portfolio-card-risk">{RISK_LABELS["Alpha"]}</div>
-        <div class="portfolio-card-symbol">Carry Book</div>
-        <div class="portfolio-card-name">No active pairs</div>
-        <p class="portfolio-card-why">{WHY_TEXT["Alpha"]}</p>
-      </div>
-    );
-  }
-
-  const topPairs = pairs.slice(0, 3).map((p) => `${p.symbol} ${p.funding_apr?.toFixed(1)}%`).join(" · ");
+  const verdict = risk?.verdict ?? "unknown";
+  const vLabel = VERDICT_LABELS[verdict] ?? { label: verdict, color: "var(--muted)" };
 
   return (
     <div class="portfolio-card portfolio-card-alpha">
       <div class="portfolio-card-bucket">Alpha</div>
-      <div class="portfolio-card-risk">{RISK_LABELS["Alpha"]}</div>
 
       <div class="portfolio-card-symbol">Carry Book</div>
-      <div class="portfolio-card-name">{topPairs}</div>
+      <div class="portfolio-card-name">
+        {pairs.length > 0
+          ? pairs.slice(0, 3).map((p) => p.symbol).join(" + ")
+          : "No active pairs"}
+      </div>
 
       <div class="portfolio-card-return">
         <span class="portfolio-return-value">~11%/yr</span>
         <span class="portfolio-return-label">on notional</span>
       </div>
 
-      <div class="portfolio-card-stats">
-        <span>Live</span>
-        <span>t = 36.0</span>
+      <div class="portfolio-risk-badge" style={{ color: vLabel.color }}>
+        <span class="portfolio-risk-dot" style={{ background: vLabel.color }} />
+        {vLabel.label}
       </div>
 
-      <p class="portfolio-card-why">{WHY_TEXT["Alpha"]}</p>
+      {risk?.pc1_label && (
+        <div class="muted" style={{ fontSize: "11px", marginTop: "4px" }}>
+          {risk.pc1_label}
+          {risk.net_ratio !== undefined && ` · net ratio ${(risk.net_ratio * 100).toFixed(1)}%`}
+        </div>
+      )}
+
+      <p class="portfolio-card-why">
+        Collects funding rates from perpetual futures. Earns regardless of
+        market direction. PCA confirms the book is {vLabel.label.toLowerCase()}.
+      </p>
     </div>
   );
 }

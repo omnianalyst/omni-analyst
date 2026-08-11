@@ -7,6 +7,7 @@ declare module "@neutron-build/core" {
     | `/entity/${string}`
     | "/login"
     | "/objective"
+    | "/scanner"
     | "/search"
     | "/setup"
     | "/system"
