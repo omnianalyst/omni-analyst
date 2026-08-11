@@ -1,4 +1,4 @@
-import { ScannerView } from "../components/ScannerView";
+import { PortfolioView } from "../components/PortfolioView";
 
 export const config = { mode: "app", hydrate: true };
 
@@ -7,5 +7,5 @@ export function head() {
 }
 
 export default function PortfolioPage() {
-  return <ScannerView />;
+  return <PortfolioView />;
 }

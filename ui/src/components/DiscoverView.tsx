@@ -1,29 +1,23 @@
 import { useState } from "preact/hooks";
+import { ScannerView } from "./ScannerView";
 import { SearchView } from "./SearchView";
 import { WatchlistView } from "./WatchlistView";
 import { AlertsView } from "./AlertsView";
 
-type Tab = "search" | "watchlist" | "alerts";
+type Tab = "scanner" | "search" | "watchlist" | "alerts";
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: "scanner", label: "Markets" },
   { id: "search", label: "Search" },
   { id: "watchlist", label: "Watchlists" },
   { id: "alerts", label: "Alerts" },
 ];
 
 export function DiscoverView() {
-  const [tab, setTab] = useState<Tab>("search");
+  const [tab, setTab] = useState<Tab>("scanner");
 
   return (
     <div class="discover-view">
-      <header class="page-head">
-        <h1>Discover</h1>
-        <p class="muted">
-          Find entities in the coverage store, track them on watchlists, and
-          set alerts on the claim types that matter.
-        </p>
-      </header>
-
       <div class="tab-bar" role="tablist">
         {TABS.map((t) => (
           <button
@@ -39,6 +33,7 @@ export function DiscoverView() {
       </div>
 
       <div class="tab-content" role="tabpanel">
+        {tab === "scanner" && <ScannerView />}
         {tab === "search" && <SearchView />}
         {tab === "watchlist" && <WatchlistView />}
         {tab === "alerts" && <AlertsView />}
