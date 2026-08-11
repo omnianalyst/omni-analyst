@@ -45,6 +45,7 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 import numpy as np
 
@@ -56,7 +57,7 @@ SETTLEMENTS_PER_YEAR = Decimal(24 * 365)
 _QUERY = """
 SELECT
     c.event_date,
-    split_part(c.key, ':', 2)  AS asset,
+    split_part(split_part(c.key, ':', 2), '/', 1)  AS asset,
     (c.value ->> 'rate')::numeric AS rate
 FROM ({visible}) c
 WHERE c.claim_type = 'funding_rate'
@@ -67,7 +68,7 @@ ORDER BY c.event_date
 """
 
 
-async def load_funding_panel(pool, *, venue: str, assets: list[str], start: datetime, end: datetime):
+async def load_funding_panel(pool, *, venue: str, assets: list[str], start: datetime, end: datetime, audience=None):
     """Read funding history into a pandas DataFrame indexed by timestamp.
 
     Returns a wide frame: rows = settlement timestamps, columns = asset
@@ -80,7 +81,7 @@ async def load_funding_panel(pool, *, venue: str, assets: list[str], start: date
 
     rows = await pool.fetch(
         _QUERY.format(visible=visible_claims_cte("$1")),
-        None,
+        audience,
         venue,
         start,
         end,
@@ -222,6 +223,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--cost-bps", type=str, default="28")
     parser.add_argument("--lookback-days", type=int, default=7)
     parser.add_argument("--universe", nargs="*", default=CARRY_UNIVERSE)
+    parser.add_argument("--audience", default=None, help="UUID of the BYO credential owner for private funding claims")
     args = parser.parse_args(argv)
 
     cost_bps = Decimal(args.cost_bps)
@@ -238,6 +240,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
             assets=args.universe,
             start=start,
             end=end,
+            audience=UUID(args.audience) if args.audience else None,
         )
 
         missing = set(args.universe) - found
