@@ -22,6 +22,7 @@ import {
 } from "../lib/trading";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
+import { WalletAccounts } from "./WalletAccounts";
 
 type Resource<T> =
   | { kind: "ok"; data: T }
@@ -221,6 +222,8 @@ export function PortfolioView() {
         </div>
         <NavChart points={chartHistory} />
       </section>
+
+      <WalletAccounts />
 
       <div class="portfolio-grid">
         <section class="surface-card holdings-card">
