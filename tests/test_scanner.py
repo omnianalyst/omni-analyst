@@ -1,5 +1,6 @@
 """Measured rankings used by the Discover market scanner."""
 
+import math
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
@@ -147,3 +148,19 @@ def test_short_history_does_not_claim_five_or_ten_year_performance() -> None:
 
     assert metrics["cagr_5y"] is None
     assert metrics["cagr_10y"] is None
+
+
+def test_metrics_discard_non_finite_and_non_positive_feed_values() -> None:
+    index = pd.date_range("2020-01-02", periods=500, freq="B")
+    values = pd.Series(range(100, 600), index=index, dtype=float)
+    values.iloc[20] = float("inf")
+    values.iloc[30] = float("-inf")
+    values.iloc[40] = 0
+
+    metrics = _compute_metrics(values)
+
+    assert all(
+        value is None or not isinstance(value, float) or math.isfinite(value)
+        for key, value in metrics.items()
+        if key != "returns"
+    )

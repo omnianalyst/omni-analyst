@@ -207,6 +207,7 @@ def _fetch_prices() -> pd.DataFrame:
 
 def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str, Any]:
     prices = prices.dropna()
+    prices = prices[np.isfinite(prices.astype(float)) & (prices.astype(float) > 0)]
     if len(prices) < 30:
         return {
             "price": float(prices.iloc[-1]) if len(prices) > 0 else None,
