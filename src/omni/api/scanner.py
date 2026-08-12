@@ -93,6 +93,7 @@ ASSETS: dict[str, list[dict[str, str]]] = {
         {"symbol": "DOT", "name": "Polkadot", "yf": "DOT-USD", "asset_class": "crypto", "area": "Digital assets"},
         {"symbol": "LTC", "name": "Litecoin", "yf": "LTC-USD", "asset_class": "crypto", "area": "Digital assets"},
         {"symbol": "BCH", "name": "Bitcoin Cash", "yf": "BCH-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "XMR", "name": "Monero", "yf": "XMR-USD", "asset_class": "crypto", "area": "Digital assets"},
     ],
     "Deflation": [
         {"symbol": "TLT", "name": "iShares 20+ Year Treasury", "yf": "TLT",
@@ -464,24 +465,27 @@ async def _sector_leaders(pool, audience) -> list[dict]:
 def _payload(buckets_data: list[dict], sectors: list[dict]) -> dict:
     assets = [asset for bucket in buckets_data for asset in bucket["assets"]]
 
-    def ranked(score: str) -> list[dict]:
-        available = [asset for asset in assets if asset.get("scores", {}).get(score) is not None]
-        available.sort(key=lambda asset: asset["scores"][score], reverse=True)
-        return available[:15]
+    def category_ranked(asset_class: str) -> list[dict]:
+        available = [
+            asset
+            for asset in assets
+            if asset["asset_class"] == asset_class
+            and asset.get("scores", {}).get("balanced") is not None
+        ]
+        available.sort(key=lambda asset: asset["scores"]["balanced"], reverse=True)
+        return available
 
     return {
         "buckets": buckets_data,
-        "asset_rankings": {
-            "balanced": ranked("balanced"),
-            "durable_growth": ranked("durable_growth"),
-            "consistency": ranked("consistency"),
-            "stability": ranked("stability"),
-            "diversification": ranked("diversification"),
+        "category_rankings": {
+            "stocks": category_ranked("stocks"),
+            "defensive": category_ranked("defensive"),
+            "crypto": category_ranked("crypto"),
         },
         "ranking_method": {
-            "balanced": "35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification; available measures are reweighted when history is shorter.",
+            "balanced": "Within each category: 35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification; available measures are reweighted when history is shorter.",
             "history": "One-year return is trailing. Five- and ten-year figures are annualized. Median return uses complete calendar years; long-term and consistency ranks require at least three complete years.",
-            "scope": "Scores are percentile ranks within the broad assets measured here, not forecasts or recommendations.",
+            "scope": "Scores are percentile ranks against the other assets in the same category, not forecasts or recommendations.",
         },
         "sectors": sectors,
         "overall_leaders": _overall_leaders(sectors),
@@ -547,7 +551,8 @@ async def _build_scanner(app: App, audience) -> dict:
             "assets": bucket_assets,
         })
 
-    _score_assets(all_entries)
+    for asset_class in ("stocks", "defensive", "crypto"):
+        _score_assets([entry for entry in all_entries if entry["asset_class"] == asset_class])
     for bucket in buckets_data:
         bucket["assets"].sort(
             key=lambda asset: asset.get("scores", {}).get("balanced") or -1,

@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 
 from omni.api.scanner import (
+    ASSETS,
     SECTOR_RETURN_WINDOW,
     _compute_metrics,
     _correlation_to_market,
@@ -13,6 +14,12 @@ from omni.api.scanner import (
     _risk_tier,
     _sector_leader_payload,
 )
+
+
+def test_crypto_universe_includes_monero() -> None:
+    symbols = {asset["symbol"] for asset in ASSETS["Debasement"]}
+
+    assert "XMR" in symbols
 
 
 def _history(symbol: str, name: str, start: float, finish: float) -> list[dict]:

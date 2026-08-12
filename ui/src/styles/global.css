@@ -3314,6 +3314,121 @@ tr.row.tier-unknown td:first-child {
   flex-wrap: wrap;
   gap: 5px;
 }
+.ranking-definition {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 17px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: rgba(11, 17, 26, 0.58);
+}
+.ranking-definition strong {
+  font-size: 12px;
+}
+.ranking-definition p {
+  max-width: 900px;
+  margin: 3px 0 0;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.canonical-rankings {
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+}
+.rank-category {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.rank-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: rgba(11, 17, 26, 0.7);
+  box-shadow: var(--shadow-card);
+}
+.rank-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.rank-table th {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--faint);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-align: right;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.rank-table th:nth-child(1),
+.rank-table th:nth-child(2) {
+  text-align: left;
+}
+.rank-table td {
+  padding: 11px 12px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+}
+.rank-table tbody tr:first-child td {
+  border-top: 0;
+}
+.rank-table tbody tr:hover {
+  background: rgba(92, 197, 255, 0.035);
+}
+.rank-table td:first-child,
+.rank-table td:nth-child(2) {
+  text-align: left;
+}
+.rank-number {
+  display: inline-grid;
+  width: 23px;
+  height: 23px;
+  place-items: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 50%;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+.rank-table tr:nth-child(-n + 3) .rank-number {
+  border-color: rgba(92, 197, 255, 0.3);
+  color: var(--accent);
+}
+.rank-asset {
+  display: flex;
+  min-width: 190px;
+  flex-direction: column;
+}
+.rank-asset strong {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.rank-asset small {
+  overflow: hidden;
+  max-width: 260px;
+  color: var(--faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+}
+.canonical-score {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 14px;
+}
+.canonical-methodology {
+  margin-top: -8px;
+  padding: 0 2px;
+}
 .rank-switch button,
 .position-filters button {
   padding: 6px 9px;
@@ -4069,6 +4184,19 @@ tr.row.tier-unknown td:first-child {
   }
   .asset-card-measures-four > div:nth-child(4) {
     border-top: 1px solid var(--border-soft);
+  }
+  .ranking-definition {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .rank-table th:nth-child(6),
+  .rank-table td:nth-child(6),
+  .rank-table th:nth-child(7),
+  .rank-table td:nth-child(7) {
+    display: none;
+  }
+  .rank-asset {
+    min-width: 135px;
   }
   .discover-controls > div {
     width: 100%;
