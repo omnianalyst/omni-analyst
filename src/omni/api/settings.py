@@ -141,10 +141,54 @@ def build_router(app: App) -> Router:
         if venue_key not in saved["venues"]:
             saved["venues"][venue_key] = {}
         saved["venues"][venue_key]["enabled"] = enabled
+
+        if enabled and body.get("credentials"):
+            saved["venues"][venue_key]["credentials"] = body["credentials"]
+
         await _save_settings(app.db.pool, audience, saved)
+
+        from omni.venue.manager import refresh_venues
+        status = await refresh_venues(app.db.pool, audience)
 
         if venue_key == "ibkr" and enabled:
             return {"status": "enabled", "note": "IB Gateway container will start on next scheduler cycle"}
-        return {"status": "enabled" if enabled else "disabled"}
+        return {"status": "enabled" if enabled else "disabled", "venue_status": status.get(venue_key, "unknown")}
+
+    @router.get("/settings/venues/status")
+    async def venue_status(request: Request) -> dict:
+        """Live status of all connected venues — positions and balances."""
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            from neutron.error import unauthorized
+            raise unauthorized("Authentication required")
+
+        from omni.venue.manager import connected_venues, refresh_venues
+        status = await refresh_venues(app.db.pool, audience)
+        venues = connected_venues()
+
+        venue_data: list[dict] = []
+        for key, venue in venues.items():
+            entry: dict[str, Any] = {"key": key, "name": getattr(venue, "name", key)}
+            try:
+                positions = await venue.positions()
+                entry["positions"] = [
+                    {"symbol": p.symbol, "quantity": str(p.quantity),
+                     "market_type": p.market_type.value if hasattr(p.market_type, "value") else str(p.market_type),
+                     "average_entry": str(p.average_entry)}
+                    for p in positions
+                ]
+            except Exception:  # noqa: BLE001
+                entry["positions"] = []
+            try:
+                balances = await venue.balances()
+                entry["balances"] = [
+                    {"asset": b.asset, "free": str(b.free), "locked": str(b.locked)}
+                    for b in balances
+                ]
+            except Exception:  # noqa: BLE001
+                entry["balances"] = []
+            venue_data.append(entry)
+
+        return {"venues": venue_data, "status": status}
 
     return router

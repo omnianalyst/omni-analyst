@@ -105,7 +105,22 @@ def _detect_resolved_yes(outcomes: list[Any], prices: list[Any]) -> bool:
     return yes_won
 
 
-def _parse_market(raw: Mapping[str, Any]) -> ResolvedMarket:
+def _parse_market(raw: Mapping[str, Any]) -> list[ResolvedMarket]:
+    """Parse one Gamma market row, decomposing NegRisk multi-outcome markets
+    into N binary markets. Always returns a list (length 1 for plain Yes/No,
+    length N for NegRisk, length 0 should never happen — that's a raise).
+
+    Decomposition rule: a NegRisk event like "Who will win the 2028 nomination?"
+    with outcomes `["Trump", "DeSantis", "Harris"]` becomes three binary
+    markets, each asking "Will <name> win the 2028 nomination?". The winning
+    candidate resolves YES=$1 on their sub-market and NO=$0 on everyone
+    else's; that maps cleanly onto the existing binary resolution detection.
+
+    Non-NegRisk multi-outcome markets (some crypto threshold markets,
+    sports scores) are still refused — they lack the NegRisk contract's
+    binary-guarantee semantics, and treating them as YES-or-field would be
+    the kind of substitution this project exists not to make.
+    """
     if not isinstance(raw, Mapping):
         raise Unavailable(f"market record is {type(raw).__name__}, not a mapping")
     condition_id = str(raw.get("id", "")).strip()
@@ -117,30 +132,142 @@ def _parse_market(raw: Mapping[str, Any]) -> ResolvedMarket:
     category = str(raw.get("category") or "Other").strip() or "Other"
     outcomes = _parse_stringified_array(raw.get("outcomes"), "outcomes")
     prices = _parse_stringified_array(raw.get("outcomePrices"), "outcomePrices")
-    resolved_yes = _detect_resolved_yes(outcomes, prices)
-
     tokens = _parse_stringified_array(raw.get("clobTokenIds"), "clobTokenIds")
-    yes_token = str(tokens[0]) if len(tokens) >= 1 else None
-    no_token = str(tokens[1]) if len(tokens) >= 2 else None
+    neg_risk = bool(raw.get("negRisk", False))
 
     try:
         volume = float(raw.get("volume") or 0.0)
     except (TypeError, ValueError):
         raise Unavailable(f"volume is not numeric: {raw.get('volume')!r}")
 
-    return ResolvedMarket(
-        condition_id=condition_id,
-        question=question,
-        category=category,
-        resolved_yes=resolved_yes,
-        resolution_date=_parse_iso(raw.get("endDate"), "endDate"),
-        created_at=_parse_iso(raw.get("startDate"), "startDate"),
-        yes_token_id=yes_token,
-        no_token_id=no_token,
-        neg_risk=bool(raw.get("negRisk", False)),
-        slug=str(raw.get("slug") or ""),
-        volume=volume,
+    end_date = _parse_iso(raw.get("endDate"), "endDate")
+    start_date = _parse_iso(raw.get("startDate"), "startDate")
+    slug = str(raw.get("slug") or "")
+
+    # Plain Yes/No binary
+    if len(outcomes) == 2 and str(outcomes[0]).strip().lower() == "yes":
+        resolved_yes = _detect_resolved_yes(outcomes, prices)
+        yes_token = str(tokens[0]) if len(tokens) >= 1 else None
+        no_token = str(tokens[1]) if len(tokens) >= 2 else None
+        return [
+            ResolvedMarket(
+                condition_id=condition_id,
+                question=question,
+                category=category,
+                resolved_yes=resolved_yes,
+                resolution_date=end_date,
+                created_at=start_date,
+                yes_token_id=yes_token,
+                no_token_id=no_token,
+                neg_risk=False,
+                slug=slug,
+                volume=volume,
+            )
+        ]
+
+    # NegRisk multi-outcome: decompose to N binary markets
+    if neg_risk and len(outcomes) >= 2 and len(prices) == len(outcomes):
+        return _decompose_negrisk(
+            condition_id=condition_id,
+            question=question,
+            category=category,
+            outcomes=outcomes,
+            prices=prices,
+            tokens=tokens,
+            volume=volume,
+            end_date=end_date,
+            start_date=start_date,
+            slug=slug,
+        )
+
+    # Otherwise: not a Yes/No binary and not a flagged NegRisk event. Refuse.
+    raise Unavailable(
+        f"market {condition_id}: outcomes={outcomes!r} neg_risk={neg_risk} — "
+        f"not a Yes/No binary and not a supported NegRisk event"
     )
+
+
+def _decompose_negrisk(
+    *,
+    condition_id: str,
+    question: str,
+    category: str,
+    outcomes: list,
+    prices: list,
+    tokens: list,
+    volume: float,
+    end_date: datetime,
+    start_date: datetime,
+    slug: str,
+) -> list[ResolvedMarket]:
+    """Turn one NegRisk multi-outcome event into N binary ResolvedMarkets.
+
+    Each outcome `<name>` becomes a binary market asking "Will <name> win:
+    <question>?". The winning outcome is the one whose resolved price is 1.0;
+    all others are 0.0. If the price vector doesn't cleanly resolve to
+    exactly one winner, EVERY decomposed sub-market raises — a NegRisk event
+    that didn't cleanly resolve cannot be scored per-outcome either.
+
+    The parent event's `volume` is inherited by each sub-market. This
+    over-counts traded volume if the consumer sums across sub-markets, but
+    matches how the parent event's liquidity is actually shared; per-sub-
+    market volume is not separately reported by Gamma.
+
+    The synthetic `condition_id` is `<parent_id>:<outcome_index>` — unique
+    per sub-market, traceable to the parent.
+    """
+    import math
+
+    try:
+        price_floats = [float(p) for p in prices]
+    except (TypeError, ValueError) as exc:
+        raise Unavailable(f"NegRisk prices not numeric: {prices!r}") from exc
+
+    if not all(math.isfinite(p) for p in price_floats):
+        raise Unavailable(f"NegRisk prices not finite: {prices!r}")
+
+    # Detect winner: exactly one outcome at 1.0, all others at 0.0.
+    winners = [i for i, p in enumerate(price_floats) if math.isclose(p, 1.0, abs_tol=1e-6)]
+    if len(winners) == 0:
+        # No winner: market not yet resolved OR tied-at-zero (cancelled).
+        # Refuse rather than guess.
+        raise Unavailable(
+            f"NegRisk event {condition_id}: no outcome resolved at 1.0; "
+            f"either unresolved or cancelled"
+        )
+    if len(winners) > 1:
+        raise Unavailable(
+            f"NegRisk event {condition_id}: {len(winners)} outcomes resolved at 1.0; "
+            f"ambiguous, refusing to score"
+        )
+    winner_idx = winners[0]
+
+    decomposed: list[ResolvedMarket] = []
+    for i, outcome_name in enumerate(outcomes):
+        name = str(outcome_name).strip()
+        if not name:
+            continue
+        yes_token = str(tokens[i]) if i < len(tokens) else None
+        sub_id = f"{condition_id}:{i}"
+        sub_question = f"Will {name} win: {question}"
+        decomposed.append(
+            ResolvedMarket(
+                condition_id=sub_id,
+                question=sub_question,
+                category=category,
+                resolved_yes=(i == winner_idx),
+                resolution_date=end_date,
+                created_at=start_date,
+                yes_token_id=yes_token,
+                no_token_id=None,
+                neg_risk=True,
+                slug=slug,
+                volume=volume,
+            )
+        )
+    if not decomposed:
+        raise Unavailable(f"NegRisk event {condition_id}: no usable outcomes in {outcomes!r}")
+    return decomposed
 
 
 def _filter_markets(
@@ -228,7 +355,7 @@ async def list_resolved_markets(
         if not isinstance(item, Mapping):
             continue
         try:
-            parsed.append(_parse_market(item))
+            parsed.extend(_parse_market(item))
         except (Unavailable, ValueError) as exc:
             if strict:
                 raise

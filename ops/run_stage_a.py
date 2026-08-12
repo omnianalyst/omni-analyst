@@ -129,6 +129,9 @@ def _parse_args() -> argparse.Namespace:
                    help="per-trade stake for the P&L backtest (default $5)")
     p.add_argument("--taker", action="store_true",
                    help="use taker fee curve for the P&L backtest (default maker=0)")
+    p.add_argument("--threshold-list", type=str, default=None,
+                   help="comma-separated thresholds to sweep (e.g. '0.01,0.02,0.05'); "
+                        "runs LLM once per market then applies each threshold offline")
     p.add_argument("--horizon-days", type=int, default=7)
     p.add_argument("--tolerance-hours", type=int, default=6)
     p.add_argument("--max-concurrent", type=int, default=1)
@@ -284,7 +287,57 @@ def _build_document_provider(args: argparse.Namespace):
     return compose_providers(*providers)
 
 
+def _print_threshold_sweep(report, args) -> None:
+    """Print the P&L curve across the requested thresholds.
+
+    The sweep runs offline on the same LLM outputs the single-threshold
+    backtest used — no extra model calls. Used to identify the P&L-optimal
+    threshold and the trade-count sensitivity.
+    """
+    from omni.polymarket.calibrate import sweep_thresholds
+
+    try:
+        thresholds = tuple(float(t.strip()) for t in args.threshold_list.split(","))
+    except ValueError:
+        _stderr(f"could not parse --threshold-list: {args.threshold_list!r}")
+        return
+    if not thresholds:
+        return
+
+    results = sweep_thresholds(
+        report.trade_pairs,
+        thresholds=thresholds,
+        size_usd=args.size_usd,
+        taker=args.taker,
+    )
+    fee_mode = "taker" if args.taker else "maker"
+    print(f"\nThreshold sweep — size=${args.size_usd}, {fee_mode} fees:")
+    print(f"  {'thresh':>7} {'trades':>7} {'win_rate':>9} {'gross':>9} {'fees':>8} {'net':>9} {'roi/trade':>10}")
+    for t in thresholds:
+        s = results[t]
+        if s.n_closed == 0:
+            print(f"  {t*100:>6.1f}% {s.n_closed:>7} {'-':>9} {'-':>9} {'-':>8} {'-':>9} {'-':>10}")
+            continue
+        wr = f"{s.win_rate*100:.1f}%" if s.win_rate is not None else "-"
+        roi = f"{s.avg_roi_pct:+.2f}%" if s.avg_roi_pct is not None else "-"
+        print(
+            f"  {t*100:>6.1f}% {s.n_closed:>7} {wr:>9} "
+            f"${s.gross_pnl:>+7.2f} ${s.fee_pnl:>+6.2f} ${s.net_pnl:>+7.2f} {roi:>10}"
+        )
+    cumulative_usd = sum(results[t].net_pnl for t in thresholds if results[t].n_closed)
+    print(f"\n  cumulative net across all thresholds (with duplicates): ${cumulative_usd:+.2f}")
+
+
 async def _run_single(model, snapshots, args) -> tuple:
+    """One harness run over all snapshots. Returns (report,)."""
+    from omni.polymarket.calibrate import run_stage_a
+    report = await run_stage_a(
+        model, snapshots, method=args.method,
+        pnl_threshold=args.pnl_threshold,
+        pnl_size_usd=args.size_usd,
+        pnl_taker=args.taker,
+    )
+    return (report,)
     """One harness run over all snapshots. Returns (report,)."""
     from omni.polymarket.calibrate import run_stage_a
     report = await run_stage_a(
@@ -441,6 +494,8 @@ async def main() -> int:
                     _print_json_report(report, prep_exclusions)
                 else:
                     _print_human_report(report, prep_exclusions, args)
+                    if args.threshold_list and report.trade_pairs:
+                        _print_threshold_sweep(report, args)
         except KeyboardInterrupt:
             _stderr("interrupted; no report.")
             return 130

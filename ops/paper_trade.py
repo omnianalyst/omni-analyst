@@ -99,7 +99,8 @@ def _parse_args() -> argparse.Namespace:
     sp_scan.add_argument("--target-markets", type=int, default=50)
     sp_scan.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     sp_scan.add_argument("--size-usd", type=float, default=DEFAULT_SIZE_USD)
-    sp_scan.add_argument("--min-volume", type=float, default=1000.0)
+    sp_scan.add_argument("--min-volume", type=float, default=100.0,
+                         help="filter micro-volume markets; 100 is the floor with usable price signal")
     sp_scan.add_argument("--max-pages", type=int, default=5)
     sp_scan.add_argument("--model", default="glm-5.2")
     sp_scan.add_argument("--thinking", choices=("max", "auto", "none"), default="auto")

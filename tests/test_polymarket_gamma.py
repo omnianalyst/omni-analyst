@@ -64,7 +64,7 @@ class TestListResolvedMarkets:
     async def test_wrong_yes_label_refused(self):
         payload = _market_payload(outcomes=json.dumps(["Up", "Down"]))
         async with _client(lambda req: httpx.Response(200, json=[payload])) as c:
-            with pytest.raises(Unavailable, match="outcome\\[0\\]"):
+            with pytest.raises(Unavailable, match="not a Yes/No binary"):
                 await list_resolved_markets(c, limit=10)
 
     async def test_http_error_raises_unavailable(self):
@@ -140,6 +140,98 @@ class TestListResolvedMarkets:
         async with _client(lambda req: httpx.Response(200, json={"oops": True})) as c:
             with pytest.raises(Unavailable, match="expected a list"):
                 await list_resolved_markets(c, limit=10, strict=False)
+
+
+class TestNegRiskDecomposition:
+    """Multi-outcome markets flagged `negRisk: true` decompose into N binary
+    markets, one per outcome. Each sub-market asks "Will <name> win: <parent>?"
+    and resolves YES for the winner, NO for everyone else."""
+
+    def _negrisk_payload(self, **overrides):
+        base = {
+            "id": "0xnr",
+            "question": "Who will win the 2028 nomination?",
+            "category": "Politics",
+            "outcomes": json.dumps(["Trump", "DeSantis", "Harris"]),
+            "outcomePrices": json.dumps(["1.0", "0.0", "0.0"]),
+            "clobTokenIds": json.dumps(["tok-t", "tok-d", "tok-h"]),
+            "startDate": "2024-01-01T00:00:00Z",
+            "endDate": "2028-11-01T00:00:00Z",
+            "negRisk": True,
+            "slug": "2028-nomination",
+            "volume": "500000.0",
+        }
+        base.update(overrides)
+        return base
+
+    async def test_clean_negrisk_decomposes_to_n_markets(self):
+        async with _client(lambda r: httpx.Response(200, json=[self._negrisk_payload()])) as c:
+            markets = await list_resolved_markets(c, limit=10)
+        assert len(markets) == 3
+        questions = [m.question for m in markets]
+        assert all("Will" in q and "win" in q for q in questions)
+        assert any("Trump" in q for q in questions)
+        assert any("DeSantis" in q for q in questions)
+        assert any("Harris" in q for q in questions)
+
+    async def test_winner_marked_resolved_yes(self):
+        async with _client(lambda r: httpx.Response(200, json=[self._negrisk_payload()])) as c:
+            markets = await list_resolved_markets(c, limit=10)
+        # Trump won (price=1.0)
+        winner = next(m for m in markets if "Trump" in m.question)
+        loser = next(m for m in markets if "DeSantis" in m.question)
+        assert winner.resolved_yes is True
+        assert loser.resolved_yes is False
+
+    async def test_unique_condition_ids_per_submarket(self):
+        async with _client(lambda r: httpx.Response(200, json=[self._negrisk_payload()])) as c:
+            markets = await list_resolved_markets(c, limit=10)
+        ids = [m.condition_id for m in markets]
+        assert len(set(ids)) == 3
+        assert all(cid.startswith("0xnr:") for cid in ids)
+
+    async def test_per_outcome_token_assigned(self):
+        async with _client(lambda r: httpx.Response(200, json=[self._negrisk_payload()])) as c:
+            markets = await list_resolved_markets(c, limit=10)
+        trump = next(m for m in markets if "Trump" in m.question)
+        harris = next(m for m in markets if "Harris" in m.question)
+        assert trump.yes_token_id == "tok-t"
+        assert harris.yes_token_id == "tok-h"
+        assert trump.no_token_id is None  # NegRisk sub-markets have no separate NO token
+
+    async def test_negrisk_no_winner_refused(self):
+        # All outcomes at 0 — market unresolved or cancelled.
+        payload = self._negrisk_payload(outcomePrices=json.dumps(["0.0", "0.0", "0.0"]))
+        async with _client(lambda r: httpx.Response(200, json=[payload])) as c:
+            with pytest.raises(Unavailable, match="no outcome resolved"):
+                await list_resolved_markets(c, limit=10)
+
+    async def test_negrisk_multiple_winners_refused(self):
+        payload = self._negrisk_payload(outcomePrices=json.dumps(["1.0", "1.0", "0.0"]))
+        async with _client(lambda r: httpx.Response(200, json=[payload])) as c:
+            with pytest.raises(Unavailable, match="ambiguous"):
+                await list_resolved_markets(c, limit=10)
+
+    async def test_non_negrisk_multi_outcome_refused(self):
+        # Multi-outcome but no negRisk flag — refuse rather than guess semantics.
+        payload = self._negrisk_payload(negRisk=False)
+        async with _client(lambda r: httpx.Response(200, json=[payload])) as c:
+            with pytest.raises(Unavailable, match="not a supported NegRisk"):
+                await list_resolved_markets(c, limit=10)
+
+    async def test_negrisk_lenient_mode_skips_unresolved_events(self):
+        # Unresolved NegRisk event (no winner) in lenient mode: skipped, not fatal.
+        bad = self._negrisk_payload(outcomePrices=json.dumps(["0.5", "0.3", "0.2"]))
+        good = self._negrisk_payload(id="0xnr2")
+        skipped = []
+        async with _client(lambda r: httpx.Response(200, json=[good, bad])) as c:
+            markets = await list_resolved_markets(
+                c, limit=10, strict=False,
+                on_skip=lambda raw, exc: skipped.append((raw.get("id"), str(exc))),
+            )
+        assert len(markets) == 3
+        assert len(skipped) == 1
+        assert skipped[0][0] == "0xnr"
 
 
 class TestListResolvedMarketsUntil:
