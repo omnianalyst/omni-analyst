@@ -1,12 +1,12 @@
-"""Cross-asset market scanner: the five-bucket dashboard.
+"""Cross-asset market scanner: sector leadership plus five regime buckets.
 
-Shows every tracked asset across the five portfolio buckets (growth, debasement,
-deflation, safety, alpha) with trailing returns, risk metrics, and for crypto
-the current funding rate that the carry book ranks on.
+Shows the leading measured companies in each GICS sector, followed by tracked
+assets across the five portfolio buckets (growth, debasement, deflation, safety,
+alpha) with trailing returns, risk metrics, and current crypto funding rates.
 
-Price data comes from yfinance (display-only, never ingested as claims — same
-pattern as the research probes). Funding rates come from the claim store.
-Results are cached for 1 hour to keep the endpoint fast.
+Broad-asset prices come from yfinance (display-only, never ingested as claims —
+the same pattern as the research probes). Company histories and funding rates
+come from the audience-visible claim store. Results are cached for 1 hour.
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ from omni.auth import resolve_audience_from_request
 from omni.coverage.visibility import visible_claims_cte
 
 CACHE_TTL = 3600
-_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+SECTOR_RETURN_WINDOW = 30
+SECTOR_LEADER_COUNT = 3
+_cache: dict[str, dict[str, Any]] = {}
 
 ASSETS: dict[str, list[dict[str, str]]] = {
     "Growth": [
@@ -169,17 +171,131 @@ async def _funding_rates(pool, audience) -> dict[str, float | None]:
     return out
 
 
-def _payload(buckets_data: list[dict]) -> dict:
-    return {"buckets": buckets_data, "as_of": datetime.now(UTC).isoformat()}
+def _price(value: Any) -> float | None:
+    if isinstance(value, (str, bytes)):
+        import json
+
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("close", value.get("price"))
+    try:
+        price = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return price if price > 0 else None
+
+
+def _sector_leader_payload(rows: list[Any]) -> list[dict]:
+    """Rank companies within each sector from visible 30-session histories."""
+    histories: dict[tuple[str, str, str, str], list[tuple[Any, Any]]] = {}
+    for row in rows:
+        key = (
+            row["sector_symbol"],
+            row["sector_name"],
+            row["symbol"],
+            row["name"],
+        )
+        histories.setdefault(key, []).append((row["event_date"], row["value"]))
+
+    ranked: dict[tuple[str, str], list[dict]] = {}
+    for (sector_symbol, sector_name, symbol, name), observations in histories.items():
+        valid = [
+            (event_date, price)
+            for event_date, value in observations
+            if (price := _price(value)) is not None
+        ]
+        valid.sort(key=lambda item: item[0], reverse=True)
+        if len(valid) <= SECTOR_RETURN_WINDOW:
+            continue
+        latest_date, latest = valid[0]
+        _, start = valid[SECTOR_RETURN_WINDOW]
+        sector_key = (sector_symbol, sector_name)
+        ranked.setdefault(sector_key, []).append({
+            "symbol": symbol,
+            "name": name,
+            "return_30d": round((latest / start - 1) * 100, 2),
+            "as_of": latest_date.isoformat(),
+        })
+
+    sectors: list[dict] = []
+    for (sector_symbol, sector_name), companies in ranked.items():
+        companies.sort(key=lambda company: company["return_30d"], reverse=True)
+        sectors.append({
+            "name": sector_name,
+            "symbol": sector_symbol,
+            "coverage": len(companies),
+            "leaders": companies[:SECTOR_LEADER_COUNT],
+        })
+    sectors.sort(key=lambda sector: sector["name"])
+    return sectors
+
+
+async def _sector_leaders(pool, audience) -> list[dict]:
+    rows = await pool.fetch(
+        f"""
+        WITH visible AS (
+        {visible_claims_cte("$1")}
+        ), observations AS (
+            SELECT DISTINCT ON (c.entity_id, c.event_date)
+                   company.symbol, company.name,
+                   sector.symbol AS sector_symbol,
+                   COALESCE(sector.identifiers ->> 'gics_sector', sector.name)
+                       AS sector_name,
+                   c.event_date, c.knowledge_date, c.value
+            FROM visible c
+            JOIN entity company ON company.id = c.entity_id
+            JOIN entity_edge edge
+              ON edge.from_entity = company.id
+             AND edge.relation = 'member_of_sector'
+            JOIN entity sector
+              ON sector.id = edge.to_entity
+             AND sector.kind = 'sector_etf'
+            WHERE company.kind = 'company'
+              AND c.claim_type = 'price_snapshot'
+            ORDER BY c.entity_id, c.event_date, c.knowledge_date DESC
+        ), ranked AS (
+            SELECT *, row_number() OVER (
+                PARTITION BY symbol ORDER BY event_date DESC
+            ) AS observation_rank
+            FROM observations
+        )
+        SELECT symbol, name, sector_symbol, sector_name, event_date, value
+        FROM ranked
+        WHERE observation_rank <= {SECTOR_RETURN_WINDOW + 1}
+        ORDER BY sector_name, symbol, event_date DESC
+        """,
+        audience,
+    )
+    return _sector_leader_payload(rows)
+
+
+def _payload(buckets_data: list[dict], sectors: list[dict]) -> dict:
+    return {
+        "buckets": buckets_data,
+        "sectors": sectors,
+        "sector_coverage": {
+            "available": len(sectors),
+            "total": 11,
+            "window_sessions": SECTOR_RETURN_WINDOW,
+        },
+        "as_of": datetime.now(UTC).isoformat(),
+    }
 
 
 async def _build_scanner(app: App, audience) -> dict:
     now = time.time()
-    if _cache["data"] is not None and now - _cache["ts"] < CACHE_TTL:
-        return _cache["data"]
+    cache_key = str(audience) if audience is not None else "shared"
+    cached = _cache.get(cache_key)
+    if cached is not None and now - cached["ts"] < CACHE_TTL:
+        return cached["data"]
 
     prices = _fetch_prices()
     funding = await _funding_rates(app.db.pool, audience)
+    sectors = await _sector_leaders(app.db.pool, audience)
 
     buckets_data: list[dict] = []
     for bucket_name, assets in ASSETS.items():
@@ -224,9 +340,8 @@ async def _build_scanner(app: App, audience) -> dict:
         "assets": carry_pairs,
     })
 
-    payload = _payload(buckets_data)
-    _cache["data"] = payload
-    _cache["ts"] = now
+    payload = _payload(buckets_data, sectors)
+    _cache[cache_key] = {"data": payload, "ts": now}
     return payload
 
 
