@@ -6,6 +6,7 @@ import pandas as pd
 
 from omni.api.scanner import (
     SECTOR_RETURN_WINDOW,
+    _compute_metrics,
     _correlation_to_market,
     _market_behavior,
     _overall_leaders,
@@ -45,7 +46,7 @@ def test_sector_leaders_rank_returns_and_limit_the_display() -> None:
     assert [leader["symbol"] for leader in sectors[0]["leaders"]] == [
         "TOP", "MID", "LOW", "FLAT"
     ]
-    assert sectors[0]["leaders"][0]["return_30d"] == 30.0
+    assert sectors[0]["leaders"][0]["return_1y"] == 30.0
 
 
 def test_sector_leaders_exclude_incomplete_or_invalid_histories() -> None:
@@ -84,12 +85,12 @@ def test_overall_leaders_rank_across_sector_boundaries() -> None:
         {
             "name": "Technology",
             "symbol": "XLK",
-            "leaders": [{"symbol": "AAA", "return_30d": 12.0}],
+            "leaders": [{"symbol": "AAA", "return_1y": 12.0}],
         },
         {
             "name": "Energy",
             "symbol": "XLE",
-            "leaders": [{"symbol": "BBB", "return_30d": 20.0}],
+            "leaders": [{"symbol": "BBB", "return_1y": 20.0}],
         },
     ]
 
@@ -97,3 +98,23 @@ def test_overall_leaders_rank_across_sector_boundaries() -> None:
 
     assert [company["symbol"] for company in overall] == ["BBB", "AAA"]
     assert overall[0]["sector"] == "Energy"
+
+
+def test_long_horizon_metrics_use_cagr_and_complete_calendar_years() -> None:
+    index = pd.date_range("2015-01-02", "2026-08-10", freq="B")
+    prices = pd.Series(100 * (1.10 ** ((index - index[0]).days / 365.2425)), index=index)
+
+    metrics = _compute_metrics(prices)
+
+    assert metrics["cagr_5y"] == 10.0
+    assert metrics["cagr_10y"] == 10.0
+    assert metrics["median_annual_return"] is not None
+    assert metrics["complete_years"] == 10
+
+
+def test_short_history_does_not_claim_five_or_ten_year_performance() -> None:
+    index = pd.date_range("2024-01-02", periods=400, freq="B")
+    metrics = _compute_metrics(pd.Series(range(100, 500), index=index), "crypto")
+
+    assert metrics["cagr_5y"] is None
+    assert metrics["cagr_10y"] is None

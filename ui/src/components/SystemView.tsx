@@ -11,6 +11,7 @@ import {
   type LoopStatus,
 } from "../lib/system";
 import { errorMessage, lastOkAt, refresh, state, status } from "../lib/systemStore";
+import { formatMoney, getCarryCycles, recordedCarry } from "../lib/portfolio";
 import {
   describeReconciliation,
   formatTimestamp,
@@ -45,6 +46,7 @@ export function SystemView() {
     | { kind: "ok"; data: ReconciliationReport }
     | { kind: "error"; message: string }
   >({ kind: "loading" });
+  const [automationOutcome, setAutomationOutcome] = useState<{ carry: number | null; cycles: number } | null>(null);
 
   useEffect(() => {
     void refresh();
@@ -54,6 +56,9 @@ export function SystemView() {
         kind: "error",
         message: "Trading reconciliation is currently unavailable.",
       }));
+    void getCarryCycles()
+      .then(({ cycles }) => setAutomationOutcome({ carry: recordedCarry(cycles), cycles: cycles.length }))
+      .catch(() => setAutomationOutcome(null));
   }, []);
 
   const snapshot = status.value;
@@ -74,7 +79,6 @@ export function SystemView() {
     (loop) => ["fresh", "recent"].includes(scheduledLoopTier(loop.age_seconds, loop.never_run)),
   ).length;
   const fillEntries = Object.entries(snapshot.fill_last_hour).sort((a, b) => b[1] - a[1]);
-  const fillTotal = fillEntries.reduce((sum, [, count]) => sum + count, 0);
   const disconnected = storeState === "error";
   const critical = word === "inactive" || word === "stalled";
   const attention = disconnected || critical || unhealthy.length > 0 || word === "degraded";
@@ -122,9 +126,11 @@ export function SystemView() {
           <span class="metric-context">calls surfaced from {snapshot.production_24h.predictions} predictions</span>
         </article>
         <article class="primary-metric">
-          <span class="metric-kicker">Coverage work</span>
-          <strong>{fillTotal}</strong>
-          <span class="metric-context">fill attempts in the last hour</span>
+          <span class="metric-kicker">Automation outcome</span>
+          <strong class={automationOutcome?.carry !== null && automationOutcome?.carry !== undefined && automationOutcome.carry < 0 ? "value-negative" : "value-positive"}>
+            {automationOutcome?.carry === null || automationOutcome?.carry === undefined ? "—" : formatMoney(String(automationOutcome.carry))}
+          </strong>
+          <span class="metric-context">recorded net carry across {automationOutcome?.cycles ?? 0} completed cycles</span>
         </article>
       </section>
 

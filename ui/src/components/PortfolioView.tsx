@@ -11,6 +11,7 @@ import {
   recordedCarry,
   type CarryCycle,
   type NavPoint,
+  type PositionAssetClass,
 } from "../lib/portfolio";
 import {
   formatTimestamp,
@@ -38,6 +39,44 @@ type State =
       reconciliation: Resource<ReconciliationReport>;
     };
 
+type PositionFilter = "all" | PositionAssetClass;
+type ChartRange = "1m" | "3m" | "1y" | "all";
+
+function NavChart({ points }: { points: NavPoint[] }) {
+  const measured = points
+    .map((point) => ({ time: new Date(point.taken_at).getTime(), value: Number(point.nav) }))
+    .filter((point) => Number.isFinite(point.time) && Number.isFinite(point.value))
+    .sort((a, b) => a.time - b.time);
+  if (measured.length < 2) return <div class="clean-empty"><strong>Chart is building</strong><span>Two recorded valuations are needed.</span></div>;
+  const times = measured.map((point) => point.time);
+  const values = measured.map((point) => point.value);
+  const minTime = Math.min(...times);
+  const maxTime = Math.max(...times);
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const x = (time: number) => 12 + ((time - minTime) / Math.max(maxTime - minTime, 1)) * 576;
+  const y = (value: number) => 148 - ((value - minValue) / Math.max(maxValue - minValue, 1)) * 124;
+  const gaps = measured.slice(1).map((point, index) => point.time - measured[index].time).sort((a, b) => a - b);
+  const typicalGap = gaps.length > 1 ? gaps[Math.floor(gaps.length / 2)] : 86_400_000;
+  const paths: string[] = [];
+  let path = "";
+  measured.forEach((point, index) => {
+    const beginsSegment = index === 0 || point.time - measured[index - 1].time > typicalGap * 2.5;
+    if (beginsSegment && path) paths.push(path);
+    path = `${beginsSegment ? "M" : `${path} L`} ${x(point.time).toFixed(1)} ${y(point.value).toFixed(1)}`;
+  });
+  if (path) paths.push(path);
+  return (
+    <div class="nav-chart-wrap">
+      <svg class="nav-chart" viewBox="0 0 600 170" role="img" aria-label="Recorded portfolio value over time">
+        <line x1="12" y1="148" x2="588" y2="148" class="nav-chart-axis" />
+        {paths.map((segment) => <path d={segment} class="nav-chart-line" fill="none" />)}
+      </svg>
+      <div class="nav-chart-scale"><span>{formatMoney(String(minValue))}</span><span>{formatMoney(String(maxValue))}</span></div>
+    </div>
+  );
+}
+
 function resource<T>(result: PromiseSettledResult<T>): Resource<T> {
   if (result.status === "fulfilled") return { kind: "ok", data: result.value };
   return { kind: "error", message: describeError(result.reason).message };
@@ -56,6 +95,8 @@ function signedMoney(value: number | null): string {
 
 export function PortfolioView() {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [positionFilter, setPositionFilter] = useState<PositionFilter>("all");
+  const [chartRange, setChartRange] = useState<ChartRange>("1y");
 
   useEffect(() => {
     let cancelled = false;
@@ -118,8 +159,12 @@ export function PortfolioView() {
   const latestCycle = cycles[0] ?? null;
   const health = portfolioHealth(portfolio.positions, latestCycle, reconciliation);
   const groups = groupPositions(portfolio.positions);
+  const filteredGroups = positionFilter === "all" ? groups : groups.filter((group) => group.assetClass === positionFilter);
   const carry = state.cycles.kind === "ok" ? recordedCarry(cycles) : null;
   const change = state.history.kind === "ok" ? navChange(history) : null;
+  const rangeDays = { "1m": 31, "3m": 93, "1y": 366, all: Infinity }[chartRange];
+  const newestTime = history.length ? new Date(history[history.length - 1].taken_at).getTime() : 0;
+  const chartHistory = history.filter((point) => newestTime - new Date(point.taken_at).getTime() <= rangeDays * 86_400_000);
 
   return (
     <div class="portfolio-view product-page">
@@ -165,6 +210,18 @@ export function PortfolioView() {
         </article>
       </section>
 
+      <section class="surface-card portfolio-chart-card">
+        <div class="section-heading-row section-heading-compact">
+          <div><p class="eyebrow">Recorded value</p><h2>Portfolio over time</h2><p>Actual NAV snapshots only; missing intervals are left disconnected.</p></div>
+          <div class="view-switch chart-range-switch">
+            {(["1m", "3m", "1y", "all"] as ChartRange[]).map((range) => (
+              <button type="button" class={chartRange === range ? "active" : ""} onClick={() => setChartRange(range)}>{range === "all" ? "All" : range.toUpperCase()}</button>
+            ))}
+          </div>
+        </div>
+        <NavChart points={chartHistory} />
+      </section>
+
       <div class="portfolio-grid">
         <section class="surface-card holdings-card">
           <div class="section-heading">
@@ -172,16 +229,23 @@ export function PortfolioView() {
               <p class="eyebrow">Now</p>
               <h2>What the portfolio holds</h2>
             </div>
-            <span class="count-badge">{groups.length} {groups.length === 1 ? "position" : "positions"}</span>
+            <span class="count-badge">{filteredGroups.length} of {groups.length}</span>
           </div>
-          {groups.length === 0 ? (
+          <div class="position-filters" aria-label="Position type">
+            {(["all", "stocks", "defensive", "crypto"] as PositionFilter[]).map((filter) => (
+              <button type="button" class={positionFilter === filter ? "active" : ""} onClick={() => setPositionFilter(filter)}>
+                {filter === "all" ? "All" : filter === "stocks" ? "Stocks & ETFs" : filter === "defensive" ? "Gold, bonds & defensive" : "Crypto"}
+              </button>
+            ))}
+          </div>
+          {filteredGroups.length === 0 ? (
             <div class="clean-empty">
-              <strong>Holding cash</strong>
-              <span>No market positions are open.</span>
+              <strong>{groups.length ? "No positions in this group" : "Holding cash"}</strong>
+              <span>{groups.length ? "Choose another filter to see current holdings." : "No market positions are open."}</span>
             </div>
           ) : (
             <div class="position-stack">
-              {groups.map((group) => (
+              {filteredGroups.map((group) => (
                 <article class="position-card" key={`${group.venue}:${group.asset}`}>
                   <div class="position-identity">
                     <span class="asset-mark">{group.asset.slice(0, 2)}</span>
@@ -198,7 +262,7 @@ export function PortfolioView() {
                         : "Only one market leg is present"}
                     </span>
                   </div>
-                  <div class="position-leg-count">{group.legs.length} legs</div>
+                  <div class="position-leg-count">{group.notional === null ? `${group.legs.length} legs` : formatMoney(String(group.notional))}</div>
                 </article>
               ))}
             </div>

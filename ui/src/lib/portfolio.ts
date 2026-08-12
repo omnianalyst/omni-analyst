@@ -45,7 +45,14 @@ export interface PositionGroup {
   legs: Position[];
   hasSpot: boolean;
   hasPerpetual: boolean;
+  assetClass: PositionAssetClass;
+  notional: number | null;
 }
+
+export type PositionAssetClass = "stocks" | "crypto" | "defensive";
+
+const DEFENSIVE_ASSETS = new Set(["GLD", "SLV", "BND", "TLT", "IEF", "SHV", "TIP", "DBC"]);
+const CRYPTO_ASSETS = new Set(["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC", "BCH"]);
 
 export type HealthTone = "healthy" | "attention" | "critical" | "quiet";
 
@@ -65,6 +72,13 @@ function assetFromSymbol(symbol: string): string {
   return symbol.split("/")[0]?.split(":")[0] || symbol;
 }
 
+export function positionAssetClass(position: Position): PositionAssetClass {
+  const asset = assetFromSymbol(position.symbol).toUpperCase();
+  if (position.market_type === "perpetual" || CRYPTO_ASSETS.has(asset)) return "crypto";
+  if (DEFENSIVE_ASSETS.has(asset)) return "defensive";
+  return "stocks";
+}
+
 export function groupPositions(positions: Position[]): PositionGroup[] {
   const groups = new Map<string, PositionGroup>();
   for (const position of positions) {
@@ -76,10 +90,16 @@ export function groupPositions(positions: Position[]): PositionGroup[] {
       legs: [],
       hasSpot: false,
       hasPerpetual: false,
+      assetClass: positionAssetClass(position),
+      notional: null,
     };
     group.legs.push(position);
     group.hasSpot ||= position.market_type === "spot";
     group.hasPerpetual ||= position.market_type === "perpetual";
+    const notional = position.notional === null ? null : Number(position.notional);
+    if (notional !== null && Number.isFinite(notional)) {
+      group.notional = (group.notional ?? 0) + Math.abs(notional);
+    }
     groups.set(key, group);
   }
   return [...groups.values()].sort((a, b) => a.asset.localeCompare(b.asset));

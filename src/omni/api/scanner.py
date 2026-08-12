@@ -1,4 +1,4 @@
-"""Cross-asset market scanner: sector leadership plus five regime buckets.
+"""Cross-asset market scanner: durable rankings plus regime context.
 
 Shows the leading measured companies in each GICS sector, followed by tracked
 assets across the five portfolio buckets (growth, debasement, deflation, safety,
@@ -24,7 +24,7 @@ from omni.auth import resolve_audience_from_request
 from omni.coverage.visibility import visible_claims_cte
 
 CACHE_TTL = 3600
-SECTOR_RETURN_WINDOW = 30
+SECTOR_RETURN_WINDOW = 252
 SECTOR_LEADER_COUNT = 15
 OVERALL_LEADER_COUNT = 15
 _cache: dict[str, dict[str, Any]] = {}
@@ -32,33 +32,78 @@ _cache: dict[str, dict[str, Any]] = {}
 ASSETS: dict[str, list[dict[str, str]]] = {
     "Growth": [
         {"symbol": "VTI", "name": "Vanguard Total Stock Market", "yf": "VTI",
-         "asset_class": "stocks"},
+         "asset_class": "stocks", "area": "US broad market"},
         {"symbol": "SPY", "name": "S&P 500 ETF", "yf": "SPY",
-         "asset_class": "stocks"},
+         "asset_class": "stocks", "area": "US broad market"},
         {"symbol": "QQQ", "name": "Invesco QQQ Trust", "yf": "QQQ",
-         "asset_class": "stocks"},
+         "asset_class": "stocks", "area": "US broad market"},
+        {"symbol": "DIA", "name": "Dow Jones Industrial Average", "yf": "DIA",
+         "asset_class": "stocks", "area": "US broad market"},
+        {"symbol": "IWM", "name": "Russell 2000 ETF", "yf": "IWM",
+         "asset_class": "stocks", "area": "US broad market"},
+        {"symbol": "VUG", "name": "Vanguard Growth ETF", "yf": "VUG",
+         "asset_class": "stocks", "area": "Investment style"},
+        {"symbol": "VTV", "name": "Vanguard Value ETF", "yf": "VTV",
+         "asset_class": "stocks", "area": "Investment style"},
+        {"symbol": "QUAL", "name": "iShares MSCI USA Quality", "yf": "QUAL",
+         "asset_class": "stocks", "area": "Investment style"},
+        {"symbol": "USMV", "name": "iShares MSCI USA Min Vol", "yf": "USMV",
+         "asset_class": "stocks", "area": "Investment style"},
+        {"symbol": "MTUM", "name": "iShares MSCI USA Momentum", "yf": "MTUM",
+         "asset_class": "stocks", "area": "Investment style"},
+        {"symbol": "DGRO", "name": "iShares Core Dividend Growth", "yf": "DGRO",
+         "asset_class": "stocks", "area": "Investment style"},
         {"symbol": "VXUS", "name": "Vanguard Total International", "yf": "VXUS",
-         "asset_class": "stocks"},
+         "asset_class": "stocks", "area": "International"},
+        {"symbol": "VEA", "name": "Vanguard Developed Markets", "yf": "VEA",
+         "asset_class": "stocks", "area": "International"},
+        {"symbol": "VWO", "name": "Vanguard Emerging Markets", "yf": "VWO",
+         "asset_class": "stocks", "area": "International"},
+        {"symbol": "XLK", "name": "Technology Select Sector", "yf": "XLK", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLF", "name": "Financial Select Sector", "yf": "XLF", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLV", "name": "Health Care Select Sector", "yf": "XLV", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLI", "name": "Industrial Select Sector", "yf": "XLI", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLE", "name": "Energy Select Sector", "yf": "XLE", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLY", "name": "Consumer Discretionary Sector", "yf": "XLY", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLP", "name": "Consumer Staples Sector", "yf": "XLP", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLU", "name": "Utilities Select Sector", "yf": "XLU", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLB", "name": "Materials Select Sector", "yf": "XLB", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLC", "name": "Communication Services Sector", "yf": "XLC", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLRE", "name": "Real Estate Select Sector", "yf": "XLRE", "asset_class": "stocks", "area": "Sector"},
     ],
     "Debasement": [
         {"symbol": "GLD", "name": "SPDR Gold Shares", "yf": "GLD",
-         "asset_class": "defensive"},
+         "asset_class": "defensive", "area": "Precious metals"},
         {"symbol": "SLV", "name": "iShares Silver Trust", "yf": "SLV",
-         "asset_class": "defensive"},
+         "asset_class": "defensive", "area": "Precious metals"},
+        {"symbol": "DBC", "name": "Invesco DB Commodity Index", "yf": "DBC",
+         "asset_class": "defensive", "area": "Commodities"},
         {"symbol": "BTC", "name": "Bitcoin", "yf": "BTC-USD",
-         "asset_class": "crypto"},
+         "asset_class": "crypto", "area": "Digital assets"},
         {"symbol": "ETH", "name": "Ethereum", "yf": "ETH-USD",
-         "asset_class": "crypto"},
+         "asset_class": "crypto", "area": "Digital assets"},
         {"symbol": "SOL", "name": "Solana", "yf": "SOL-USD",
-         "asset_class": "crypto"},
+         "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "BNB", "name": "BNB", "yf": "BNB-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "XRP", "name": "XRP", "yf": "XRP-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "ADA", "name": "Cardano", "yf": "ADA-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "DOGE", "name": "Dogecoin", "yf": "DOGE-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "AVAX", "name": "Avalanche", "yf": "AVAX-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "LINK", "name": "Chainlink", "yf": "LINK-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "DOT", "name": "Polkadot", "yf": "DOT-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "LTC", "name": "Litecoin", "yf": "LTC-USD", "asset_class": "crypto", "area": "Digital assets"},
+        {"symbol": "BCH", "name": "Bitcoin Cash", "yf": "BCH-USD", "asset_class": "crypto", "area": "Digital assets"},
     ],
     "Deflation": [
         {"symbol": "TLT", "name": "iShares 20+ Year Treasury", "yf": "TLT",
-         "asset_class": "defensive"},
+         "asset_class": "defensive", "area": "Treasuries"},
+        {"symbol": "IEF", "name": "iShares 7-10 Year Treasury", "yf": "IEF", "asset_class": "defensive", "area": "Treasuries"},
+        {"symbol": "TIP", "name": "iShares TIPS Bond ETF", "yf": "TIP", "asset_class": "defensive", "area": "Inflation-linked bonds"},
+        {"symbol": "BND", "name": "Vanguard Total Bond Market", "yf": "BND", "asset_class": "defensive", "area": "Broad bonds"},
     ],
     "Safety": [
         {"symbol": "SHV", "name": "iShares Short Treasury", "yf": "SHV",
-         "asset_class": "defensive"},
+         "asset_class": "defensive", "area": "Treasuries"},
     ],
 }
 
@@ -69,7 +114,7 @@ BUCKET_ROLES = {
     "Safety": "Recession/liquidity — cash and T-bills preserve capital",
 }
 
-CRYPTO_ASSETS = {"BTC", "ETH", "SOL"}
+CRYPTO_ASSETS = {asset["symbol"] for asset in ASSETS["Debasement"] if asset["asset_class"] == "crypto"}
 
 
 def _fetch_prices() -> pd.DataFrame:
@@ -82,7 +127,7 @@ def _fetch_prices() -> pd.DataFrame:
 
     ticker_str = " ".join(all_tickers)
     raw = yf.download(
-        ticker_str, period="2y", interval="1d",
+        ticker_str, period="10y", interval="1d",
         auto_adjust=True, progress=False, group_by="ticker",
     )
     if raw.empty:
@@ -115,7 +160,7 @@ def _fetch_prices() -> pd.DataFrame:
     return panel
 
 
-def _compute_metrics(prices: pd.Series) -> dict[str, float | None]:
+def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str, Any]:
     prices = prices.dropna()
     if len(prices) < 30:
         return {
@@ -124,6 +169,12 @@ def _compute_metrics(prices: pd.Series) -> dict[str, float | None]:
             "sharpe": None,
             "volatility": None,
             "max_drawdown": None,
+            "cagr_5y": None,
+            "cagr_10y": None,
+            "median_annual_return": None,
+            "positive_year_rate": None,
+            "history_years": 0,
+            "complete_years": 0,
         }
 
     daily_ret = prices.pct_change().dropna()
@@ -137,8 +188,9 @@ def _compute_metrics(prices: pd.Series) -> dict[str, float | None]:
             return None
         return round(((current / start) - 1) * 100, 2)
 
-    ann_vol = float(daily_ret.std() * np.sqrt(365) * 100)
-    ann_ret = float(daily_ret.mean() * 365 * 100)
+    sessions = 365 if asset_class == "crypto" else 252
+    ann_vol = float(daily_ret.std() * np.sqrt(sessions) * 100)
+    ann_ret = float(daily_ret.mean() * sessions * 100)
     sharpe = round(ann_ret / ann_vol, 2) if ann_vol > 0 else None
 
     cumulative = (1 + daily_ret).cumprod()
@@ -146,18 +198,95 @@ def _compute_metrics(prices: pd.Series) -> dict[str, float | None]:
     drawdown = (cumulative - peak) / peak
     max_dd = round(float(drawdown.min()) * 100, 2)
 
+    elapsed_years = max((prices.index[-1] - prices.index[0]).days / 365.2425, 0)
+
+    def cagr(years: int) -> float | None:
+        target = prices.index[-1] - pd.DateOffset(years=years)
+        eligible = prices[prices.index <= target]
+        if eligible.empty and elapsed_years >= years * 0.98:
+            eligible = prices.iloc[:1]
+        if eligible.empty or elapsed_years < years * 0.95:
+            return None
+        start = float(eligible.iloc[-1])
+        actual_years = (prices.index[-1] - eligible.index[-1]).days / 365.2425
+        if start <= 0 or actual_years <= 0:
+            return None
+        return round(((current / start) ** (1 / actual_years) - 1) * 100, 2)
+
+    year_ends = prices.resample("YE").last()
+    annual = year_ends.pct_change(fill_method=None).dropna() * 100
+    annual = annual[annual.index.year < prices.index[-1].year]
+
     return {
         "price": round(current, 2),
         "returns": {
             "7d": trailing_return(7),
             "30d": trailing_return(30),
             "90d": trailing_return(90),
-            "365d": trailing_return(365),
+            "365d": trailing_return(sessions),
         },
         "sharpe": sharpe,
         "volatility": round(ann_vol, 1),
         "max_drawdown": max_dd,
+        "cagr_5y": cagr(5),
+        "cagr_10y": cagr(10),
+        "median_annual_return": round(float(annual.median()), 2) if len(annual) else None,
+        "positive_year_rate": round(float((annual > 0).mean() * 100), 1) if len(annual) else None,
+        "history_years": round(elapsed_years, 1),
+        "complete_years": len(annual),
     }
+
+
+def _percentile_scores(entries: list[dict], field: str, *, inverse: bool = False) -> dict[str, float]:
+    available = [(entry["symbol"], entry.get(field)) for entry in entries]
+    available = [(symbol, float(value)) for symbol, value in available if value is not None and np.isfinite(value)]
+    if not available:
+        return {}
+    values = pd.Series({symbol: value for symbol, value in available})
+    scores = values.rank(pct=True, method="average") * 100
+    if inverse:
+        scores = 100 - scores + (100 / len(scores))
+    return {symbol: round(float(score), 1) for symbol, score in scores.items()}
+
+
+def _score_assets(entries: list[dict]) -> None:
+    components = {
+        "return_1y": _percentile_scores(entries, "return_1y"),
+        "cagr_5y": _percentile_scores(entries, "cagr_5y"),
+        "cagr_10y": _percentile_scores(entries, "cagr_10y"),
+        "median": _percentile_scores(entries, "median_annual_return"),
+        "positive_years": _percentile_scores(entries, "positive_year_rate"),
+        "volatility": _percentile_scores(entries, "volatility", inverse=True),
+        "drawdown": _percentile_scores(entries, "max_drawdown"),
+        "diversification": _percentile_scores(entries, "correlation_to_spy", inverse=True),
+    }
+    for entry in entries:
+        symbol = entry["symbol"]
+
+        def average(names: tuple[str, ...], asset_symbol: str = symbol) -> float | None:
+            values = [
+                components[name][asset_symbol]
+                for name in names
+                if asset_symbol in components[name]
+            ]
+            return round(sum(values) / len(values), 1) if values else None
+
+        has_long_enough_record = entry.get("complete_years", 0) >= 3
+        durable = average(("cagr_5y", "cagr_10y", "median")) if has_long_enough_record else None
+        consistency = average(("median", "positive_years")) if has_long_enough_record else None
+        stability = average(("volatility", "drawdown"))
+        diversification = average(("diversification",))
+        recent = average(("return_1y",))
+        weighted = [(durable, 0.35), (consistency, 0.25), (stability, 0.20), (recent, 0.10), (diversification, 0.10)]
+        present = [(value, weight) for value, weight in weighted if value is not None]
+        overall = sum(value * weight for value, weight in present) / sum(weight for _, weight in present) if present else None
+        entry["scores"] = {
+            "balanced": round(overall, 1) if overall is not None else None,
+            "durable_growth": durable,
+            "consistency": consistency,
+            "stability": stability,
+            "diversification": diversification,
+        }
 
 
 def _correlation_to_market(asset: pd.Series, market: pd.Series) -> float | None:
@@ -235,7 +364,7 @@ def _price(value: Any) -> float | None:
 
 
 def _sector_leader_payload(rows: list[Any]) -> list[dict]:
-    """Rank companies within each sector from visible 30-session histories."""
+    """Rank companies within each sector from visible one-year histories."""
     histories: dict[tuple[str, str, str, str], list[tuple[Any, Any]]] = {}
     for row in rows:
         key = (
@@ -262,13 +391,13 @@ def _sector_leader_payload(rows: list[Any]) -> list[dict]:
         ranked.setdefault(sector_key, []).append({
             "symbol": symbol,
             "name": name,
-            "return_30d": round((latest / start - 1) * 100, 2),
+            "return_1y": round((latest / start - 1) * 100, 2),
             "as_of": latest_date.isoformat(),
         })
 
     sectors: list[dict] = []
     for (sector_symbol, sector_name), companies in ranked.items():
-        companies.sort(key=lambda company: company["return_30d"], reverse=True)
+        companies.sort(key=lambda company: company["return_1y"], reverse=True)
         sectors.append({
             "name": sector_name,
             "symbol": sector_symbol,
@@ -289,7 +418,7 @@ def _overall_leaders(sectors: list[dict]) -> list[dict]:
         for sector in sectors
         for leader in sector["leaders"]
     ]
-    companies.sort(key=lambda company: company["return_30d"], reverse=True)
+    companies.sort(key=lambda company: company["return_1y"], reverse=True)
     return companies[:OVERALL_LEADER_COUNT]
 
 
@@ -333,8 +462,27 @@ async def _sector_leaders(pool, audience) -> list[dict]:
 
 
 def _payload(buckets_data: list[dict], sectors: list[dict]) -> dict:
+    assets = [asset for bucket in buckets_data for asset in bucket["assets"]]
+
+    def ranked(score: str) -> list[dict]:
+        available = [asset for asset in assets if asset.get("scores", {}).get(score) is not None]
+        available.sort(key=lambda asset: asset["scores"][score], reverse=True)
+        return available[:15]
+
     return {
         "buckets": buckets_data,
+        "asset_rankings": {
+            "balanced": ranked("balanced"),
+            "durable_growth": ranked("durable_growth"),
+            "consistency": ranked("consistency"),
+            "stability": ranked("stability"),
+            "diversification": ranked("diversification"),
+        },
+        "ranking_method": {
+            "balanced": "35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification; available measures are reweighted when history is shorter.",
+            "history": "One-year return is trailing. Five- and ten-year figures are annualized. Median return uses complete calendar years; long-term and consistency ranks require at least three complete years.",
+            "scope": "Scores are percentile ranks within the broad assets measured here, not forecasts or recommendations.",
+        },
         "sectors": sectors,
         "overall_leaders": _overall_leaders(sectors),
         "sector_coverage": {
@@ -358,13 +506,14 @@ async def _build_scanner(app: App, audience) -> dict:
     sectors = await _sector_leaders(app.db.pool, audience)
 
     buckets_data: list[dict] = []
+    all_entries: list[dict] = []
     for bucket_name, assets in ASSETS.items():
         bucket_assets: list[dict] = []
         for a in assets:
             symbol = a["symbol"]
             if symbol not in prices.columns:
                 continue
-            metrics = _compute_metrics(prices[symbol])
+            metrics = _compute_metrics(prices[symbol], a["asset_class"])
             correlation = (
                 _correlation_to_market(prices[symbol], prices["SPY"])
                 if "SPY" in prices.columns
@@ -374,16 +523,19 @@ async def _build_scanner(app: App, audience) -> dict:
                 "symbol": symbol,
                 "name": a["name"],
                 "asset_class": a["asset_class"],
+                "area": a["area"],
                 "risk_tier": _risk_tier(metrics["volatility"]),
                 "correlation_to_spy": correlation,
                 "market_behavior": _market_behavior(correlation),
                 **metrics,
             }
+            entry["return_1y"] = metrics.get("returns", {}).get("365d")
             if symbol in CRYPTO_ASSETS:
                 entry["funding_apr"] = funding.get(symbol)
             else:
                 entry["funding_apr"] = None
             bucket_assets.append(entry)
+            all_entries.append(entry)
 
         bucket_assets.sort(
             key=lambda x: (x.get("returns", {}).get("90d") or -999),
@@ -394,6 +546,13 @@ async def _build_scanner(app: App, audience) -> dict:
             "role": BUCKET_ROLES.get(bucket_name, ""),
             "assets": bucket_assets,
         })
+
+    _score_assets(all_entries)
+    for bucket in buckets_data:
+        bucket["assets"].sort(
+            key=lambda asset: asset.get("scores", {}).get("balanced") or -1,
+            reverse=True,
+        )
 
     payload = _payload(buckets_data, sectors)
     _cache[cache_key] = {"data": payload, "ts": now}

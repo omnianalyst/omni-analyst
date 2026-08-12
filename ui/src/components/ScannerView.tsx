@@ -7,10 +7,12 @@ type AssetClass = "stocks" | "crypto" | "defensive";
 type RiskTier = "low" | "medium" | "high" | "unrated";
 type MarketBehavior = "risk_on" | "diversifier" | "counterweight" | "unrated";
 type ViewMode = "type" | "risk";
+type RankMode = "balanced" | "durable_growth" | "consistency" | "stability" | "diversification";
 
 interface AssetMetric {
   symbol: string;
   name?: string;
+  area: string;
   asset_class: AssetClass;
   risk_tier: RiskTier;
   correlation_to_spy?: number | null;
@@ -22,8 +24,16 @@ interface AssetMetric {
     "365d"?: number | null;
   };
   volatility?: number | null;
+  max_drawdown?: number | null;
+  cagr_5y?: number | null;
+  cagr_10y?: number | null;
+  median_annual_return?: number | null;
+  positive_year_rate?: number | null;
+  history_years: number;
+  complete_years: number;
+  scores: Record<RankMode, number | null>;
   funding_apr?: number | null;
-  context: string;
+  context?: string;
 }
 
 interface Bucket {
@@ -35,7 +45,7 @@ interface Bucket {
 interface SectorLeader {
   symbol: string;
   name: string;
-  return_30d: number;
+  return_1y: number;
   as_of: string;
 }
 
@@ -55,6 +65,12 @@ interface ScannerData {
   buckets: Bucket[];
   sectors: SectorLeaders[];
   overall_leaders: OverallLeader[];
+  asset_rankings: Record<RankMode, AssetMetric[]>;
+  ranking_method: {
+    balanced: string;
+    history: string;
+    scope: string;
+  };
   sector_coverage: {
     available: number;
     total: number;
@@ -108,6 +124,14 @@ const BEHAVIOR_LABELS: Record<MarketBehavior, string> = {
   unrated: "Not measured",
 };
 
+const RANK_LABELS: Record<RankMode, string> = {
+  balanced: "Balanced",
+  durable_growth: "Long-term",
+  consistency: "Consistency",
+  stability: "Stability",
+  diversification: "Diversification",
+};
+
 function percent(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
@@ -145,18 +169,22 @@ function AssetCard({
         )}
       </header>
 
-      <div class="asset-card-measures">
-        <div>
-          <span>30 sessions</span>
-          <strong class={tone(asset.returns?.["30d"])}>
-            {percent(asset.returns?.["30d"])}
-          </strong>
-        </div>
+      <div class="asset-card-measures asset-card-measures-four">
         <div>
           <span>1 year</span>
           <strong class={tone(asset.returns?.["365d"])}>
             {percent(asset.returns?.["365d"])}
           </strong>
+        </div>
+        <div>
+          <span>5y / year</span>
+          <strong class={tone(asset.cagr_5y)}>
+            {percent(asset.cagr_5y)}
+          </strong>
+        </div>
+        <div>
+          <span>Median year</span>
+          <strong class={tone(asset.median_annual_return)}>{percent(asset.median_annual_return)}</strong>
         </div>
         <div>
           <span>Volatility</span>
@@ -165,7 +193,7 @@ function AssetCard({
       </div>
 
       <footer>
-        <span>{asset.context}</span>
+        <span>{asset.area} · {asset.history_years.toFixed(1)}y history</span>
         {asset.funding_apr !== null && asset.funding_apr !== undefined ? (
           <span>Funding {percent(asset.funding_apr)} APR</span>
         ) : behaviorLens && asset.correlation_to_spy !== null &&
@@ -185,7 +213,7 @@ function SectorLeadership({ data }: { data: ScannerData }) {
           <p class="eyebrow">Stock leadership</p>
           <h3>Top companies within measured sectors</h3>
           <p>
-            Ranked by {data.sector_coverage.window_sessions}-session return from
+            Ranked by trailing {data.sector_coverage.window_sessions}-session return from
             the company histories available to you.
           </p>
         </div>
@@ -217,8 +245,8 @@ function SectorLeadership({ data }: { data: ScannerData }) {
                     <strong>{leader.symbol}</strong>
                     <small>{leader.sector}</small>
                   </span>
-                  <strong class={tone(leader.return_30d)}>
-                    {percent(leader.return_30d)}
+                  <strong class={tone(leader.return_1y)}>
+                    {percent(leader.return_1y)}
                   </strong>
                 </li>
               ))}
@@ -247,8 +275,8 @@ function SectorLeadership({ data }: { data: ScannerData }) {
                         <strong>{leader.symbol}</strong>
                         <small>{leader.name}</small>
                       </span>
-                      <strong class={tone(leader.return_30d)}>
-                        {percent(leader.return_30d)}
+                      <strong class={tone(leader.return_1y)}>
+                        {percent(leader.return_1y)}
                       </strong>
                     </li>
                   ))}
@@ -266,6 +294,7 @@ export function ScannerView() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [viewMode, setViewMode] = useState<ViewMode>("type");
   const [behaviorLens, setBehaviorLens] = useState(false);
+  const [rankMode, setRankMode] = useState<RankMode>("balanced");
 
   useEffect(() => {
     let cancelled = false;
@@ -304,6 +333,7 @@ export function ScannerView() {
   );
 
   const groups = viewMode === "type" ? TYPE_GROUPS : RISK_GROUPS;
+  const rankedAssets = state.data.asset_rankings[rankMode] ?? [];
 
   return (
     <div class="scanner-view product-page">
@@ -320,6 +350,39 @@ export function ScannerView() {
           </time>
         </div>
       </header>
+
+      <section class="surface-card ranked-assets-card">
+        <div class="section-heading-row section-heading-compact">
+          <div>
+            <p class="eyebrow">Measured shortlist</p>
+            <h2>Highest-ranked broad assets</h2>
+            <p>Compare durable returns, repeatability, risk, and how differently each asset moved from stocks.</p>
+          </div>
+          <div class="rank-switch" aria-label="Ranking lens">
+            {(Object.keys(RANK_LABELS) as RankMode[]).map((mode) => (
+              <button type="button" class={rankMode === mode ? "active" : ""} onClick={() => setRankMode(mode)}>
+                {RANK_LABELS[mode]}
+              </button>
+            ))}
+          </div>
+        </div>
+        <ol class="ranked-assets-list">
+          {rankedAssets.map((asset, index) => (
+            <li key={asset.symbol}>
+              <span class="leader-rank">{index + 1}</span>
+              <span class="leader-company"><strong>{asset.symbol}</strong><small>{asset.area}</small></span>
+              <span class="ranked-return"><small>5y / year</small><strong class={tone(asset.cagr_5y)}>{percent(asset.cagr_5y)}</strong></span>
+              <span class="ranked-return"><small>Median year</small><strong class={tone(asset.median_annual_return)}>{percent(asset.median_annual_return)}</strong></span>
+              <span class="rank-score"><small>{RANK_LABELS[rankMode]} score</small><strong>{asset.scores[rankMode]?.toFixed(0) ?? "—"}</strong></span>
+            </li>
+          ))}
+        </ol>
+        <details class="methodology-note">
+          <summary>How this ranking works</summary>
+          <p>{rankMode === "balanced" ? state.data.ranking_method.balanced : `The ${RANK_LABELS[rankMode].toLowerCase()} lens ranks only its named measurements.`}</p>
+          <p>{state.data.ranking_method.history} {state.data.ranking_method.scope}</p>
+        </details>
+      </section>
 
       <section class="discover-controls" aria-label="Discover organization">
         <div>
@@ -366,7 +429,7 @@ export function ScannerView() {
             {behaviorCounts.counterweight} counterweights
           </span>
           <p>
-            Based on two-year daily correlation to SPY. A counterweight has moved
+            Based on available daily history, up to ten years, versus SPY. A counterweight has moved
             differently in this window; it is not a guaranteed hedge.
           </p>
         </aside>
@@ -396,7 +459,7 @@ export function ScannerView() {
                   <span>{groupedAssets.length}</span>
                 </div>
                 <div class="discover-asset-grid">
-                  {groupedAssets.map((asset) => (
+                  {groupedAssets.slice(0, 15).map((asset) => (
                     <AssetCard
                       asset={asset}
                       behaviorLens={behaviorLens}
