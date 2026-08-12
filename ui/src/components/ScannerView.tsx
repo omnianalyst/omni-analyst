@@ -45,7 +45,7 @@ interface Bucket {
 interface SectorLeader {
   symbol: string;
   name: string;
-  return_1y: number;
+  return_window: number;
   as_of: string;
 }
 
@@ -245,8 +245,8 @@ function SectorLeadership({ data }: { data: ScannerData }) {
                     <strong>{leader.symbol}</strong>
                     <small>{leader.sector}</small>
                   </span>
-                  <strong class={tone(leader.return_1y)}>
-                    {percent(leader.return_1y)}
+                  <strong class={tone(leader.return_window)}>
+                    {percent(leader.return_window)}
                   </strong>
                 </li>
               ))}
@@ -275,8 +275,8 @@ function SectorLeadership({ data }: { data: ScannerData }) {
                         <strong>{leader.symbol}</strong>
                         <small>{leader.name}</small>
                       </span>
-                      <strong class={tone(leader.return_1y)}>
-                        {percent(leader.return_1y)}
+                      <strong class={tone(leader.return_window)}>
+                        {percent(leader.return_window)}
                       </strong>
                     </li>
                   ))}

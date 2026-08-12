@@ -46,7 +46,7 @@ def test_sector_leaders_rank_returns_and_limit_the_display() -> None:
     assert [leader["symbol"] for leader in sectors[0]["leaders"]] == [
         "TOP", "MID", "LOW", "FLAT"
     ]
-    assert sectors[0]["leaders"][0]["return_1y"] == 30.0
+    assert sectors[0]["leaders"][0]["return_window"] == 30.0
 
 
 def test_sector_leaders_exclude_incomplete_or_invalid_histories() -> None:
@@ -85,12 +85,12 @@ def test_overall_leaders_rank_across_sector_boundaries() -> None:
         {
             "name": "Technology",
             "symbol": "XLK",
-            "leaders": [{"symbol": "AAA", "return_1y": 12.0}],
+            "leaders": [{"symbol": "AAA", "return_window": 12.0}],
         },
         {
             "name": "Energy",
             "symbol": "XLE",
-            "leaders": [{"symbol": "BBB", "return_1y": 20.0}],
+            "leaders": [{"symbol": "BBB", "return_window": 20.0}],
         },
     ]
 

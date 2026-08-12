@@ -24,7 +24,7 @@ from omni.auth import resolve_audience_from_request
 from omni.coverage.visibility import visible_claims_cte
 
 CACHE_TTL = 3600
-SECTOR_RETURN_WINDOW = 252
+SECTOR_RETURN_WINDOW = 30
 SECTOR_LEADER_COUNT = 15
 OVERALL_LEADER_COUNT = 15
 _cache: dict[str, dict[str, Any]] = {}
@@ -364,7 +364,7 @@ def _price(value: Any) -> float | None:
 
 
 def _sector_leader_payload(rows: list[Any]) -> list[dict]:
-    """Rank companies within each sector from visible one-year histories."""
+    """Rank companies within each sector from visible 30-session histories."""
     histories: dict[tuple[str, str, str, str], list[tuple[Any, Any]]] = {}
     for row in rows:
         key = (
@@ -391,13 +391,13 @@ def _sector_leader_payload(rows: list[Any]) -> list[dict]:
         ranked.setdefault(sector_key, []).append({
             "symbol": symbol,
             "name": name,
-            "return_1y": round((latest / start - 1) * 100, 2),
+            "return_window": round((latest / start - 1) * 100, 2),
             "as_of": latest_date.isoformat(),
         })
 
     sectors: list[dict] = []
     for (sector_symbol, sector_name), companies in ranked.items():
-        companies.sort(key=lambda company: company["return_1y"], reverse=True)
+        companies.sort(key=lambda company: company["return_window"], reverse=True)
         sectors.append({
             "name": sector_name,
             "symbol": sector_symbol,
@@ -418,7 +418,7 @@ def _overall_leaders(sectors: list[dict]) -> list[dict]:
         for sector in sectors
         for leader in sector["leaders"]
     ]
-    companies.sort(key=lambda company: company["return_1y"], reverse=True)
+    companies.sort(key=lambda company: company["return_window"], reverse=True)
     return companies[:OVERALL_LEADER_COUNT]
 
 
