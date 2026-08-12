@@ -7,9 +7,9 @@ import { AlertsView } from "./AlertsView";
 type Tab = "scanner" | "search" | "watchlist" | "alerts";
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: "scanner", label: "Markets" },
+  { id: "scanner", label: "Overview" },
   { id: "search", label: "Search" },
-  { id: "watchlist", label: "Watchlists" },
+  { id: "watchlist", label: "Saved" },
   { id: "alerts", label: "Alerts" },
 ];
 

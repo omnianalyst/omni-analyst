@@ -1,4 +1,4 @@
-import { useEffect } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { formatAge } from "../lib/age";
 import {
   engineStatusWord,
@@ -8,226 +8,168 @@ import {
   scheduledLoopTier,
   unhealthyLoops,
   worstScheduledTier,
-  type EngineStatusWord,
   type LoopStatus,
 } from "../lib/system";
-import {
-  errorMessage,
-  lastOkAt,
-  refresh,
-  state,
-  status,
-} from "../lib/systemStore";
+import { errorMessage, lastOkAt, refresh, state, status } from "../lib/systemStore";
 import { ErrorState } from "./ErrorState";
-import { Hint } from "./Hint";
 import { Loading } from "./Loading";
 
-const WORD_TIER: Record<EngineStatusWord, string> = {
-  nominal: "fresh",
-  degraded: "aging",
-  stalled: "stale",
-  inactive: "dead",
-  standby: "unknown",
-};
-
 function timestamp(iso: string | null): string {
-  if (!iso) return "\u2014";
+  if (!iso) return "—";
   return iso.slice(0, 19).replace("T", " ");
 }
 
 function LoopRow({ loop }: { loop: LoopStatus }) {
   const cadence = loopCadence(loop.loop);
   const tier = scheduledLoopTier(loop.age_seconds, loop.never_run);
-  // On-demand loops staying quiet is the conviction gate working, not a stall;
-  // spell that out so the row never reads as an unexplained silence.
-  const note =
-    cadence === "on_demand"
-      ? loop.never_run
-        ? "on demand, nothing to say yet"
-        : "on demand, quiet is normal"
-      : null;
-
-  return (
-    <tr class={`row ${cadence === "scheduled" ? "tier-" + tier : ""}`}>
-      <td class="claim-type">
-        {(cadence === "scheduled" || loop.never_run) && (
-          <span class={`engine-dot tier-${loop.never_run ? "unknown" : tier}`} aria-hidden="true" />
-        )}
-        {loop.loop}
-      </td>
-      <td>
-        <Hint term={cadence === "scheduled" ? "loop_scheduled" : "loop_on_demand"}>
-          <span class="gap-class">
-            {cadence === "scheduled" ? "scheduled" : "on demand"}
-          </span>
-        </Hint>
-      </td>
-      <td class="mono">{timestamp(loop.last_activity)}</td>
-      <td class="num mono">{loopAgeLabel(loop)}</td>
-      <td class="mono">{note}</td>
-    </tr>
-  );
-}
-
-function FillRow({ outcome, n }: { outcome: string; n: number }) {
   return (
     <tr>
-      <td class="claim-type">
-        <span class={`fill fill-${fillOutcomeClass(outcome)}`}>{outcome}</span>
-      </td>
-      <td class="num">{n}</td>
+      <td><strong>{loop.loop}</strong></td>
+      <td><span class={`status-dot-simple tone-${cadence === "scheduled" ? tier : "quiet"}`} />{cadence === "scheduled" ? "Scheduled" : "On demand"}</td>
+      <td>{timestamp(loop.last_activity)}</td>
+      <td>{loopAgeLabel(loop)}</td>
     </tr>
   );
 }
 
 export function SystemView() {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+
   useEffect(() => {
     void refresh();
   }, []);
 
-  const s = status.value;
-  const st = state.value;
+  const snapshot = status.value;
+  const storeState = state.value;
 
-  if (s === null) {
-    if (st === "error") {
-      return <ErrorState message={errorMessage.value ?? "status unreachable"} />;
+  if (snapshot === null) {
+    if (storeState === "error") {
+      return <ErrorState message={errorMessage.value ?? "System status is unreachable."} />;
     }
-    return <Loading label="Loading system status…" />;
+    return <Loading label="Checking Omni…" />;
   }
 
-  const worst = worstScheduledTier(s.loops);
+  const worst = worstScheduledTier(snapshot.loops);
   const word = engineStatusWord(worst);
-  const tierClass = WORD_TIER[word];
-  const fillEntries = Object.entries(s.fill_last_hour).sort((a, b) => b[1] - a[1]);
-  const unhealthy = unhealthyLoops(s.health);
-  const sortedLoops = [...s.loops].sort((a, b) => {
-    const order = (l: LoopStatus) => (loopCadence(l.loop) === "scheduled" ? 0 : 1);
-    if (order(a) !== order(b)) return order(a) - order(b);
-    return a.loop.localeCompare(b.loop);
-  });
+  const unhealthy = unhealthyLoops(snapshot.health);
+  const scheduled = snapshot.loops.filter((loop) => loopCadence(loop.loop) === "scheduled");
+  const healthyScheduled = scheduled.filter(
+    (loop) => ["fresh", "recent"].includes(scheduledLoopTier(loop.age_seconds, loop.never_run)),
+  ).length;
+  const fillEntries = Object.entries(snapshot.fill_last_hour).sort((a, b) => b[1] - a[1]);
+  const fillTotal = fillEntries.reduce((sum, [, count]) => sum + count, 0);
+  const disconnected = storeState === "error";
+  const critical = word === "inactive" || word === "stalled";
+  const attention = disconnected || critical || unhealthy.length > 0 || word === "degraded";
+  const headline = attention ? "Omni needs attention" : "Everything is running";
+  const detail = disconnected
+    ? "The live status connection was lost. This page is showing the last real snapshot."
+    : unhealthy.length > 0
+      ? `${unhealthy.length} background ${unhealthy.length === 1 ? "job needs" : "jobs need"} attention.`
+      : critical
+        ? "A scheduled background job has stopped reporting on time."
+        : "Research, coverage, and monitoring are operating on schedule.";
 
   return (
-    <div>
-      <header class="page-head">
-        <h1>System status</h1>
-        <p class="muted">
-          Loop health read from the data itself: a loop that is alive writes rows,
-          one that is dead stops. Scheduled loops are graded on cadence; on-demand
-          loops are quiet by design.
-        </p>
+    <div class="system-view product-page">
+      <header class={`system-hero ${attention ? "health-attention" : "health-healthy"}`}>
+        <div>
+          <p class="eyebrow">System</p>
+          <div class="health-title-row">
+            <span class="health-orb" aria-hidden="true" />
+            <h1>{headline}</h1>
+          </div>
+          <p>{detail}</p>
+        </div>
+        <button type="button" class="btn-secondary compact-button" onClick={() => void refresh()}>
+          Check again
+        </button>
       </header>
 
-      {st === "error" ? (
-        <p class="error-line">
-          connection lost &mdash; showing the last real snapshot
-          {lastOkAt.value ? ` (${formatAge((Date.now() - lastOkAt.value) / 1000)})` : ""}
+      {disconnected ? (
+        <p class="inline-warning system-warning">
+          Last live update {lastOkAt.value ? formatAge((Date.now() - lastOkAt.value) / 1000) : "unknown"}.
         </p>
       ) : null}
 
-      <section class="panel">
-        <h2 class="panel-title">
-          Engine
-          <button type="button" class="panel-clear" onClick={() => void refresh()}>
-            refresh
-          </button>
-        </h2>
-        <div class="regime-panel">
-          <div class="regime-header">
-            <span class={`badge badge-${tierClass === "fresh" ? "pos" : tierClass === "dead" || tierClass === "stale" ? "neg" : ""}`}>
-              <span class={`engine-dot tier-${tierClass}`} aria-hidden="true" /> {word}
-            </span>
-          </div>
-          <div class="metric-grid">
-            <div class="metric">
-              <span class="metric-label">
-                <Hint term="demand">Demand active</Hint>
-              </span>
-              <span class="metric-value">{s.demand.active}</span>
-              <span class="metric-sub">{s.demand.total} total</span>
-            </div>
-            <div class="metric">
-              <span class="metric-label">Predictions (24h)</span>
-              <span class="metric-value">{s.production_24h.predictions}</span>
-            </div>
-            <div class="metric">
-              <span class="metric-label">Calls surfaced (24h)</span>
-              <span class="metric-value">{s.production_24h.findings}</span>
-              <span class="metric-sub">quiet days are healthy</span>
-            </div>
-            <div class="metric">
-              <span class="metric-label">Assessed</span>
-              <span class="metric-value mono" style={{ fontSize: "14px" }}>
-                {timestamp(s.now)}
-              </span>
-            </div>
-          </div>
+      <section class="primary-metrics system-metrics" aria-label="System summary">
+        <article class="primary-metric">
+          <span class="metric-kicker">Automation</span>
+          <strong>{healthyScheduled}/{scheduled.length}</strong>
+          <span class="metric-context">scheduled jobs reporting normally</span>
+        </article>
+        <article class="primary-metric">
+          <span class="metric-kicker">Last 24 hours</span>
+          <strong>{snapshot.production_24h.findings}</strong>
+          <span class="metric-context">calls surfaced from {snapshot.production_24h.predictions} predictions</span>
+        </article>
+        <article class="primary-metric">
+          <span class="metric-kicker">Coverage work</span>
+          <strong>{fillTotal}</strong>
+          <span class="metric-context">fill attempts in the last hour</span>
+        </article>
+      </section>
+
+      <section class="surface-card attention-card">
+        <div class="section-heading">
+          <div><p class="eyebrow">Attention</p><h2>{unhealthy.length === 0 ? "Nothing needs you" : "Review these jobs"}</h2></div>
+          <span class={`count-badge ${unhealthy.length > 0 ? "count-warning" : ""}`}>{unhealthy.length}</span>
         </div>
-      </section>
-
-      <section class="panel">
-        <h2 class="panel-title">Loop health</h2>
         {unhealthy.length === 0 ? (
-          <p class="empty">
-            {s.health.overall === null
-              ? "No loop has run yet -- health appears after the first iteration."
-              : "All loops healthy. A failing or stale loop surfaces here with its reason."}
-          </p>
+          <div class="clean-empty success-empty">
+            <strong>No active system issues</strong>
+            <span>Quiet on-demand jobs are normal and are not treated as failures.</span>
+          </div>
         ) : (
-          <ul class="health-list">
-            {unhealthy.map((u) => (
-              <li class={`health-item tier-${u.flag === "failing" ? "dead" : "stale"}`}>
-                <span class={`engine-dot tier-${u.flag === "failing" ? "dead" : "stale"}`} aria-hidden="true" />
-                <span class="claim-type">{u.loop}</span>
-                <span class="mono">{u.detail}</span>
-              </li>
+          <div class="issue-list">
+            {unhealthy.map((issue) => (
+              <article class="issue-row" key={issue.loop}>
+                <span class={`status-dot-simple tone-${issue.flag === "failing" ? "dead" : "stale"}`} />
+                <div><strong>{issue.loop}</strong><span>{issue.detail}</span></div>
+              </article>
             ))}
-          </ul>
+          </div>
         )}
       </section>
 
-      <section class="panel">
-        <h2 class="panel-title">Loops</h2>
-        <table class="coverage">
-          <thead>
-            <tr>
-              <th>Loop</th>
-              <th>Cadence</th>
-              <th>Last activity</th>
-              <th class="num">Age</th>
-              <th>Note</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sortedLoops.map((l) => (
-              <LoopRow key={l.loop} loop={l} />
-            ))}
-          </tbody>
-        </table>
-      </section>
+      <button
+        type="button"
+        class="disclosure-button"
+        aria-expanded={detailsOpen}
+        onClick={() => setDetailsOpen((open) => !open)}
+      >
+        <span>{detailsOpen ? "Hide technical details" : "View technical details"}</span>
+        <span aria-hidden="true">{detailsOpen ? "−" : "+"}</span>
+      </button>
 
-      <section class="panel">
-        <h2 class="panel-title">
-          <Hint term="fill_outcome">Fill outcomes</Hint>
-          <span class="panel-clear">last hour</span>
-        </h2>
-        {fillEntries.length === 0 ? (
-          <p class="empty">No fill attempts in the last hour. The engine is idle on this path.</p>
-        ) : (
-          <table class="coverage">
-            <thead>
-              <tr>
-                <th>Outcome</th>
-                <th class="num">Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              {fillEntries.map(([outcome, n]) => (
-                <FillRow key={outcome} outcome={outcome} n={n} />
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+      {detailsOpen ? (
+        <div class="detail-drawer">
+          <section class="detail-block">
+            <div class="section-heading"><div><p class="eyebrow">Background jobs</p><h2>Activity by loop</h2></div><small>Assessed {timestamp(snapshot.now)}</small></div>
+            <div class="responsive-table">
+              <table class="data-table">
+                <thead><tr><th>Job</th><th>Mode</th><th>Last activity</th><th>Age</th></tr></thead>
+                <tbody>{snapshot.loops.map((loop) => <LoopRow key={loop.loop} loop={loop} />)}</tbody>
+              </table>
+            </div>
+          </section>
+          <section class="detail-block">
+            <div class="section-heading"><div><p class="eyebrow">Coverage</p><h2>Fill outcomes</h2></div><small>Last hour</small></div>
+            {fillEntries.length === 0 ? (
+              <p class="clean-empty">No coverage fills were attempted in the last hour.</p>
+            ) : (
+              <div class="outcome-grid">
+                {fillEntries.map(([outcome, count]) => (
+                  <div class="outcome-card" key={outcome}>
+                    <span class={`fill fill-${fillOutcomeClass(outcome)}`}>{outcome}</span>
+                    <strong>{count}</strong>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

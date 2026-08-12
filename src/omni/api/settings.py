@@ -1,8 +1,7 @@
-"""Settings API: manage credentials, venue adapters, and provider keys.
+"""Settings API for reporting configuration and controlling venue state.
 
-Reads/writes the operator's configuration — API keys, venue credentials,
-adapter enable/disable state. Venue credentials are stored encrypted in
-the database (not in plaintext env vars), decrypted at adapter-connect time.
+Secret values are deployment-managed. The API reports whether they are
+configured without returning them to the browser.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from neutron import App, Router
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
+from omni.config import settings
 from omni.credentials.catalog import PROVIDER_CATALOG
 
 __all__ = ["build_router"]
@@ -44,13 +44,17 @@ def _provider_catalog_payload() -> list[dict]:
     """Render the credential catalog for the UI."""
     out = []
     for key, entry in sorted(PROVIDER_CATALOG.items()):
+        settings_field = entry.get("settings_field", "")
         out.append({
             "key": key,
             "label": entry.get("label", key),
             "category": entry.get("category", ""),
-            "settings_field": entry.get("settings_field", ""),
+            "settings_field": settings_field,
             "key_required": entry.get("key_required", False),
             "wired": entry.get("wired", False),
+            "configured": bool(
+                settings_field and getattr(settings, settings_field, "")
+            ),
         })
     return out
 
@@ -94,6 +98,51 @@ VENUE_CATALOG = [
 ]
 
 
+def _venue_catalog_payload(saved: dict) -> list[dict]:
+    saved_venues = saved.get("venues", {})
+    out = []
+    for entry in VENUE_CATALOG:
+        key = entry["key"]
+        legacy = saved_venues.get(key, {})
+        if key == "hyperliquid":
+            configured = bool(
+                settings.hyperliquid_wallet_address
+                and settings.hyperliquid_private_key
+            )
+            source = "deployment"
+        else:
+            configured = bool(legacy.get("credentials"))
+            source = "legacy" if configured else "unavailable"
+        out.append({
+            **entry,
+            "configured": configured,
+            "enabled": bool(legacy.get("enabled")),
+            "configuration_source": source,
+        })
+    return out
+
+
+def _sanitized_venues(saved: dict) -> dict:
+    return {
+        entry["key"]: {
+            "enabled": entry["enabled"],
+            "configured": entry["configured"],
+            "configuration_source": entry["configuration_source"],
+        }
+        for entry in _venue_catalog_payload(saved)
+    }
+
+
+def _body_contains_secrets(body: dict) -> bool:
+    if body.get("providers"):
+        return True
+    venues = body.get("venues", {})
+    return any(
+        isinstance(value, dict) and "credentials" in value
+        for value in venues.values()
+    )
+
+
 def build_router(app: App) -> Router:
     router = Router()
 
@@ -101,14 +150,28 @@ def build_router(app: App) -> Router:
     async def get_settings(request: Request) -> dict:
         audience = resolve_audience_from_request(request)
         if audience is None:
-            return {"providers": {}, "venues": {}, "provider_catalog": _provider_catalog_payload(), "venue_catalog": VENUE_CATALOG}
+            saved = {"providers": {}, "venues": {}}
+            providers = [
+                {**entry, "configured": False}
+                for entry in _provider_catalog_payload()
+            ]
+            venues = [
+                {**entry, "configured": False, "enabled": False}
+                for entry in _venue_catalog_payload(saved)
+            ]
+            return {
+                "providers": {},
+                "venues": {},
+                "provider_catalog": providers,
+                "venue_catalog": venues,
+            }
 
         saved = await _load_settings(app.db.pool, audience)
         return {
-            "providers": saved.get("providers", {}),
-            "venues": saved.get("venues", {}),
+            "providers": {},
+            "venues": _sanitized_venues(saved),
             "provider_catalog": _provider_catalog_payload(),
-            "venue_catalog": VENUE_CATALOG,
+            "venue_catalog": _venue_catalog_payload(saved),
         }
 
     @router.post("/settings")
@@ -119,6 +182,13 @@ def build_router(app: App) -> Router:
             raise unauthorized("Authentication required")
 
         body = await request.json()
+        if _body_contains_secrets(body):
+            from neutron.error import bad_request
+
+            raise bad_request(
+                "Secret values cannot be saved through the browser; configure "
+                "them in the deployment environment"
+            )
         saved = await _load_settings(app.db.pool, audience)
         if "providers" in body:
             saved["providers"] = {**saved.get("providers", {}), **body["providers"]}
@@ -135,15 +205,19 @@ def build_router(app: App) -> Router:
             raise unauthorized("Authentication required")
 
         body = await request.json()
+        if "credentials" in body:
+            from neutron.error import bad_request
+
+            raise bad_request(
+                "Venue credentials cannot be saved through the browser; "
+                "configure them in the deployment environment"
+            )
         enabled = body.get("enabled", False)
         saved = await _load_settings(app.db.pool, audience)
         saved.setdefault("venues", {})
         if venue_key not in saved["venues"]:
             saved["venues"][venue_key] = {}
         saved["venues"][venue_key]["enabled"] = enabled
-
-        if enabled and body.get("credentials"):
-            saved["venues"][venue_key]["credentials"] = body["credentials"]
 
         await _save_settings(app.db.pool, audience, saved)
 

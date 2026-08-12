@@ -151,16 +151,17 @@ export default function Layout({
     <div class="app-shell">
       <header class="topbar">
         <div class="topbar-left">
-          <a href="/" class="brand">Omni Analyst</a>
+          <a href="/" class="brand"><span class="brand-mark" aria-hidden="true" />Omni Analyst</a>
           <nav class="topnav">
             {NAV.map((item) => (
-              <a key={item.href} href={item.href} class="topnav-link">
+              <a key={item.href} href={item.href} class={`topnav-link ${pathname === item.href ? "topnav-link-active" : ""}`}>
                 {item.label}
               </a>
             ))}
           </nav>
         </div>
         <div class="topbar-right">
+          {signedIn ? <StatusRail /> : null}
           {signedIn ? (
             <button
               type="button"
@@ -203,7 +204,6 @@ export default function Layout({
           )}
         </div>
       </header>
-      {signedIn ? <StatusRail /> : null}
       <main class="content">{allowed ? children : null}</main>
       {signedIn ? <CommandPalette commands={COMMANDS} /> : null}
     </div>
