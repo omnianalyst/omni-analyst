@@ -38,6 +38,10 @@ export function SearchView() {
       return;
     }
     setState({ kind: "loading", q });
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "search");
+    url.searchParams.set("q", q);
+    window.history.replaceState({}, "", url);
     try {
       const res = await searchEntities(q);
       if (res.entities.length === 0) {
@@ -57,12 +61,10 @@ export function SearchView() {
   }
 
   return (
-    <div class="search-view">
-      <header class="page-head">
+    <div class="search-view discover-subview">
+      <header class="discover-subview-heading">
         <h1>Search</h1>
-        <p class="muted">
-          Find a ticker or company by symbol or name.
-        </p>
+        <p>Find a stock, crypto asset, ETF, or economic series.</p>
       </header>
 
       <form class="search-form" onSubmit={onSubmit} role="search">
@@ -84,8 +86,7 @@ export function SearchView() {
       <section class="results" aria-live="polite">
         {state.kind === "idle" && (
           <p class="empty">
-            Type a symbol or name to search. An empty network is honest; we
-            won&apos;t list everything just to look busy.
+            Enter a symbol or name to inspect its available measurements.
           </p>
         )}
         {state.kind === "loading" && (

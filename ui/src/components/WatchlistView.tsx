@@ -63,13 +63,10 @@ export function WatchlistView() {
   }
 
   return (
-    <div class="watchlist-view">
-      <header class="page-head">
-        <h1>Watchlists</h1>
-        <p class="muted">
-          A watchlist is how demand enters the system. Entities on a list are
-          kept covered; removing one drops that demand.
-        </p>
+    <div class="watchlist-view discover-subview">
+      <header class="discover-subview-heading">
+        <h1>Saved</h1>
+        <p>Keep important entities covered and easy to return to.</p>
       </header>
 
       {state.kind === "loading" ? (
@@ -82,11 +79,14 @@ export function WatchlistView() {
 
       {state.kind === "ok" ? (
         <>
-          <section class="panel">
-            <h2 class="panel-title">New watchlist</h2>
-            <form class="auth-form" onSubmit={onCreate}>
+          <section class="watchlist-create-card">
+            <div>
+              <h2>New list</h2>
+              <p>Group companies, assets, or indicators around a question.</p>
+            </div>
+            <form class="watchlist-create-form" onSubmit={onCreate}>
               <input
-                class="search-input"
+                class="watchlist-name-input"
                 type="text"
                 placeholder="e.g. Mega-cap tech, Macro indicators"
                 value={name}

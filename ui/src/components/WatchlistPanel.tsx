@@ -137,18 +137,6 @@ export function WatchlistPanel({ watchlist }: { watchlist: Watchlist }) {
     <section class="panel">
       <h2 class="panel-title">
         {watchlist.name}
-        <span
-          class="faint"
-          style={{
-            marginLeft: "10px",
-            textTransform: "none",
-            letterSpacing: 0,
-            fontFamily: "var(--mono)",
-            fontSize: "11px",
-          }}
-        >
-          {watchlist.id}
-        </span>
       </h2>
 
       {mutateError ? (
@@ -166,7 +154,7 @@ export function WatchlistPanel({ watchlist }: { watchlist: Watchlist }) {
         ) : null}
         {entries.kind === "ok" && entries.entries.length === 0 ? (
           <p class="empty">
-            Nothing on this watchlist yet. Search above to add a ticker.
+            Nothing saved here yet. Use Add entity below to find a ticker.
           </p>
         ) : null}
         {entries.kind === "ok" && entries.entries.length > 0 ? (

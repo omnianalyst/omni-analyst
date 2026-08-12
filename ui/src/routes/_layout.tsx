@@ -160,8 +160,7 @@ export default function Layout({
             ))}
           </nav>
         </div>
-        <div class="topbar-right">
-          {signedIn ? <StatusRail /> : null}
+        <div class="topbar-center">
           {signedIn ? (
             <button
               type="button"
@@ -175,6 +174,9 @@ export default function Layout({
               <kbd class="palette-trigger-kbd">Cmd K</kbd>
             </button>
           ) : null}
+        </div>
+        <div class="topbar-right">
+          {signedIn ? <StatusRail /> : null}
           {signedIn ? (
             <div class="gear-menu" onClick={(e) => e.stopPropagation()}>
               <button

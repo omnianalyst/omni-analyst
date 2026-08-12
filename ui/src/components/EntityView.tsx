@@ -69,7 +69,7 @@ export function EntityView() {
   }, [id]);
 
   useEffect(() => {
-    if (!id || !selectedType) {
+    if (!id) {
       setClaims({ kind: "idle" });
       return;
     }
@@ -111,16 +111,36 @@ export function EntityView() {
     );
   }
 
+  const entity = coverage.kind === "ok" ? coverage.data.entity : null;
+  const claimCount = coverage.kind === "ok"
+    ? coverage.data.groups.reduce((total, group) => total + group.count, 0)
+    : null;
+  const gapCount = gaps.kind === "ok" ? gaps.data.gaps.length : null;
+  const readableType = selectedType?.replaceAll("_", " ");
+
   return (
-    <div class="entity-view">
-      <header class="page-head">
-        <p class="muted mono">entity {id}</p>
-        <h1>Coverage</h1>
+    <div class="entity-view product-page">
+      <a class="entity-back-link" href="/search?tab=search">← Back to search</a>
+      <header class="entity-page-heading">
+        <div>
+          <div class="entity-title-line">
+            <h1>{entity?.symbol ?? "Entity"}</h1>
+            {entity ? <span>{entity.kind.replaceAll("_", " ")}</span> : null}
+          </div>
+          <p>{entity?.name ?? "Loading company details…"}</p>
+        </div>
+        <div class="entity-summary-strip">
+          <span><strong>{coverage.kind === "ok" ? coverage.data.groups.length : "—"}</strong> data types</span>
+          <span><strong>{claimCount ?? "—"}</strong> measurements</span>
+          <span class={gapCount !== null && gapCount > 0 ? "value-negative" : ""}>
+            <strong>{gapCount ?? "—"}</strong> open gaps
+          </span>
+        </div>
       </header>
 
       <div class="entity-grid">
         <section class="panel entity-coverage">
-          <h2 class="panel-title">Claims by type</h2>
+          <h2 class="panel-title">Available data</h2>
           {coverage.kind === "loading" || coverage.kind === "idle" ? (
             <Loading label="Loading coverage…" />
           ) : null}
@@ -140,24 +160,20 @@ export function EntityView() {
         <div class="entity-detail">
           <section class="panel">
             <h2 class="panel-title">
-              {selectedType ? `${selectedType} claims` : "Claims"}
+              {readableType ? `${readableType} measurements` : "Recent measurements"}
               {selectedType ? (
                 <a class="panel-clear" href={`/entity/${id}`}>
                   all types
                 </a>
               ) : null}
             </h2>
-            {!selectedType ? (
-              <p class="empty">Select a claim type to inspect its values.</p>
+            {claims.kind === "loading" || claims.kind === "idle" ? (
+              <Loading label={`Loading ${readableType ?? "recent"} measurements…`} />
             ) : null}
-            {selectedType &&
-            (claims.kind === "loading" || claims.kind === "idle") ? (
-              <Loading label={`Loading ${selectedType} claims…`} />
-            ) : null}
-            {selectedType && claims.kind === "error" && (
+            {claims.kind === "error" && (
               <ErrorState message={claims.message} detail={claims.detail} />
             )}
-            {selectedType && claims.kind === "ok" && (
+            {claims.kind === "ok" && (
               <ClaimsTable claims={claims.data.claims} />
             )}
           </section>

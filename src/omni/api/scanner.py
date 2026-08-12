@@ -25,7 +25,8 @@ from omni.coverage.visibility import visible_claims_cte
 
 CACHE_TTL = 3600
 SECTOR_RETURN_WINDOW = 30
-SECTOR_LEADER_COUNT = 3
+SECTOR_LEADER_COUNT = 15
+OVERALL_LEADER_COUNT = 15
 _cache: dict[str, dict[str, Any]] = {}
 
 ASSETS: dict[str, list[dict[str, str]]] = {
@@ -278,6 +279,20 @@ def _sector_leader_payload(rows: list[Any]) -> list[dict]:
     return sectors
 
 
+def _overall_leaders(sectors: list[dict]) -> list[dict]:
+    companies = [
+        {
+            **leader,
+            "sector": sector["name"],
+            "sector_symbol": sector["symbol"],
+        }
+        for sector in sectors
+        for leader in sector["leaders"]
+    ]
+    companies.sort(key=lambda company: company["return_30d"], reverse=True)
+    return companies[:OVERALL_LEADER_COUNT]
+
+
 async def _sector_leaders(pool, audience) -> list[dict]:
     rows = await pool.fetch(
         f"""
@@ -321,6 +336,7 @@ def _payload(buckets_data: list[dict], sectors: list[dict]) -> dict:
     return {
         "buckets": buckets_data,
         "sectors": sectors,
+        "overall_leaders": _overall_leaders(sectors),
         "sector_coverage": {
             "available": len(sectors),
             "total": 11,

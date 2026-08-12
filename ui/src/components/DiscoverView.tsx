@@ -13,8 +13,24 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "alerts", label: "Alerts" },
 ];
 
+function initialTab(): Tab {
+  if (typeof window === "undefined") return "scanner";
+  const params = new URLSearchParams(window.location.search);
+  const requested = params.get("tab");
+  if (requested && TABS.some((tab) => tab.id === requested)) return requested as Tab;
+  return params.has("q") ? "search" : "scanner";
+}
+
 export function DiscoverView() {
-  const [tab, setTab] = useState<Tab>("scanner");
+  const [tab, setTab] = useState<Tab>(initialTab);
+
+  function selectTab(next: Tab) {
+    setTab(next);
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", next);
+    if (next !== "search") url.searchParams.delete("q");
+    window.history.replaceState({}, "", url);
+  }
 
   return (
     <div class="discover-view">
@@ -25,7 +41,7 @@ export function DiscoverView() {
             class={`tab ${tab === t.id ? "tab-active" : ""}`}
             role="tab"
             aria-selected={tab === t.id}
-            onClick={() => setTab(t.id)}
+            onClick={() => selectTab(t.id)}
           >
             {t.label}
           </button>

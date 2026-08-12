@@ -89,6 +89,7 @@ export interface CoverageGroup {
 }
 export interface CoverageResponse {
   entity_id: string;
+  entity: Entity;
   groups: CoverageGroup[];
 }
 
@@ -198,9 +199,9 @@ export const getGaps = (id: string): Promise<GapsResponse> =>
     authHeaderIfPresent(),
   );
 
-export const getClaims = (id: string, claimType: string): Promise<ClaimsResponse> =>
+export const getClaims = (id: string, claimType?: string | null): Promise<ClaimsResponse> =>
   request<ClaimsResponse>(
-    `/coverage/${encodeURIComponent(id)}/claims?claim_type=${encodeURIComponent(claimType)}`,
+    `/coverage/${encodeURIComponent(id)}/claims${claimType ? `?claim_type=${encodeURIComponent(claimType)}` : ""}`,
     authHeaderIfPresent(),
   );
 

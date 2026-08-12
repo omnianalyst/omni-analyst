@@ -39,6 +39,11 @@ interface SectorLeader {
   as_of: string;
 }
 
+interface OverallLeader extends SectorLeader {
+  sector: string;
+  sector_symbol: string;
+}
+
 interface SectorLeaders {
   name: string;
   symbol: string;
@@ -49,6 +54,7 @@ interface SectorLeaders {
 interface ScannerData {
   buckets: Bucket[];
   sectors: SectorLeaders[];
+  overall_leaders: OverallLeader[];
   sector_coverage: {
     available: number;
     total: number;
@@ -194,33 +200,63 @@ function SectorLeadership({ data }: { data: ScannerData }) {
           <p>No company has enough visible history for a measured ranking yet.</p>
         </div>
       ) : (
-        <div class="sector-leader-grid">
-          {data.sectors.map((sector) => (
-            <article class="sector-leader-card" key={sector.symbol}>
-              <header>
-                <div>
-                  <span>{sector.symbol}</span>
-                  <h3>{sector.name}</h3>
-                </div>
-                <small>{sector.coverage} compared</small>
-              </header>
-              <ol>
-                {sector.leaders.map((leader, index) => (
-                  <li key={leader.symbol}>
-                    <span class="leader-rank">{index + 1}</span>
-                    <span class="leader-company">
-                      <strong>{leader.symbol}</strong>
-                      <small>{leader.name}</small>
-                    </span>
-                    <strong class={tone(leader.return_30d)}>
-                      {percent(leader.return_30d)}
-                    </strong>
-                  </li>
-                ))}
-              </ol>
-            </article>
-          ))}
-        </div>
+        <>
+          <article class="overall-leaders-card">
+            <header>
+              <div>
+                <p class="eyebrow">Fast funnel</p>
+                <h3>Best overall</h3>
+              </div>
+              <span>Top {data.overall_leaders.length} across {data.sectors.reduce((total, sector) => total + sector.coverage, 0)}</span>
+            </header>
+            <ol class="overall-leader-grid">
+              {data.overall_leaders.map((leader, index) => (
+                <li key={leader.symbol}>
+                  <span class="leader-rank">{index + 1}</span>
+                  <span class="leader-company">
+                    <strong>{leader.symbol}</strong>
+                    <small>{leader.sector}</small>
+                  </span>
+                  <strong class={tone(leader.return_30d)}>
+                    {percent(leader.return_30d)}
+                  </strong>
+                </li>
+              ))}
+            </ol>
+          </article>
+
+          <div class="sector-subheading">
+            <h3>Best within each sector</h3>
+            <span>Up to 15 companies per measured sector</span>
+          </div>
+          <div class="sector-leader-grid">
+            {data.sectors.map((sector) => (
+              <article class="sector-leader-card" key={sector.symbol}>
+                <header>
+                  <div>
+                    <span>{sector.symbol}</span>
+                    <h3>{sector.name}</h3>
+                  </div>
+                  <small>Top {sector.leaders.length} of {sector.coverage}</small>
+                </header>
+                <ol>
+                  {sector.leaders.map((leader, index) => (
+                    <li key={leader.symbol}>
+                      <span class="leader-rank">{index + 1}</span>
+                      <span class="leader-company">
+                        <strong>{leader.symbol}</strong>
+                        <small>{leader.name}</small>
+                      </span>
+                      <strong class={tone(leader.return_30d)}>
+                        {percent(leader.return_30d)}
+                      </strong>
+                    </li>
+                  ))}
+                </ol>
+              </article>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
@@ -271,20 +307,17 @@ export function ScannerView() {
 
   return (
     <div class="scanner-view product-page">
-      <header class="discover-intro">
+      <header class="discover-page-heading">
         <div>
-          <p class="eyebrow">Discover</p>
-          <h1>See what moves together—and what may offset it</h1>
-          <p>
-            Organize the market by asset type or measured risk, then reveal how
-            each asset has moved relative to stocks. Measurements, not recommendations.
-          </p>
+          <h1>Discover</h1>
+          <p>See what is leading, what moves together, and what may offset it.</p>
         </div>
-        <div class="discover-meta">
-          <strong>{companyCount}</strong>
-          <span>companies compared</span>
-          <span>{assets.length} broad assets in context</span>
-          <small>Updated {new Date(state.data.as_of).toLocaleString()}</small>
+        <div class="discover-compact-meta">
+          <span><strong>{companyCount}</strong> companies</span>
+          <span><strong>{assets.length}</strong> broad assets</span>
+          <time dateTime={state.data.as_of}>
+            Updated {new Date(state.data.as_of).toLocaleString()}
+          </time>
         </div>
       </header>
 

@@ -84,13 +84,21 @@ async def _entity_exists(pool, entity_id: UUID) -> bool:
     ) is not None
 
 
+async def _entity_summary(pool, entity_id: UUID):
+    return await pool.fetchrow(
+        "SELECT id, kind, symbol, name FROM entity WHERE id = $1",
+        entity_id,
+    )
+
+
 def build_router(app: App) -> Router:
     router = Router()
 
     @router.get("/coverage/{entity_id}")
     async def coverage_summary(entity_id: UUID, request: Request) -> dict:
         """Coverage grouped by claim_type, each group reporting its freshness."""
-        if not await _entity_exists(app.db.pool, entity_id):
+        entity = await _entity_summary(app.db.pool, entity_id)
+        if entity is None:
             raise not_found(f"No entity {entity_id}")
         audience = _audience(request)
         sql = f"""
@@ -133,7 +141,16 @@ def build_router(app: App) -> Router:
             }
             for r in rows
         ]
-        return {"entity_id": str(entity_id), "groups": groups}
+        return {
+            "entity_id": str(entity_id),
+            "entity": {
+                "id": str(entity["id"]),
+                "kind": entity["kind"],
+                "symbol": entity["symbol"],
+                "name": entity["name"],
+            },
+            "groups": groups,
+        }
 
     @router.get("/coverage/{entity_id}/claims")
     async def list_claims(

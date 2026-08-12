@@ -79,11 +79,10 @@ export function SettingsView() {
 
   return (
     <div class="settings-view product-page">
-      <header class="settings-intro">
+      <header class="settings-page-heading">
         <div>
-          <p class="eyebrow">Settings</p>
-          <h1>Connections and data</h1>
-          <p>See what this deployment can use and where configuration still needs attention.</p>
+          <h1>Settings</h1>
+          <p>Connections, data sources, and deployment configuration.</p>
         </div>
         <div class="settings-summary">
           <span><strong>{configuredVenues}</strong> venues configured</span>

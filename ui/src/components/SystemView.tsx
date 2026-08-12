@@ -11,6 +11,12 @@ import {
   type LoopStatus,
 } from "../lib/system";
 import { errorMessage, lastOkAt, refresh, state, status } from "../lib/systemStore";
+import {
+  describeReconciliation,
+  formatTimestamp,
+  getReconciliation,
+  type ReconciliationReport,
+} from "../lib/trading";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 
@@ -34,9 +40,20 @@ function LoopRow({ loop }: { loop: LoopStatus }) {
 
 export function SystemView() {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [reconciliation, setReconciliation] = useState<
+    | { kind: "loading" }
+    | { kind: "ok"; data: ReconciliationReport }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
 
   useEffect(() => {
     void refresh();
+    void getReconciliation()
+      .then((data) => setReconciliation({ kind: "ok", data }))
+      .catch(() => setReconciliation({
+        kind: "error",
+        message: "Trading reconciliation is currently unavailable.",
+      }));
   }, []);
 
   const snapshot = status.value;
@@ -72,14 +89,15 @@ export function SystemView() {
 
   return (
     <div class="system-view product-page">
-      <header class={`system-hero ${attention ? "health-attention" : "health-healthy"}`}>
+      <header class={`compact-status-heading ${attention ? "health-attention" : "health-healthy"}`}>
         <div>
-          <p class="eyebrow">System</p>
           <div class="health-title-row">
             <span class="health-orb" aria-hidden="true" />
-            <h1>{headline}</h1>
+            <div>
+              <h1>System</h1>
+              <p>{headline} · {detail}</p>
+            </div>
           </div>
-          <p>{detail}</p>
         </div>
         <button type="button" class="btn-secondary compact-button" onClick={() => void refresh()}>
           Check again
@@ -144,6 +162,32 @@ export function SystemView() {
 
       {detailsOpen ? (
         <div class="detail-drawer">
+          <section class="detail-block">
+            <div class="section-heading">
+              <div><p class="eyebrow">Trading infrastructure</p><h2>Venue reconciliation</h2></div>
+            </div>
+            {reconciliation.kind === "loading" ? (
+              <Loading label="Checking trading venues…" />
+            ) : reconciliation.kind === "error" ? (
+              <p class="inline-warning">{reconciliation.message}</p>
+            ) : reconciliation.data.venues.length === 0 ? (
+              <p class="clean-empty">No venue checks have been recorded.</p>
+            ) : (
+              <div class="verification-list">
+                {reconciliation.data.venues.map((venue) => {
+                  const presentation = describeReconciliation(venue.status);
+                  return (
+                    <div class={`verification-row tone-${presentation.tone}`} key={venue.venue}>
+                      <span class="health-orb" aria-hidden="true" />
+                      <strong>{venue.venue}</strong>
+                      <span>{presentation.label}</span>
+                      <small>{formatTimestamp(venue.checked_at)}</small>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
           <section class="detail-block">
             <div class="section-heading"><div><p class="eyebrow">Background jobs</p><h2>Activity by loop</h2></div><small>Assessed {timestamp(snapshot.now)}</small></div>
             <div class="responsive-table">

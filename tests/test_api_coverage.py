@@ -159,7 +159,14 @@ async def test_coverage_summary_reports_per_type_counts_and_newest_knowledge_dat
         r = await client.get(f"/coverage/{entity_id}")
 
     assert r.status_code == 200
-    groups = {g["claim_type"]: g for g in r.json()["groups"]}
+    payload = r.json()
+    assert payload["entity"] == {
+        "id": str(entity_id),
+        "kind": "company",
+        "symbol": "AAPL",
+        "name": "AAPL",
+    }
+    groups = {g["claim_type"]: g for g in payload["groups"]}
 
     fund = groups["fundamental_metric"]
     assert fund["count"] == 2

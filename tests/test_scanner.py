@@ -8,6 +8,7 @@ from omni.api.scanner import (
     SECTOR_RETURN_WINDOW,
     _correlation_to_market,
     _market_behavior,
+    _overall_leaders,
     _risk_tier,
     _sector_leader_payload,
 )
@@ -42,9 +43,7 @@ def test_sector_leaders_rank_returns_and_limit_the_display() -> None:
     assert len(sectors) == 1
     assert sectors[0]["coverage"] == 4
     assert [leader["symbol"] for leader in sectors[0]["leaders"]] == [
-        "TOP",
-        "MID",
-        "LOW",
+        "TOP", "MID", "LOW", "FLAT"
     ]
     assert sectors[0]["leaders"][0]["return_30d"] == 30.0
 
@@ -78,3 +77,23 @@ def test_market_correlation_uses_aligned_daily_returns() -> None:
 
     assert _correlation_to_market(same_direction, market) == 1.0
     assert _correlation_to_market(same_direction.iloc[:20], market.iloc[:20]) is None
+
+
+def test_overall_leaders_rank_across_sector_boundaries() -> None:
+    sectors = [
+        {
+            "name": "Technology",
+            "symbol": "XLK",
+            "leaders": [{"symbol": "AAA", "return_30d": 12.0}],
+        },
+        {
+            "name": "Energy",
+            "symbol": "XLE",
+            "leaders": [{"symbol": "BBB", "return_30d": 20.0}],
+        },
+    ]
+
+    overall = _overall_leaders(sectors)
+
+    assert [company["symbol"] for company in overall] == ["BBB", "AAA"]
+    assert overall[0]["sector"] == "Energy"

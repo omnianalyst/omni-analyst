@@ -13,13 +13,9 @@ import {
   type NavPoint,
 } from "../lib/portfolio";
 import {
-  describeReconciliation,
-  formatQuantity,
   formatTimestamp,
   getPortfolio,
   getReconciliation,
-  sideLabel,
-  positionSide,
   type Portfolio,
   type ReconciliationReport,
 } from "../lib/trading";
@@ -60,7 +56,6 @@ function signedMoney(value: number | null): string {
 
 export function PortfolioView() {
   const [state, setState] = useState<State>({ kind: "loading" });
-  const [detailsOpen, setDetailsOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,14 +123,15 @@ export function PortfolioView() {
 
   return (
     <div class="portfolio-view product-page">
-      <header class={`portfolio-hero health-${health.tone}`}>
+      <header class={`compact-status-heading health-${health.tone}`}>
         <div class="portfolio-hero-copy">
-          <p class="eyebrow">Your portfolio</p>
           <div class="health-title-row">
             <span class="health-orb" aria-hidden="true" />
-            <h1>{health.headline}</h1>
+            <div>
+              <h1>Portfolio</h1>
+              <p>{health.headline} · {health.detail}</p>
+            </div>
           </div>
-          <p>{health.detail}</p>
         </div>
         <div class="portfolio-asof">
           <span>Last valued</span>
@@ -240,96 +236,6 @@ export function PortfolioView() {
           ) : null}
         </aside>
       </div>
-
-      <button
-        type="button"
-        class="disclosure-button"
-        aria-expanded={detailsOpen}
-        onClick={() => setDetailsOpen((open) => !open)}
-      >
-        <span>{detailsOpen ? "Hide portfolio details" : "View portfolio details"}</span>
-        <span aria-hidden="true">{detailsOpen ? "−" : "+"}</span>
-      </button>
-
-      {detailsOpen ? (
-        <div class="detail-drawer">
-          <section class="detail-block">
-            <div class="section-heading">
-              <div><p class="eyebrow">Verification</p><h2>Venue checks</h2></div>
-            </div>
-            {state.reconciliation.kind === "error" ? (
-              <p class="inline-warning">Reconciliation unavailable: {state.reconciliation.message}</p>
-            ) : reconciliation && reconciliation.venues.length > 0 ? (
-              <div class="verification-list">
-                {reconciliation.venues.map((venue) => {
-                  const presentation = describeReconciliation(venue.status);
-                  return (
-                    <div class={`verification-row tone-${presentation.tone}`} key={venue.venue}>
-                      <span class="health-orb" aria-hidden="true" />
-                      <strong>{venue.venue}</strong>
-                      <span>{presentation.label}</span>
-                      <small>{formatTimestamp(venue.checked_at)}</small>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <p class="clean-empty">No venue checks have been recorded.</p>
-            )}
-          </section>
-
-          <section class="detail-block">
-            <div class="section-heading">
-              <div><p class="eyebrow">Positions</p><h2>Recorded legs</h2></div>
-            </div>
-            {portfolio.positions.length === 0 ? (
-              <p class="clean-empty">No position legs are recorded.</p>
-            ) : (
-              <div class="responsive-table">
-                <table class="data-table">
-                  <thead><tr><th>Asset</th><th>Venue</th><th>Market</th><th>Side</th><th>Quantity</th><th>Entry</th></tr></thead>
-                  <tbody>
-                    {portfolio.positions.map((position) => {
-                      const side = positionSide(position);
-                      return (
-                        <tr key={`${position.venue}:${position.symbol}:${position.market_type}`}>
-                          <td><strong>{position.symbol}</strong></td>
-                          <td>{position.venue}</td>
-                          <td>{position.market_type}</td>
-                          <td>{sideLabel(side)}</td>
-                          <td class="mono">{formatQuantity(position.quantity)}</td>
-                          <td class="mono">{formatMoney(position.average_entry)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-
-          <section class="detail-block">
-            <div class="section-heading">
-              <div><p class="eyebrow">History</p><h2>Recorded valuations</h2></div>
-              <span class="count-badge">{history.length}</span>
-            </div>
-            {state.history.kind === "error" ? (
-              <p class="inline-warning">Valuation history unavailable: {state.history.message}</p>
-            ) : history.length === 0 ? (
-              <p class="clean-empty">No historical valuations have been recorded yet.</p>
-            ) : (
-              <div class="valuation-strip">
-                {history.slice(-12).map((point) => (
-                  <div class="valuation-point" key={point.taken_at}>
-                    <strong>{formatMoney(point.nav)}</strong>
-                    <span>{point.taken_at.slice(0, 10)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        </div>
-      ) : null}
     </div>
   );
 }
