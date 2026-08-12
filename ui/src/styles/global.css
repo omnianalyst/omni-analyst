@@ -2271,3 +2271,108 @@ tr.row.tier-unknown td:first-child {
   padding: 8px 16px 4px;
   list-style: none;
 }
+
+.hero-stats {
+  display: flex;
+  justify-content: center;
+  gap: 48px;
+  padding: 32px 0;
+}
+.hero-stat {
+  text-align: center;
+}
+.hero-stat-value {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.hero-stat-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 4px;
+}
+.hero-section {
+  text-align: center;
+  margin-bottom: 24px;
+}
+.hero-pairs {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.hero-pair-tag {
+  background: var(--card, var(--bg-alt, #1a1a2e));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 16px;
+  font-weight: 700;
+  font-size: 16px;
+}
+.hero-subtitle {
+  font-size: 13px;
+  max-width: 500px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+.details-toggle {
+  display: block;
+  margin: 0 auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 20px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.details-toggle:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.details-section {
+  max-width: 600px;
+  margin: 20px auto 0;
+}
+.details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.details-card {
+  background: var(--card, var(--bg-alt, #1a1a2e));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+.details-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.details-value {
+  font-size: 18px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+.details-last-cycle {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+.details-subtitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 20px 0 8px;
+}
+.details-table {
+  margin-bottom: 20px;
+}
