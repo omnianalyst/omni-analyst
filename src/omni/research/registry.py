@@ -20,12 +20,20 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from math import erfc, sqrt
 from pathlib import Path
 from typing import Any
 
 DEFAULT_PATH = Path(__file__).resolve().parents[3] / "_orchestrator" / "hypothesis_registry.jsonl"
+
+# The permutation null measured on crypto cross-sections puts the null's own
+# 95th percentile at |t| 2.2-2.5 even for a SINGLE test, because one dominant
+# market factor correlates every asset. A bar of 1.96 is wrong here before any
+# multiplicity is considered.
+NULL_FLOOR = 2.5
 
 
 @dataclass(frozen=True)
@@ -38,6 +46,56 @@ class Entry:
     verdict: str
     recorded_at: str
     detail: dict[str, Any]
+
+
+# The two bar calculations live here as pure functions of the history, not as
+# methods, because more than one reader needs them: `evaluate()` computes the
+# bar from the JSONL file during a research run, and the API computes it from
+# the mirrored table so the product can show the same number. A second
+# implementation of this arithmetic would eventually disagree with the first,
+# and the disagreement would be invisible -- both would look like a plausible
+# threshold. One implementation, two callers.
+
+
+def bar_for(*, total_cells: int, pending_cells: int) -> float:
+    """The |t| a result must clear, given every test before it AND now.
+
+    `pending_cells` is included because the test about to run is part of the
+    search. Computing the bar from history alone would let each new test be
+    judged as though it were the first.
+    """
+    n = max(1, max(0, total_cells) + max(0, pending_cells))
+    return max(NULL_FLOOR, math.sqrt(2.0 * math.log(n)))
+
+
+def fdr_bar_for(*, stats: Sequence[float], pending_cells: int, q: float = 0.10) -> float:
+    """The Benjamini-Hochberg threshold over recorded statistics, as a |t|.
+
+    `bar_for` controls the FAMILY-WISE error rate -- the probability of even one
+    false positive across every test ever run. That is the right target when
+    hunting a single true effect among nulls, and it is brutal when you believe
+    several real effects exist, because it treats the hundredth test as harshly
+    as if it were the only one.
+
+    FDR instead controls the expected PROPORTION of discoveries that are false.
+    At q = 0.10 it accepts that roughly one in ten survivors is noise, in
+    exchange for a materially lower bar.
+
+    `stats` are the observed |t| values, in any order. With none recorded it
+    falls back to the null floor rather than inventing a threshold.
+    """
+    ordered = sorted((abs(float(t)) for t in stats), reverse=True)
+    if not ordered:
+        return NULL_FLOOR
+    m = len(ordered) + max(0, pending_cells)
+    threshold = None
+    for rank, t in enumerate(ordered, start=1):
+        p = erfc(t / sqrt(2.0))
+        if p <= q * rank / m:
+            threshold = t
+        else:
+            break
+    return max(NULL_FLOOR, threshold if threshold is not None else NULL_FLOOR)
 
 
 class Registry:
@@ -74,59 +132,31 @@ class Registry:
         """Every statistic this project has ever computed against the null."""
         return sum(e.cells for e in self.entries())
 
+    def recorded_stats(self) -> list[float]:
+        """Every per-test statistic recorded against the null, unordered."""
+        return [
+            abs(float(t))
+            for e in self.entries()
+            if (t := e.detail.get("best_recent_third_t")) is not None
+        ]
+
     def fdr_bar(self, *, pending_cells: int, q: float = 0.10) -> float:
-        """The Benjamini-Hochberg threshold, expressed as a |t|.
-
-        `bar()` controls the FAMILY-WISE error rate -- the probability of even
-        one false positive across every test ever run. That is the right target
-        when hunting a single true effect among nulls, and it is brutal when you
-        believe several real effects exist, because it treats the hundredth test
-        as harshly as if it were the only one.
-
-        FDR instead controls the expected PROPORTION of discoveries that are
-        false. At q = 0.10 it accepts that roughly one in ten survivors is
-        noise, in exchange for a materially lower bar. For a genuine search
-        across many families that is the honest correction.
+        """The Benjamini-Hochberg threshold over this history, as a |t|.
 
         Computed from the recorded per-test statistics rather than assumed, so
         it tightens as the history fills with nulls -- which is the behaviour
-        that makes it trustworthy. With no recorded statistics it falls back to
-        the crypto null floor rather than inventing a threshold.
+        that makes it trustworthy. See `fdr_bar_for`.
         """
-        from math import erfc, sqrt
-
-        stats = sorted(
-            (abs(float(t)) for e in self.entries()
-             if (t := e.detail.get("best_recent_third_t")) is not None),
-            reverse=True,
+        return fdr_bar_for(
+            stats=self.recorded_stats(), pending_cells=pending_cells, q=q
         )
-        if not stats:
-            return 2.5
-        m = len(stats) + max(0, pending_cells)
-        # Two-sided normal p-value for each observed |t|, largest t first.
-        threshold = None
-        for rank, t in enumerate(stats, start=1):
-            p = erfc(t / sqrt(2.0))
-            if p <= q * rank / m:
-                threshold = t
-            else:
-                break
-        return max(2.5, threshold if threshold is not None else 2.5)
 
     def bar(self, *, pending_cells: int) -> float:
-        """The |t| a result must clear, given everything tested before AND now.
+        """The |t| a result must clear, given this history AND the pending test.
 
-        Includes `pending_cells` because the test about to run is part of the
-        search. Computing the bar from history alone would let each new test be
-        judged as though it were the first.
-
-        Never below 2.5. The permutation null measured on crypto cross-sections
-        puts the null's own 95th percentile at |t| 2.2-2.5 even for a SINGLE
-        test, because one dominant market factor correlates every asset. A bar
-        of 1.96 is wrong here before any multiplicity is considered.
+        See `bar_for`. Never below `NULL_FLOOR`.
         """
-        n = max(1, self.total_cells() + max(0, pending_cells))
-        return max(2.5, math.sqrt(2.0 * math.log(n)))
+        return bar_for(total_cells=self.total_cells(), pending_cells=pending_cells)
 
     def record(
         self,

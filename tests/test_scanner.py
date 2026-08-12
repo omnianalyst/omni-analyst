@@ -15,6 +15,7 @@ from omni.api.scanner import (
     _payload,
     _risk_tier,
     _sector_leader_payload,
+    _tier_census,
 )
 
 
@@ -164,3 +165,65 @@ def test_metrics_discard_non_finite_and_non_positive_feed_values() -> None:
         for key, value in metrics.items()
         if key != "returns"
     )
+
+
+def test_a_cash_equivalent_reports_no_sharpe_rather_than_a_huge_one() -> None:
+    """The guard must catch NEARLY constant, not only exactly constant.
+
+    Measured on the live feed 2026-08-12, SGOV had 0.205% annualised
+    volatility and a genuine 4.2% annualised return, which the old
+    `ann_vol > 0` guard turned into a reported Sharpe of 20.6. No strategy
+    achieves that; it is a real numerator divided by a denominator that rounds
+    to nothing.
+    """
+    index = pd.date_range("2024-01-01", periods=500, freq="D", tz=UTC)
+    # ~4%/yr drift with the negligible daily wobble of a T-bill fund.
+    drift = [100.0 * (1.0 + 0.04 / 365) ** day for day in range(500)]
+    prices = pd.Series(drift, index=index)
+
+    metrics = _compute_metrics(prices)
+
+    assert metrics["volatility"] is not None
+    assert metrics["volatility"] < 1.0
+    assert metrics["sharpe"] is None, (
+        f"a {metrics['volatility']}% volatility asset reported a Sharpe of "
+        f"{metrics['sharpe']}; below the floor there is no risk to adjust for"
+    )
+
+
+def test_a_normally_volatile_asset_still_reports_a_sharpe() -> None:
+    """The floor must not silence the assets it exists to protect."""
+    index = pd.date_range("2024-01-01", periods=500, freq="D", tz=UTC)
+    rng = __import__("numpy").random.default_rng(7)
+    steps = rng.normal(0.0006, 0.012, size=500).cumsum()
+    prices = pd.Series(100.0 * __import__("numpy").exp(steps), index=index)
+
+    metrics = _compute_metrics(prices)
+
+    assert metrics["volatility"] > 1.0
+    assert metrics["sharpe"] is not None
+    assert abs(metrics["sharpe"]) < 10, "a plausible Sharpe, not a divide-by-noise artefact"
+
+
+def test_tier_census_reports_an_unreached_tier_as_zero_not_absent() -> None:
+    """An omitted tier reads as a filter the caller applied.
+
+    The stocks category holds only diversified funds and cannot reach `high`
+    at all -- the most volatile measured 27.1% against a 30% cut. Showing
+    `high: 0` says that honestly; omitting the key would imply the universe was
+    narrowed.
+    """
+    census = _tier_census(
+        [{"risk_tier": "low"}, {"risk_tier": "medium"}, {"risk_tier": "medium"}]
+    )
+
+    assert census["high"] == 0
+    assert set(census) == {"low", "medium", "high", "unrated"}
+
+
+def test_payload_publishes_a_risk_census_for_every_category() -> None:
+    census = _payload([], [], {})["risk_census"]
+
+    assert set(census) == {"stocks", "defensive", "crypto"}
+    for category in census.values():
+        assert category["high"] == 0

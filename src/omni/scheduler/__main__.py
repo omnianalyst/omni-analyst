@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from contextlib import suppress
 
 from omni.autonomous.runner import AutonomousRunner
 from omni.config import settings
@@ -19,6 +20,7 @@ from omni.db import connect, migrate
 from omni.entities.identify import run as populate_identifiers
 from omni.entities.seed import run as seed_market_universe
 from omni.scheduler.worker import Scheduler, SchedulerConfig, default_registry
+from omni.venue.manager import reconcile_forever
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -68,6 +70,12 @@ async def main() -> None:
     autonomous = AutonomousRunner(client.pool)
     await autonomous.start()
 
+    # Venue connections are reconciled here rather than only when a Settings
+    # endpoint is called. Without this a venue enabled in the UI stayed
+    # disconnected until someone reloaded that page, and a restart dropped
+    # every connection silently.
+    venues = asyncio.create_task(reconcile_forever(client.pool, stopping))
+
     try:
         await stopping.wait()
     finally:
@@ -77,6 +85,9 @@ async def main() -> None:
             scheduler.stats.filled, scheduler.stats.unfillable,
             scheduler.stats.errored,
         )
+        venues.cancel()
+        with suppress(asyncio.CancelledError):
+            await venues
         await autonomous.stop()
         await scheduler.stop()
         await client.close()

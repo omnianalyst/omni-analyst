@@ -4772,3 +4772,148 @@ tr.row.tier-unknown td:first-child {
     padding-left: 20px;
   }
 }
+
+/* Strategy research record -- the search this system has actually run.
+   The meter is a share of the bar, never a score: it is capped at 1 in
+   `shareOfBar` so a failed result cannot render as though it exceeded the
+   threshold it failed. */
+.research-record {
+  display: grid;
+  gap: var(--s-4);
+}
+
+.research-bars {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--s-4);
+  padding: var(--s-4);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+
+.research-bars > div {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+
+.research-bars strong {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.research-meter {
+  display: block;
+  width: 100%;
+  max-width: 90px;
+  height: 3px;
+  margin-top: 5px;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.research-meter::after {
+  content: "";
+  display: block;
+  width: calc(var(--share, 0) * 100%);
+  height: 100%;
+  border-radius: 2px;
+  background: var(--tier-unknown);
+}
+
+.research-note {
+  margin: 0;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.research-note code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Entity profile -- one name, measured. */
+.entity-price-block {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  text-align: right;
+}
+
+.entity-price-block strong {
+  font-size: 30px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.entity-price-block small {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.entity-chart {
+  margin: 0;
+  display: grid;
+  gap: var(--s-2);
+}
+
+.entity-chart svg {
+  width: 100%;
+  height: 120px;
+  overflow: visible;
+}
+
+.entity-chart path {
+  fill: none;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.entity-chart .spark-rising { stroke: var(--tier-fresh); }
+.entity-chart .spark-falling { stroke: var(--tier-dead); }
+
+.entity-chart figcaption {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.entity-derived {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--s-4);
+  padding: var(--s-4);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+
+.entity-derived > div {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+
+.entity-derived strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.entity-limits ul {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.entity-limits li {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}

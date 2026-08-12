@@ -35,6 +35,22 @@ CACHE_TTL = 3600
 SECTOR_RETURN_WINDOW = 30
 SECTOR_LEADER_COUNT = 15
 OVERALL_LEADER_COUNT = 15
+
+# Risk tier cuts, in annualised volatility percent.
+#
+# Worth knowing when reading a tier census: a universe of diversified funds
+# cannot reach `high`. Measured 2026-08-12 over two years, the most volatile of
+# the 28 ranked broad stock ETFs was XLK at 27.1%, and the only broad asset of
+# any class above 30% was SLV at 47.8%. That is a property of diversification,
+# not of the threshold -- individual companies routinely clear it.
+RISK_TIER_LOW_MAX = 10.0
+RISK_TIER_MEDIUM_MAX = 30.0
+
+# Annualised volatility percent below which a Sharpe ratio is not reported.
+# Cash equivalents sit near 0.2%, where the ratio is dominated by the
+# denominator's noise rather than by any risk-adjusted skill.
+MIN_SHARPE_VOLATILITY = 1.0
+
 _cache: dict[str, dict[str, Any]] = {}
 
 ASSETS: dict[str, list[dict[str, str]]] = {
@@ -237,7 +253,23 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
     sessions = 365 if asset_class == "crypto" else 252
     ann_vol = float(daily_ret.std() * np.sqrt(sessions) * 100)
     ann_ret = float(daily_ret.mean() * sessions * 100)
-    sharpe = round(ann_ret / ann_vol, 2) if ann_vol > 0 else None
+    # `ann_vol > 0` is not a sufficient guard, and the failure it misses is the
+    # one that actually occurs. A cash-equivalent fund is not exactly constant,
+    # it is *nearly* constant: SGOV measured 0.205% annualised volatility, so
+    # the ratio passed the guard and reported a Sharpe of 20.6 -- a figure no
+    # real strategy achieves, produced by dividing a genuine 4.2% return by a
+    # volatility that rounds to nothing.
+    #
+    # The floor is on the standard deviation rather than the variance because
+    # only the former is in the same units as the return, and it is expressed
+    # in annualised percent to match `ann_vol`. Below it the asset carries no
+    # risk worth dividing by, so the honest answer is that it has no
+    # risk-adjusted return -- not a large one.
+    sharpe = (
+        round(ann_ret / ann_vol, 2)
+        if np.isfinite(ann_vol) and ann_vol >= MIN_SHARPE_VOLATILITY
+        else None
+    )
 
     cumulative = (1 + daily_ret).cumprod()
     peak = cumulative.expanding().max()
@@ -352,11 +384,28 @@ def _correlation_to_market(asset: pd.Series, market: pd.Series) -> float | None:
 def _risk_tier(volatility: float | None) -> str:
     if volatility is None or not np.isfinite(volatility):
         return "unrated"
-    if volatility < 10:
+    if volatility < RISK_TIER_LOW_MAX:
         return "low"
-    if volatility < 30:
+    if volatility < RISK_TIER_MEDIUM_MAX:
         return "medium"
     return "high"
+
+
+def _tier_census(entries: list[dict]) -> dict[str, int]:
+    """How many assets landed in each tier, including the empty ones.
+
+    Reported per category so a tier that no asset reached is visibly zero
+    rather than silently absent. The distinction matters: a category of
+    diversified funds cannot produce a `high` tier at all -- none of them
+    reaches 30% annualised volatility -- and an omitted row reads as a filter
+    the caller has applied, which would be a claim about the universe that is
+    not true.
+    """
+    census = dict.fromkeys(("low", "medium", "high", "unrated"), 0)
+    for entry in entries:
+        tier = entry.get("risk_tier", "unrated")
+        census[tier] = census.get(tier, 0) + 1
+    return census
 
 
 def _market_behavior(correlation: float | None) -> str:
@@ -520,17 +569,24 @@ def _payload(buckets_data: list[dict], sectors: list[dict], coverage: dict[str, 
         available.sort(key=lambda asset: asset["scores"]["balanced"], reverse=True)
         return available
 
+    rankings = {
+        "stocks": category_ranked("stocks"),
+        "defensive": category_ranked("defensive"),
+        "crypto": category_ranked("crypto"),
+    }
+
     return {
         "buckets": buckets_data,
-        "category_rankings": {
-            "stocks": category_ranked("stocks"),
-            "defensive": category_ranked("defensive"),
-            "crypto": category_ranked("crypto"),
+        "category_rankings": rankings,
+        "risk_census": {
+            category: _tier_census(entries) for category, entries in rankings.items()
         },
         "ranking_method": {
             "balanced": "Within each category: 35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification; available measures are reweighted when history is shorter.",
             "history": "One-year return is trailing. Five- and ten-year figures are annualized. Median return uses complete calendar years; long-term and consistency ranks require at least three complete years.",
             "scope": "Scores are percentile ranks against the other assets in the same category, not forecasts or recommendations.",
+            "risk_tier": f"Annualised volatility under {RISK_TIER_LOW_MAX:.0f}% is low, under {RISK_TIER_MEDIUM_MAX:.0f}% is medium, and at or above it is high. A tier showing zero means no asset in that category reached it, not that any were filtered out — diversified funds rarely clear the high threshold.",
+            "sharpe": f"Sharpe is withheld below {MIN_SHARPE_VOLATILITY:.0f}% annualised volatility, where the ratio measures the denominator's noise rather than risk-adjusted return.",
         },
         "sectors": sectors,
         "overall_leaders": _overall_leaders(sectors) if len(sectors) == 11 else [],

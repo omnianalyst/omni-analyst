@@ -37,7 +37,7 @@
 		/capabilities /capabilities/* /coverage /coverage/* \
 		/entities /entities/* /exposure /exposure/* /gaps /gaps/* \
 		/objective/* /watchlists /watchlists/* \
-		/portfolio /portfolio/* /scanner/* \
+		/portfolio /portfolio/* /research/* /scanner/* \
 		/settings/* /system/* /trading /trading/* /wallets /wallets/*
 	handle @api {
 		reverse_proxy {$OMNI_API_UPSTREAM:-api:8000}

@@ -36,6 +36,11 @@ dependencies = [
     # reshaped the async_support surface, which would silently move the venue
     # an adapter targets.
     "ccxt>=4.0,<5",
+    # Venue credentials are encrypted at rest (omni.credentials.keyring).
+    # Already present transitively via pyjwt[crypto]; declared directly because
+    # this code imports it, and a transitive dependency can be dropped by an
+    # unrelated upgrade.
+    "cryptography>=42",
     "yfinance>=1.5.2",
     "openpyxl>=3.1.5",
 ]

@@ -68,6 +68,14 @@ services:
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
       LICENSED_REDISTRIBUTION_PROVIDERS: ${LICENSED_REDISTRIBUTION_PROVIDERS:-}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-3600}
+      # Optional. Absent, Omni generates a key into omni_keys on first use.
+      # Supplying one here overrides the file (12-factor / secrets manager).
+      OMNI_CREDENTIAL_KEY: ${OMNI_CREDENTIAL_KEY:-}
+    volumes:
+      # Durable home for the credential key. Without this the key would be
+      # generated into a container filesystem and lost on the next deploy,
+      # making every credential encrypted under it unreadable.
+      - omni_keys:/var/lib/omni
     ports:
       - "${API_PORT:-8000}:8000"
     # No healthcheck override: the image's HEALTHCHECK (see Dockerfile) is what
@@ -104,6 +112,9 @@ services:
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
       LICENSED_REDISTRIBUTION_PROVIDERS: ${LICENSED_REDISTRIBUTION_PROVIDERS:-}
       TOKEN_EXPIRES_IN: ${TOKEN_EXPIRES_IN:-3600}
+      # Optional. Absent, Omni generates a key into omni_keys on first use.
+      # Supplying one here overrides the file (12-factor / secrets manager).
+      OMNI_CREDENTIAL_KEY: ${OMNI_CREDENTIAL_KEY:-}
       # Trading credentials, scheduler ONLY -- deliberately absent from the api
       # service above. The api serves reads; a process that answers public
       # requests has no use for a key that can place orders, and the cheapest
@@ -125,6 +136,11 @@ services:
       # trend.sma calibration buckets. Raise for stricter/more silence, lower
       # for more (noisier).
       TARGET_HIT_RATE: ${TARGET_HIT_RATE:-0.6}
+    volumes:
+      # Same durable key as the api. The scheduler is the process that
+      # actually connects venues, so it must read the same key that
+      # encrypted the credentials.
+      - omni_keys:/var/lib/omni
     # Exactly one. Do not scale.
     deploy:
       replicas: 1
@@ -150,6 +166,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  omni_keys:
   postgres_data:
   caddy_data:
   caddy_config:
