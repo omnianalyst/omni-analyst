@@ -46,7 +46,7 @@ export function SettingsView() {
       setState({ kind: "auth" });
       return;
     }
-    request<SettingsData>("/settings", headers)
+    request<SettingsData>("/settings/config", headers)
       .then((data) => {
         if (!cancelled) setState({ kind: "ok", data });
       })

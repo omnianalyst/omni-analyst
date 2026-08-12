@@ -36,9 +36,9 @@
 		/autonomous /autonomous/* /briefing /briefing/* \
 		/capabilities /capabilities/* /coverage /coverage/* \
 		/entities /entities/* /exposure /exposure/* /gaps /gaps/* \
-		/objective /objective/* /watchlists /watchlists/* \
-		/portfolio /portfolio/* /scanner /scanner/* \
-		/settings /settings/* /system /system/* /trading /trading/*
+		/objective/* /watchlists /watchlists/* \
+		/portfolio /portfolio/* /scanner/* \
+		/settings/* /system/* /trading /trading/*
 	handle @api {
 		reverse_proxy {$OMNI_API_UPSTREAM:-api:8000}
 	}

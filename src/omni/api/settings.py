@@ -146,7 +146,7 @@ def _body_contains_secrets(body: dict) -> bool:
 def build_router(app: App) -> Router:
     router = Router()
 
-    @router.get("/settings")
+    @router.get("/settings/config")
     async def get_settings(request: Request) -> dict:
         audience = resolve_audience_from_request(request)
         if audience is None:
