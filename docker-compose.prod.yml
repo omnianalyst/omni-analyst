@@ -45,6 +45,11 @@ services:
       context: .
       dockerfile: Dockerfile
     image: omni-api:latest
+    # Public market/reference providers must not depend on the host's optional
+    # Tailscale MagicDNS resolver. Docker still resolves compose service names.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,6 +79,9 @@ services:
       context: .
       dockerfile: Dockerfile.scheduler
     image: omni-scheduler:latest
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     # Depends on a HEALTHY api, not just a started one. /health answers only
     # after the api lifespan has run migrations, so by the time this starts the
     # schema is in place and the scheduler's own migrate() is a no-op - the two

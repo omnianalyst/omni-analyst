@@ -659,7 +659,10 @@ async def _build_scanner(app: App, audience) -> dict:
         },
     }
     payload = _payload(buckets_data, sectors, coverage)
-    _cache[cache_key] = {"data": payload, "ts": now}
+    # A provider/DNS outage must not pin an empty market to the one-hour cache.
+    # The honest empty response can be shown once, then the next request retries.
+    if not prices.empty:
+        _cache[cache_key] = {"data": payload, "ts": now}
     return payload
 
 
