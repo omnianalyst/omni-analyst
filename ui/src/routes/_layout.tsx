@@ -151,7 +151,7 @@ export default function Layout({
     <div class="app-shell">
       <header class="topbar">
         <div class="topbar-left">
-          <a href="/" class="brand"><span class="brand-mark" aria-hidden="true" />Omni Analyst</a>
+          <a href="/" class="brand">Omni Analyst</a>
           <nav class="topnav">
             {NAV.map((item) => (
               <a key={item.href} href={item.href} class={`topnav-link ${pathname === item.href ? "topnav-link-active" : ""}`}>

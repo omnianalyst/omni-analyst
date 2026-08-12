@@ -30,23 +30,34 @@ _cache: dict[str, dict[str, Any]] = {}
 
 ASSETS: dict[str, list[dict[str, str]]] = {
     "Growth": [
-        {"symbol": "VTI", "name": "Vanguard Total Stock Market", "yf": "VTI"},
-        {"symbol": "SPY", "name": "S&P 500 ETF", "yf": "SPY"},
-        {"symbol": "QQQ", "name": "Invesco QQQ Trust", "yf": "QQQ"},
-        {"symbol": "VXUS", "name": "Vanguard Total International", "yf": "VXUS"},
+        {"symbol": "VTI", "name": "Vanguard Total Stock Market", "yf": "VTI",
+         "asset_class": "stocks"},
+        {"symbol": "SPY", "name": "S&P 500 ETF", "yf": "SPY",
+         "asset_class": "stocks"},
+        {"symbol": "QQQ", "name": "Invesco QQQ Trust", "yf": "QQQ",
+         "asset_class": "stocks"},
+        {"symbol": "VXUS", "name": "Vanguard Total International", "yf": "VXUS",
+         "asset_class": "stocks"},
     ],
     "Debasement": [
-        {"symbol": "GLD", "name": "SPDR Gold Shares", "yf": "GLD"},
-        {"symbol": "SLV", "name": "iShares Silver Trust", "yf": "SLV"},
-        {"symbol": "BTC", "name": "Bitcoin", "yf": "BTC-USD"},
-        {"symbol": "ETH", "name": "Ethereum", "yf": "ETH-USD"},
-        {"symbol": "SOL", "name": "Solana", "yf": "SOL-USD"},
+        {"symbol": "GLD", "name": "SPDR Gold Shares", "yf": "GLD",
+         "asset_class": "defensive"},
+        {"symbol": "SLV", "name": "iShares Silver Trust", "yf": "SLV",
+         "asset_class": "defensive"},
+        {"symbol": "BTC", "name": "Bitcoin", "yf": "BTC-USD",
+         "asset_class": "crypto"},
+        {"symbol": "ETH", "name": "Ethereum", "yf": "ETH-USD",
+         "asset_class": "crypto"},
+        {"symbol": "SOL", "name": "Solana", "yf": "SOL-USD",
+         "asset_class": "crypto"},
     ],
     "Deflation": [
-        {"symbol": "TLT", "name": "iShares 20+ Year Treasury", "yf": "TLT"},
+        {"symbol": "TLT", "name": "iShares 20+ Year Treasury", "yf": "TLT",
+         "asset_class": "defensive"},
     ],
     "Safety": [
-        {"symbol": "SHV", "name": "iShares Short Treasury", "yf": "SHV"},
+        {"symbol": "SHV", "name": "iShares Short Treasury", "yf": "SHV",
+         "asset_class": "defensive"},
     ],
 }
 
@@ -55,7 +66,6 @@ BUCKET_ROLES = {
     "Debasement": "Inflation/stagflation — hard assets win when currency devalues",
     "Deflation": "Falling rates/prices — long bonds win when rates cut",
     "Safety": "Recession/liquidity — cash and T-bills preserve capital",
-    "Alpha": "Uncorrelated harvest — carry book collects funding regardless of regime",
 }
 
 CRYPTO_ASSETS = {"BTC", "ETH", "SOL"}
@@ -147,6 +157,40 @@ def _compute_metrics(prices: pd.Series) -> dict[str, float | None]:
         "volatility": round(ann_vol, 1),
         "max_drawdown": max_dd,
     }
+
+
+def _correlation_to_market(asset: pd.Series, market: pd.Series) -> float | None:
+    returns = pd.concat(
+        [asset.pct_change(fill_method=None), market.pct_change(fill_method=None)],
+        axis=1,
+        join="inner",
+    ).dropna()
+    if len(returns) < 30:
+        return None
+    correlation = float(returns.iloc[:, 0].corr(returns.iloc[:, 1]))
+    if not np.isfinite(correlation):
+        return None
+    return round(correlation, 2)
+
+
+def _risk_tier(volatility: float | None) -> str:
+    if volatility is None or not np.isfinite(volatility):
+        return "unrated"
+    if volatility < 10:
+        return "low"
+    if volatility < 30:
+        return "medium"
+    return "high"
+
+
+def _market_behavior(correlation: float | None) -> str:
+    if correlation is None or not np.isfinite(correlation):
+        return "unrated"
+    if correlation <= -0.15:
+        return "counterweight"
+    if correlation < 0.35:
+        return "diversifier"
+    return "risk_on"
 
 
 async def _funding_rates(pool, audience) -> dict[str, float | None]:
@@ -305,9 +349,18 @@ async def _build_scanner(app: App, audience) -> dict:
             if symbol not in prices.columns:
                 continue
             metrics = _compute_metrics(prices[symbol])
+            correlation = (
+                _correlation_to_market(prices[symbol], prices["SPY"])
+                if "SPY" in prices.columns
+                else None
+            )
             entry: dict[str, Any] = {
                 "symbol": symbol,
                 "name": a["name"],
+                "asset_class": a["asset_class"],
+                "risk_tier": _risk_tier(metrics["volatility"]),
+                "correlation_to_spy": correlation,
+                "market_behavior": _market_behavior(correlation),
                 **metrics,
             }
             if symbol in CRYPTO_ASSETS:
@@ -325,20 +378,6 @@ async def _build_scanner(app: App, audience) -> dict:
             "role": BUCKET_ROLES.get(bucket_name, ""),
             "assets": bucket_assets,
         })
-
-    carry_pairs = []
-    for symbol in ["ETH", "SOL", "BTC"]:
-        if symbol in funding and funding[symbol] is not None:
-            carry_pairs.append({
-                "symbol": symbol,
-                "funding_apr": funding[symbol],
-            })
-    carry_pairs.sort(key=lambda x: x["funding_apr"], reverse=True)
-    buckets_data.append({
-        "name": "Alpha",
-        "role": BUCKET_ROLES["Alpha"],
-        "assets": carry_pairs,
-    })
 
     payload = _payload(buckets_data, sectors)
     _cache[cache_key] = {"data": payload, "ts": now}

@@ -2,7 +2,15 @@
 
 from datetime import UTC, datetime, timedelta
 
-from omni.api.scanner import SECTOR_RETURN_WINDOW, _sector_leader_payload
+import pandas as pd
+
+from omni.api.scanner import (
+    SECTOR_RETURN_WINDOW,
+    _correlation_to_market,
+    _market_behavior,
+    _risk_tier,
+    _sector_leader_payload,
+)
 
 
 def _history(symbol: str, name: str, start: float, finish: float) -> list[dict]:
@@ -48,3 +56,25 @@ def test_sector_leaders_exclude_incomplete_or_invalid_histories() -> None:
         row["value"] = {"close": None}
 
     assert _sector_leader_payload([*incomplete, *invalid]) == []
+
+
+def test_risk_tiers_are_derived_from_observed_volatility() -> None:
+    assert _risk_tier(4.0) == "low"
+    assert _risk_tier(18.0) == "medium"
+    assert _risk_tier(42.0) == "high"
+    assert _risk_tier(None) == "unrated"
+
+
+def test_market_behavior_uses_measured_correlation_bands() -> None:
+    assert _market_behavior(0.8) == "risk_on"
+    assert _market_behavior(0.1) == "diversifier"
+    assert _market_behavior(-0.3) == "counterweight"
+    assert _market_behavior(None) == "unrated"
+
+
+def test_market_correlation_uses_aligned_daily_returns() -> None:
+    market = pd.Series([100 + index for index in range(40)], dtype=float)
+    same_direction = market * 2
+
+    assert _correlation_to_market(same_direction, market) == 1.0
+    assert _correlation_to_market(same_direction.iloc[:20], market.iloc[:20]) is None
