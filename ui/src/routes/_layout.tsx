@@ -150,27 +150,27 @@ export default function Layout({
   return (
     <div class="app-shell">
       <header class="topbar">
-        <a href="/" class="brand">
-          Omni Analyst
-        </a>
-        <nav class="topnav">
-          {NAV.map((item) => (
-            <a key={item.href} href={item.href} class="topnav-link">
-              {item.label}
-            </a>
-          ))}
-        </nav>
+        <div class="topbar-left">
+          <a href="/" class="brand">Omni Analyst</a>
+          <nav class="topnav">
+            {NAV.map((item) => (
+              <a key={item.href} href={item.href} class="topnav-link">
+                {item.label}
+              </a>
+            ))}
+          </nav>
+        </div>
         <div class="topbar-right">
           {signedIn ? (
             <button
               type="button"
               class="palette-trigger"
-              title="Jump to a destination (Cmd or Ctrl+K)"
+              title="Search (Cmd or Ctrl+K)"
               onClick={() =>
                 window.dispatchEvent(new CustomEvent(OPEN_COMMAND_PALETTE))
               }
             >
-              <span>Jump to</span>
+              <span>Search</span>
               <kbd class="palette-trigger-kbd">Cmd K</kbd>
             </button>
           ) : null}

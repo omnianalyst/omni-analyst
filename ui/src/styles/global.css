@@ -100,6 +100,16 @@ a:hover {
   border-bottom: 1px solid var(--border-soft);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
 }
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 .brand {
   display: inline-flex;
   align-items: center;
@@ -2200,11 +2210,7 @@ tr.row.tier-unknown td:first-child {
   border-color: var(--accent);
 }
 
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
+/* topbar-right defined earlier in file */
 .gear-menu {
   position: relative;
 }
@@ -2251,4 +2257,17 @@ tr.row.tier-unknown td:first-child {
 }
 .gear-dropdown-item:hover {
   background: var(--border-soft);
+}
+.palette-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 8px;
+}
+.palette-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  padding: 8px 16px 4px;
+  list-style: none;
 }

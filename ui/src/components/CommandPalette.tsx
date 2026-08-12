@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { navigate } from "@neutron-build/core/client";
 import { filterRoutes, type CommandItem } from "../lib/command";
+import { request, authHeaderIfPresent } from "../lib/api";
 
 export const OPEN_COMMAND_PALETTE = "omni:open-command-palette";
 
@@ -11,96 +12,90 @@ function isTyping(): boolean {
   return tag === "input" || tag === "textarea" || el.isContentEditable;
 }
 
+interface EntityResult {
+  id: string;
+  symbol: string | null;
+  name: string | null;
+  kind: string;
+}
+
 export function CommandPalette({ commands }: { commands: CommandItem[] }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
+  const [entities, setEntities] = useState<EntityResult[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
-  const filtered = filterRoutes(commands, query);
+  const navResults = filterRoutes(commands, query);
 
-  // Reset selection whenever the result set or open state changes, so the
-  // highlight never points past the end of the list.
+  useEffect(() => { setActive(0); }, [query, open]);
+
   useEffect(() => {
-    setActive(0);
+    if (!open) return;
+    if (query.trim().length < 2) { setEntities([]); return; }
+    const timer = setTimeout(async () => {
+      try {
+        const resp = await request<{ entities: EntityResult[] }>(
+          `/entities?q=${encodeURIComponent(query.trim())}`,
+          authHeaderIfPresent(),
+        );
+        setEntities((resp.entities || []).slice(0, 10));
+      } catch { setEntities([]); }
+    }, 250);
+    return () => clearTimeout(timer);
   }, [query, open]);
 
+  useEffect(() => { if (open) inputRef.current?.focus(); }, [open]);
   useEffect(() => {
-    if (open) inputRef.current?.focus();
-  }, [open]);
-
-  useEffect(() => {
-    const el = listRef.current?.querySelector<HTMLElement>(
-      `li[data-idx="${active}"]`,
-    );
+    const el = listRef.current?.querySelector<HTMLElement>(`li[data-idx="${active}"]`);
     el?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
+  const allResults = [
+    ...navResults.map(r => ({ type: "nav" as const, ...r })),
+    ...entities.map(e => ({
+      type: "entity" as const,
+      href: `/entity/${e.id}`,
+      label: e.symbol || e.name || e.id,
+      sub: e.name || "",
+      hint: e.kind,
+    })),
+  ];
+
   useEffect(() => {
     function go(href: string) {
-      // navigate() takes the typed route union; the palette deals in plain
-      // hrefs, so cast rather than constrain every caller to the route map.
       navigate(href as never);
       setOpen(false);
       setQuery("");
     }
-
     function onKey(e: KeyboardEvent) {
-      // Cmd/Ctrl+K toggles from anywhere, including while typing.
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setOpen((o) => !o);
-        return;
+        e.preventDefault(); setOpen((o) => !o); return;
       }
       if (open) {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          setOpen(false);
-          return;
-        }
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          setActive((a) => Math.min(a + 1, Math.max(filtered.length - 1, 0)));
-          return;
-        }
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          setActive((a) => Math.max(a - 1, 0));
-          return;
-        }
+        if (e.key === "Escape") { e.preventDefault(); setOpen(false); return; }
+        if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(a + 1, Math.max(allResults.length - 1, 0))); return; }
+        if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); return; }
         if (e.key === "Enter") {
-          const item = filtered[active];
-          if (item) {
-            e.preventDefault();
-            go(item.href);
-          }
+          const item = allResults[active];
+          if (item) { e.preventDefault(); go(item.href); }
           return;
         }
-        return;
       }
-      // Digit hotkeys 1-9 jump to that route, but never while the user is
-      // typing into a field (so a "1" in search does not yank them away).
       if (!isTyping() && /^[1-9]$/.test(e.key)) {
         const item = commands[Number(e.key) - 1];
-        if (item) {
-          e.preventDefault();
-          go(item.href);
-        }
+        if (item) { e.preventDefault(); go(item.href); }
       }
     }
-
-    function onOpen() {
-      setOpen(true);
-    }
-
+    function onOpen() { setOpen(true); }
     window.addEventListener("keydown", onKey);
     window.addEventListener(OPEN_COMMAND_PALETTE, onOpen);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener(OPEN_COMMAND_PALETTE, onOpen);
     };
-  }, [open, filtered, active, commands]);
+  }, [open, allResults, active, commands]);
 
   if (!open) return null;
 
@@ -110,33 +105,44 @@ export function CommandPalette({ commands }: { commands: CommandItem[] }) {
         <input
           ref={inputRef}
           class="palette-input"
-          placeholder="Jump to a destination"
+          placeholder="Search stocks, crypto, ETFs, or jump to a page..."
           value={query}
-          onInput={(e) =>
-            setQuery((e.currentTarget as HTMLInputElement).value)
-          }
+          onInput={(e) => setQuery((e.currentTarget as HTMLInputElement).value)}
         />
-        {filtered.length === 0 ? (
-          <p class="palette-empty">No matching destination.</p>
+        {allResults.length === 0 ? (
+          <p class="palette-empty">
+            {query.trim().length >= 2 ? "Searching..." : "Type to search entities or jump to a page."}
+          </p>
         ) : (
           <ul class="palette-list" ref={listRef}>
-            {filtered.map((item, i) => (
-              <li key={item.href} data-idx={i}>
-                <a
-                  href={item.href}
-                  class={`palette-row ${i === active ? "palette-row-active" : ""}`}
-                  onMouseEnter={() => setActive(i)}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    navigate(item.href as never);
-                    setOpen(false);
-                    setQuery("");
-                  }}
-                >
-                  <span class="palette-label">{item.label}</span>
-                  {item.hint ? <kbd class="palette-hint">{item.hint}</kbd> : null}
-                </a>
-              </li>
+            {navResults.length > 0 && query.length > 0 && (
+              <li class="palette-section-label">Pages</li>
+            )}
+            {allResults.map((item, i) => (
+              <>
+                {"sub" in item && i === navResults.length && (
+                  <li class="palette-section-label">Entities</li>
+                )}
+                <li key={item.href} data-idx={i}>
+                  <a
+                    href={item.href}
+                    class={`palette-row ${i === active ? "palette-row-active" : ""}`}
+                    onMouseEnter={() => setActive(i)}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigate(item.href as never);
+                      setOpen(false);
+                      setQuery("");
+                    }}
+                  >
+                    <span class="palette-label">{item.label}</span>
+                    {"sub" in item && item.sub ? (
+                      <span class="palette-sub">{item.sub}</span>
+                    ) : null}
+                    {item.hint ? <kbd class="palette-hint">{item.hint}</kbd> : null}
+                  </a>
+                </li>
+              </>
             ))}
           </ul>
         )}
