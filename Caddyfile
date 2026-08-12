@@ -33,7 +33,7 @@
 	# path can never shadow a route. Add new top-level routers here.
 	@api path /health /openapi.json /docs /redoc \
 		/alerts /alerts/* /analysis /analysis/* /auth /auth/* \
-		/autonomous /autonomous/* /briefing /briefing/* \
+		/autonomous /autonomous/* /briefing /briefing/* /bulletin /bulletin/* \
 		/capabilities /capabilities/* /coverage /coverage/* \
 		/entities /entities/* /exposure /exposure/* /gaps /gaps/* \
 		/objective/* /watchlists /watchlists/* \

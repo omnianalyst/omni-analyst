@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { useLocation } from "@neutron-build/core/client";
 import "../styles/global.css";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "../components/CommandPalette";
+import { HeaderBulletin } from "../components/HeaderBulletin";
 import { StatusRail } from "../components/StatusRail";
 import type { CommandItem } from "../lib/command";
 import { clearAuthToken, getAuthToken } from "../lib/auth";
@@ -177,6 +178,7 @@ export default function Layout({
         </div>
         <div class="topbar-right">
           {signedIn ? <StatusRail /> : null}
+          {signedIn ? <HeaderBulletin /> : null}
           {signedIn ? (
             <div class="gear-menu" onClick={(e) => e.stopPropagation()}>
               <button
