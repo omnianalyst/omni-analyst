@@ -2,24 +2,24 @@
 #
 # Same-origin deploy. The UI is built with an empty API base (see ui/src/config.ts:
 # production builds default to same-origin), so the browser calls relative paths
-# and Caddy routes them by prefix. Set {$OMNI_HOST} to serve HTTPS on a domain,
-# or leave it unset for HTTP on the Tailscale interface (no public DNS -> no ACME).
+# and Caddy routes them by prefix. Set {$OMNI_ADDR} to serve HTTPS on a domain,
+# or leave it unset for HTTP on port 80 (no public DNS -> no ACME).
 #
-#   OMNI_HOST=omni.example.com   -> automatic HTTPS via Let's Encrypt
-#   OMNI_HOST=                   -> http://{$OMNI_ADDR:-:80}, no TLS
+#   OMNI_ADDR=omni.example.com   -> automatic HTTPS via Let's Encrypt
+#   OMNI_ADDR=:80                -> HTTP on port 80, no TLS
 #
 # Build the UI before bringing this up:
 #   npm --prefix ui run build
 # Mount ui/dist at /srv/ui (see docker-compose.prod.yml).
 
-{$OMNI_HOST} {
+{$OMNI_ADDR} {
 	encode gzip zstd
 
 	# Browser hardening. Safe headers that cannot break the SPA. A Content-
 	# Security-Policy is deliberately omitted for now: the built asset graph
 	# (vite modulepreload, any residual inline style) needs validating against a
 	# real build before a script-src restriction lands, and a misconfigured CSP
-	# takes the app down. HSTS is a no-op over plain HTTP (OMNI_HOST unset) and
+	# takes the app down. HSTS is a no-op over plain HTTP (OMNI_ADDR=:80) and
 	# activates automatically once TLS is on.
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -32,12 +32,13 @@
 	# Framework-provided + API routers. Listed explicitly so a static asset
 	# path can never shadow a route. Add new top-level routers here.
 	@api path /health /openapi.json /docs /redoc \
-	          /alerts /alerts/* /analysis /analysis/* /auth /auth/* \
-	          /autonomous /autonomous/* /briefing /briefing/* \
-	          /capabilities /capabilities/* /coverage /coverage/* \
-	          /entities /entities/* /gaps /gaps/* \
-	          /objective /objective/* /watchlists /watchlists/* \
-	          /system /system/*
+		/alerts /alerts/* /analysis /analysis/* /auth /auth/* \
+		/autonomous /autonomous/* /briefing /briefing/* \
+		/capabilities /capabilities/* /coverage /coverage/* \
+		/entities /entities/* /exposure /exposure/* /gaps /gaps/* \
+		/objective /objective/* /watchlists /watchlists/* \
+		/portfolio /portfolio/* /scanner /scanner/* \
+		/settings /settings/* /system /system/* /trading /trading/*
 	handle @api {
 		reverse_proxy {$OMNI_API_UPSTREAM:-api:8000}
 	}

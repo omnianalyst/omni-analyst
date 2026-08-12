@@ -129,7 +129,6 @@ services:
       api:
         condition: service_healthy
     environment:
-      OMNI_HOST: ${OMNI_HOST:-}
       OMNI_ADDR: ${OMNI_ADDR:-:80}
       OMNI_API_UPSTREAM: ${OMNI_API_UPSTREAM:-api:8000}
     ports:
