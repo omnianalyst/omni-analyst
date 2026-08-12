@@ -3429,6 +3429,85 @@ tr.row.tier-unknown td:first-child {
   margin-top: -8px;
   padding: 0 2px;
 }
+.coverage-summary {
+  display: grid;
+  align-items: center;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 12px 24px;
+  padding: 15px 17px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: rgba(11, 17, 26, 0.58);
+}
+.coverage-summary.coverage-partial {
+  border-color: rgba(234, 179, 8, 0.22);
+}
+.coverage-summary-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.coverage-summary-title strong {
+  font-size: 12px;
+}
+.coverage-summary-title p {
+  margin: 2px 0 0;
+  color: var(--faint);
+  font-size: 9px;
+}
+.coverage-summary-facts {
+  display: flex;
+  gap: 16px;
+  color: var(--faint);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.coverage-summary-facts strong {
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.coverage-summary > details {
+  grid-column: 1 / -1;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--faint);
+  font-size: 9px;
+}
+.coverage-summary summary {
+  cursor: pointer;
+}
+.coverage-audit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
+  margin-top: 12px;
+}
+.coverage-audit-grid strong {
+  color: var(--muted);
+  font-size: 10px;
+}
+.coverage-audit-grid p {
+  margin: 4px 0 0;
+  line-height: 1.5;
+}
+.coverage-gate-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 16px;
+  border: 1px solid rgba(234, 179, 8, 0.2);
+  border-radius: var(--r-md);
+  background: rgba(234, 179, 8, 0.035);
+}
+.coverage-gate-note strong {
+  font-size: 11px;
+}
+.coverage-gate-note span {
+  color: var(--faint);
+  font-size: 9px;
+  text-align: right;
+}
 .rank-switch button,
 .position-filters button {
   padding: 6px 9px;
@@ -4188,6 +4267,23 @@ tr.row.tier-unknown td:first-child {
   .ranking-definition {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .coverage-summary {
+    grid-template-columns: 1fr;
+  }
+  .coverage-summary-facts {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  .coverage-audit-grid {
+    grid-template-columns: 1fr;
+  }
+  .coverage-gate-note {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .coverage-gate-note span {
+    text-align: left;
   }
   .rank-table th:nth-child(6),
   .rank-table td:nth-child(6),

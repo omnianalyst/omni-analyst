@@ -23,6 +23,7 @@ interface AssetMetric {
   median_annual_return?: number | null;
   history_years: number;
   complete_years: number;
+  market_cap_rank?: number | null;
   scores: {
     balanced: number | null;
     durable_growth: number | null;
@@ -57,6 +58,22 @@ interface ScannerData {
   overall_leaders: OverallLeader[];
   ranking_method: { balanced: string; history: string; scope: string };
   sector_coverage: { available: number; total: number; window_sessions: number };
+  coverage: {
+    policy_version: string;
+    complete: boolean;
+    crypto: {
+      source: string;
+      live: boolean;
+      market_cap_limit: number;
+      ranked: number;
+      excluded: Array<{ rank: number; symbol: string; name: string; reason: string }>;
+      unmapped: Array<{ rank: number; symbol: string; name: string; reason: string }>;
+      insufficient_history: Array<{ symbol: string; observations: number; required: number }>;
+    };
+    broad_assets: { configured: number; ranked: number; unavailable: string[] };
+    companies: { sectors_measured: number; sectors_required: number; complete: boolean };
+    industries: { complete: boolean; reason: string };
+  };
   as_of: string;
 }
 
@@ -142,7 +159,10 @@ function RankedCategory({
                 <td>
                   <span class="rank-asset">
                     <strong>{asset.symbol}</strong>
-                    <small>{asset.name} · {asset.area}</small>
+                    <small>
+                      {asset.name} · {asset.area}
+                      {asset.market_cap_rank ? ` · market cap #${asset.market_cap_rank}` : ""}
+                    </small>
                   </span>
                 </td>
                 <td><strong class="canonical-score">{asset.scores.balanced?.toFixed(0) ?? "—"}</strong></td>
@@ -195,7 +215,7 @@ function SectorLeadership({ data }: { data: ScannerData }) {
         </div>
       ) : (
         <>
-          <article class="overall-leaders-card">
+          {data.overall_leaders.length > 0 ? <article class="overall-leaders-card">
             <header>
               <div><p class="eyebrow">Across measured companies</p><h3>Top overall</h3></div>
               <span>Top {data.overall_leaders.length} by {data.sector_coverage.window_sessions}-session return</span>
@@ -209,7 +229,12 @@ function SectorLeadership({ data }: { data: ScannerData }) {
                 </li>
               ))}
             </ol>
-          </article>
+          </article> : (
+            <div class="coverage-gate-note">
+              <strong>Overall company ranking withheld</strong>
+              <span>It will unlock when all 11 sectors have enough comparable company history.</span>
+            </div>
+          )}
           <div class="sector-leader-grid">
             {data.sectors.map((sector) => (
               <article class="sector-leader-card" key={sector.symbol}>
@@ -283,6 +308,48 @@ export function ScannerView() {
           <span class="toggle-track" aria-hidden="true"><span /></span>
           Show market role
         </button>
+      </section>
+
+      <section class={`coverage-summary ${state.data.coverage.complete ? "coverage-complete" : "coverage-partial"}`}>
+        <div class="coverage-summary-title">
+          <span class="health-orb" aria-hidden="true" />
+          <div>
+            <strong>{state.data.coverage.complete ? "Universe coverage complete" : "Universe coverage is still closing"}</strong>
+            <p>Policy {state.data.coverage.policy_version} · every omission is now classified.</p>
+          </div>
+        </div>
+        <div class="coverage-summary-facts">
+          <span><strong>{state.data.coverage.crypto.ranked}</strong> crypto ranked</span>
+          <span><strong>{state.data.coverage.crypto.unmapped.length}</strong> need mapping</span>
+          <span><strong>{state.data.coverage.companies.sectors_measured}/{state.data.coverage.companies.sectors_required}</strong> company sectors</span>
+        </div>
+        <details>
+          <summary>View coverage audit</summary>
+          <div class="coverage-audit-grid">
+            <div>
+              <strong>Explicitly excluded ({state.data.coverage.crypto.excluded.length})</strong>
+              <p>{state.data.coverage.crypto.excluded.length
+                ? state.data.coverage.crypto.excluded.map((item) => `${item.symbol}: ${item.reason}`).join(" · ")
+                : "No live exclusions returned."}</p>
+            </div>
+            <div>
+              <strong>Needs a verified mapping ({state.data.coverage.crypto.unmapped.length})</strong>
+              <p>{state.data.coverage.crypto.unmapped.length
+                ? state.data.coverage.crypto.unmapped.map((item) => `#${item.rank} ${item.symbol}`).join(" · ")
+                : "Every eligible census asset is mapped."}</p>
+            </div>
+            <div>
+              <strong>Insufficient price history ({state.data.coverage.crypto.insufficient_history.length})</strong>
+              <p>{state.data.coverage.crypto.insufficient_history.length
+                ? state.data.coverage.crypto.insufficient_history.map((item) => `${item.symbol}: ${item.observations}/${item.required} observations`).join(" · ")
+                : "Every mapped asset meets the history floor."}</p>
+            </div>
+            <div>
+              <strong>Industries</strong>
+              <p>{state.data.coverage.industries.reason}</p>
+            </div>
+          </div>
+        </details>
       </section>
 
       <div class="canonical-rankings">

@@ -11,6 +11,7 @@ from omni.api.scanner import (
     _correlation_to_market,
     _market_behavior,
     _overall_leaders,
+    _payload,
     _risk_tier,
     _sector_leader_payload,
 )
@@ -20,6 +21,27 @@ def test_crypto_universe_includes_monero() -> None:
     symbols = {asset["symbol"] for asset in ASSETS["Debasement"]}
 
     assert "XMR" in symbols
+
+
+def test_broad_universe_covers_every_sector_and_major_missing_sleeves() -> None:
+    assets = [asset for bucket in ASSETS.values() for asset in bucket]
+    symbols = {asset["symbol"] for asset in assets}
+    sector_symbols = {asset["symbol"] for asset in assets if asset["area"] == "Sector"}
+
+    assert len(sector_symbols) == 11
+    assert {"VT", "VO", "VNQ", "BNDX", "LQD", "HYG", "SGOV"} <= symbols
+
+
+def test_partial_sector_coverage_withholds_overall_company_ranking() -> None:
+    sectors = [{
+        "name": "Technology",
+        "symbol": "XLK",
+        "coverage": 1,
+        "leaders": [{"symbol": "AAA", "return_window": 12.0}],
+    }]
+    payload = _payload([], sectors, {"complete": False})
+
+    assert payload["overall_leaders"] == []
 
 
 def _history(symbol: str, name: str, start: float, finish: float) -> list[dict]:

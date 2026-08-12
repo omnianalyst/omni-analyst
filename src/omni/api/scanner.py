@@ -15,6 +15,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import numpy as np
 import pandas as pd
 from neutron import App, Router
@@ -22,6 +23,13 @@ from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
 from omni.coverage.visibility import visible_claims_cte
+from omni.market_universe import (
+    CRYPTO_REGISTRY,
+    MIN_CRYPTO_OBSERVATIONS,
+    POLICY_VERSION,
+    crypto_assets,
+    evaluate_crypto_census,
+)
 
 CACHE_TTL = 3600
 SECTOR_RETURN_WINDOW = 30
@@ -41,6 +49,10 @@ ASSETS: dict[str, list[dict[str, str]]] = {
          "asset_class": "stocks", "area": "US broad market"},
         {"symbol": "IWM", "name": "Russell 2000 ETF", "yf": "IWM",
          "asset_class": "stocks", "area": "US broad market"},
+        {"symbol": "VO", "name": "Vanguard Mid-Cap ETF", "yf": "VO",
+         "asset_class": "stocks", "area": "US broad market"},
+        {"symbol": "VT", "name": "Vanguard Total World Stock", "yf": "VT",
+         "asset_class": "stocks", "area": "Global market"},
         {"symbol": "VUG", "name": "Vanguard Growth ETF", "yf": "VUG",
          "asset_class": "stocks", "area": "Investment style"},
         {"symbol": "VTV", "name": "Vanguard Value ETF", "yf": "VTV",
@@ -59,6 +71,8 @@ ASSETS: dict[str, list[dict[str, str]]] = {
          "asset_class": "stocks", "area": "International"},
         {"symbol": "VWO", "name": "Vanguard Emerging Markets", "yf": "VWO",
          "asset_class": "stocks", "area": "International"},
+        {"symbol": "VNQ", "name": "Vanguard Real Estate ETF", "yf": "VNQ",
+         "asset_class": "stocks", "area": "Real estate"},
         {"symbol": "XLK", "name": "Technology Select Sector", "yf": "XLK", "asset_class": "stocks", "area": "Sector"},
         {"symbol": "XLF", "name": "Financial Select Sector", "yf": "XLF", "asset_class": "stocks", "area": "Sector"},
         {"symbol": "XLV", "name": "Health Care Select Sector", "yf": "XLV", "asset_class": "stocks", "area": "Sector"},
@@ -78,22 +92,7 @@ ASSETS: dict[str, list[dict[str, str]]] = {
          "asset_class": "defensive", "area": "Precious metals"},
         {"symbol": "DBC", "name": "Invesco DB Commodity Index", "yf": "DBC",
          "asset_class": "defensive", "area": "Commodities"},
-        {"symbol": "BTC", "name": "Bitcoin", "yf": "BTC-USD",
-         "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "ETH", "name": "Ethereum", "yf": "ETH-USD",
-         "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "SOL", "name": "Solana", "yf": "SOL-USD",
-         "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "BNB", "name": "BNB", "yf": "BNB-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "XRP", "name": "XRP", "yf": "XRP-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "ADA", "name": "Cardano", "yf": "ADA-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "DOGE", "name": "Dogecoin", "yf": "DOGE-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "AVAX", "name": "Avalanche", "yf": "AVAX-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "LINK", "name": "Chainlink", "yf": "LINK-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "DOT", "name": "Polkadot", "yf": "DOT-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "LTC", "name": "Litecoin", "yf": "LTC-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "BCH", "name": "Bitcoin Cash", "yf": "BCH-USD", "asset_class": "crypto", "area": "Digital assets"},
-        {"symbol": "XMR", "name": "Monero", "yf": "XMR-USD", "asset_class": "crypto", "area": "Digital assets"},
+        *crypto_assets(),
     ],
     "Deflation": [
         {"symbol": "TLT", "name": "iShares 20+ Year Treasury", "yf": "TLT",
@@ -101,10 +100,15 @@ ASSETS: dict[str, list[dict[str, str]]] = {
         {"symbol": "IEF", "name": "iShares 7-10 Year Treasury", "yf": "IEF", "asset_class": "defensive", "area": "Treasuries"},
         {"symbol": "TIP", "name": "iShares TIPS Bond ETF", "yf": "TIP", "asset_class": "defensive", "area": "Inflation-linked bonds"},
         {"symbol": "BND", "name": "Vanguard Total Bond Market", "yf": "BND", "asset_class": "defensive", "area": "Broad bonds"},
+        {"symbol": "BNDX", "name": "Vanguard Total International Bond", "yf": "BNDX", "asset_class": "defensive", "area": "International bonds"},
+        {"symbol": "LQD", "name": "iShares Investment Grade Corporate Bond", "yf": "LQD", "asset_class": "defensive", "area": "Corporate credit"},
+        {"symbol": "HYG", "name": "iShares High Yield Corporate Bond", "yf": "HYG", "asset_class": "defensive", "area": "High-yield credit"},
     ],
     "Safety": [
         {"symbol": "SHV", "name": "iShares Short Treasury", "yf": "SHV",
          "asset_class": "defensive", "area": "Treasuries"},
+        {"symbol": "SGOV", "name": "iShares 0-3 Month Treasury", "yf": "SGOV",
+         "asset_class": "defensive", "area": "Cash equivalent"},
     ],
 }
 
@@ -116,6 +120,46 @@ BUCKET_ROLES = {
 }
 
 CRYPTO_ASSETS = {asset["symbol"] for asset in ASSETS["Debasement"] if asset["asset_class"] == "crypto"}
+COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
+
+
+async def _crypto_census() -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                COINGECKO_MARKETS_URL,
+                params={
+                    "vs_currency": "usd",
+                    "order": "market_cap_desc",
+                    "per_page": 60,
+                    "page": 1,
+                    "sparkline": "false",
+                },
+            )
+            response.raise_for_status()
+            rows = response.json()
+        if not isinstance(rows, list):
+            raise TypeError("CoinGecko market census was not a list")
+        return {**evaluate_crypto_census(rows), "source": "live", "live": True}
+    except (httpx.HTTPError, TypeError, ValueError):
+        return {
+            "policy_version": POLICY_VERSION,
+            "market_cap_limit": 60,
+            "included": [
+                {
+                    "rank": None,
+                    "symbol": metadata["symbol"],
+                    "name": metadata["name"],
+                    "coin_id": coin_id,
+                    "registered_symbol": metadata["symbol"],
+                }
+                for coin_id, metadata in CRYPTO_REGISTRY.items()
+            ],
+            "excluded": [],
+            "unmapped": [],
+            "source": "registry fallback",
+            "live": False,
+        }
 
 
 def _fetch_prices() -> pd.DataFrame:
@@ -462,7 +506,7 @@ async def _sector_leaders(pool, audience) -> list[dict]:
     return _sector_leader_payload(rows)
 
 
-def _payload(buckets_data: list[dict], sectors: list[dict]) -> dict:
+def _payload(buckets_data: list[dict], sectors: list[dict], coverage: dict[str, Any]) -> dict:
     assets = [asset for bucket in buckets_data for asset in bucket["assets"]]
 
     def category_ranked(asset_class: str) -> list[dict]:
@@ -488,12 +532,13 @@ def _payload(buckets_data: list[dict], sectors: list[dict]) -> dict:
             "scope": "Scores are percentile ranks against the other assets in the same category, not forecasts or recommendations.",
         },
         "sectors": sectors,
-        "overall_leaders": _overall_leaders(sectors),
+        "overall_leaders": _overall_leaders(sectors) if len(sectors) == 11 else [],
         "sector_coverage": {
             "available": len(sectors),
             "total": 11,
             "window_sessions": SECTOR_RETURN_WINDOW,
         },
+        "coverage": coverage,
         "as_of": datetime.now(UTC).isoformat(),
     }
 
@@ -505,17 +550,35 @@ async def _build_scanner(app: App, audience) -> dict:
     if cached is not None and now - cached["ts"] < CACHE_TTL:
         return cached["data"]
 
+    crypto_census = await _crypto_census()
+    eligible_crypto = {
+        item["registered_symbol"]: item
+        for item in crypto_census["included"]
+    }
     prices = _fetch_prices()
     funding = await _funding_rates(app.db.pool, audience)
     sectors = await _sector_leaders(app.db.pool, audience)
 
     buckets_data: list[dict] = []
     all_entries: list[dict] = []
+    unavailable_assets: list[str] = []
+    insufficient_crypto: list[dict[str, Any]] = []
     for bucket_name, assets in ASSETS.items():
         bucket_assets: list[dict] = []
         for a in assets:
             symbol = a["symbol"]
+            if a["asset_class"] == "crypto" and symbol not in eligible_crypto:
+                continue
             if symbol not in prices.columns:
+                unavailable_assets.append(symbol)
+                continue
+            observations = int(prices[symbol].dropna().shape[0])
+            if a["asset_class"] == "crypto" and observations < MIN_CRYPTO_OBSERVATIONS:
+                insufficient_crypto.append({
+                    "symbol": symbol,
+                    "observations": observations,
+                    "required": MIN_CRYPTO_OBSERVATIONS,
+                })
                 continue
             metrics = _compute_metrics(prices[symbol], a["asset_class"])
             correlation = (
@@ -533,6 +596,8 @@ async def _build_scanner(app: App, audience) -> dict:
                 "market_behavior": _market_behavior(correlation),
                 **metrics,
             }
+            if a["asset_class"] == "crypto":
+                entry["market_cap_rank"] = eligible_crypto[symbol].get("rank")
             entry["return_1y"] = metrics.get("returns", {}).get("365d")
             if symbol in CRYPTO_ASSETS:
                 entry["funding_apr"] = funding.get(symbol)
@@ -559,7 +624,41 @@ async def _build_scanner(app: App, audience) -> dict:
             reverse=True,
         )
 
-    payload = _payload(buckets_data, sectors)
+    ranked_crypto = [entry for entry in all_entries if entry["asset_class"] == "crypto"]
+    company_complete = len(sectors) == 11
+    crypto_complete = (
+        crypto_census["live"]
+        and not crypto_census["unmapped"]
+        and not insufficient_crypto
+    )
+    coverage = {
+        "policy_version": POLICY_VERSION,
+        "complete": company_complete and crypto_complete and not unavailable_assets,
+        "crypto": {
+            "source": crypto_census["source"],
+            "live": crypto_census["live"],
+            "market_cap_limit": crypto_census["market_cap_limit"],
+            "ranked": len(ranked_crypto),
+            "excluded": crypto_census["excluded"],
+            "unmapped": crypto_census["unmapped"],
+            "insufficient_history": insufficient_crypto,
+        },
+        "broad_assets": {
+            "configured": sum(len(items) for items in ASSETS.values()),
+            "ranked": len(all_entries),
+            "unavailable": sorted(set(unavailable_assets)),
+        },
+        "companies": {
+            "sectors_measured": len(sectors),
+            "sectors_required": 11,
+            "complete": company_complete,
+        },
+        "industries": {
+            "complete": False,
+            "reason": "Verified GICS industry metadata is not yet stored.",
+        },
+    }
+    payload = _payload(buckets_data, sectors, coverage)
     _cache[cache_key] = {"data": payload, "ts": now}
     return payload
 

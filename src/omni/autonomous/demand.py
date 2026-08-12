@@ -24,7 +24,10 @@ from omni.demand.ledger import autonomous_attention
 
 logger = logging.getLogger("omni.autonomous.demand")
 
-_TOP_SECTORS = 3
+# Company comparison is only honest when every GICS sector can enter the
+# candidate set. User demand still outranks this autonomous weight, while the
+# fill queue progressively closes coverage across all eleven sectors.
+_TOP_SECTORS = 11
 _AUTONOMOUS_WEIGHT = 0.5
 
 _EXISTING_AUTONOMOUS = """
