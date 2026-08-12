@@ -170,6 +170,10 @@ async def list_active_markets(
     volume filtering. The `fetched_at` timestamp is per-batch, not per-market
     — the paper trader scans in batches and a single batch shares one
     observation moment.
+
+    NegRisk multi-outcome events are decomposed: each sub-outcome becomes
+    its own `ActiveMarket` with a synthetic question `Will <name> win: <parent>?`.
+    The sub-outcome's current price is the per-outcome price from Gamma.
     """
     if limit <= 0 or limit > 500:
         raise ValueError(f"limit must be in 1..500, got {limit}")
@@ -206,13 +210,122 @@ async def list_active_markets(
         if not isinstance(item, Mapping):
             continue
         try:
-            parsed.append(_parse_active_market(item, ts))
+            parsed.extend(_parse_active_market_or_decompose(item, ts))
         except (Unavailable, ValueError) as exc:
             if strict:
                 raise
             if on_skip is not None:
                 on_skip(item, exc if isinstance(exc, Unavailable) else Unavailable(str(exc)))
     return _filter_active(parsed, categories=categories, min_volume=min_volume)
+
+
+def _parse_active_market_or_decompose(
+    raw: Mapping[str, Any], fetched_at: datetime
+) -> list[ActiveMarket]:
+    """Parse one Gamma active-market row, decomposing NegRisk multi-outcome
+    events into N `ActiveMarket` rows (mirror of `gamma._parse_market`'s
+    resolved-side decomposition). Returns a list of length 1 for plain
+    Yes/No, length N for NegRisk."""
+    if not isinstance(raw, Mapping):
+        raise Unavailable(f"market record is {type(raw).__name__}, not a mapping")
+
+    condition_id = str(raw.get("id", "")).strip()
+    question = str(raw.get("question") or raw.get("title") or "").strip()
+    if not condition_id or not question:
+        raise Unavailable(
+            f"market missing id or question: id={raw.get('id')!r} q={raw.get('question')!r}"
+        )
+
+    outcomes = _parse_stringified_array(raw.get("outcomes"), "outcomes")
+    prices = _parse_stringified_array(raw.get("outcomePrices"), "outcomePrices")
+    tokens = _parse_stringified_array(raw.get("clobTokenIds"), "clobTokenIds")
+    neg_risk = bool(raw.get("negRisk", False))
+
+    try:
+        volume = float(raw.get("volume") or 0.0)
+    except (TypeError, ValueError):
+        raise Unavailable(f"volume not numeric: {raw.get('volume')!r}")
+
+    category = str(raw.get("category") or "Other").strip() or "Other"
+    end_date_raw = raw.get("endDate")
+    end_date: datetime | None = None
+    if end_date_raw:
+        try:
+            ts = str(end_date_raw).replace("Z", "+00:00")
+            end_date = datetime.fromisoformat(ts)
+            if end_date.tzinfo is None:
+                end_date = end_date.replace(tzinfo=UTC)
+        except ValueError:
+            end_date = None
+
+    slug = str(raw.get("slug") or "")
+
+    # Plain Yes/No binary
+    if len(outcomes) == 2 and str(outcomes[0]).strip().lower() == "yes":
+        if len(prices) < 1:
+            raise Unavailable("outcomePrices missing")
+        try:
+            yes_price = float(prices[0])
+        except (TypeError, ValueError) as exc:
+            raise Unavailable(f"yes_price not numeric: {prices[0]!r}") from exc
+        if not math.isfinite(yes_price) or not (0.0 <= yes_price <= 1.0):
+            raise Unavailable(f"yes_price out of [0, 1]: {yes_price}")
+        yes_token = str(tokens[0]) if len(tokens) >= 1 else None
+        no_token = str(tokens[1]) if len(tokens) >= 2 else None
+        return [
+            ActiveMarket(
+                condition_id=condition_id,
+                question=question,
+                category=category,
+                yes_token_id=yes_token,
+                no_token_id=no_token,
+                yes_price=yes_price,
+                neg_risk=False,
+                slug=slug,
+                volume=volume,
+                end_date=end_date,
+                fetched_at=fetched_at,
+            )
+        ]
+
+    # NegRisk multi-outcome: decompose. Each sub-outcome's price is its own
+    # current probability; the parent event has not resolved yet.
+    if neg_risk and len(outcomes) >= 2 and len(prices) == len(outcomes):
+        decomposed: list[ActiveMarket] = []
+        for i, name in enumerate(outcomes):
+            name_str = str(name).strip()
+            if not name_str:
+                continue
+            try:
+                sub_price = float(prices[i])
+            except (TypeError, ValueError) as exc:
+                raise Unavailable(f"NegRisk sub-price not numeric: {prices[i]!r}") from exc
+            if not math.isfinite(sub_price) or not (0.0 <= sub_price <= 1.0):
+                raise Unavailable(f"NegRisk sub-price out of [0, 1]: {sub_price}")
+            yes_token = str(tokens[i]) if i < len(tokens) else None
+            decomposed.append(
+                ActiveMarket(
+                    condition_id=f"{condition_id}:{i}",
+                    question=f"Will {name_str} win: {question}",
+                    category=category,
+                    yes_token_id=yes_token,
+                    no_token_id=None,
+                    yes_price=sub_price,
+                    neg_risk=True,
+                    slug=slug,
+                    volume=volume,
+                    end_date=end_date,
+                    fetched_at=fetched_at,
+                )
+            )
+        if not decomposed:
+            raise Unavailable(f"NegRisk event {condition_id}: no usable outcomes in {outcomes!r}")
+        return decomposed
+
+    raise Unavailable(
+        f"market {condition_id}: outcomes={outcomes!r} neg_risk={neg_risk} — "
+        f"not a Yes/No binary and not a supported NegRisk event"
+    )
 
 
 async def fetch_current_resolution(

@@ -31,7 +31,7 @@ from omni.ingest.protocol import Unavailable
 from omni.llm.protocol import LanguageModel
 from omni.polymarket.estimator import estimate, estimation_id
 from omni.polymarket.gamma import fetch_price_history
-from omni.polymarket.pnl import DEFAULT_FEE_RATE, Fill, PnLSummary, summarise
+from omni.polymarket.pnl import DEFAULT_FEE_RATES, Fill, PnLSummary, summarise
 from omni.polymarket.types import Document, Estimation, MarketAtCutoff, ResolvedMarket
 
 DEFAULT_HORIZON = timedelta(days=7)
@@ -231,15 +231,20 @@ def _backtest_pnl(
 
     Each trade is sized at `size_usd` of capital deployed, not equal shares.
     The entry price is the market's YES price at cutoff for YES trades, or
-    (1 - that) for NO trades. Fee rate defaults to the median category rate;
-    a real Stage B backtest would use the per-category rate from Gamma, but
-    Stage A's data does not carry it.
+    (1 - that) for NO trades. Fee rate is per-category, derived via
+    `news.derive_category` against the documented Polymarket V2 rates
+    (`pnl.DEFAULT_FEE_RATES`). Crypto carries the highest rate (0.07),
+    Geopolitics is zero, Politics/Finance/Tech at 0.04 — using the median
+    0.05 for everything would understate Crypto costs and overstate
+    Politics costs, distorting the per-category P&L comparison.
 
     `threshold` is the minimum `|llm_prob - market_prob|` required to open a
     trade. Lower = more trades, more fees, more sample. Higher = fewer
     trades, cleaner signals. The right value emerges from running this with
     several thresholds and looking at the P&L-vs-threshold curve.
     """
+    from omni.polymarket.news import derive_category
+
     fills: list[Fill] = []
     for est, snap in trades:
         llm_p_yes = _p_yes_of(est)
@@ -251,13 +256,15 @@ def _backtest_pnl(
         if not (0.0 < entry_price < 1.0):
             continue
         size_shares = size_usd / entry_price
+        category = derive_category(snap.market)
+        fee_rate = DEFAULT_FEE_RATES.get(category, 0.05)
         fills.append(
             Fill(
                 direction=direction,
                 entry_price=entry_price,
                 size_shares=size_shares,
                 outcome_yes=snap.market.resolved_yes,
-                fee_rate=DEFAULT_FEE_RATE,
+                fee_rate=fee_rate,
                 taker=taker,
             )
         )

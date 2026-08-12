@@ -91,6 +91,7 @@ a:hover {
   z-index: 10;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   height: 60px;
   padding: 0 32px;
   background: rgba(8, 12, 18, 0.78);
@@ -2197,4 +2198,57 @@ tr.row.tier-unknown td:first-child {
 .settings-input:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.gear-menu {
+  position: relative;
+}
+.gear-icon {
+  background: none;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--muted);
+  transition: border-color 0.15s, color 0.15s;
+}
+.gear-icon:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.gear-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--card, var(--bg-alt, #1a1a2e));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  min-width: 160px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  z-index: 20;
+  overflow: hidden;
+}
+.gear-dropdown-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 16px;
+  font-size: 14px;
+  color: var(--text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+}
+.gear-dropdown-item:hover {
+  background: var(--border-soft);
 }

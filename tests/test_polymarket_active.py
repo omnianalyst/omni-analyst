@@ -57,7 +57,7 @@ class TestListActiveMarkets:
     async def test_non_yes_outcome_refused(self):
         payload = _active_payload(outcomes=json.dumps(["Over", "Under"]))
         async with _client(lambda r: httpx.Response(200, json=[payload])) as c:
-            with pytest.raises(Unavailable, match="expected 'Yes'"):
+            with pytest.raises(Unavailable, match="not a Yes/No binary"):
                 await list_active_markets(c, limit=10)
 
     async def test_strict_mode_raises(self):
@@ -134,6 +134,62 @@ class TestFetchCurrentResolution:
         async with _client(lambda r: httpx.Response(500)) as c:
             with pytest.raises(Unavailable):
                 await fetch_current_resolution(c, condition_id="0x1")
+
+
+class TestActiveNegRiskDecomposition:
+    """Mirror of the resolved-side NegRisk decomposition for active markets."""
+
+    def _negrisk_payload(self, **overrides):
+        base = {
+            "id": "0xnr",
+            "question": "Who will win the 2028 nomination?",
+            "category": "Politics",
+            "outcomes": json.dumps(["Trump", "DeSantis", "Harris"]),
+            "outcomePrices": json.dumps(["0.55", "0.30", "0.15"]),
+            "clobTokenIds": json.dumps(["tok-t", "tok-d", "tok-h"]),
+            "negRisk": True,
+            "slug": "2028-nomination",
+            "volume": "500000.0",
+            "endDate": "2028-11-01T00:00:00Z",
+        }
+        base.update(overrides)
+        return base
+
+    async def test_clean_negrisk_decomposes_to_n_markets(self):
+        async with _client(lambda r: httpx.Response(200, json=[self._negrisk_payload()])) as c:
+            markets = await list_active_markets(c, limit=10)
+        assert len(markets) == 3
+        prices = sorted(m.yes_price for m in markets)
+        assert prices == pytest.approx([0.15, 0.30, 0.55])
+
+    async def test_per_outcome_question_includes_name(self):
+        async with _client(lambda r: httpx.Response(200, json=[self._negrisk_payload()])) as c:
+            markets = await list_active_markets(c, limit=10)
+        for m in markets:
+            assert "win" in m.question
+            assert "2028 nomination" in m.question
+
+    async def test_per_outcome_token_assigned(self):
+        async with _client(lambda r: httpx.Response(200, json=[self._negrisk_payload()])) as c:
+            markets = await list_active_markets(c, limit=10)
+        trump = next(m for m in markets if "Trump" in m.question)
+        harris = next(m for m in markets if "Harris" in m.question)
+        assert trump.yes_token_id == "tok-t"
+        assert harris.yes_token_id == "tok-h"
+        assert trump.neg_risk is True
+
+    async def test_sub_condition_ids_unique(self):
+        async with _client(lambda r: httpx.Response(200, json=[self._negrisk_payload()])) as c:
+            markets = await list_active_markets(c, limit=10)
+        ids = [m.condition_id for m in markets]
+        assert len(set(ids)) == 3
+        assert all(cid.startswith("0xnr:") for cid in ids)
+
+    async def test_non_negrisk_multi_outcome_refused(self):
+        payload = self._negrisk_payload(negRisk=False)
+        async with _client(lambda r: httpx.Response(200, json=[payload])) as c:
+            with pytest.raises(Unavailable, match="not a supported NegRisk"):
+                await list_active_markets(c, limit=10)
 
 
 class TestActiveMarketValidation:
