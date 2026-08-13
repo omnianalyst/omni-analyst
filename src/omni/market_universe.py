@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-POLICY_VERSION = "2026-08-12.1"
+POLICY_VERSION = "2026-08-13.1"
 CRYPTO_MARKET_CAP_LIMIT = 60
 MIN_CRYPTO_OBSERVATIONS = 365
 
@@ -75,6 +75,60 @@ EXCLUDED_CRYPTO_IDS: dict[str, str] = {
     "pax-gold": "tokenized gold; gold is represented separately",
 }
 
+# Live census members that cannot be mapped safely, with what was measured.
+#
+# Deliberately NOT `EXCLUDED_CRYPTO_IDS`. That dict means "this does not belong
+# in a ranking of digital assets" -- a stablecoin is excluded whatever the data
+# says, and always will be. These are assets that *should* rank and cannot,
+# because no display-feed symbol for them has been verified. Filing them as
+# exclusions would retire an open coverage gap by renaming it, and they would
+# drop out of the `unmapped` list that is the only place the gap is visible.
+#
+# The reasons are recorded so the next audit starts from a measurement instead
+# of repeating one. Each was taken on 2026-08-13 by pulling the obvious
+# `<SYMBOL>-USD` ticker from the display feed and comparing its last close to
+# the same asset's live CoinGecko price. **Every one of the seven is a different
+# asset.** Two of them are the dangerous shape: M-USD carries 1,515 daily
+# observations and SKY-USD carries 3,200, so both clear the 365-observation gate
+# comfortably and would have been ranked -- under the right name, with another
+# coin's entire price history. The registry's numeric suffixes (HYPE32196-USD,
+# SUI20947-USD, TAO22974-USD) exist for exactly this collision, and a mapping
+# added without the price check is how one gets past it.
+UNVERIFIED_CRYPTO_IDS: dict[str, str] = {
+    "rain": (
+        "RAIN-USD on the display feed is a different asset: 1 observation, last "
+        "close $0.000016 against CoinGecko's $0.0123 (measured 2026-08-13)"
+    ),
+    "canton-network": (
+        "CC-USD on the display feed is a different asset: 792 observations, last "
+        "close $0.180 against CoinGecko's $0.0972 (measured 2026-08-13)"
+    ),
+    "world-liberty-financial": (
+        "WLFI-USD on the display feed is a different asset: 323 observations, "
+        "last close $2.7e-13 against CoinGecko's $0.0550 (measured 2026-08-13)"
+    ),
+    "aster-2": (
+        "ASTER-USD on the display feed is a different asset: 1 observation, last "
+        "close $0.00108 against CoinGecko's $0.602 (measured 2026-08-13)"
+    ),
+    "memecore": (
+        "M-USD on the display feed is a different asset: 1,515 observations, "
+        "last close $0.000251 against CoinGecko's $1.10 (measured 2026-08-13). "
+        "It clears the observation gate, so only the price check catches it"
+    ),
+    "morpho": (
+        "MORPHO-USD on the display feed is a different asset: 90 observations, "
+        "last close $0.00181 against CoinGecko's $1.96 (measured 2026-08-13)"
+    ),
+    "sky": (
+        "SKY-USD on the display feed is a different asset: 3,200 observations, "
+        "last close $0.0141 against CoinGecko's $0.0533 (measured 2026-08-13). "
+        "It clears the observation gate, so only the price check catches it"
+    ),
+}
+
+UNMAPPED_WITHOUT_A_MEASUREMENT = "no verified display-feed mapping"
+
 
 def crypto_assets() -> list[dict[str, str]]:
     """Return every safely mapped candidate; live rank filtering happens later."""
@@ -105,7 +159,19 @@ def evaluate_crypto_census(rows: list[dict[str, Any]]) -> dict[str, Any]:
         elif coin_id in CRYPTO_REGISTRY:
             included.append({**item, "registered_symbol": CRYPTO_REGISTRY[coin_id]["symbol"]})
         else:
-            unmapped.append({**item, "reason": "no verified display-feed mapping"})
+            # An unmapped asset stays unmapped whether or not anyone has looked
+            # into why. The recorded finding replaces the generic sentence, and
+            # its absence is itself informative: this one has not been measured
+            # yet.
+            unmapped.append(
+                {
+                    **item,
+                    "reason": UNVERIFIED_CRYPTO_IDS.get(
+                        coin_id, UNMAPPED_WITHOUT_A_MEASUREMENT
+                    ),
+                    "measured": coin_id in UNVERIFIED_CRYPTO_IDS,
+                }
+            )
     return {
         "policy_version": POLICY_VERSION,
         "market_cap_limit": CRYPTO_MARKET_CAP_LIMIT,
@@ -121,6 +187,8 @@ __all__ = [
     "EXCLUDED_CRYPTO_IDS",
     "MIN_CRYPTO_OBSERVATIONS",
     "POLICY_VERSION",
+    "UNMAPPED_WITHOUT_A_MEASUREMENT",
+    "UNVERIFIED_CRYPTO_IDS",
     "crypto_assets",
     "evaluate_crypto_census",
 ]

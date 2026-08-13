@@ -68,7 +68,14 @@ interface ScannerData {
       market_cap_limit: number;
       ranked: number;
       excluded: Array<{ rank: number; symbol: string; name: string; reason: string }>;
-      unmapped: Array<{ rank: number; symbol: string; name: string; reason: string }>;
+      unmapped: Array<{
+        rank: number;
+        symbol: string;
+        name: string;
+        coin_id: string;
+        reason: string;
+        measured: boolean;
+      }>;
       insufficient_history: Array<{ symbol: string; observations: number; required: number }>;
     };
     broad_assets: { configured: number; ranked: number; unavailable: string[] };
@@ -335,9 +342,17 @@ export function ScannerView() {
             </div>
             <div>
               <strong>Needs a verified mapping ({state.data.coverage.crypto.unmapped.length})</strong>
-              <p>{state.data.coverage.crypto.unmapped.length
-                ? state.data.coverage.crypto.unmapped.map((item) => `#${item.rank} ${item.symbol}`).join(" · ")
-                : "Every eligible census asset is mapped."}</p>
+              {state.data.coverage.crypto.unmapped.length ? (
+                <ul class="coverage-audit-list">
+                  {state.data.coverage.crypto.unmapped.map((item) => (
+                    <li key={item.coin_id}>
+                      <span>#{item.rank} {item.symbol}</span> — {item.reason}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>Every eligible census asset is mapped.</p>
+              )}
             </div>
             <div>
               <strong>Insufficient price history ({state.data.coverage.crypto.insufficient_history.length})</strong>

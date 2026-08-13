@@ -3882,6 +3882,19 @@ tr.row.tier-unknown td:first-child {
   margin: 4px 0 0;
   line-height: 1.5;
 }
+.coverage-audit-list {
+  margin: 4px 0 0;
+  padding-left: 0;
+  list-style: none;
+  line-height: 1.5;
+}
+.coverage-audit-list li + li {
+  margin-top: 6px;
+}
+.coverage-audit-list span {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
 .coverage-gate-note {
   display: flex;
   align-items: center;
