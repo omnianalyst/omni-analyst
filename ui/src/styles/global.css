@@ -5053,3 +5053,129 @@ tr.row.tier-unknown td:first-child {
 .connection-status.status-ok { color: var(--tier-fresh); }
 .connection-status.status-warn { color: var(--tier-stale); }
 .connection-status.status-quiet { color: var(--faint); }
+
+/* Portfolio hierarchy: the managed book and the read-only wallets are the same
+   page but not the same kind of thing. The data was already separated; the
+   layout read flat, which is the reading that lets someone add the two totals
+   together in their head. The external band is deliberately recessed rather
+   than merely labelled. */
+.book-band {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.book-band + .book-band {
+  margin-top: 34px;
+  padding-top: 26px;
+  border-top: 1px solid var(--border);
+}
+.book-band-label h2 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.01em;
+}
+.book-band-label p {
+  margin: 6px 0 0;
+  max-width: 68ch;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.book-band-external .book-band-label strong {
+  color: var(--text);
+}
+.book-band-external {
+  padding: 24px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: rgba(5, 7, 10, 0.45);
+}
+
+/* Rebalance schedule. */
+.schedule-card .section-heading p {
+  margin: 6px 0 0;
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.window-pill {
+  flex-shrink: 0;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+.window-pill.open {
+  border-color: rgba(45, 212, 191, 0.35);
+  color: var(--tier-fresh);
+}
+.schedule-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.schedule-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--tier-unknown);
+  border-radius: var(--r-md);
+  background: rgba(16, 26, 43, 0.4);
+}
+.schedule-row.tone-healthy {
+  border-left-color: var(--tier-fresh);
+}
+.schedule-row.tone-attention {
+  border-left-color: var(--tier-aging);
+}
+.schedule-identity strong {
+  display: block;
+  font-size: 13px;
+}
+.schedule-identity span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.schedule-countdown {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.schedule-countdown strong {
+  font-size: 20px;
+  line-height: 1.1;
+}
+.schedule-countdown span,
+.schedule-nodate {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+.schedule-detail {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.schedule-refusal {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-soft);
+}
+.schedule-refusal-reason {
+  margin: 6px 0 0;
+  max-width: 78ch;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.schedule-refusal-meta {
+  margin: 8px 0 0;
+  color: var(--faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}

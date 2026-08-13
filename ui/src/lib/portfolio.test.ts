@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
+  classificationIndex,
   formatMoney,
   groupPositions,
   navChange,
   portfolioHealth,
   recordedCarry,
   type CarryCycle,
+  type ClassificationResponse,
 } from "./portfolio";
 import type { Position, ReconciliationReport } from "./trading";
+
+const classification = (
+  symbols: ClassificationResponse["symbols"],
+): ClassificationResponse => ({
+  portfolio_id: "book",
+  classes: ["crypto", "defensive", "stocks"],
+  symbols,
+});
 
 const position = (market_type: "spot" | "perpetual", quantity: string): Position => ({
   venue: "hyperliquid",
@@ -53,6 +63,97 @@ describe("portfolio presentation", () => {
       hasPerpetual: true,
     });
     expect(groups[0].legs).toHaveLength(2);
+  });
+
+  it("takes the asset class from the backend rather than from a symbol list", () => {
+    const groups = groupPositions(
+      [position("spot", "1")],
+      classificationIndex(
+        classification([
+          {
+            symbol: "BTC/USDC",
+            asset: "BTC",
+            asset_class: "defensive",
+            name: "Bitcoin",
+            refusal: null,
+          },
+        ]),
+      ),
+    );
+
+    // "defensive" is deliberately not the class anyone would guess for BTC.
+    // The old hardcoded set had it in CRYPTO_ASSETS, so a test using a
+    // plausible class would pass against both implementations and prove
+    // nothing about which one produced the answer.
+    expect(groups[0].assetClass).toBe("defensive");
+    expect(groups[0].classRefusal).toBeNull();
+  });
+
+  it("leaves a symbol the universe does not list unclassified, not a stock", () => {
+    const groups = groupPositions(
+      [position("perpetual", "-1")],
+      classificationIndex(
+        classification([
+          {
+            symbol: "BTC/USDC",
+            asset: "BTC",
+            asset_class: null,
+            name: null,
+            refusal: "no entry in the governed display universe classifies BTC",
+          },
+        ]),
+      ),
+    );
+
+    expect(groups[0].assetClass).toBeNull();
+    expect(groups[0].classRefusal).toBe(
+      "no entry in the governed display universe classifies BTC",
+    );
+  });
+
+  it("distinguishes an unread classification from an unlisted symbol", () => {
+    const [unread] = groupPositions([position("spot", "1")]);
+    const [unlisted] = groupPositions(
+      [position("spot", "1")],
+      classificationIndex(
+        classification([
+          {
+            symbol: "OTHER/USDC",
+            asset: "OTHER",
+            asset_class: "crypto",
+            name: "Other",
+            refusal: null,
+          },
+        ]),
+      ),
+    );
+
+    expect(unread.assetClass).toBeNull();
+    expect(unread.classRefusal).toContain("has not been read");
+    expect(unlisted.assetClass).toBeNull();
+    expect(unlisted.classRefusal).toContain("no entry in the governed universe");
+    expect(unread.classRefusal).not.toBe(unlisted.classRefusal);
+  });
+
+  it("classifies a pair from whichever leg the backend lists", () => {
+    const groups = groupPositions(
+      [position("spot", "1"), position("perpetual", "-1")],
+      classificationIndex(
+        classification([
+          {
+            symbol: "BTC/USDC",
+            asset: "BTC",
+            asset_class: "crypto",
+            name: "Bitcoin",
+            refusal: null,
+          },
+        ]),
+      ),
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].assetClass).toBe("crypto");
+    expect(groups[0].classRefusal).toBeNull();
   });
 
   it("puts a halt ahead of a clean reconciliation", () => {

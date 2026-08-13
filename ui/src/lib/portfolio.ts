@@ -46,13 +46,71 @@ export interface PositionGroup {
   hasSpot: boolean;
   hasPerpetual: boolean;
   assetClass: PositionAssetClass;
+  classRefusal: string | null;
   notional: number | null;
 }
 
-export type PositionAssetClass = "stocks" | "crypto" | "defensive";
+/**
+ * The class of a held symbol, as the backend's governed universe reports it.
+ *
+ * `null` is a symbol that universe does not list. It is deliberately not a
+ * class: the two hardcoded sets this replaces fell through to "stocks" for
+ * anything unrecognised, so every unlisted perp in the book was filed as an
+ * equity -- a class nobody measured, printed as one somebody did.
+ */
+export type PositionAssetClass = string | null;
 
-const DEFENSIVE_ASSETS = new Set(["GLD", "SLV", "BND", "TLT", "IEF", "SHV", "TIP", "DBC"]);
-const CRYPTO_ASSETS = new Set(["BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC", "BCH"]);
+export interface SymbolClassification {
+  symbol: string;
+  asset: string;
+  asset_class: string | null;
+  name: string | null;
+  refusal: string | null;
+}
+
+export interface ClassificationResponse {
+  portfolio_id: string;
+  classes: string[];
+  symbols: SymbolClassification[];
+}
+
+export interface CarrySchedule {
+  portfolio_id: string;
+  as_of: string;
+  rebalance_period_days: number;
+  window_opens_hour: number;
+  window_closes_hour: number;
+  in_rebalance_window: boolean;
+  refusal_recording_began_at: string | null;
+  last_refusal: CarryRefusal | null;
+  last_refusal_unavailable: string | null;
+  venues: VenueSchedule[];
+}
+
+export interface CarryRefusal {
+  venue: string;
+  attempted_at: string;
+  guard: string;
+  reason: string;
+  funding_window_opens_at: string | null;
+  last_cycle_at: string | null;
+  last_completed_at: string | null;
+  next_due_at: string | null;
+}
+
+export type ScheduleState = "never_run" | "no_completed_cycle" | "holding" | "due";
+
+export interface VenueSchedule {
+  venue: string;
+  state: ScheduleState;
+  detail: string;
+  last_refusal: CarryRefusal | null;
+  last_cycle_at: string | null;
+  last_completed_at: string | null;
+  funding_window_opens_at: string | null;
+  next_rebalance_due_at: string | null;
+  days_until_due: number | null;
+}
 
 export type HealthTone = "healthy" | "attention" | "critical" | "quiet";
 
@@ -68,31 +126,71 @@ export const getCarryCycles = (): Promise<CarryCyclesResponse> =>
 export const getNavHistory = (): Promise<NavHistoryResponse> =>
   authedGetJson<NavHistoryResponse>("/trading/nav-history");
 
+export const getClassification = (): Promise<ClassificationResponse> =>
+  authedGetJson<ClassificationResponse>("/trading/classification");
+
+export const getCarrySchedule = (): Promise<CarrySchedule> =>
+  authedGetJson<CarrySchedule>("/trading/schedule");
+
 function assetFromSymbol(symbol: string): string {
   return symbol.split("/")[0]?.split(":")[0] || symbol;
 }
 
-export function positionAssetClass(position: Position): PositionAssetClass {
-  const asset = assetFromSymbol(position.symbol).toUpperCase();
-  if (position.market_type === "perpetual" || CRYPTO_ASSETS.has(asset)) return "crypto";
-  if (DEFENSIVE_ASSETS.has(asset)) return "defensive";
-  return "stocks";
+/**
+ * Index the backend's answer by the symbol as stored.
+ *
+ * Keyed on the venue symbol rather than a parsed base asset so that no second
+ * parser in the browser has to agree with the one on the server -- the two
+ * drifting is how `ETH/USDC:USDC` and `ETH/USDC` end up in different classes.
+ */
+export function classificationIndex(
+  response: ClassificationResponse | null,
+): Map<string, SymbolClassification> {
+  const index = new Map<string, SymbolClassification>();
+  for (const entry of response?.symbols ?? []) index.set(entry.symbol, entry);
+  return index;
 }
 
-export function groupPositions(positions: Position[]): PositionGroup[] {
+export function groupPositions(
+  positions: Position[],
+  classification: Map<string, SymbolClassification> = new Map(),
+): PositionGroup[] {
   const groups = new Map<string, PositionGroup>();
   for (const position of positions) {
     const asset = assetFromSymbol(position.symbol);
     const key = `${position.venue}:${asset}`;
+    const classified = classification.get(position.symbol);
     const group = groups.get(key) ?? {
       asset,
       venue: position.venue,
       legs: [],
       hasSpot: false,
       hasPerpetual: false,
-      assetClass: positionAssetClass(position),
+      assetClass: null,
+      classRefusal: null,
       notional: null,
     };
+    // A pair's two legs are the same asset, so the first leg the backend
+    // classifies settles it for the group; the refusal is only kept while no
+    // leg has produced a class. An unread classification and a symbol the
+    // universe does not list are different failures and say so separately --
+    // collapsing them is how "we did not ask" starts reading as "there is no
+    // answer".
+    if (group.assetClass === null) {
+      if (classified?.asset_class) {
+        group.assetClass = classified.asset_class;
+        group.classRefusal = null;
+      } else if (classified) {
+        group.classRefusal =
+          classified.refusal ??
+          `the governed universe returned no class for ${position.symbol}`;
+      } else {
+        group.classRefusal =
+          classification.size === 0
+            ? "the backend classification has not been read"
+            : `no entry in the governed universe classifies ${position.symbol}`;
+      }
+    }
     group.legs.push(position);
     group.hasSpot ||= position.market_type === "spot";
     group.hasPerpetual ||= position.market_type === "perpetual";

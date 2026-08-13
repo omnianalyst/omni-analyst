@@ -2,16 +2,21 @@ import { useEffect, useState } from "preact/hooks";
 import { describeError } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
 import {
+  classificationIndex,
   formatMoney,
   getCarryCycles,
+  getCarrySchedule,
+  getClassification,
   getNavHistory,
   groupPositions,
   navChange,
   portfolioHealth,
   recordedCarry,
   type CarryCycle,
+  type CarrySchedule,
+  type ClassificationResponse,
   type NavPoint,
-  type PositionAssetClass,
+  type VenueSchedule,
 } from "../lib/portfolio";
 import {
   formatTimestamp,
@@ -38,10 +43,102 @@ type State =
       cycles: Resource<CarryCycle[]>;
       history: Resource<NavPoint[]>;
       reconciliation: Resource<ReconciliationReport>;
+      classification: Resource<ClassificationResponse>;
+      schedule: Resource<CarrySchedule>;
     };
 
-type PositionFilter = "all" | PositionAssetClass;
+type PositionFilter = "all" | string;
 type ChartRange = "1m" | "3m" | "1y" | "all";
+
+// Display names for the backend's own class vocabulary. A class with no entry
+// renders under its backend name rather than being relabelled or hidden, so a
+// class added on the server appears here without this file being edited.
+const CLASS_LABELS: Record<string, string> = {
+  stocks: "Stocks & ETFs",
+  defensive: "Gold, bonds & defensive",
+  crypto: "Crypto",
+  unclassified: "Unclassified",
+};
+
+const SCHEDULE_TONE: Record<VenueSchedule["state"], string> = {
+  never_run: "quiet",
+  no_completed_cycle: "attention",
+  holding: "healthy",
+  due: "attention",
+};
+
+const SCHEDULE_LABEL: Record<VenueSchedule["state"], string> = {
+  never_run: "No cycle recorded",
+  no_completed_cycle: "No completed cycle",
+  holding: "Holding",
+  due: "Rebalance due",
+};
+
+function CarryScheduleCard({ schedule }: { schedule: CarrySchedule }) {
+  return (
+    <section class="surface-card schedule-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Next</p>
+          <h2>Rebalance schedule</h2>
+          <p>
+            The hold is {schedule.rebalance_period_days} days. Cycles run
+            between {String(schedule.window_opens_hour).padStart(2, "0")}:00 and{" "}
+            {String(schedule.window_closes_hour).padStart(2, "0")}:00 UTC, where
+            the measured variance is lowest.
+          </p>
+        </div>
+        <span class={`window-pill ${schedule.in_rebalance_window ? "open" : "shut"}`}>
+          {schedule.in_rebalance_window ? "Window open" : "Window closed"}
+        </span>
+      </div>
+
+      {schedule.venues.length === 0 ? (
+        <div class="clean-empty">
+          <strong>No venue has a schedule yet</strong>
+          <span>A venue appears here once it records a cycle or holds a position.</span>
+        </div>
+      ) : (
+        <div class="schedule-stack">
+          {schedule.venues.map((venue) => (
+            <article class={`schedule-row tone-${SCHEDULE_TONE[venue.state]}`} key={venue.venue}>
+              <div class="schedule-identity">
+                <strong>{venue.venue}</strong>
+                <span>{SCHEDULE_LABEL[venue.state]}</span>
+              </div>
+              <div class="schedule-countdown">
+                {venue.days_until_due === null ? (
+                  <span class="schedule-nodate">—</span>
+                ) : (
+                  <>
+                    <strong>{venue.days_until_due}</strong>
+                    <span>{venue.days_until_due === 1 ? "day left" : "days left"}</span>
+                  </>
+                )}
+              </div>
+              <p class="schedule-detail">{venue.detail}</p>
+            </article>
+          ))}
+        </div>
+      )}
+
+      <div class="schedule-refusal">
+        <p class="eyebrow">Last refusal</p>
+        {schedule.last_refusal ? (
+          <>
+            <p class="schedule-refusal-reason">{schedule.last_refusal.reason}</p>
+            <p class="schedule-refusal-meta">
+              {schedule.last_refusal.venue} · {schedule.last_refusal.guard} ·{" "}
+              {formatTimestamp(schedule.last_refusal.attempted_at)}
+            </p>
+          </>
+        ) : (
+          <p class="schedule-refusal-reason">{schedule.last_refusal_unavailable}</p>
+        )}
+      </div>
+    </section>
+  );
+}
 
 function NavChart({ points }: { points: NavPoint[] }) {
   const measured = points
@@ -102,12 +199,15 @@ export function PortfolioView() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [portfolio, cycles, history, reconciliation] = await Promise.allSettled([
-        getPortfolio(),
-        getCarryCycles(),
-        getNavHistory(),
-        getReconciliation(),
-      ]);
+      const [portfolio, cycles, history, reconciliation, classification, schedule] =
+        await Promise.allSettled([
+          getPortfolio(),
+          getCarryCycles(),
+          getNavHistory(),
+          getReconciliation(),
+          getClassification(),
+          getCarrySchedule(),
+        ]);
       if (cancelled) return;
       if (portfolio.status === "rejected") {
         if (portfolio.reason instanceof AuthRequiredError) {
@@ -130,6 +230,8 @@ export function PortfolioView() {
             ? { kind: "ok", data: history.value.points }
             : resource(history),
         reconciliation: resource(reconciliation),
+        classification: resource(classification),
+        schedule: resource(schedule),
       });
     })();
     return () => {
@@ -159,8 +261,26 @@ export function PortfolioView() {
     state.reconciliation.kind === "ok" ? state.reconciliation.data : null;
   const latestCycle = cycles[0] ?? null;
   const health = portfolioHealth(portfolio.positions, latestCycle, reconciliation);
-  const groups = groupPositions(portfolio.positions);
-  const filteredGroups = positionFilter === "all" ? groups : groups.filter((group) => group.assetClass === positionFilter);
+  const classification =
+    state.classification.kind === "ok" ? state.classification.data : null;
+  const groups = groupPositions(
+    portfolio.positions,
+    classificationIndex(classification),
+  );
+  // The filter offers what the backend universe actually holds, plus a bucket
+  // for held symbols it does not classify. The set this replaces was two
+  // hardcoded lists in the browser, which could disagree with Discover about
+  // what an asset is and filed anything unrecognised as a stock.
+  const presentClasses = [
+    ...new Set(groups.map((group) => group.assetClass).filter((c): c is string => c !== null)),
+  ].sort();
+  const hasUnclassified = groups.some((group) => group.assetClass === null);
+  const filteredGroups =
+    positionFilter === "all"
+      ? groups
+      : positionFilter === "unclassified"
+        ? groups.filter((group) => group.assetClass === null)
+        : groups.filter((group) => group.assetClass === positionFilter);
   const carry = state.cycles.kind === "ok" ? recordedCarry(cycles) : null;
   const change = state.history.kind === "ok" ? navChange(history) : null;
   const rangeDays = { "1m": 31, "3m": 93, "1y": 366, all: Infinity }[chartRange];
@@ -185,9 +305,15 @@ export function PortfolioView() {
         </div>
       </header>
 
+      <div class="book-band" aria-labelledby="managed-book-heading">
+        <div class="book-band-label">
+          <h2 id="managed-book-heading">Managed trading book</h2>
+          <p>Positions this system opened, values it recorded, and the cadence it trades on.</p>
+        </div>
+
       <section class="primary-metrics" aria-label="Portfolio summary">
         <article class="primary-metric primary-metric-featured">
-          <span class="metric-kicker">Portfolio value</span>
+          <span class="metric-kicker">Trading NAV</span>
           <strong>{formatMoney(portfolio.nav)}</strong>
           <span class="metric-context">{formatMoney(portfolio.cash)} available cash</span>
         </article>
@@ -223,7 +349,19 @@ export function PortfolioView() {
         <NavChart points={chartHistory} />
       </section>
 
-      <WalletAccounts />
+      {state.schedule.kind === "ok" ? (
+        <CarryScheduleCard schedule={state.schedule.data} />
+      ) : (
+        <section class="surface-card schedule-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Next</p>
+              <h2>Rebalance schedule</h2>
+            </div>
+          </div>
+          <p class="inline-warning">Schedule unavailable: {state.schedule.message}</p>
+        </section>
+      )}
 
       <div class="portfolio-grid">
         <section class="surface-card holdings-card">
@@ -235,12 +373,18 @@ export function PortfolioView() {
             <span class="count-badge">{filteredGroups.length} of {groups.length}</span>
           </div>
           <div class="position-filters" aria-label="Position type">
-            {(["all", "stocks", "defensive", "crypto"] as PositionFilter[]).map((filter) => (
+            {(["all", ...presentClasses, ...(hasUnclassified ? ["unclassified"] : [])] as PositionFilter[]).map((filter) => (
               <button type="button" class={positionFilter === filter ? "active" : ""} onClick={() => setPositionFilter(filter)}>
-                {filter === "all" ? "All" : filter === "stocks" ? "Stocks & ETFs" : filter === "defensive" ? "Gold, bonds & defensive" : "Crypto"}
+                {filter === "all" ? "All" : CLASS_LABELS[filter] ?? filter}
               </button>
             ))}
           </div>
+          {state.classification.kind === "error" ? (
+            <p class="inline-warning">
+              Classification unavailable, so these are grouped without one:{" "}
+              {state.classification.message}
+            </p>
+          ) : null}
           {filteredGroups.length === 0 ? (
             <div class="clean-empty">
               <strong>{groups.length ? "No positions in this group" : "Holding cash"}</strong>
@@ -254,15 +398,20 @@ export function PortfolioView() {
                     <span class="asset-mark">{group.asset.slice(0, 2)}</span>
                     <div>
                       <strong>{group.asset}</strong>
-                      <span>{group.venue}</span>
+                      <span>
+                        {group.venue}
+                        {group.assetClass ? ` · ${CLASS_LABELS[group.assetClass] ?? group.assetClass}` : ""}
+                      </span>
                     </div>
                   </div>
                   <div class="position-purpose">
                     <strong>{group.hasSpot && group.hasPerpetual ? "Paired carry" : "Unpaired exposure"}</strong>
                     <span>
-                      {group.hasSpot && group.hasPerpetual
-                        ? "Spot and perpetual legs are both present"
-                        : "Only one market leg is present"}
+                      {group.assetClass === null && group.classRefusal
+                        ? group.classRefusal
+                        : group.hasSpot && group.hasPerpetual
+                          ? "Spot and perpetual legs are both present"
+                          : "Only one market leg is present"}
                     </span>
                   </div>
                   <div class="position-leg-count">{group.notional === null ? `${group.legs.length} legs` : formatMoney(String(group.notional))}</div>
@@ -302,6 +451,20 @@ export function PortfolioView() {
             <p class="inline-warning">Cycle history unavailable: {state.cycles.message}</p>
           ) : null}
         </aside>
+      </div>
+      </div>
+
+      <div class="book-band book-band-external" aria-labelledby="external-holdings-heading">
+        <div class="book-band-label">
+          <h2 id="external-holdings-heading">External holdings, read only</h2>
+          <p>
+            Public addresses this system watches and never trades. These balances
+            are <strong>not</strong> part of the {formatMoney(portfolio.nav)} trading
+            NAV above, and chain and price coverage is incomplete — see each
+            wallet for what was reachable.
+          </p>
+        </div>
+        <WalletAccounts />
       </div>
     </div>
   );
