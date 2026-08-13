@@ -4954,3 +4954,89 @@ tr.row.tier-unknown td:first-child {
   font-size: 16px;
   font-variant-numeric: tabular-nums;
 }
+
+/* Venue controls. A control that cannot act is disabled with its reason
+   beside it rather than accepting a click that silently does nothing. */
+.venue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.venue-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.venue-toggle input:disabled {
+  cursor: not-allowed;
+}
+
+.venue-toggle:has(input:disabled) {
+  color: var(--faint);
+  cursor: not-allowed;
+}
+
+.venue-blocked {
+  color: var(--tier-aging);
+  font-size: 11px;
+}
+
+.venue-form {
+  display: grid;
+  gap: var(--s-3);
+  margin-top: var(--s-3);
+  padding: var(--s-4);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+
+.venue-field {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.venue-field span {
+  color: var(--muted);
+}
+
+.venue-field em {
+  color: var(--tier-stale);
+  font-style: normal;
+}
+
+.venue-field input[type="text"],
+.venue-field input[type="password"] {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.venue-form-actions {
+  display: flex;
+  gap: var(--s-2);
+}
+
+.venue-form-note,
+.venue-message {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.venue-form-note { color: var(--faint); }
+.venue-message { color: var(--tier-fresh); }
+
+.connection-status.status-ok { color: var(--tier-fresh); }
+.connection-status.status-warn { color: var(--tier-stale); }
+.connection-status.status-quiet { color: var(--faint); }

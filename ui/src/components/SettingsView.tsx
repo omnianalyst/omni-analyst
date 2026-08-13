@@ -1,34 +1,10 @@
-import { useEffect, useState } from "preact/hooks";
-import { authHeaderIfPresent, describeError, request } from "../lib/api";
+import { useCallback, useEffect, useState } from "preact/hooks";
+import { authHeaderIfPresent, describeError } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
+import { getSettings, type ProviderEntry, type SettingsData } from "../lib/settings";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
-
-interface ProviderEntry {
-  key: string;
-  label: string;
-  category: string;
-  settings_field: string;
-  key_required: boolean;
-  wired: boolean;
-  configured: boolean;
-}
-
-interface VenueEntry {
-  key: string;
-  label: string;
-  type: string;
-  requires_process: boolean;
-  description: string;
-  configured: boolean;
-  enabled: boolean;
-  configuration_source: "deployment" | "legacy" | "unavailable";
-}
-
-interface SettingsData {
-  provider_catalog: ProviderEntry[];
-  venue_catalog: VenueEntry[];
-}
+import { VenueCard } from "./VenueCard";
 
 type State =
   | { kind: "loading" }
@@ -39,19 +15,14 @@ type State =
 export function SettingsView() {
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useEffect(() => {
-    let cancelled = false;
-    const headers = authHeaderIfPresent();
-    if (!headers.authorization) {
+  const load = useCallback(() => {
+    if (!authHeaderIfPresent().authorization) {
       setState({ kind: "auth" });
       return;
     }
-    request<SettingsData>("/settings/config", headers)
-      .then((data) => {
-        if (!cancelled) setState({ kind: "ok", data });
-      })
+    getSettings()
+      .then((data) => setState({ kind: "ok", data }))
       .catch((error) => {
-        if (cancelled) return;
         if (error instanceof AuthRequiredError) {
           setState({ kind: "auth" });
           return;
@@ -59,10 +30,11 @@ export function SettingsView() {
         const described = describeError(error);
         setState({ kind: "error", message: described.message, detail: described.detail });
       });
-    return () => {
-      cancelled = true;
-    };
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   if (state.kind === "loading") return <Loading label="Loading settings…" />;
   if (state.kind === "auth") return <ErrorState message="Sign in to view settings." />;
@@ -97,32 +69,7 @@ export function SettingsView() {
         </div>
         <div class="connection-grid">
           {state.data.venue_catalog.map((venue) => (
-            <article class="connection-card" key={venue.key}>
-              <div class="connection-header">
-                <div>
-                  <span class="connection-type">{venue.type}</span>
-                  <h3>{venue.label}</h3>
-                  <p>{venue.description}</p>
-                </div>
-                <span class={`connection-state-dot ${venue.configured ? "is-configured" : ""}`} aria-hidden="true" />
-              </div>
-              <div class="connection-status-row">
-                <span class={`connection-status ${venue.configured ? "status-enabled" : ""}`}>
-                  {venue.configured ? "Configured" : "Not configured"}
-                </span>
-                {venue.enabled ? <span>Enabled</span> : null}
-              </div>
-              <p class="connection-guidance">
-                {venue.configuration_source === "deployment"
-                  ? venue.configured
-                    ? "Credentials were loaded from the deployment environment."
-                    : "Add the required credentials to the deployment environment."
-                  : venue.configuration_source === "legacy"
-                    ? "A legacy saved configuration exists. Move it to secure deployment secrets before changing it."
-                    : "Browser-based secret storage is unavailable until an encrypted credential store is connected."}
-              </p>
-              {venue.requires_process ? <p class="connection-note">Also requires the managed IB Gateway process.</p> : null}
-            </article>
+            <VenueCard key={venue.key} entry={venue} onChanged={load} />
           ))}
         </div>
       </section>

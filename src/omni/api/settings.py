@@ -99,24 +99,58 @@ VENUE_CATALOG = [
 
 
 def _venue_catalog_payload(saved: dict) -> list[dict]:
+    """Every venue, with how its credentials are held and whether it is usable.
+
+    `configuration_source` is the honest part. Before an encrypted store existed
+    this page could only report `legacy` (a plaintext row somebody wrote
+    directly) or `unavailable`, and it told the operator to use deployment
+    secrets because the browser had nowhere safe to put them. Now
+    `omni.credentials.keyring` exists, so `encrypted` is a real state and the
+    difference between the three matters:
+
+      deployment  -- read from the environment, never through this page
+      encrypted   -- stored by this page under the credential key
+      legacy      -- a plaintext row predating the keyring; must be re-entered
+      unavailable -- nothing stored
+    """
+    from omni.credentials.keyring import is_encrypted
+    from omni.venue.manager import SECRET_FIELDS
+
     saved_venues = saved.get("venues", {})
     out = []
     for entry in VENUE_CATALOG:
         key = entry["key"]
-        legacy = saved_venues.get(key, {})
+        stored = saved_venues.get(key, {})
+        credentials = stored.get("credentials") or {}
+
         if key == "hyperliquid":
+            # The carry book's keys are deployment-managed on purpose: the
+            # scheduler holds them and the api never receives them.
             configured = bool(
                 settings.hyperliquid_wallet_address
                 and settings.hyperliquid_private_key
             )
             source = "deployment"
+        elif credentials:
+            secret_fields = SECRET_FIELDS.get(key, ())
+            present = [f for f in secret_fields if credentials.get(f)]
+            # `legacy` only when a secret field is stored WITHOUT the marker.
+            # A partially-migrated row is legacy: one plaintext secret is enough
+            # to make the record unsafe, so the weaker state wins.
+            source = (
+                "encrypted"
+                if present and all(is_encrypted(credentials[f]) for f in present)
+                else "legacy"
+            )
+            configured = True
         else:
-            configured = bool(legacy.get("credentials"))
-            source = "legacy" if configured else "unavailable"
+            configured = False
+            source = "unavailable"
+
         out.append({
             **entry,
             "configured": configured,
-            "enabled": bool(legacy.get("enabled")),
+            "enabled": bool(stored.get("enabled")),
             "configuration_source": source,
         })
     return out
@@ -196,6 +230,97 @@ def build_router(app: App) -> Router:
             saved["venues"] = {**saved.get("venues", {}), **body["venues"]}
         await _save_settings(app.db.pool, audience, saved)
         return {"status": "saved"}
+
+    @router.post("/settings/venue/{venue_key}/credentials")
+    async def set_venue_credentials(venue_key: str, request: Request) -> dict:
+        """Store a venue's credentials, encrypted at rest.
+
+        The ONE door for secrets. `POST /settings` still refuses them, so there
+        is exactly one path into storage and it always encrypts -- a second
+        writer that forgot would leave plaintext rows that read back perfectly
+        and nothing would report it.
+
+        Nothing is ever returned. The response says what was stored and whether
+        the venue then connected, and the connection attempt runs immediately so
+        a wrong credential is reported now rather than at the next scheduler
+        cycle.
+        """
+        from neutron.error import bad_request, not_found, unauthorized
+
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+
+        entry = next((v for v in VENUE_CATALOG if v["key"] == venue_key), None)
+        if entry is None:
+            raise not_found(f"unknown venue {venue_key}")
+
+        if venue_key == "hyperliquid":
+            # Refusing is the security boundary, not an inconvenience. These keys
+            # can move the carry book, they live only in the scheduler's
+            # environment, and the api process is deliberately never given them.
+            raise bad_request(
+                "Hyperliquid credentials are deployment-managed and cannot be set "
+                "from the browser. The api process does not hold trading keys."
+            )
+
+        body = await request.json()
+        supplied = body.get("credentials")
+        if not isinstance(supplied, dict) or not supplied:
+            raise bad_request("credentials must be a non-empty object")
+
+        known = {field["name"] for field in entry.get("fields", [])}
+        unknown = set(supplied) - known
+        if unknown:
+            raise bad_request(
+                f"unknown field(s) for {venue_key}: {', '.join(sorted(unknown))}"
+            )
+        missing = [
+            field["name"]
+            for field in entry.get("fields", [])
+            if field.get("required") and not supplied.get(field["name"])
+        ]
+        if missing:
+            raise bad_request(f"missing required field(s): {', '.join(missing)}")
+
+        from omni.venue.manager import refresh_venues, store_venue_credentials
+
+        await store_venue_credentials(app.db.pool, audience, venue_key, supplied)
+        status = await refresh_venues(app.db.pool, audience)
+
+        return {
+            "status": "stored",
+            "encrypted": True,
+            "venue_status": status.get(venue_key, "not enabled"),
+        }
+
+    @router.delete("/settings/venue/{venue_key}/credentials")
+    async def clear_venue_credentials(venue_key: str, request: Request) -> dict:
+        """Forget a venue's credentials and disconnect it.
+
+        Needed as much for the legacy-plaintext case as for revocation: the only
+        way to clear a pre-keyring row is to remove it.
+        """
+        from neutron.error import unauthorized
+
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+
+        saved = await _load_settings(app.db.pool, audience)
+        venues = saved.setdefault("venues", {})
+        entry = venues.get(venue_key)
+        if entry is None:
+            return {"status": "not stored"}
+
+        entry.pop("credentials", None)
+        entry["enabled"] = False
+        await _save_settings(app.db.pool, audience, saved)
+
+        from omni.venue.manager import refresh_venues
+
+        await refresh_venues(app.db.pool, audience)
+        return {"status": "cleared"}
 
     @router.post("/settings/venue/{venue_key}/toggle")
     async def toggle_venue(venue_key: str, request: Request) -> dict:
