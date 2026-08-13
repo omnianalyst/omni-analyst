@@ -83,6 +83,66 @@ class TestSeed:
         aapl = await _entity(db, kind=COMPANY_KIND, symbol="AAPL")
         assert (await _identifiers(db.pool, aapl["id"]))["polygon"] == "AAPL"
 
+    async def test_companies_carry_their_gics_sector_and_sub_industry(self, db):
+        await seed_market_universe(db.pool)
+
+        nvda = await _entity(db, kind=COMPANY_KIND, symbol="NVDA")
+        ids = await _identifiers(db.pool, nvda["id"])
+        assert ids["gics_sector"] == "Information Technology"
+        assert ids["gics_sub_industry"] == "Semiconductors"
+
+    async def test_sub_industry_separates_peers_the_sector_lumps_together(self, db):
+        # The whole point of storing sub-industry. NVDA and MSFT share a sector,
+        # so a sector-only store ranks a semiconductor fab against a software
+        # house as though comparable. A sub-industry that merely copied the
+        # sector -- the plausible wrong implementation -- fails here.
+        await seed_market_universe(db.pool)
+
+        sub = {}
+        for symbol in ("NVDA", "MSFT", "AAPL"):
+            entity = await _entity(db, kind=COMPANY_KIND, symbol=symbol)
+            ids = await _identifiers(db.pool, entity["id"])
+            assert ids["gics_sector"] == "Information Technology"
+            sub[symbol] = ids["gics_sub_industry"]
+
+        assert len(set(sub.values())) == 3, f"sub-industries collapsed: {sub}"
+        assert all(v != "Information Technology" for v in sub.values())
+
+    async def test_every_constituent_carries_a_named_sub_industry(self, db):
+        # Reference data has to be complete at the level it claims to describe.
+        # A blank sub-industry would silently drop that company out of every
+        # peer group with no reason recorded anywhere.
+        missing = [
+            symbol
+            for symbol, _, _, sub_industry in SP500_CONSTITUENTS
+            if not isinstance(sub_industry, str) or not sub_industry.strip()
+        ]
+        assert not missing, f"constituents with no sub-industry: {missing}"
+
+        sectors = {sector for _, _, sector, _ in SP500_CONSTITUENTS}
+        sub_industries = {sub for _, _, _, sub in SP500_CONSTITUENTS}
+        assert len(sub_industries) > len(sectors)
+
+    async def test_a_reclassification_refreshes_but_still_preserves_the_cik(self, db):
+        # GICS reclassifies names (APP moved sector between two accesses of the
+        # source list). The identifiers merge must let the refreshed sector and
+        # sub-industry win while the CIK written between boots survives. Getting
+        # the merge direction wrong breaks exactly one of those two.
+        await seed_market_universe(db.pool)
+        nvda = await _entity(db, kind=COMPANY_KIND, symbol="NVDA")
+
+        await db.pool.execute(
+            "UPDATE entity SET identifiers = identifiers || $1::jsonb WHERE id = $2",
+            json.dumps({"cik": "0001045810", "gics_sub_industry": "Stale Classification"}),
+            nvda["id"],
+        )
+
+        await seed_market_universe(db.pool)
+
+        after = await _identifiers(db.pool, nvda["id"])
+        assert after["gics_sub_industry"] == "Semiconductors", "re-seed kept a stale GICS class"
+        assert after["cik"] == "0001045810", "re-seed clobbered the CIK"
+
     async def test_etfs_get_polygon_and_gics_sector(self, db):
         await seed_market_universe(db.pool)
 
@@ -123,7 +183,7 @@ class TestSeed:
         report = await seed_market_universe(db.pool)
 
         sectors_with_etf = {s for _, _, s in SECTOR_ETFS}
-        expected = sum(1 for _, _, s in SP500_CONSTITUENTS if s in sectors_with_etf)
+        expected = sum(1 for _, _, s, _ in SP500_CONSTITUENTS if s in sectors_with_etf)
         assert report.edges == expected
         assert report.unlinked == ()
 
@@ -197,7 +257,7 @@ class TestSeed:
         # be legal at the schema but would mean the same ticker is seeded twice
         # under different kinds -- ambiguous for resolve(). The static data must
         # keep these sets disjoint.
-        constituent_symbols = {s for s, _, _ in SP500_CONSTITUENTS}
+        constituent_symbols = {s for s, _, _, _ in SP500_CONSTITUENTS}
         other_symbols = {s for s, *_ in SECTOR_ETFS} | {s for s, _ in INDICES}
         overlap = constituent_symbols & other_symbols
         assert not overlap, f"constituent symbol(s) reused as ETF/index: {overlap}"

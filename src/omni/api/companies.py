@@ -46,7 +46,32 @@ CACHE_TTL = 3600
 MIN_SESSIONS = 60
 DISPLAY_LIMIT = 15
 
+# A rank within a sub-industry only says something if there is a field to be
+# ranked within. At two names the percentile construction can only ever emit 50
+# and 100, so "1st of 2" would read as a standing the comparison cannot support.
+# Below this the industry rank is withheld with a stated reason -- never filled
+# with the global rank, which would silently answer a different question.
+MIN_INDUSTRY_PEERS = 3
+
 _cache: dict[str, dict[str, Any]] = {}
+
+
+def _identifiers(value: Any) -> dict[str, Any]:
+    """asyncpg hands back jsonb as a string, not a dict. See `_number`."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _text(identifiers: dict[str, Any], key: str) -> str | None:
+    value = identifiers.get(key)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _number(value: Any) -> float | None:
@@ -66,12 +91,17 @@ def _number(value: Any) -> float | None:
     return out if np.isfinite(out) else None
 
 
-def _balanced(entries: list[dict]) -> None:
-    """Attach a category-relative balanced score, in place.
+def _balanced(entries: list[dict], *, key: str = "scores") -> None:
+    """Attach a population-relative balanced score, in place.
 
     Same construction as the broad-asset scanner: percentile ranks within this
     population, reweighted over whichever components a name actually has. It is
     a ranking against these peers, not a forecast and not a recommendation.
+
+    `key` is what makes the industry ranking a genuinely different measurement
+    rather than the global one re-sorted: called over a sub-industry's members
+    the percentiles are computed against those members only, so a semiconductor
+    company is scored against semiconductor companies.
     """
     if not entries:
         return
@@ -91,10 +121,76 @@ def _balanced(entries: list[dict]) -> None:
                 continue
             total += value * w
             weight += w
-        entry["scores"] = {
+        entry[key] = {
             "balanced": round(total / weight, 1) if weight > 0 else None,
             "components_available": round(weight / 1.0, 2),
         }
+
+
+def _rank_within_industries(ranked: list[dict]) -> list[dict]:
+    """Score and rank each company against its own GICS sub-industry.
+
+    The global ranking stays exactly as it was; this is an additional
+    measurement, not a replacement. A company with no stored sub-industry, or
+    one in a group too small to rank in, gets a null rank and a named reason --
+    never a fabricated position and never the global rank standing in.
+
+    Returns the group summaries, largest first.
+    """
+    groups: dict[str, list[dict]] = {}
+    for entry in ranked:
+        entry["industry_rank"] = None
+        entry["industry_peers"] = 0
+        entry["industry_scores"] = None
+        industry = entry.get("industry")
+        if industry is None:
+            entry["industry_rank_reason"] = "no verified GICS sub-industry stored"
+            continue
+        groups.setdefault(industry, []).append(entry)
+
+    summaries: list[dict] = []
+    for industry, members in groups.items():
+        for entry in members:
+            entry["industry_peers"] = len(members)
+        if len(members) < MIN_INDUSTRY_PEERS:
+            for entry in members:
+                entry["industry_rank_reason"] = (
+                    f"{len(members)} measured in this sub-industry, "
+                    f"fewer than the {MIN_INDUSTRY_PEERS} a rank needs to mean anything"
+                )
+            summaries.append({
+                "industry": industry,
+                "sector": members[0].get("sector"),
+                "measured": len(members),
+                "ranked": False,
+                "reason": (
+                    f"fewer than {MIN_INDUSTRY_PEERS} measured companies in this "
+                    "sub-industry"
+                ),
+                "companies": [],
+            })
+            continue
+
+        _balanced(members, key="industry_scores")
+        scored = [m for m in members if m["industry_scores"]["balanced"] is not None]
+        scored.sort(key=lambda m: m["industry_scores"]["balanced"], reverse=True)
+        for position, entry in enumerate(scored, start=1):
+            entry["industry_rank"] = position
+            entry["industry_rank_reason"] = None
+        for entry in members:
+            if entry["industry_rank"] is None:
+                entry["industry_rank_reason"] = "no component available to score"
+        summaries.append({
+            "industry": industry,
+            "sector": members[0].get("sector"),
+            "measured": len(members),
+            "ranked": True,
+            "reason": None,
+            "companies": [m["symbol"] for m in scored],
+        })
+
+    summaries.sort(key=lambda s: (-s["measured"], s["industry"]))
+    return summaries
 
 
 async def _load(pool, audience) -> dict[str, Any]:
@@ -102,7 +198,7 @@ async def _load(pool, audience) -> dict[str, Any]:
     rows = await pool.fetch(
         f"""
         WITH visible AS ({visible})
-        SELECT e.symbol, e.name, v.value, v.event_date
+        SELECT e.symbol, e.name, e.identifiers, v.value, v.event_date
         FROM visible v
         JOIN entity e ON e.id = v.entity_id
         WHERE e.kind = 'company' AND v.claim_type = 'price_snapshot'
@@ -116,7 +212,13 @@ async def _load(pool, audience) -> dict[str, Any]:
         price = _number(row["value"])
         if price is None or price <= 0:
             continue
-        bucket = series.setdefault(row["symbol"], {"name": row["name"], "points": {}})
+        identifiers = _identifiers(row["identifiers"])
+        bucket = series.setdefault(row["symbol"], {
+            "name": row["name"],
+            "sector": _text(identifiers, "gics_sector"),
+            "industry": _text(identifiers, "gics_sub_industry"),
+            "points": {},
+        })
         bucket["points"][pd.Timestamp(row["event_date"]).tz_convert(UTC).normalize()] = price
 
     entries: list[dict[str, Any]] = []
@@ -130,6 +232,8 @@ async def _load(pool, audience) -> dict[str, Any]:
         entries.append({
             "symbol": symbol,
             "name": bucket["name"],
+            "sector": bucket["sector"],
+            "industry": bucket["industry"],
             "price": metrics["price"],
             "return_30d": metrics["returns"].get("30d"),
             "return_90d": metrics["returns"].get("90d"),
@@ -148,15 +252,23 @@ async def _load(pool, audience) -> dict[str, Any]:
     ranked = [e for e in entries if e.get("scores", {}).get("balanced") is not None]
     ranked.sort(key=lambda e: e["scores"]["balanced"], reverse=True)
 
+    industries = _rank_within_industries(ranked)
+
     return {
         "companies": ranked,
         "leaders": ranked[:DISPLAY_LIMIT],
+        "industries": industries,
         "risk_census": _tier_census(ranked),
         "coverage": {
             "measured": len(ranked),
             "with_prices": len(series),
             "too_thin": thin,
             "min_sessions": MIN_SESSIONS,
+            "with_industry": sum(1 for e in ranked if e.get("industry") is not None),
+            "without_industry": sum(1 for e in ranked if e.get("industry") is None),
+            "industries_ranked": sum(1 for i in industries if i["ranked"]),
+            "industries_below_min_peers": sum(1 for i in industries if not i["ranked"]),
+            "min_industry_peers": MIN_INDUSTRY_PEERS,
         },
         "standing": {
             "verdict": (
@@ -169,6 +281,16 @@ async def _load(pool, audience) -> dict[str, Any]:
             "scope": (
                 "Percentile ranks against the other companies measured here. A "
                 "measurement, not a forecast and not a recommendation."
+            ),
+            "industry": (
+                "`industry_rank` re-runs the same construction against the "
+                "company's own GICS sub-industry, so a semiconductor company is "
+                "scored against semiconductor companies rather than against every "
+                "software house that shares its sector. The global rank is "
+                f"unchanged and still published. Withheld below "
+                f"{MIN_INDUSTRY_PEERS} measured peers, and for any company whose "
+                "sub-industry the store does not hold -- with the reason on the "
+                "company, never a filled-in position."
             ),
             "risk_tier": (
                 "Annualised volatility under 10% is low, under 30% medium, at or "

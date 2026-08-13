@@ -8,8 +8,13 @@ scanner scores, and the broad-market barometers.
 
 What this module does, and just as importantly what it does NOT:
 
-  * It seeds IDENTITY only -- `kind`, `symbol`, `name`, and the `polygon` key
-    each entity fetches by. It writes no claims, no prices, no fundamentals.
+  * It seeds IDENTITY only -- `kind`, `symbol`, `name`, the GICS sector and
+    sub-industry, and the `polygon` key each entity fetches by. It writes no
+    claims, no prices, no fundamentals.
+  * It records one dated membership snapshot per observation of the constituent
+    list (migration 056). That is reference data with a date on it, not a
+    measurement: the date is the one the list was derived from its source, and a
+    re-run of an already-recorded observation writes nothing.
   * Every constituent is linked to its sector ETF by an `entity_edge`
     (`member_of_sector`). That edge is the navigation the deduction chain walks;
     without it the seeded universe is a flat list, not a globe to scan.
@@ -42,7 +47,10 @@ from omni.entities._seed_data import (
     INDICES,
     MACRO_ENTITIES,
     SECTOR_ETFS,
+    SP500_ACCESSED_ON,
     SP500_CONSTITUENTS,
+    SP500_INDEX_SYMBOL,
+    SP500_SOURCE,
 )
 
 logger = logging.getLogger("omni.entities.seed")
@@ -71,6 +79,14 @@ EDGE_SOURCE = "omni.seed"
 _POLYGON_KEY = "polygon"
 _GICS_SECTOR_KEY = "gics_sector"
 
+# Sub-industry is the level at which two companies are actually comparable. The
+# sector alone puts a software house and a semiconductor fab in the same bucket,
+# which is why /scanner/companies could rank a company against its sector but
+# not against its peers. Stored on the company entity because that is where the
+# sector already lives for ETFs, and the upsert's `||` merge lets a GICS
+# reclassification refresh it on the next boot without touching the CIK.
+_GICS_SUB_INDUSTRY_KEY = "gics_sub_industry"
+
 # Upsert a row keyed by (kind, symbol). On conflict, MERGE identifiers (||) so a
 # CIK written between boots survives -- overwriting would silently un-resolve
 # every company. Name refreshes from the static list; identifiers never lose
@@ -90,6 +106,31 @@ VALUES ($1, $2, $3, 1.0, $4)
 ON CONFLICT (from_entity, to_entity, relation) DO NOTHING
 """
 
+# DO NOTHING, never DO UPDATE. An observation already recorded for a date is
+# never rewritten -- rewriting history is how a survivorship-biased record gets
+# made, not corrected.
+_INSERT_MEMBERSHIP = """
+INSERT INTO index_membership
+    (index_symbol, member_symbol, observed_on, present, source)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (index_symbol, member_symbol, observed_on) DO NOTHING
+"""
+
+# The members present at the most recent observation STRICTLY BEFORE this one.
+# Strictly before matters: comparing today's snapshot against itself after the
+# present rows land would report every member as a departure on a second run.
+_PREVIOUS_MEMBERS = """
+SELECT member_symbol
+FROM index_membership
+WHERE index_symbol = $1
+  AND present
+  AND observed_on = (
+      SELECT max(observed_on)
+      FROM index_membership
+      WHERE index_symbol = $1 AND observed_on < $2
+  )
+"""
+
 
 @dataclass(frozen=True)
 class SeedReport:
@@ -103,6 +144,14 @@ class SeedReport:
     # the seed -- it is reported so an operator sees the dangling constituents
     # rather than finding them silently unlinked later.
     unlinked: tuple[tuple[str, str], ...] = ()
+    # Rows written by this run's membership snapshot. Both are zero on a re-run
+    # of an already-recorded observation, which is the idempotency guarantee
+    # rather than a failure. `departed` names the members the previous
+    # observation held and this one does not -- the half of the history a static
+    # list cannot express.
+    membership_present: int = 0
+    membership_absent: int = 0
+    departed: tuple[str, ...] = ()
 
     @property
     def total(self) -> int:
@@ -114,6 +163,61 @@ async def _upsert(pool, kind: str, symbol: str, name: str, identifiers: dict) ->
         _UPSERT_ENTITY, kind, symbol, name, json.dumps(identifiers)
     )
     return row["id"]
+
+
+async def snapshot_index_membership(pool) -> tuple[int, int, tuple[str, ...]]:
+    """Record what the index held on the date the list was observed.
+
+    Returns (present_written, absent_written, departed_symbols).
+
+    `observed_on` is `SP500_ACCESSED_ON`, the date the constituent list was
+    derived from its canonical source -- not the clock. The seeder runs on every
+    boot, so stamping now() would have each boot assert a fresh observation of a
+    list nobody re-checked, which is a fabricated measurement wearing a real
+    date. Refreshing the tuples and the accessed date together is what advances
+    the history.
+
+    A member the previous observation held and this one does not is written as
+    `present = false`, so a departure is recorded rather than merely stopping.
+    An absent row means nobody looked; that has to stay distinguishable from a
+    member being gone.
+    """
+    current = sorted({symbol for symbol, _, _, _ in SP500_CONSTITUENTS})
+    previous = {
+        row["member_symbol"]
+        for row in await pool.fetch(
+            _PREVIOUS_MEMBERS, SP500_INDEX_SYMBOL, SP500_ACCESSED_ON
+        )
+    }
+    departed = tuple(sorted(previous.difference(current)))
+
+    present_written = 0
+    for symbol in current:
+        status = await pool.execute(
+            _INSERT_MEMBERSHIP,
+            SP500_INDEX_SYMBOL,
+            symbol,
+            SP500_ACCESSED_ON,
+            True,
+            SP500_SOURCE,
+        )
+        if status.endswith("1"):
+            present_written += 1
+
+    absent_written = 0
+    for symbol in departed:
+        status = await pool.execute(
+            _INSERT_MEMBERSHIP,
+            SP500_INDEX_SYMBOL,
+            symbol,
+            SP500_ACCESSED_ON,
+            False,
+            SP500_SOURCE,
+        )
+        if status.endswith("1"):
+            absent_written += 1
+
+    return present_written, absent_written, departed
 
 
 async def seed_market_universe(pool) -> SeedReport:
@@ -151,9 +255,17 @@ async def seed_market_universe(pool) -> SeedReport:
     company_count = 0
     edge_count = 0
     unlinked: list[tuple[str, str]] = []
-    for symbol, name, gics_sector in SP500_CONSTITUENTS:
+    for symbol, name, gics_sector, gics_sub_industry in SP500_CONSTITUENTS:
         company_id = await _upsert(
-            pool, COMPANY_KIND, symbol, name, {_POLYGON_KEY: symbol}
+            pool,
+            COMPANY_KIND,
+            symbol,
+            name,
+            {
+                _POLYGON_KEY: symbol,
+                _GICS_SECTOR_KEY: gics_sector,
+                _GICS_SUB_INDUSTRY_KEY: gics_sub_industry,
+            },
         )
         company_count += 1
         etf_id = sector_etf_ids.get(gics_sector)
@@ -167,6 +279,8 @@ async def seed_market_universe(pool) -> SeedReport:
         if inserted.endswith("1"):
             edge_count += 1
 
+    present_written, absent_written, departed = await snapshot_index_membership(pool)
+
     return SeedReport(
         companies=company_count,
         sector_etfs=etf_count,
@@ -174,6 +288,9 @@ async def seed_market_universe(pool) -> SeedReport:
         macro_entities=macro_count,
         edges=edge_count,
         unlinked=tuple(unlinked),
+        membership_present=present_written,
+        membership_absent=absent_written,
+        departed=departed,
     )
 
 
@@ -187,6 +304,19 @@ def _log_report(report: SeedReport) -> None:
         report.macro_entities,
         report.edges,
     )
+    logger.info(
+        "index membership observed %s: %d present rows, %d departure rows written",
+        SP500_ACCESSED_ON.isoformat(),
+        report.membership_present,
+        report.membership_absent,
+    )
+    if report.departed:
+        logger.info(
+            "%d member(s) left %s since the previous observation: %s",
+            len(report.departed),
+            SP500_INDEX_SYMBOL,
+            ", ".join(report.departed),
+        )
     if report.unlinked:
         logger.warning(
             "%d constituents had no sector ETF to link to: %s",

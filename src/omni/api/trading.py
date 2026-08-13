@@ -66,6 +66,7 @@ from neutron import App, Router
 from neutron.error import bad_request, not_found, unauthorized
 from starlette.requests import Request
 
+from omni.api.scanner import ASSETS
 from omni.auth import resolve_audience_from_request
 from omni.conviction.gate import MIN_RESOLVED_FOR_CALIBRATION
 from omni.conviction.walk_forward_report import (
@@ -77,6 +78,7 @@ from omni.conviction.walk_forward_report import (
 from omni.portfolio.reconcile import latest_by_venue
 from omni.portfolio.state import UnknownPortfolio
 from omni.portfolio.state import load as load_portfolio
+from omni.trading import carry_runner
 from omni.trading.policy import MIN_RESOLVED_FOR_PAPER, TradingPhase, eligible
 from omni.venue.costs import BPS, gross_expectancy_bps, round_trip_cost, survives_costs
 from omni.venue.protocol import Capabilities, MarketType, OrderKind, Side, TradeIntent
@@ -656,6 +658,170 @@ def _reconciliation_status(
     return "reconciled"
 
 
+# Every venue the schedule has something to say about. Cycle rows first, because
+# a venue that has run cycles is the one the cadence is measured at; position
+# rows unioned in so a book holding something at a venue no cycle has ever run
+# at reports `never_run` rather than being absent from the page entirely.
+_SCHEDULED_VENUES = """
+SELECT venue FROM carry_cycle WHERE portfolio_id = $1
+UNION
+SELECT venue FROM position     WHERE portfolio_id = $1
+ORDER BY venue
+"""
+
+_HELD_SYMBOLS = """
+SELECT DISTINCT symbol FROM position WHERE portfolio_id = $1 ORDER BY symbol
+"""
+
+# A refused cycle writes nothing. `run_due_cycle` raises `CarryRunRefused`
+# before `run_carry_cycle` is reached, so no `carry_cycle` row exists to carry
+# the reason -- it is logged by the process that ran and by nothing that
+# survives it. This endpoint therefore reports the refusal reason as absent with
+# that stated, and reports the *schedule* the refusal was taken against, which
+# is in the database. Deriving a sentence and presenting it as the recorded
+# refusal would be the fabrication this codebase exists to avoid: it would read
+# identically whether the cycle fired and refused or the scheduler never ran at
+# all.
+REFUSAL_IS_NOT_RECORDED = (
+    "A refused cycle writes no carry_cycle row -- the runner refuses before it "
+    "trades or settles anything -- so the reason it gave exists only in the "
+    "runner's log on the host that ran it. No absence of rows between "
+    "rebalances can distinguish a refusal from a scheduler that never fired; "
+    "the schedule below is what the refusal would have been taken against."
+)
+
+# The classes the governed universe can put an asset in. Read off the universe
+# rather than listed here, so a class added there appears without this file
+# being edited -- and so the UI has one vocabulary to render rather than a
+# second copy of this list.
+_UNIVERSE = {
+    asset["symbol"]: asset for bucket in ASSETS.values() for asset in bucket
+}
+ASSET_CLASSES = sorted({asset["asset_class"] for asset in _UNIVERSE.values()})
+
+
+def _base_asset(symbol: str) -> str:
+    """`ETH/USDC:USDC` -> `ETH`. A venue symbol names the pair; the universe
+    classifies the base asset."""
+    return symbol.split("/")[0].split(":")[0].upper()
+
+
+def _classify(symbol: str) -> dict:
+    asset = _base_asset(symbol)
+    entry = _UNIVERSE.get(asset)
+    if entry is None:
+        # Not `stocks`. The frontend set this replaces fell through to equities
+        # for anything it did not recognise, so every unlisted perp in the book
+        # was filed as a stock -- a class nobody measured, printed as one
+        # somebody did.
+        return {
+            "symbol": symbol,
+            "asset": asset,
+            "asset_class": None,
+            "name": None,
+            "refusal": (
+                f"no entry in the governed display universe classifies {asset}"
+            ),
+        }
+    return {
+        "symbol": symbol,
+        "asset": asset,
+        "asset_class": entry["asset_class"],
+        "name": entry["name"],
+        "refusal": None,
+    }
+
+
+def _days_until(due: datetime, now: datetime) -> int:
+    """Whole days remaining, rounding up, floored at zero.
+
+    Integer timedelta division throughout: a fraction of a day left is a day
+    the hold has not finished, and `now` past `due` is nothing remaining rather
+    than a negative countdown.
+    """
+    remaining = due - now
+    if remaining <= timedelta(0):
+        return 0
+    return -((-remaining) // timedelta(days=1))
+
+
+def _venue_schedule(venue: str, known, *, now: datetime, period: timedelta) -> dict:
+    """One venue's rebalance state, derived from the cycle log and nothing else.
+
+    Four states, each a different fact, none of which may be collapsed into
+    another:
+
+    - `never_run` -- no cycle recorded here. The funding boundary is unknown, so
+      the first run has to state an inception.
+    - `no_completed_cycle` -- cycles exist and every one halted. The hold is
+      measured from the last *completed* cycle, so it bars nothing: a book that
+      halted and was repaired does not wait six weeks.
+    - `holding` -- inside the hold. This is the expected steady state, and the
+      one an empty cycle table between rebalances looks exactly like.
+    - `due` -- the hold has elapsed. The runner still refuses outside the
+      rebalance window, which is reported separately.
+    """
+    base = {
+        "venue": venue,
+        "last_cycle_at": (
+            None if known.last_cycle is None else known.last_cycle.isoformat()
+        ),
+        "last_completed_at": (
+            None if known.last_completed is None else known.last_completed.isoformat()
+        ),
+        "funding_window_opens_at": (
+            None if known.opens_at is None else known.opens_at.isoformat()
+        ),
+        "next_rebalance_due_at": None,
+        "days_until_due": None,
+    }
+    if known.last_cycle is None:
+        return {
+            **base,
+            "state": "never_run",
+            "detail": (
+                f"No carry cycle has been recorded at {venue}, so the instant "
+                f"its funding window opens at is not knowable here and the "
+                f"first run must state an inception."
+            ),
+        }
+    if known.last_completed is None:
+        return {
+            **base,
+            "state": "no_completed_cycle",
+            "detail": (
+                f"Every cycle recorded at {venue} halted. The hold is measured "
+                f"from the last completed cycle, so it bars nothing here."
+            ),
+        }
+
+    due = known.last_completed + period
+    dated = {
+        **base,
+        "next_rebalance_due_at": due.isoformat(),
+        "days_until_due": _days_until(due, now),
+    }
+    if now - known.last_completed < period:
+        return {
+            **dated,
+            "state": "holding",
+            "detail": (
+                f"The last completed cycle ran at "
+                f"{known.last_completed.isoformat()}. The hold is {period.days} "
+                f"days, so the next rebalance is due {due.isoformat()}. "
+                f"Rebalancing sooner is turnover the signal did not ask for."
+            ),
+        }
+    return {
+        **dated,
+        "state": "due",
+        "detail": (
+            f"The {period.days}-day hold elapsed at {due.isoformat()}. The next "
+            f"cycle runs in the next rebalance window."
+        ),
+    }
+
+
 def build_router(app: App) -> Router:
     router = Router()
 
@@ -896,6 +1062,73 @@ def build_router(app: App) -> Router:
                 }
                 for r in rows
             ],
+        }
+
+    @router.get("/trading/schedule")
+    async def carry_schedule(request: Request) -> dict:
+        """When the next rebalance is due, and what the runner is holding for.
+
+        `/trading/cycles` answers what the book *did*; this answers what it is
+        *about to do and why not yet*, which is the half that was readable only
+        over SSH. The cadence and the rebalance window are read off
+        `carry_runner` rather than restated here, because two copies of the hold
+        would let this page count down to a date the runner does not recognise.
+
+        Everything below is derived from `carry_cycle` through the same
+        `boundary` query the runner takes its decision from. What is *not* here
+        is the text of any refusal: see `REFUSAL_IS_NOT_RECORDED`.
+        """
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+
+        pool = app.db.pool
+        portfolio_id = await _resolve_portfolio(pool, audience, request.query_params)
+        rows = await pool.fetch(_SCHEDULED_VENUES, portfolio_id)
+
+        period = carry_runner.REBALANCE_PERIOD
+        now = datetime.now(UTC)
+        venues = []
+        for row in rows:
+            venue = row["venue"]
+            known = await carry_runner.boundary(pool, portfolio_id, venue)
+            venues.append(_venue_schedule(venue, known, now=now, period=period))
+
+        return {
+            "portfolio_id": str(portfolio_id),
+            "as_of": now.isoformat(),
+            "rebalance_period_days": period.days,
+            "window_opens_hour": carry_runner.WINDOW_OPENS_HOUR,
+            "window_closes_hour": carry_runner.WINDOW_CLOSES_HOUR,
+            "in_rebalance_window": carry_runner.in_rebalance_window(now),
+            "last_refusal": None,
+            "last_refusal_unavailable": REFUSAL_IS_NOT_RECORDED,
+            "venues": venues,
+        }
+
+    @router.get("/trading/classification")
+    async def position_classification(request: Request) -> dict:
+        """What class the governed universe puts each held symbol in.
+
+        The filters over the book were classified in the browser from two
+        hardcoded symbol sets, which meant the page and Discover could disagree
+        about what an asset is, and anything in neither set was filed as a
+        stock. This reports the universe's own answer per held symbol, keyed by
+        the symbol as stored so no second parser has to agree with this one, and
+        reports an unlisted symbol as unclassified with a reason rather than as
+        the class that happened to be the fallthrough.
+        """
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+
+        pool = app.db.pool
+        portfolio_id = await _resolve_portfolio(pool, audience, request.query_params)
+        rows = await pool.fetch(_HELD_SYMBOLS, portfolio_id)
+        return {
+            "portfolio_id": str(portfolio_id),
+            "classes": ASSET_CLASSES,
+            "symbols": [_classify(row["symbol"]) for row in rows],
         }
 
     @router.get("/trading/nav-history")
