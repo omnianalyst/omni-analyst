@@ -493,3 +493,61 @@ class TestTheKnobsAreRealAndStated:
 
         with pytest.raises(ValueError, match="no weight given"):
             combine({"a": f, "b": f}, prices=prices, weights={"a": 1.0})
+
+
+class TestASignalWithNoCrossSectionIsRefused:
+    """Finding 53: a filter leaving too few names returns 0.00 for every cell,
+    which reads as a decisive failure and is actually the absence of a test."""
+
+    def test_a_signal_scoring_almost_nothing_raises_rather_than_returning_zeros(
+        self, registry
+    ):
+        import numpy as np
+        import pandas as pd
+
+        from omni.research.harness import evaluate
+
+        days = pd.date_range("2024-01-01", periods=400, freq="D", tz="UTC")
+        rng = np.random.default_rng(3)
+        prices = pd.DataFrame(
+            100 * np.exp(rng.normal(0, 0.01, size=(400, 30)).cumsum(axis=0)),
+            index=days,
+            columns=[f"A{i}" for i in range(30)],
+        )
+
+        def almost_never_scores(frame: pd.DataFrame) -> pd.DataFrame:
+            # Admits a name only on a move no asset in this panel ever makes.
+            moves = frame.pct_change(1, fill_method=None)
+            return moves.where(moves.abs() >= 0.90).shift(1)
+
+        with pytest.raises(ValueError, match="cannot be measured on this panel"):
+            evaluate(
+                name="test.no_cross_section", source="synthetic",
+                signal=almost_never_scores, prices=prices, horizons=(1, 2),
+                registry=registry, permutation_draws=5, record=False,
+            )
+
+    def test_a_signal_that_does_score_enough_names_is_still_measured(self, registry):
+        """The floor must not reject signals it exists to protect."""
+        import numpy as np
+        import pandas as pd
+
+        from omni.research.harness import evaluate
+
+        days = pd.date_range("2024-01-01", periods=400, freq="D", tz="UTC")
+        rng = np.random.default_rng(4)
+        prices = pd.DataFrame(
+            100 * np.exp(rng.normal(0, 0.01, size=(400, 30)).cumsum(axis=0)),
+            index=days,
+            columns=[f"A{i}" for i in range(30)],
+        )
+
+        verdicts = evaluate(
+            name="test.full_cross_section", source="synthetic",
+            signal=lambda f: f.pct_change(3, fill_method=None).shift(1),
+            prices=prices, horizons=(1,), registry=registry,
+            permutation_draws=5, record=False,
+        )
+
+        assert len(verdicts) == 1
+        assert verdicts[0].gross.n > 0

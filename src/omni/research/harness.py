@@ -413,6 +413,28 @@ def evaluate(
 
     if strictness not in STRICTNESS:
         raise ValueError(f"strictness must be one of {STRICTNESS}, got {strictness!r}")
+
+    # A signal that scores too few names per period has not been measured, and
+    # must not be recorded as though it had. Finding 53: a filter admitting only
+    # names that moved >= 20% in a day left a MEDIAN OF ZERO scorable names --
+    # 10 of 2,186 days had ten or more -- so there was no cross-section to rank.
+    # Every cell came back 0.00, which reads as a decisive failure and is
+    # actually the absence of a test. Four such cells entered the append-only
+    # registry and permanently raised the bar for every hypothesis after them.
+    #
+    # Refusing here is the only place this can be caught cheaply: by the time
+    # `_periods` has returned empty arrays the caller cannot distinguish "ranked
+    # and earned nothing" from "never ranked anything".
+    scorable = scores.notna().sum(axis=1)
+    if float(scorable.median()) < quantile * 2:
+        raise ValueError(
+            f"{name}: median {scorable.median():.0f} scorable names per period, "
+            f"below the {quantile * 2} needed to form {quantile} buckets on both "
+            f"sides. This signal cannot be measured on this panel -- report it as "
+            f"cannot_answer rather than recording cells that would raise the bar "
+            f"for everyone else."
+        )
+
     bar = (
         reg.bar(pending_cells=len(horizons))
         if strictness == "strict"
