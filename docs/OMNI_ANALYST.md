@@ -71,6 +71,7 @@ containers     omni-v2-api-1        running
                caddy                shared, outside the app compose project
 
 migrations     55  (local tree and live DB agree)
+release        v0.2.0 -- images labelled rev=3eee24e
 host path      /home/user/omni-v2
 public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 ```
@@ -847,6 +848,7 @@ to make a global invocation green.
 | `_orchestrator/TRADING_API_CONTRACT.md` | The frozen JSON shape API and UI share | Anything else |
 | `_orchestrator/RESEARCH_AGENDA.md` | Ranked directions, with priors and traps | State |
 | `docs/ETF_PORTFOLIO_EXPERIMENT.md` | The ETF-versus-constituent result | Live allocation |
+| `docs/NEXT_SESSION.md` | The brief for P2/P3/P4/P5, the only work left | Current state |
 | `docs/HISTORY.md` | v1 lineage, retired strategies, superseded docs | Anything current |
 | `DEPLOY.md` | Detailed build and configuration reference | Live topology |
 
