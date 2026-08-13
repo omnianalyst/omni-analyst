@@ -1,5 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, request } from "../lib/api";
+import { CompaniesPanel } from "./CompaniesPanel";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 
@@ -371,6 +372,8 @@ export function ScannerView() {
       </details>
 
       <SectorLeadership data={state.data} />
+
+      <CompaniesPanel />
     </div>
   );
 }

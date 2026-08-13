@@ -4917,3 +4917,40 @@ tr.row.tier-unknown td:first-child {
   font-size: 12px;
   line-height: 1.6;
 }
+
+/* Individual companies -- deliberately set apart from the ETF core.
+   The left rule and muted ground are the visual half of the separation the
+   endpoint makes structurally: these rank on the same axes but do not carry
+   the same standing, because the ranker over them failed its own test. */
+.companies-panel {
+  display: grid;
+  gap: var(--s-4);
+  border-left: 2px solid var(--border-strong);
+}
+
+.companies-verdict {
+  margin: 0;
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.companies-census {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-4);
+}
+
+.companies-census > div {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.companies-census strong {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
