@@ -104,7 +104,10 @@ function CarryScheduleCard({ schedule }: { schedule: CarrySchedule }) {
             <article class={`schedule-row tone-${SCHEDULE_TONE[venue.state]}`} key={venue.venue}>
               <div class="schedule-identity">
                 <strong>{venue.venue}</strong>
-                <span>{SCHEDULE_LABEL[venue.state]}</span>
+                {/* A state added on the server renders under its own name
+                    rather than as "undefined", which reads as a bug in the
+                    page instead of a vocabulary the page has not learned. */}
+                <span>{SCHEDULE_LABEL[venue.state] ?? venue.state}</span>
               </div>
               <div class="schedule-countdown">
                 {venue.days_until_due === null ? (
