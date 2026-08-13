@@ -73,7 +73,7 @@ containers     omni-v2-api-1        running
 migrations     57  (local tree and live DB agree)
 images         omni-api:69b73ce / omni-scheduler:69b73ce, also :latest
 rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = c39ea15
-release        v0.3.0 = 494976c, which is what production runs plus the docs
+release        v0.3.0 = dad01c7 -- the deployed image (69b73ce) plus docs only
 host path      /home/user/omni-v2
 public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 ```
@@ -81,8 +81,9 @@ public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 Two deploys on 2026-08-13, both with normal builds and a pre-migration dump:
 `c39ea15` carried migration 056 and the P3/P4 API work, `69b73ce` carried
 migration 057, the refusal recording and the portfolio UI. The release tag
-`main` was fast-forwarded to `494976c` and tagged **v0.3.0** afterwards, so the
-tag, `main` and the deployed branch now agree.
+`main` was fast-forwarded and tagged **v0.3.0** (`dad01c7`) afterwards. The tag
+is ahead of the running image by documentation commits only; no `src/`,
+`migrations/` or `ui/` change sits between them.
 
 ### The carry book
 
@@ -393,7 +394,7 @@ Neutron is a sibling checkout. Framework defects go to
 branch            feat/autotrade-phase0
 ahead of main     0 commits
 main ahead        0 commits
-newest tag        v0.3.0 = 494976c
+newest tag        v0.3.0 = dad01c7
 ```
 
 The 202-commit gap is closed: `main` was fast-forwarded on 2026-08-13 and tagged
