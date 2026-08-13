@@ -33,6 +33,14 @@ the fill price, not in a number anything reconciles.
 Both guards refuse rather than adjust. A runner that shifted `as_of` into the
 window on the operator's behalf would move the instant the selector ranks at and
 the funding window closes at, which is a different cycle than the one asked for.
+
+**Every refusal is written to `carry_refusal` before it is raised.** A refused
+cycle trades nothing and settles nothing, so before migration 057 it wrote
+nothing either, and the reason survived only in the log of the process that ran.
+On a six-week hold that is a book producing no row anywhere on roughly 41 of
+every 42 days -- and no absence of rows could distinguish a correct refusal from
+a scheduler that never fired. The row is what makes the loop's own silence
+legible.
 """
 
 from __future__ import annotations
@@ -44,6 +52,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import NoReturn
 from uuid import UUID
 
 from omni.trading.carry_loop import CarryConfig, CarryCycleResult, run_carry_cycle
@@ -80,6 +89,37 @@ INSERT INTO carry_cycle (
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 """
 
+# ON CONFLICT DO NOTHING rather than an upsert: the guards are deterministic in
+# their inputs, so a second evaluation at the same instant reaches the same
+# verdict, and a second row would inflate any count taken over this table --
+# including the one that answers "is the scheduler firing daily".
+_RECORD_REFUSAL = """
+INSERT INTO carry_refusal (
+    portfolio_id, venue, attempted_at, guard, reason,
+    funding_window_opens_at, last_cycle_at, last_completed_at, next_due_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ON CONFLICT (portfolio_id, venue, attempted_at) DO NOTHING
+"""
+
+# The identity of each check, stable across message rewordings. The reason
+# sentence is written for the operator reading a log; the guard is what a query
+# groups by, so a refusal count survives someone improving the prose.
+GUARD_OUTSIDE_WINDOW = "outside_rebalance_window"
+GUARD_NO_RECORDED_CYCLE = "no_recorded_cycle"
+GUARD_INSTANT_ALREADY_COVERED = "instant_already_covered"
+GUARD_INSIDE_HOLD = "inside_hold"
+GUARD_NO_AFFORDABLE_NAME = "no_affordable_name"
+
+GUARDS = frozenset(
+    {
+        GUARD_OUTSIDE_WINDOW,
+        GUARD_NO_RECORDED_CYCLE,
+        GUARD_INSTANT_ALREADY_COVERED,
+        GUARD_INSIDE_HOLD,
+        GUARD_NO_AFFORDABLE_NAME,
+    }
+)
+
 
 class CarryRunRefused(Exception):
     """The cycle was not run, and the book is untouched.
@@ -87,6 +127,11 @@ class CarryRunRefused(Exception):
     Distinct from a halt, which is a cycle that ran and stopped partway. Nothing
     here has read the venue or written a claim.
     """
+
+    def __init__(self, reason: str, *, guard: str) -> None:
+        super().__init__(reason)
+        self.guard = guard
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -157,6 +202,83 @@ async def record_cycle(
     )
 
 
+async def record_refusal(
+    pool,
+    *,
+    portfolio_id: UUID,
+    venue: str,
+    attempted_at: datetime,
+    guard: str,
+    reason: str,
+    known: Boundary | None,
+) -> None:
+    """Write the refusal, with the boundary state it was taken against.
+
+    `known` is None for a refusal taken before the boundary was read, which is
+    every refusal from the window guard -- the cheapest check, and deliberately
+    first. The boundary columns are then NULL and `guard` says why, so the
+    absence reads as "the runner never got that far" rather than as a book with
+    no history.
+    """
+    due = None
+    if known is not None and known.last_completed is not None:
+        due = known.last_completed + REBALANCE_PERIOD
+    await pool.execute(
+        _RECORD_REFUSAL,
+        portfolio_id,
+        venue,
+        attempted_at,
+        guard,
+        reason,
+        None if known is None else known.opens_at,
+        None if known is None else known.last_cycle,
+        None if known is None else known.last_completed,
+        due,
+    )
+
+
+async def _refuse(
+    pool,
+    *,
+    portfolio_id: UUID,
+    venue: str,
+    attempted_at: datetime,
+    guard: str,
+    reason: str,
+    known: Boundary | None = None,
+) -> NoReturn:
+    """Record the refusal, then raise it.
+
+    A failure to record is logged and swallowed rather than raised. The refusal
+    is the true outcome -- the book is untouched either way -- and letting a
+    write error surface in its place would report a normal, correct decision to
+    the operator as a crash. The log is the fallback that existed before this
+    table, and an ERROR there is the signal that the new record is not being
+    kept; it must not become the signal that the cycle failed.
+    """
+    try:
+        await record_refusal(
+            pool,
+            portfolio_id=portfolio_id,
+            venue=venue,
+            attempted_at=attempted_at,
+            guard=guard,
+            reason=reason,
+            known=known,
+        )
+    except Exception:
+        logger.exception(
+            "could not record the %s refusal for portfolio=%s venue=%s at %s; "
+            "the cycle was still refused and the book is untouched: %s",
+            guard,
+            portfolio_id,
+            venue,
+            attempted_at.isoformat(),
+            reason,
+        )
+    raise CarryRunRefused(reason, guard=guard)
+
+
 async def run_due_cycle(
     pool,
     *,
@@ -188,33 +310,56 @@ async def run_due_cycle(
             f"this cycle reads are stamped UTC"
         )
     if not ignore_window and not in_rebalance_window(now):
-        raise CarryRunRefused(
-            f"{now.astimezone(UTC):%H:%M} UTC is outside the "
-            f"{WINDOW_OPENS_HOUR:02d}:00-{WINDOW_CLOSES_HOUR:02d}:00 UTC rebalance "
-            f"window. Both legs of every pair cross the spread at this instant, and "
-            f"the measured variance at 14:00 UTC is 2.5x the 05:00 trough -- so a "
-            f"cycle run outside the window pays a cost that appears in no report. "
-            f"Pass ignore_window to run anyway"
+        await _refuse(
+            pool,
+            portfolio_id=portfolio_id,
+            venue=venue.name,
+            attempted_at=now,
+            guard=GUARD_OUTSIDE_WINDOW,
+            reason=(
+                f"{now.astimezone(UTC):%H:%M} UTC is outside the "
+                f"{WINDOW_OPENS_HOUR:02d}:00-{WINDOW_CLOSES_HOUR:02d}:00 UTC rebalance "
+                f"window. Both legs of every pair cross the spread at this instant, and "
+                f"the measured variance at 14:00 UTC is 2.5x the 05:00 trough -- so a "
+                f"cycle run outside the window pays a cost that appears in no report. "
+                f"Pass ignore_window to run anyway"
+            ),
         )
 
     known = await boundary(pool, portfolio_id, venue.name)
     if known.opens_at is None and inception is None:
-        raise CarryRunRefused(
-            f"portfolio {portfolio_id} has recorded no carry cycle at {venue.name}, so "
-            f"the instant its funding window opens at is not knowable here. State it "
-            f"as the inception: one settlement period skips every settlement in a "
-            f"longer gap, and the portfolio's own inception re-walks history already "
-            f"collected"
+        await _refuse(
+            pool,
+            portfolio_id=portfolio_id,
+            venue=venue.name,
+            attempted_at=now,
+            guard=GUARD_NO_RECORDED_CYCLE,
+            known=known,
+            reason=(
+                f"portfolio {portfolio_id} has recorded no carry cycle at {venue.name}, so "
+                f"the instant its funding window opens at is not knowable here. State it "
+                f"as the inception: one settlement period skips every settlement in a "
+                f"longer gap, and the portfolio's own inception re-walks history already "
+                f"collected"
+            ),
         )
     funding_since = known.opens_at if known.opens_at is not None else inception
     assert funding_since is not None
 
     if known.last_cycle is not None and now <= known.last_cycle:
-        raise CarryRunRefused(
-            f"the last cycle at {venue.name} ran at {known.last_cycle}, which is not "
-            f"before {now}. A cycle settles ({funding_since}, now] and ranks as of "
-            f"now; running one at an instant already covered would rank on a book "
-            f"the log says has moved since"
+        await _refuse(
+            pool,
+            portfolio_id=portfolio_id,
+            venue=venue.name,
+            attempted_at=now,
+            guard=GUARD_INSTANT_ALREADY_COVERED,
+            known=known,
+            reason=(
+                f"the last cycle at {venue.name} ran at {known.last_cycle}, which is not "
+                f"before {now}. A cycle settles ({funding_since}, now] and ranks as of "
+                f"now; running one at an instant already covered would rank on a book "
+                f"the log says has moved since"
+            ),
         )
     if (
         not ignore_cadence
@@ -222,12 +367,20 @@ async def run_due_cycle(
         and now - known.last_completed < REBALANCE_PERIOD
     ):
         due = known.last_completed + REBALANCE_PERIOD
-        raise CarryRunRefused(
-            f"the last completed cycle ran at {known.last_completed}; the hold is "
-            f"{REBALANCE_PERIOD.days} days and the next is due {due}. Rebalancing "
-            f"sooner is turnover the signal did not ask for, and turnover is what "
-            f"Finding 9 measured destroying this strategy. Pass ignore_cadence to "
-            f"run anyway"
+        await _refuse(
+            pool,
+            portfolio_id=portfolio_id,
+            venue=venue.name,
+            attempted_at=now,
+            guard=GUARD_INSIDE_HOLD,
+            known=known,
+            reason=(
+                f"the last completed cycle ran at {known.last_completed}; the hold is "
+                f"{REBALANCE_PERIOD.days} days and the next is due {due}. Rebalancing "
+                f"sooner is turnover the signal did not ask for, and turnover is what "
+                f"Finding 9 measured destroying this strategy. Pass ignore_cadence to "
+                f"run anyway"
+            ),
         )
 
     # Execution-cost filter, BEFORE the selector ranks. `select_carry_basket`
@@ -252,11 +405,19 @@ async def run_due_cycle(
         )
         universe = affordable_ids(measured, max_execution_bps=max_execution_bps)
         if not universe:
-            raise CarryRunRefused(
-                f"no name in the universe trades within {max_execution_bps} bps "
-                f"round trip at {config.notional_per_pair} a pair. Trading the "
-                f"cheapest of a bad set is how a cost floor gets crossed by "
-                f"default; raise the ceiling deliberately or wait for spreads"
+            await _refuse(
+                pool,
+                portfolio_id=portfolio_id,
+                venue=venue.name,
+                attempted_at=now,
+                guard=GUARD_NO_AFFORDABLE_NAME,
+                known=known,
+                reason=(
+                    f"no name in the universe trades within {max_execution_bps} bps "
+                    f"round trip at {config.notional_per_pair} a pair. Trading the "
+                    f"cheapest of a bad set is how a cost floor gets crossed by "
+                    f"default; raise the ceiling deliberately or wait for spreads"
+                ),
             )
 
     result = await run_carry_cycle(

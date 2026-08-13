@@ -114,7 +114,7 @@ async def main() -> int:
             print(f"refused        {result.refused}")
         return 1 if result.halted else 0
     except CarryRunRefused as exc:
-        print(f"REFUSED, book untouched:\n  {exc}")
+        print(f"REFUSED [{exc.guard}], book untouched:\n  {exc}")
         return 2
     finally:
         await v.aclose()

@@ -17,6 +17,7 @@ that actually traded.
 """
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -26,6 +27,11 @@ import pytest
 from omni.portfolio.state import create_portfolio
 from omni.trading.carry_loop import CarryConfig, CarryHalt
 from omni.trading.carry_runner import (
+    GUARD_INSIDE_HOLD,
+    GUARD_INSTANT_ALREADY_COVERED,
+    GUARD_NO_RECORDED_CYCLE,
+    GUARD_OUTSIDE_WINDOW,
+    GUARDS,
     REBALANCE_PERIOD,
     CarryRunRefused,
     boundary,
@@ -202,6 +208,13 @@ async def _run(db, *, venue, portfolio_id, ids, owner, now=NOW, **overrides):
 async def _rows(db, portfolio_id):
     return await db.pool.fetch(
         "SELECT * FROM carry_cycle WHERE portfolio_id = $1 ORDER BY as_of",
+        portfolio_id,
+    )
+
+
+async def _refusals(db, portfolio_id):
+    return await db.pool.fetch(
+        "SELECT * FROM carry_refusal WHERE portfolio_id = $1 ORDER BY attempted_at",
         portfolio_id,
     )
 
@@ -500,6 +513,262 @@ class TestWhatIsRecorded:
         assert row["fees_paid"] == result.fees_paid
         assert not row["halted"]
         assert row["halt_reason"] is None
+
+
+class TestRefusalsAreRecorded:
+    """The blind spot: a refused cycle used to write nothing at all.
+
+    On a six-week hold the runner refuses on roughly 41 of every 42 days, and
+    until this table existed each of those days produced no row anywhere. The
+    absence was therefore ambiguous in the one direction that matters on a book
+    holding real money: a correct refusal and a scheduler that never fired
+    looked exactly alike. What is pinned here is that the row is written, that
+    it carries the reason the caller was actually given, that it stays out of
+    the cycle log, and that a failure to write it does not turn a normal
+    refusal into a crash.
+    """
+
+    async def test_the_window_refusal_is_recorded_with_the_reason_the_caller_saw(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+
+        with pytest.raises(CarryRunRefused) as refusal:
+            await _run(
+                db,
+                venue=venue,
+                portfolio_id=portfolio_id,
+                ids=ids,
+                owner=owner,
+                now=NOW.replace(hour=14),
+                inception=INCEPTION,
+            )
+
+        (row,) = await _refusals(db, portfolio_id)
+        assert row["guard"] == GUARD_OUTSIDE_WINDOW
+        assert row["reason"] == str(refusal.value) == refusal.value.reason
+        assert row["attempted_at"] == NOW.replace(hour=14)
+        assert row["venue"] == VENUE
+
+    async def test_the_window_refusal_records_no_boundary_because_it_read_none(
+        self, db, owner, portfolio_id, venue
+    ):
+        """The cheapest guard is deliberately first, so it refuses before the
+        boundary is read. Filling those columns in anyway would report a state
+        the runner never consulted; `guard` is what makes the NULLs legible."""
+        ids = await _world(db, owner)
+        await _record_a_cycle(db, portfolio_id, as_of=NOW - timedelta(days=1))
+
+        with pytest.raises(CarryRunRefused):
+            await _run(
+                db,
+                venue=venue,
+                portfolio_id=portfolio_id,
+                ids=ids,
+                owner=owner,
+                now=NOW.replace(hour=14),
+            )
+
+        (row,) = await _refusals(db, portfolio_id)
+        assert row["guard"] == GUARD_OUTSIDE_WINDOW
+        assert row["funding_window_opens_at"] is None
+        assert row["last_cycle_at"] is None
+        assert row["last_completed_at"] is None
+        assert row["next_due_at"] is None
+
+    async def test_the_hold_refusal_records_the_boundary_it_was_measured_against(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+        last = NOW - timedelta(days=2)
+        await _record_a_cycle(db, portfolio_id, as_of=last)
+
+        with pytest.raises(CarryRunRefused) as refusal:
+            await _run(db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner)
+
+        (row,) = await _refusals(db, portfolio_id)
+        assert row["guard"] == GUARD_INSIDE_HOLD
+        assert row["reason"] == str(refusal.value)
+        assert row["last_cycle_at"] == last
+        assert row["last_completed_at"] == last
+        assert row["next_due_at"] == last + REBALANCE_PERIOD
+        assert row["funding_window_opens_at"] == last
+
+    async def test_the_missing_origin_refusal_is_recorded(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+
+        with pytest.raises(CarryRunRefused) as refusal:
+            await _run(db, venue=venue, portfolio_id=portfolio_id, ids=ids, owner=owner)
+
+        (row,) = await _refusals(db, portfolio_id)
+        assert row["guard"] == GUARD_NO_RECORDED_CYCLE
+        assert row["reason"] == str(refusal.value)
+        assert row["last_cycle_at"] is None
+
+    async def test_a_covered_instant_refusal_is_recorded(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+        await _record_a_cycle(db, portfolio_id, as_of=NOW, since=INCEPTION)
+
+        with pytest.raises(CarryRunRefused) as refusal:
+            await _run(
+                db,
+                venue=venue,
+                portfolio_id=portfolio_id,
+                ids=ids,
+                owner=owner,
+                now=NOW - timedelta(hours=1),
+                ignore_cadence=True,
+                ignore_window=True,
+            )
+
+        (row,) = await _refusals(db, portfolio_id)
+        assert row["guard"] == GUARD_INSTANT_ALREADY_COVERED
+        assert row["reason"] == str(refusal.value)
+
+    async def test_every_recorded_guard_is_one_the_module_declares(
+        self, db, owner, portfolio_id, venue
+    ):
+        """A typo in a guard string is silent everywhere else: the row still
+        writes, the reason still reads, and only a query grouping by guard ever
+        notices -- by quietly splitting one guard into two."""
+        ids = await _world(db, owner)
+
+        for now in (NOW.replace(hour=14), NOW):
+            with pytest.raises(CarryRunRefused):
+                await _run(
+                    db,
+                    venue=venue,
+                    portfolio_id=portfolio_id,
+                    ids=ids,
+                    owner=owner,
+                    now=now,
+                )
+
+        rows = await _refusals(db, portfolio_id)
+        assert len(rows) == 2
+        assert {row["guard"] for row in rows} <= GUARDS
+        assert {row["guard"] for row in rows} == {
+            GUARD_OUTSIDE_WINDOW,
+            GUARD_NO_RECORDED_CYCLE,
+        }
+
+    async def test_a_refusal_is_not_written_into_the_cycle_log(
+        self, db, owner, portfolio_id, venue
+    ):
+        """A refusal traded nothing and settled nothing, so every money column
+        on `carry_cycle` would be a zero standing in for an absence -- and the
+        boundary read would treat it as a cycle the book actually ran."""
+        ids = await _world(db, owner)
+
+        with pytest.raises(CarryRunRefused):
+            await _run(
+                db,
+                venue=venue,
+                portfolio_id=portfolio_id,
+                ids=ids,
+                owner=owner,
+                now=NOW.replace(hour=14),
+                inception=INCEPTION,
+            )
+
+        assert await _rows(db, portfolio_id) == []
+        assert len(await _refusals(db, portfolio_id)) == 1
+        assert (await boundary(db.pool, portfolio_id, VENUE)).last_cycle is None
+
+    async def test_a_cycle_that_ran_records_no_refusal(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+
+        result = await _run(
+            db,
+            venue=venue,
+            portfolio_id=portfolio_id,
+            ids=ids,
+            owner=owner,
+            inception=INCEPTION,
+        )
+
+        assert not result.halted
+        assert await _refusals(db, portfolio_id) == []
+
+    async def test_the_same_instant_refused_twice_records_one_row(
+        self, db, owner, portfolio_id, venue
+    ):
+        """The guards are deterministic in their inputs, so a re-run at the same
+        instant reaches the same verdict. A second row would double-count the
+        one thing this table is queried for -- whether the loop is firing."""
+        ids = await _world(db, owner)
+        at = NOW.replace(hour=14)
+
+        for _ in range(2):
+            with pytest.raises(CarryRunRefused):
+                await _run(
+                    db,
+                    venue=venue,
+                    portfolio_id=portfolio_id,
+                    ids=ids,
+                    owner=owner,
+                    now=at,
+                    inception=INCEPTION,
+                )
+
+        assert len(await _refusals(db, portfolio_id)) == 1
+
+    async def test_a_refusal_that_cannot_be_recorded_is_still_a_refusal(
+        self, db, owner, portfolio_id, venue, caplog
+    ):
+        """The write failing must not be reported as the cycle failing.
+
+        `cycle_one.py` exits 2 on a refusal and 1 on a halt, and the operator
+        reads those differently. A storage error surfacing in place of the
+        refusal would turn the most common outcome on this book -- the correct
+        one -- into a crash, on a day nothing was wrong with the book.
+        """
+        ids = await _world(db, owner)
+
+        with (
+            caplog.at_level(logging.ERROR, logger="omni.trading.carry"),
+            pytest.raises(CarryRunRefused, match="rebalance window") as refusal,
+        ):
+            await _run(
+                _FailingDb(db),
+                venue=venue,
+                portfolio_id=portfolio_id,
+                ids=ids,
+                owner=owner,
+                now=NOW.replace(hour=14),
+                inception=INCEPTION,
+            )
+
+        assert refusal.value.guard == GUARD_OUTSIDE_WINDOW
+        assert await _refusals(db, portfolio_id) == []
+        assert "could not record" in caplog.text
+        assert GUARD_OUTSIDE_WINDOW in caplog.text
+
+
+class _FailingDb:
+    """`db`, with a pool whose `carry_refusal` insert fails and nothing else."""
+
+    def __init__(self, db):
+        self.pool = _FailingPool(db.pool)
+
+
+class _FailingPool:
+    def __init__(self, pool):
+        self._pool = pool
+
+    def __getattr__(self, name):
+        return getattr(self._pool, name)
+
+    async def execute(self, query, *args):
+        if "carry_refusal" in query:
+            raise RuntimeError("carry_refusal is unwritable in this test")
+        return await self._pool.execute(query, *args)
 
 
 def _LosAngeles():

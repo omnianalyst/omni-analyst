@@ -2,18 +2,19 @@
 
 `/trading/cycles` already said what the book did. What the operator could not
 read anywhere was the decision: when the next rebalance is due, how much of the
-six-week hold is left, and what the runner refused. The last of those is the
-interesting one, because it is genuinely not in the database -- a refused cycle
-writes no row -- and the endpoint has to say so rather than derive a sentence
-that would read identically whether the cycle fired and refused or the scheduler
-never ran.
+six-week hold is left, and what the runner refused. The last of those used to be
+genuinely absent from the database -- a refused cycle wrote no row -- and the
+endpoint said so rather than derive a sentence that would read identically
+whether the cycle fired and refused or the scheduler never ran. Migration 057
+records the refusal, so the endpoint now reports the sentence the runner
+produced, and an empty record is dated by when the recording began.
 
 What is pinned here: the hold this page counts down is the hold the runner
 enforces and not a second copy of it; a book inside its hold is distinguishable
-from a book whose cycles all halted and from a book that has never run one; a
-refusal really does leave the log empty, so the page's claim about it is
-measured rather than asserted; and a symbol the governed universe does not list
-is unclassified rather than filed as a stock.
+from a book whose cycles all halted and from a book that has never run one; the
+refusal reported is the one the caller was actually given rather than a
+re-derived copy, and it stays out of the cycle log; and a symbol the governed
+universe does not list is unclassified rather than filed as a stock.
 """
 
 import asyncio
@@ -24,6 +25,7 @@ from uuid import UUID, uuid4
 import pytest
 from neutron.test import TestClient
 
+from omni.api import trading
 from omni.api.trading import build_router as trading_router
 from omni.main import create_app
 from omni.trading import carry_runner
@@ -276,15 +278,20 @@ class TestSchedule:
             ) == last_completed + timedelta(weeks=8)
             assert row["days_until_due"] == 54
 
-    async def test_a_refused_cycle_leaves_no_row_so_the_reason_is_reported_absent(
+    async def test_a_refused_cycle_reports_the_reason_it_actually_gave(
         self, database_url, db
     ):
-        """The finding, measured rather than asserted.
+        """The blind spot this endpoint used to describe, now closed.
 
-        The runner is actually made to refuse here. Afterwards the cycle table
-        is unchanged, which is why the endpoint reports the refusal reason as
-        absent with the absence explained: nothing in the database distinguishes
-        a cycle that fired and refused from a scheduler that never ran.
+        Until migration 057 the assertion here was the opposite one: the runner
+        was made to refuse, the cycle table was unchanged, and the endpoint
+        reported the reason as unavailable because nothing in the database
+        distinguished a cycle that fired and refused from a scheduler that never
+        ran. The refusal is now written before it is raised, so the endpoint
+        reports the sentence the runner produced -- and this test compares it
+        against the exception the caller saw rather than against a copy, because
+        two independently-worded strings would agree in the test and diverge in
+        production.
         """
         async with _Lifespan(_app(database_url)) as app, TestClient(app) as client:
             token, user_id = await _operator(client)
@@ -294,10 +301,11 @@ class TestSchedule:
             ) - timedelta(days=2)
             await _cycle(db, portfolio_id, as_of=last_completed)
 
-            before = await db.pool.fetchval(
+            cycles_before = await db.pool.fetchval(
                 "SELECT count(*) FROM carry_cycle WHERE portfolio_id = $1",
                 portfolio_id,
             )
+            attempted_at = last_completed + timedelta(days=1)
 
             with pytest.raises(CarryRunRefused) as refusal:
                 await run_due_cycle(
@@ -307,23 +315,96 @@ class TestSchedule:
                     config=_config(),
                     entity_ids=[],
                     audience_user_id=user_id,
-                    now=last_completed + timedelta(days=1),
+                    now=attempted_at,
                 )
             assert "the hold is 42 days" in str(refusal.value)
 
-            after = await db.pool.fetchval(
+            cycles_after = await db.pool.fetchval(
                 "SELECT count(*) FROM carry_cycle WHERE portfolio_id = $1",
                 portfolio_id,
             )
-            assert after == before, (
-                "the refusal wrote a row; the endpoint's claim that refusals "
-                "are unrecorded would then be false"
+            assert cycles_after == cycles_before, (
+                "the refusal was written into the cycle log; a refusal is not a "
+                "cycle that earned zero and every reader of that table would "
+                "now have to exclude it"
             )
 
             body = (await _read(client, token, "/trading/schedule")).json()
+            assert body["last_refusal_unavailable"] is None
+            recorded = body["last_refusal"]
+            assert recorded["reason"] == str(refusal.value)
+            assert recorded["guard"] == carry_runner.GUARD_INSIDE_HOLD
+            assert datetime.fromisoformat(recorded["attempted_at"]) == attempted_at
+            assert datetime.fromisoformat(recorded["last_completed_at"]) == (
+                last_completed
+            )
+            assert datetime.fromisoformat(recorded["next_due_at"]) == (
+                last_completed + carry_runner.REBALANCE_PERIOD
+            )
+
+            venue_row = _venue_row(body)
+            assert venue_row["state"] == "holding"
+            assert venue_row["last_refusal"]["reason"] == str(refusal.value)
+
+    async def test_a_book_with_no_recorded_refusal_says_when_the_record_starts(
+        self, database_url, db
+    ):
+        """An empty record is dated, because otherwise it overclaims.
+
+        `last_refusal: null` on a book that ran before migration 057 does not
+        mean no cycle was ever refused -- it means none was refused since the
+        table existed. Without the date the sentence would be the same silence
+        the table was added to remove.
+        """
+        async with _Lifespan(_app(database_url)) as app, TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cycle(db, portfolio_id, as_of=datetime.now(UTC) - timedelta(days=2))
+
+            body = (await _read(client, token, "/trading/schedule")).json()
             assert body["last_refusal"] is None
-            assert "carry_cycle" in body["last_refusal_unavailable"]
-            assert _venue_row(body)["state"] == "holding"
+
+            began_at = await db.pool.fetchval(
+                "SELECT applied_at FROM _neutron_migrations WHERE version = $1",
+                trading.REFUSAL_RECORDING_MIGRATION,
+            )
+            assert began_at is not None, (
+                "migration 057 is not in the log, so the endpoint has no instant "
+                "to bound the empty record with"
+            )
+            assert body["refusal_recording_began_at"] == began_at.isoformat()
+            assert began_at.isoformat() in body["last_refusal_unavailable"]
+
+    async def test_one_books_refusal_is_not_reported_on_another(
+        self, database_url, db
+    ):
+        """Refusals are per book, like every other read on this page."""
+        async with _Lifespan(_app(database_url)) as app, TestClient(app) as client:
+            token, user_id = await _operator(client)
+            mine = await _portfolio(db, user_id)
+            theirs = await _portfolio(db, user_id)
+            last_completed = datetime.now(UTC).replace(
+                hour=5, minute=0, second=0, microsecond=0
+            ) - timedelta(days=2)
+            await _cycle(db, theirs, as_of=last_completed)
+            await _cycle(db, mine, as_of=last_completed)
+
+            with pytest.raises(CarryRunRefused):
+                await run_due_cycle(
+                    db.pool,
+                    venue=_NamedVenue(),
+                    portfolio_id=theirs,
+                    config=_config(),
+                    entity_ids=[],
+                    audience_user_id=user_id,
+                    now=last_completed + timedelta(days=1),
+                )
+
+            body = (
+                await _read(client, token, f"/trading/schedule?portfolio_id={mine}")
+            ).json()
+            assert body["last_refusal"] is None
+            assert _venue_row(body)["last_refusal"] is None
 
     async def test_a_book_whose_every_cycle_halted_is_not_a_book_inside_its_hold(
         self, database_url, db

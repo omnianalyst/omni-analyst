@@ -673,22 +673,80 @@ _HELD_SYMBOLS = """
 SELECT DISTINCT symbol FROM position WHERE portfolio_id = $1 ORDER BY symbol
 """
 
-# A refused cycle writes nothing. `run_due_cycle` raises `CarryRunRefused`
-# before `run_carry_cycle` is reached, so no `carry_cycle` row exists to carry
-# the reason -- it is logged by the process that ran and by nothing that
-# survives it. This endpoint therefore reports the refusal reason as absent with
-# that stated, and reports the *schedule* the refusal was taken against, which
-# is in the database. Deriving a sentence and presenting it as the recorded
-# refusal would be the fabrication this codebase exists to avoid: it would read
-# identically whether the cycle fired and refused or the scheduler never ran at
-# all.
-REFUSAL_IS_NOT_RECORDED = (
-    "A refused cycle writes no carry_cycle row -- the runner refuses before it "
-    "trades or settles anything -- so the reason it gave exists only in the "
-    "runner's log on the host that ran it. No absence of rows between "
-    "rebalances can distinguish a refusal from a scheduler that never fired; "
-    "the schedule below is what the refusal would have been taken against."
-)
+# Refusals are recorded from migration 057 onward (`carry_refusal`). Before it,
+# a refused cycle wrote nothing anywhere but the runner's log, so no absence of
+# rows could distinguish a correct refusal from a scheduler that never fired.
+# The migration's own `applied_at` is what makes an empty table readable: it
+# dates the start of the record, so "nothing recorded" is bounded rather than
+# open-ended. Deriving a refusal sentence instead would be the fabrication this
+# codebase exists to avoid -- it would read identically in both cases.
+REFUSAL_RECORDING_MIGRATION = 57
+
+_REFUSAL_RECORDING_BEGAN = """
+SELECT applied_at FROM _neutron_migrations WHERE version = $1
+"""
+
+# Newest first, one row per venue via DISTINCT ON. The schedule reports per
+# venue because the cadence and the funding boundary are per venue, so a
+# refusal pooled across venues would describe a decision no runner took.
+_LAST_REFUSAL_PER_VENUE = """
+SELECT DISTINCT ON (venue)
+       venue, attempted_at, guard, reason,
+       funding_window_opens_at, last_cycle_at, last_completed_at, next_due_at
+FROM carry_refusal
+WHERE portfolio_id = $1
+ORDER BY venue, attempted_at DESC
+"""
+
+
+def _refusal_payload(row) -> dict:
+    return {
+        "venue": row["venue"],
+        "attempted_at": row["attempted_at"].isoformat(),
+        "guard": row["guard"],
+        "reason": row["reason"],
+        "funding_window_opens_at": (
+            None
+            if row["funding_window_opens_at"] is None
+            else row["funding_window_opens_at"].isoformat()
+        ),
+        "last_cycle_at": (
+            None if row["last_cycle_at"] is None else row["last_cycle_at"].isoformat()
+        ),
+        "last_completed_at": (
+            None
+            if row["last_completed_at"] is None
+            else row["last_completed_at"].isoformat()
+        ),
+        "next_due_at": (
+            None if row["next_due_at"] is None else row["next_due_at"].isoformat()
+        ),
+    }
+
+
+def _no_refusal_recorded(began_at: datetime | None) -> str:
+    """Why `last_refusal` is null, bounded by when the record starts.
+
+    Without the date this sentence would be indistinguishable from "this book
+    has never refused a cycle", which is false for every book that ran before
+    migration 057 -- and the endpoint would be back to reporting a silence it
+    cannot account for.
+    """
+    if began_at is None:
+        return (
+            "No refusal has been recorded for this book, and the instant "
+            "refusal recording began is not readable here -- migration "
+            f"{REFUSAL_RECORDING_MIGRATION} is not in the migration log. Until "
+            "that is resolved, an empty record cannot be dated and does not "
+            "establish that no cycle was refused."
+        )
+    return (
+        "No refusal has been recorded for this book since "
+        f"{began_at.isoformat()}, when migration {REFUSAL_RECORDING_MIGRATION} "
+        "began recording them. A cycle refused before that instant wrote no "
+        "row anywhere and survives only in the runner's log on the host that "
+        "ran it."
+    )
 
 # The classes the governed universe can put an asset in. Read off the universe
 # rather than listed here, so a class added there appears without this file
@@ -745,7 +803,14 @@ def _days_until(due: datetime, now: datetime) -> int:
     return -((-remaining) // timedelta(days=1))
 
 
-def _venue_schedule(venue: str, known, *, now: datetime, period: timedelta) -> dict:
+def _venue_schedule(
+    venue: str,
+    known,
+    *,
+    now: datetime,
+    period: timedelta,
+    last_refusal: dict | None = None,
+) -> dict:
     """One venue's rebalance state, derived from the cycle log and nothing else.
 
     Four states, each a different fact, none of which may be collapsed into
@@ -763,6 +828,7 @@ def _venue_schedule(venue: str, known, *, now: datetime, period: timedelta) -> d
     """
     base = {
         "venue": venue,
+        "last_refusal": last_refusal,
         "last_cycle_at": (
             None if known.last_cycle is None else known.last_cycle.isoformat()
         ),
@@ -1074,9 +1140,12 @@ def build_router(app: App) -> Router:
         `carry_runner` rather than restated here, because two copies of the hold
         would let this page count down to a date the runner does not recognise.
 
-        Everything below is derived from `carry_cycle` through the same
-        `boundary` query the runner takes its decision from. What is *not* here
-        is the text of any refusal: see `REFUSAL_IS_NOT_RECORDED`.
+        The schedule is derived from `carry_cycle` through the same `boundary`
+        query the runner takes its decision from. The refusals come from
+        `carry_refusal`, which the runner writes before it raises -- so a book
+        sitting inside its hold reports the decision that kept it there, and an
+        empty record is bounded by the instant recording began rather than
+        reading as "nothing happened".
         """
         audience = resolve_audience_from_request(request)
         if audience is None:
@@ -1085,6 +1154,8 @@ def build_router(app: App) -> Router:
         pool = app.db.pool
         portfolio_id = await _resolve_portfolio(pool, audience, request.query_params)
         rows = await pool.fetch(_SCHEDULED_VENUES, portfolio_id)
+        refusal_rows = await pool.fetch(_LAST_REFUSAL_PER_VENUE, portfolio_id)
+        refusals = {row["venue"]: _refusal_payload(row) for row in refusal_rows}
 
         period = carry_runner.REBALANCE_PERIOD
         now = datetime.now(UTC)
@@ -1092,7 +1163,26 @@ def build_router(app: App) -> Router:
         for row in rows:
             venue = row["venue"]
             known = await carry_runner.boundary(pool, portfolio_id, venue)
-            venues.append(_venue_schedule(venue, known, now=now, period=period))
+            venues.append(
+                _venue_schedule(
+                    venue,
+                    known,
+                    now=now,
+                    period=period,
+                    last_refusal=refusals.get(venue),
+                )
+            )
+
+        # The newest across venues. A venue the book has refused at but never
+        # run a cycle at has no schedule row, so this reads the refusals
+        # directly rather than the assembled venue list -- otherwise the most
+        # recent refusal could be dropped by the join it did not need.
+        newest = max(
+            refusals.values(), key=lambda payload: payload["attempted_at"], default=None
+        )
+        began_at = await pool.fetchval(
+            _REFUSAL_RECORDING_BEGAN, REFUSAL_RECORDING_MIGRATION
+        )
 
         return {
             "portfolio_id": str(portfolio_id),
@@ -1101,8 +1191,13 @@ def build_router(app: App) -> Router:
             "window_opens_hour": carry_runner.WINDOW_OPENS_HOUR,
             "window_closes_hour": carry_runner.WINDOW_CLOSES_HOUR,
             "in_rebalance_window": carry_runner.in_rebalance_window(now),
-            "last_refusal": None,
-            "last_refusal_unavailable": REFUSAL_IS_NOT_RECORDED,
+            "refusal_recording_began_at": (
+                None if began_at is None else began_at.isoformat()
+            ),
+            "last_refusal": newest,
+            "last_refusal_unavailable": (
+                None if newest is not None else _no_refusal_recorded(began_at)
+            ),
             "venues": venues,
         }
 
