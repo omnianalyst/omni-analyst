@@ -73,6 +73,7 @@ containers     omni-v2-api-1        running
 migrations     57  (local tree and live DB agree)
 images         omni-api:69b73ce / omni-scheduler:69b73ce, also :latest
 rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = c39ea15
+release        v0.3.0 = 494976c, which is what production runs plus the docs
 host path      /home/user/omni-v2
 public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 ```
@@ -80,7 +81,8 @@ public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 Two deploys on 2026-08-13, both with normal builds and a pre-migration dump:
 `c39ea15` carried migration 056 and the P3/P4 API work, `69b73ce` carried
 migration 057, the refusal recording and the portfolio UI. The release tag
-`v0.2.0` now names an older state than production — retag before relying on it.
+`main` was fast-forwarded to `494976c` and tagged **v0.3.0** afterwards, so the
+tag, `main` and the deployed branch now agree.
 
 ### The carry book
 
@@ -389,18 +391,18 @@ Neutron is a sibling checkout. Framework defects go to
 
 ```
 branch            feat/autotrade-phase0
-ahead of main     8 commits
+ahead of main     0 commits
 main ahead        0 commits
-main tip          cc33c59
+newest tag        v0.3.0 = 494976c
 ```
 
-`main` is an ancestor and fast-forwards cleanly; the 202-commit gap that made
-this P0 is gone. **Production still runs the feature branch**, so `main` lags
-the deployed product by whatever has not been merged — 8 commits as of
-2026-08-13. Fast-forward it and cut a tag rather than letting the gap grow
-again; the deploy that closed the 202 was materially harder than the two that
-followed it. Do not squash: the commits carry the ported backend, audits, fixes,
-UI, deployment work, Discover, wallets, the ETF experiment and the bulletin.
+The 202-commit gap is closed: `main` was fast-forwarded on 2026-08-13 and tagged
+`v0.3.0`, and the branch, `main` and the tag agree. **Production still builds
+from the feature branch**, so keep merging at the end of each session rather
+than letting the gap grow again — the deploy that closed the 202 was materially
+harder than the two that followed it. Do not squash: the commits carry the
+ported backend, audits, fixes, UI, deployment work, Discover, wallets, the ETF
+experiment and the bulletin.
 
 ---
 
@@ -670,17 +672,15 @@ means the request hit the SPA fallback instead of the API.
 
 ## 8. Ordered backlog
 
-### P0 — reconcile Git and releases — MOSTLY DONE
+### P0 — reconcile Git and releases — DONE
 
-The 202-commit gap is closed and images now carry their SHA as a tag
-(`omni-api:69b73ce`), with `rollback-prev` pointing at the build being replaced
-rather than at whatever was tagged days ago. What is **left**: `main` is 8
-commits behind the deployed branch, and the `v0.2.0` tag names an older state
-than production. Fast-forward `main` and cut a tag covering migrations through
-57.
+Done 2026-08-13. The 202-commit gap is closed, `main` is fast-forwarded, images
+carry their SHA as a tag (`omni-api:69b73ce`), `rollback-prev` points at the
+build being replaced rather than at whatever was tagged days ago, and `v0.3.0`
+covers migrations through 57.
 
-**Done when** `main` contains every deployed migration and feature, and the
-newest release tag names what is actually running.
+Keep it closed: merge and tag at the end of a session rather than at the start
+of the next one.
 
 ### P1 — finish Settings as a real control centre
 
