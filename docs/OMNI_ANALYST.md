@@ -4,7 +4,7 @@
 invariants, deployment, and open work. Everything else in `docs/` and
 `_orchestrator/` is either evidence, a deeper reference, or archived history.
 
-Last measured: **2026-08-12**. Every number below was read from the live system
+Last measured: **2026-08-13**. Every number below was read from the live system
 or the working tree on that date, not copied from an earlier document. Several
 move every session — the re-measure commands are at the end. Prefer measurement
 over this file, including when this file is confident.
@@ -62,7 +62,7 @@ dropdown right.
 
 ## 2. Live production state
 
-Measured 2026-08-12 against `deployment-host` (the-host, Tailscale).
+Measured 2026-08-13 against `deployment-host` (the-host, Tailscale).
 
 ```
 containers     omni-v2-api-1        running
@@ -70,11 +70,17 @@ containers     omni-v2-api-1        running
                omni_postgres        running   (TimescaleDB)
                caddy                shared, outside the app compose project
 
-migrations     55  (local tree and live DB agree)
-release        v0.2.0 -- images labelled rev=3eee24e
+migrations     57  (local tree and live DB agree)
+images         omni-api:69b73ce / omni-scheduler:69b73ce, also :latest
+rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = c39ea15
 host path      /home/user/omni-v2
 public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 ```
+
+Two deploys on 2026-08-13, both with normal builds and a pre-migration dump:
+`c39ea15` carried migration 056 and the P3/P4 API work, `69b73ce` carried
+migration 057, the refusal recording and the portfolio UI. The release tag
+`v0.2.0` now names an older state than production — retag before relying on it.
 
 ### The carry book
 
@@ -90,9 +96,18 @@ next rebalance ~2026-09-22    (six-week hold, enforced by the runner)
 Live since 2026-08-11. Twelve cycles logged in `carry_cycle`. The 04:00 UTC
 cycle on 2026-08-12 fired and **correctly refused** — "the hold is 42 days and
 the next is due 2026-09-22; rebalancing sooner is turnover the signal did not ask
-for" — exiting 2 with the book untouched. Refusals are logged to
-`ops/carry_cycle.log` but do not write a `carry_cycle` row, so an absence of rows
-between rebalances is expected, not a stalled loop. Check the log, not the table.
+for" — exiting 2 with the book untouched.
+
+**Refusals are now recorded** (migration 057, `carry_refusal`). A refused cycle
+still writes no `carry_cycle` row — a refusal is not a cycle that earned zero —
+but it writes a refusal row carrying the guard that fired, the reason the
+operator sees, and the boundary state the decision was taken against. So an
+absence of `carry_cycle` rows between rebalances is still expected, and it is no
+longer the only thing there is to read: query `carry_refusal` or
+`GET /trading/schedule`, which reports the last refusal per venue.
+
+Before this, no absence of rows could distinguish a correct refusal from a
+scheduler that never fired, on roughly 41 of every 42 days.
 
 The pair gate is also live and has bitten: an earlier cycle refused two pairs
 with `the_two_legs_did_not_fill_as_one_unit`. That is why the book holds ETH and
@@ -374,15 +389,18 @@ Neutron is a sibling checkout. Framework defects go to
 
 ```
 branch            feat/autotrade-phase0
-ahead of main     202 commits
+ahead of main     8 commits
 main ahead        0 commits
+main tip          cc33c59
 ```
 
-`main` is an ancestor and can likely be fast-forwarded, but **production is
-running the feature branch, so `main` does not currently represent the
-product.** Reconciling this is P0 in §8. Do not squash the accumulated commits;
-they contain the ported backend, audits, fixes, UI, deployment work, Discover,
-wallets, the ETF experiment and the bulletin.
+`main` is an ancestor and fast-forwards cleanly; the 202-commit gap that made
+this P0 is gone. **Production still runs the feature branch**, so `main` lags
+the deployed product by whatever has not been merged — 8 commits as of
+2026-08-13. Fast-forward it and cut a tag rather than letting the gap grow
+again; the deploy that closed the 202 was materially harder than the two that
+followed it. Do not squash: the commits carry the ported backend, audits, fixes,
+UI, deployment work, Discover, wallets, the ETF experiment and the bulletin.
 
 ---
 
@@ -548,19 +566,54 @@ versions in `_neutron_migrations`. It relies on a primary key rather than an
 advisory lock, so **for the very first boot of a brand-new database, run a single
 API replica** until healthy, then scale out.
 
-### Current deployment caveat
+### Deploying
 
-Normal Docker builds on `deployment-host` have failed because the host cannot
-reliably resolve container-registry DNS. Service containers were given explicit
-public DNS in `docker-compose.prod.yml`, which fixed runtime provider access, but
-the host-level pull problem may remain.
+**Normal builds work.** Verified 2026-08-13: `docker pull` resolves the registry
+and `docker compose -f docker-compose.prod.yml build` completes on the host. The
+offline `docker commit` patch described in §13 is retired — do not use it. It
+bakes the temporary container's `Cmd` into the image and has taken production
+down once already.
 
-Recent deployments used an **offline local image patch**: rsync the changed
-source/migrations/UI, create a temporary container from the existing local image,
-`docker cp` into `/app`, `docker commit` back to `omni-api:latest` or
-`omni-scheduler:latest`, recreate with `--no-build`. This kept production
-working, but it does not label images with a Git SHA and is easy to make
-non-reproducible. Restoring normal builds is P6.
+The host at `/home/user/omni-v2` is an rsync target, not a git checkout (its
+`.git` is an empty repo on `master`), so the deploy is:
+
+```bash
+# from the repo root, with the suite and the UI green
+uv build --wheel --project ../../Neutron/python --out-dir vendor
+npm --prefix ui run build
+
+rsync -az --delete --exclude='__pycache__' --exclude='*.pyc' src/ deployment-host:/home/user/omni-v2/src/
+rsync -az --delete migrations/ deployment-host:/home/user/omni-v2/migrations/
+rsync -az --delete ui/dist/   deployment-host:/home/user/omni-v2/ui/dist/
+rsync -az vendor/neutron_py-*.whl deployment-host:/home/user/omni-v2/vendor/
+rsync -az pyproject.toml uv.lock Dockerfile Dockerfile.scheduler \
+          docker-compose.prod.yml Caddyfile .dockerignore AGENTS.md \
+          deployment-host:/home/user/omni-v2/
+rsync -az --exclude='__pycache__' --exclude='*.log' ops/ deployment-host:/home/user/omni-v2/ops/
+
+ssh deployment-host 'cd /home/user/omni-v2 && docker compose -f docker-compose.prod.yml build'
+ssh deployment-host 'docker tag omni-api:latest omni-api:<sha>; docker tag omni-scheduler:latest omni-scheduler:<sha>'
+ssh deployment-host 'cd /home/user/omni-v2 && docker compose -f docker-compose.prod.yml up -d --no-build api scheduler'
+```
+
+Three things that will bite:
+
+- **Rebuild the Neutron wheel** rather than reusing the one on the host. The
+  tests run against the editable checkout, so a stale wheel deploys a framework
+  the suite never exercised.
+- **`--delete` on `ops/` would remove the cron scripts.** They now live in the
+  repo (`carry_cycle.sh`, `nav_snapshot.sh`, `launch_sweep.sh`,
+  `nav_snapshot.py`) precisely so that stops being true, but the host also holds
+  their `.log` files, which the exclude keeps.
+- **Name `api scheduler` explicitly.** A bare `up -d` also starts the compose
+  `edge` service, which fails on `Bind for 0.0.0.0:80` because the shared
+  `caddy` container owns port 80, and leaves a dead `omni_edge` container behind.
+
+Before a deploy that carries a migration: take a dump
+(`docker exec omni_postgres pg_dump -U postgres -d omni_v2 -Fc > /tmp/pre-NNN-<stamp>.dump`)
+and retag the running images as `omni-api:rollback-prev` /
+`omni-scheduler:rollback-prev` so the rollback target is the build being
+replaced rather than whatever was tagged days ago.
 
 ### Shared Caddy
 
@@ -617,15 +670,17 @@ means the request hit the SPA fallback instead of the API.
 
 ## 8. Ordered backlog
 
-### P0 — reconcile Git and releases
+### P0 — reconcile Git and releases — MOSTLY DONE
 
-Production runs a branch 202 commits ahead of `main`. Verify ancestry, run the
-release gate, fast-forward or merge, push, and tag a release containing
-migrations through 54. Record the exact deployed SHA rather than an unlabelled
-local image, and name a rollback target.
+The 202-commit gap is closed and images now carry their SHA as a tag
+(`omni-api:69b73ce`), with `rollback-prev` pointing at the build being replaced
+rather than at whatever was tagged days ago. What is **left**: `main` is 8
+commits behind the deployed branch, and the `v0.2.0` tag names an older state
+than production. Fast-forward `main` and cut a tag covering migrations through
+57.
 
-**Done when** `main` contains every deployed migration and feature, production's
-source commit is queryable without inference, and a rollback target is named.
+**Done when** `main` contains every deployed migration and feature, and the
+newest release tag names what is actually running.
 
 ### P1 — finish Settings as a real control centre
 
@@ -665,32 +720,42 @@ For decision-grade historical tests, obtain dated ETF constituents and weights,
 ticker and share-class history, delisting/merger/bankruptcy returns, reinvested
 distributions, roughly ten years of data, and an untouched recent holdout.
 
-### P3 — complete Discover coverage
+### P3 — complete Discover coverage — DONE, except by external blockers
 
-Industry and sub-industry coverage is explicitly incomplete because verified GICS
-industry metadata is not stored. The company universe is S&P 500 / current
-large-cap US, not all US or global equities, and membership is static reference
-data accessed 2026-08-05. The defensive universe is 12 representative assets.
-Seven live top-60 CoinGecko assets were unmapped at the last audit (RAIN, CC,
-WLFI, ASTER, M, MORPHO, SKY) — this list changes, so always rerun the live audit.
-Signed-in users see audience-owned Polygon company claims; anonymous users cannot,
-so anonymous sector coverage can be zero.
+Landed: GICS sub-industry on all 503 constituents with source provenance, dated
+membership snapshots (migration 056, live and populated), within-sub-industry
+ranking in `/scanner/companies`, and a re-audit of the live crypto census.
 
-Store verified GICS metadata, add dated membership snapshots rather than
-overwriting history, resolve or explicitly exclude each live top-census crypto
-mapping, govern expansion into mid/small cap and international, and make
-signed-out behaviour explicit. **Keep the coverage gate visible; never silently
+The census outcome is a **blocked** result rather than an open task. The same
+seven assets are unmapped (RAIN, CC, WLFI, ASTER, M, MORPHO, SKY) and each now
+carries a measured finding in `UNVERIFIED_CRYPTO_IDS`: every obvious
+`<SYMBOL>-USD` ticker on the display feed is a *different coin*, verified by
+comparing its last close to the live CoinGecko price. Two of them (M, SKY) carry
+1,515 and 3,200 observations, so they clear the history gate and only the price
+check catches them. Unblocking needs a display feed that is not Yahoo — see the
+licensing note in §8's *Blocked on evidence*.
+
+Still open and genuinely scheduled: govern expansion into mid/small cap and
+international, and make signed-out behaviour explicit. Signed-in users see
+audience-owned Polygon company claims; anonymous users cannot, so anonymous
+sector coverage can be zero. **Keep the coverage gate visible; never silently
 shrink the comparison set.**
 
-### P4 — portfolio and household view
+### P4 — portfolio and household view — PARTLY DONE
 
-The page correctly separates trading NAV from external wallet balances but can
-communicate the hierarchy better. Stronger visual division; filters driven by
-backend classification rather than a hardcoded frontend symbol set; allocation
-targets versus actual; ETF/direct/wallet overlap and concentration; cost basis
-only when a trustworthy source exists. **Never add wallet balances to trading
-NAV.** A combined household number must be separately named and must disclose
-incomplete price and chain coverage.
+Landed: `/trading/schedule` and `/trading/classification` and their UI. The page
+renders the rebalance cadence, the days left in the hold and the recorded
+refusal; positions are classified by the backend's governed universe instead of
+two hardcoded browser symbol sets; and the managed book and the read-only
+wallets are separate labelled bands, with the headline named **Trading NAV** and
+the external band stating that its balances are not part of it.
+
+Still open: allocation targets versus actual, and ETF/direct/wallet overlap and
+concentration — `src/omni/exposure/` already computes overlap and has 48 tests,
+so wire it in rather than rewriting. Cost basis only when a trustworthy source
+exists; there is none today, so omitting it is the honest move. **Never add
+wallet balances to trading NAV.** A combined household number must be separately
+named and must disclose incomplete price and chain coverage.
 
 ### P5 — wallet coverage
 
@@ -708,14 +773,16 @@ unverified address "verified" before real signature validation exists.
 
 ### P6 — operations and observability
 
-Fix registry DNS and normal image builds. Live images are `omni-api:latest` and
-`omni-scheduler:latest` with no SHA label; the only tagged rollback targets are
-`omni-api:rollback-20260809` and `omni-scheduler:rollback-20260809`, four days
-behind the running images. **A rollback today loses four days of deploys.**
+Registry DNS and normal image builds are **fixed** — verified 2026-08-13, twice.
+Images now carry their SHA (`omni-api:69b73ce`) and `rollback-prev` is retagged
+to the build being replaced as part of the deploy, so a rollback loses one
+deploy rather than four days. Pre-migration dumps were taken for both 056 and
+057. The four cron-driven operational files that existed only on the host are
+now in `ops/`.
 
-Daily backups already run (see §7) — what is missing is a pre-migration backup,
-a tested restore, and reconciling `/opt/omni-backup.sh` against the repo's
-`ops/backup.sh`.
+What is left: **the restore has still never been tested**, `/opt/omni-backup.sh`
+still differs from the repo's `ops/backup.sh`, and `OMNI_RSYNC_TARGET` is wired
+but unset so the dumps sit on the box they protect.
 
 Add deployment smoke tests covering health, migration version, API routing and UI
 asset hashes. Track provider latency, failure and coverage-gate regressions.
@@ -760,18 +827,21 @@ in 320 attempts**, because only the `price` family can currently vote.
 ## 9. Test baseline
 
 ```
-backend suite   4,141 passed, 0 failed, 9 pre-existing warnings, 5m47s
-UI suite          229 passed (19 files)
+backend suite   4,271 passed, 0 failed, 88 warnings, 6m44s
+UI suite          250 passed (20 files)
 UI typecheck and production build   passing
 ```
 
-Both were run in full on 2026-08-12. Over that session the backend went
-4,103 -> 4,141 and the UI 196 -> 229, adding coverage for the research record,
-the scanner guards, the entity profile and credential encryption.
+All three were run in full on 2026-08-13. Over that session the backend went
+4,247 -> 4,271 and the UI 246 -> 250, adding coverage for refusal recording, the
+schedule endpoint's refusal reads, the crypto census findings, and backend-driven
+position classification.
 
-The backend figure moves every session — the 2026-08-11 handoff recorded 4,092
-in roughly seven minutes, and documents before that recorded 3,791 and 3,965.
-Re-run it rather than quoting any of them.
+The backend figure moves every session — earlier documents recorded 4,247,
+4,141, 4,092, 3,965 and 3,791. Re-run it rather than quoting any of them. The
+wall-clock figure moves with machine load rather than with the suite: the same
+4,247 tests took 5m32s and, an hour later under an unrelated macOS process
+pinning a core, 6m44s.
 
 Focused baselines: ETF/research/portfolio 136 passed, bulletin/auth/settings
 regression 21 passed, ETF-specific 8 passed.
@@ -848,7 +918,7 @@ to make a global invocation green.
 | `_orchestrator/TRADING_API_CONTRACT.md` | The frozen JSON shape API and UI share | Anything else |
 | `_orchestrator/RESEARCH_AGENDA.md` | Ranked directions, with priors and traps | State |
 | `docs/ETF_PORTFOLIO_EXPERIMENT.md` | The ETF-versus-constituent result | Live allocation |
-| `docs/NEXT_SESSION.md` | The brief for P2/P3/P4/P5, the only work left | Current state |
+| `docs/NEXT_SESSION.md` | The brief for the work left: P0 tag, P2, P5 | Current state |
 | `docs/HISTORY.md` | v1 lineage, retired strategies, superseded docs | Anything current |
 | `DEPLOY.md` | Detailed build and configuration reference | Live topology |
 
@@ -976,3 +1046,90 @@ cannot stop the coverage loops booting.
   diversified funds only, and `high` stays empty for the reason above.
 - Settings remains read-only in the UI. The encryption and reconciliation it
   needs now exist; the controls do not.
+
+---
+
+## 14. Changes on 2026-08-13
+
+Two deploys, both with normal builds, SHA tags and a pre-migration dump.
+`c39ea15` carried migration 056 and the P3/P4 API work that had been sitting
+committed since the previous session; `69b73ce` carried everything below.
+
+### Refusals are recorded (migration 057)
+
+The blind spot: `run_due_cycle` refuses before `run_carry_cycle` is reached, so
+a refused cycle wrote no row anywhere and the reason survived only in
+`ops/carry_cycle.log` on the host. On a six-week hold that is roughly 41 of every
+42 days producing silence — and **no absence of rows could distinguish a correct
+refusal from a scheduler that never fired**, on a book holding real money.
+
+`carry_refusal` is deliberately not a nullable-outcome `carry_cycle` row. Every
+column on the cycle log describes a settlement; a row of NULLs there would have
+to be excluded by every existing reader of the book's history, and the first one
+that forgot would report a refusal as a cycle that earned zero.
+
+All five guards record before they raise, carrying the guard identity, the
+sentence the operator sees, and the boundary the decision was taken against. The
+window guard fires before the boundary is read — deliberately, it is the
+cheapest — so its boundary columns are NULL and the guard is what makes that
+legible. A write failure is logged and swallowed: `cycle_one.py` exits 2 on a
+refusal against 1 on a halt, and a storage error surfacing in place of the
+refusal would report this book's most common, correct outcome as a crash.
+
+Verified in production after deploy by running `ops/cycle_one.py` in READ_ONLY
+mode: it refused with `outside_rebalance_window`, wrote the row, left
+`carry_cycle` at 12 and the book untouched.
+
+`GET /trading/schedule` reports the refusal per venue and newest across venues.
+An empty record is bounded by migration 057's own `applied_at` — without that
+date, `last_refusal: null` reads as "this book has never refused a cycle", which
+is false for every cycle run before today.
+
+### The crypto census is blocked, not open
+
+The seven unmapped top-60 assets are the same seven. Each obvious
+`<SYMBOL>-USD` ticker on the display feed was pulled and its last close compared
+to the live CoinGecko price: **all seven are a different coin.** M-USD carries
+1,515 daily observations and SKY-USD 3,200, so both clear the 365-observation
+gate and would have ranked under the right name with another asset's history.
+The registry's numeric suffixes exist for this collision.
+
+They stay in `unmapped` rather than moving to `EXCLUDED_CRYPTO_IDS`: that dict
+is a judgement that survives any data, and filing a should-rank asset there
+would retire a coverage gap by renaming it.
+
+**The underlying blocker is licensing.** A `CRYPTO_REGISTRY` mapping is a Yahoo
+ticker, and `_fetch_prices` in `src/omni/api/scanner.py` downloads the entire
+Discover ranking feed from yfinance — the credential catalog's one `prohibited`
+provider. Adding seven entries deepens that dependency. Neither this checkout
+nor production holds a working CoinGecko key (both hold a placeholder), so its
+historical endpoint returns 401. Replacing the display feed is the real task and
+it is not a Discover task.
+
+### Portfolio page
+
+`/trading/schedule` and `/trading/classification` now have a UI. Positions are
+classified by the backend's governed universe rather than by two hardcoded
+browser symbol sets that could disagree with Discover and filed anything
+unrecognised as a stock. An unlisted symbol is unclassified and says so; an
+unread classification says something different again.
+
+The managed book and the read-only wallets are separate labelled bands, the
+headline metric is **Trading NAV**, and the external band states that its
+balances are not part of it and that coverage is incomplete. No combined
+household total is computed.
+
+### Operational files are versioned
+
+`ops/carry_cycle.sh`, `ops/nav_snapshot.sh`, `ops/launch_sweep.sh` and
+`ops/nav_snapshot.py` existed only on the host. Three are cron-driven, including
+the one that runs the carry book. Pulled in and checksum-matched. This also
+removes a live hazard: an `rsync --delete` over `ops/` would have deleted the
+carry runner from production.
+
+### A deployment note that replaces the one in §13
+
+Naming `api scheduler` on `docker compose up -d` matters. A bare `up -d` also
+starts the compose `edge` service, which fails on `Bind for 0.0.0.0:80` — the
+shared `caddy` container owns port 80 — and leaves a dead `omni_edge` container
+behind. The offline `docker commit` patch in §13 is retired; normal builds work.
