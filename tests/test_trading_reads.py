@@ -375,6 +375,47 @@ class TestSchedule:
             assert body["refusal_recording_began_at"] == began_at.isoformat()
             assert began_at.isoformat() in body["last_refusal_unavailable"]
 
+    async def test_the_headline_refusal_is_the_newest_across_venues(
+        self, database_url, db
+    ):
+        """Each venue keeps its own, and the top-level one is the most recent.
+
+        Ordered on the timestamp rather than on its ISO string, so the two
+        venues here are refused in the opposite order to their alphabetical
+        one: a sort that fell back to venue name would return the wrong row and
+        an operator would read a stale reason as the current state.
+        """
+        other = "aaa-earlier-alphabetically"
+        async with _Lifespan(_app(database_url)) as app, TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            base = datetime.now(UTC).replace(
+                hour=5, minute=0, second=0, microsecond=0
+            ) - timedelta(days=2)
+            await _cycle(db, portfolio_id, as_of=base)
+            await _cycle(db, portfolio_id, as_of=base, venue=other)
+
+            refusals = {}
+            for venue_name, offset in ((other, 1), (VENUE, 2)):
+                with pytest.raises(CarryRunRefused) as refusal:
+                    await run_due_cycle(
+                        db.pool,
+                        venue=_NamedVenue(venue_name),
+                        portfolio_id=portfolio_id,
+                        config=_config(),
+                        entity_ids=[],
+                        audience_user_id=user_id,
+                        now=base + timedelta(days=offset),
+                    )
+                refusals[venue_name] = str(refusal.value)
+
+            body = (await _read(client, token, "/trading/schedule")).json()
+
+            # VENUE was refused a day later than `other`, which sorts first.
+            assert body["last_refusal"]["venue"] == VENUE
+            assert body["last_refusal"]["reason"] == refusals[VENUE]
+            assert _venue_row(body, other)["last_refusal"]["reason"] == refusals[other]
+
     async def test_one_books_refusal_is_not_reported_on_another(
         self, database_url, db
     ):

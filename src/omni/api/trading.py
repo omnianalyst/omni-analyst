@@ -1176,10 +1176,14 @@ def build_router(app: App) -> Router:
         # The newest across venues. A venue the book has refused at but never
         # run a cycle at has no schedule row, so this reads the refusals
         # directly rather than the assembled venue list -- otherwise the most
-        # recent refusal could be dropped by the join it did not need.
-        newest = max(
-            refusals.values(), key=lambda payload: payload["attempted_at"], default=None
+        # recent refusal could be dropped by the join it did not need. Ordered
+        # on the timestamp rather than its ISO string: the two agree only while
+        # every row carries the same UTC offset, which is a property of the
+        # driver rather than anything asserted here.
+        newest_row = max(
+            refusal_rows, key=lambda row: row["attempted_at"], default=None
         )
+        newest = None if newest_row is None else refusals[newest_row["venue"]]
         began_at = await pool.fetchval(
             _REFUSAL_RECORDING_BEGAN, REFUSAL_RECORDING_MIGRATION
         )
