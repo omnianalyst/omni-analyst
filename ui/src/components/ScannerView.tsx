@@ -153,6 +153,13 @@ function tone(value: number | null | undefined): string {
   return value > 0 ? "value-positive" : value < 0 ? "value-negative" : "";
 }
 
+// The same floor the server applies before letting the median feed a rank
+// (scanner.py: has_long_enough_record). A median of one or two yearly returns
+// is noise wearing a median's clothes, and an asset below the floor stays out
+// of the builder -- it remains in the full table, where the number is labelled
+// for what it is.
+const MIN_COMPLETE_YEARS = 3;
+
 function classLabel(asset: AssetMetric): string {
   const entry = CATEGORY_DETAILS.find((category) => category.key === asset.asset_class);
   return entry ? entry.title : asset.asset_class;
@@ -167,6 +174,12 @@ function byMedian(a: AssetMetric, b: AssetMetric): number {
   if (left === null || left === undefined) return 1;
   if (right === null || right === undefined) return -1;
   return right - left;
+}
+
+function rankableByMedian(asset: AssetMetric): boolean {
+  return (
+    asset.median_annual_return != null && asset.complete_years >= MIN_COMPLETE_YEARS
+  );
 }
 
 function BuilderRow({ asset }: { asset: AssetMetric }) {
@@ -189,12 +202,18 @@ function BuilderRow({ asset }: { asset: AssetMetric }) {
 // The front door of Discover: a portfolio in one glance. One pick from each
 // volatility column is a core; the angles below are the balance against
 // market conditions. Everything after this section is the supporting depth.
+//
+// The rank is the median of each asset's complete calendar years over its
+// whole measured history -- not a fixed 10-year window, which most of the
+// universe does not have. Only assets with at least MIN_COMPLETE_YEARS
+// measured years compete, so a young listing cannot win on one lucky year.
 function PortfolioBuilder({ data }: { data: ScannerData }) {
   const universe = (Object.values(data.category_rankings) as AssetMetric[][]).flat();
+  const rankable = universe.filter(rankableByMedian);
   const hedges = HEDGE_ROLES.map((role) => ({
     ...role,
     assets: universe
-      .filter((asset) => asset.market_behavior === role.behavior && asset.median_annual_return != null)
+      .filter((asset) => asset.market_behavior === role.behavior && rankableByMedian(asset))
       .sort(byMedian)
       .slice(0, 2),
   }));
@@ -204,13 +223,15 @@ function PortfolioBuilder({ data }: { data: ScannerData }) {
       <div class="top-picks-heading">
         <h2>Build a balanced portfolio</h2>
         <p>
-          The top assets by median annual return at each level of risk. Pick a core from each
-          column, then hold the angles below to stay balanced when the market turns.
+          Top assets by median annual return at each level of risk -- the median of every
+          complete calendar year each asset has measured ({MIN_COMPLETE_YEARS}+ years required).
+          Pick a core from each column, then hold the angles below to stay balanced when the
+          market turns.
         </p>
       </div>
       <div class="top-picks-grid">
         {TIER_COLUMNS.map((column) => {
-          const assets = universe
+          const assets = rankable
             .filter((asset) => asset.risk_tier === column.tier)
             .sort(byMedian)
             .slice(0, TOP_PER_TIER);
@@ -271,7 +292,7 @@ function RankedCategory({
               <th>Asset</th>
               <th>Score</th>
               <th>1 year</th>
-              <th>Median year</th>
+              <th>Median year, all measured</th>
               <th>Volatility</th>
               <th>Market role</th>
             </tr>
