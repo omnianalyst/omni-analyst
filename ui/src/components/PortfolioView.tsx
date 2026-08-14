@@ -25,6 +25,8 @@ import {
   type Portfolio,
   type ReconciliationReport,
 } from "../lib/trading";
+import { getBriefing, type BriefingFinding } from "../lib/briefing";
+import { directionGlyph, directionWord, hitRateFelt } from "../lib/explain";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 import { WalletAccounts } from "./WalletAccounts";
@@ -46,10 +48,17 @@ type State =
       reconciliation: Resource<ReconciliationReport>;
       classification: Resource<ClassificationResponse>;
       schedule: Resource<CarrySchedule>;
+      noteworthy: BriefingFinding[];
     };
 
 type PositionFilter = "all" | string;
 type ChartRange = "1m" | "3m" | "1y" | "all";
+
+// The bar a surfaced call must clear to interrupt the portfolio page at all.
+// The feed is not this page's job; only an extremely confident standing call
+// earns a line here, and anything less renders nothing.
+const NOTEWORTHY_CONFIDENCE = 0.9;
+const NOTEWORTHY_MAX = 2;
 
 // Display names for the backend's own class vocabulary. A class with no entry
 // renders under its backend name rather than being relabelled or hidden, so a
@@ -75,71 +84,30 @@ const SCHEDULE_LABEL: Record<VenueSchedule["state"], string> = {
   due: "Rebalance due",
 };
 
-function CarryScheduleCard({ schedule }: { schedule: CarrySchedule }) {
+function NoteworthyBand({ findings }: { findings: BriefingFinding[] }) {
+  if (findings.length === 0) return null;
   return (
-    <section class="surface-card schedule-card">
-      <div class="section-heading">
-        <div>
-          <p class="eyebrow">Next</p>
-          <h2>Rebalance schedule</h2>
-          <p>
-            The hold is {schedule.rebalance_period_days} days. Cycles run
-            between {String(schedule.window_opens_hour).padStart(2, "0")}:00 and{" "}
-            {String(schedule.window_closes_hour).padStart(2, "0")}:00 UTC, where
-            the measured variance is lowest.
-          </p>
-        </div>
-        <span class={`window-pill ${schedule.in_rebalance_window ? "open" : "shut"}`}>
-          {schedule.in_rebalance_window ? "Window open" : "Window closed"}
-        </span>
-      </div>
-
-      {schedule.venues.length === 0 ? (
-        <div class="clean-empty">
-          <strong>No venue has a schedule yet</strong>
-          <span>A venue appears here once it records a cycle or holds a position.</span>
-        </div>
-      ) : (
-        <div class="schedule-stack">
-          {schedule.venues.map((venue) => (
-            <article class={`schedule-row tone-${SCHEDULE_TONE[venue.state]}`} key={venue.venue}>
-              <div class="schedule-identity">
-                <strong>{venue.venue}</strong>
-                {/* A state added on the server renders under its own name
-                    rather than as "undefined", which reads as a bug in the
-                    page instead of a vocabulary the page has not learned. */}
-                <span>{SCHEDULE_LABEL[venue.state] ?? venue.state}</span>
-              </div>
-              <div class="schedule-countdown">
-                {venue.days_until_due === null ? (
-                  <span class="schedule-nodate">—</span>
-                ) : (
-                  <>
-                    <strong>{venue.days_until_due}</strong>
-                    <span>{venue.days_until_due === 1 ? "day left" : "days left"}</span>
-                  </>
-                )}
-              </div>
-              <p class="schedule-detail">{venue.detail}</p>
-            </article>
-          ))}
-        </div>
-      )}
-
-      <div class="schedule-refusal">
-        <p class="eyebrow">Last refusal</p>
-        {schedule.last_refusal ? (
-          <>
-            <p class="schedule-refusal-reason">{schedule.last_refusal.reason}</p>
-            <p class="schedule-refusal-meta">
-              {schedule.last_refusal.venue} · {schedule.last_refusal.guard} ·{" "}
-              {formatTimestamp(schedule.last_refusal.attempted_at)}
-            </p>
-          </>
-        ) : (
-          <p class="schedule-refusal-reason">{schedule.last_refusal_unavailable}</p>
-        )}
-      </div>
+    <section class="noteworthy-band" aria-label="Noteworthy">
+      <span class="eyebrow">Noteworthy</span>
+      <ul>
+        {findings.map((finding) => {
+          const dir = finding.direction === "up" ? "up" : finding.direction === "down" ? "down" : "flat";
+          return (
+            <li key={finding.id} class={`noteworthy-row noteworthy-${dir}`}>
+              <span class={`claim-dir claim-dir-${dir}`}>
+                <span class="claim-glyph" aria-hidden="true">{directionGlyph(finding.direction)}</span>
+                {directionWord(finding.direction)}
+              </span>
+              <strong class="claim-ticker">{finding.entity.symbol ?? "\u2014"}</strong>
+              <span class="muted">{finding.entity.name}</span>
+              <span class="mono">{finding.confidence.toFixed(2)}</span>
+              {finding.calibrated_hit_rate !== null ? (
+                <span class="muted mono">{hitRateFelt(finding.calibrated_hit_rate)}</span>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }
@@ -195,15 +163,131 @@ function signedMoney(value: number | null): string {
   return `${value > 0 ? "+" : value < 0 ? "−" : ""}${absolute}`;
 }
 
+// The cadence the machine trades on, compressed to one line. The full venue
+// detail and last refusal live behind the disclosure; a healthy holding period
+// is not information the page needs to lead with.
+function scheduleOneLine(schedule: CarrySchedule): string {
+  const dueDays = schedule.venues
+    .map((venue) => venue.days_until_due)
+    .filter((days): days is number => days !== null);
+  const soonest = dueDays.length > 0 ? Math.min(...dueDays) : null;
+  const window = schedule.in_rebalance_window ? "window open" : "window closed";
+  const next = soonest !== null ? ` · next due in ${soonest} day${soonest === 1 ? "" : "s"}` : "";
+  return `Rebalance every ${schedule.rebalance_period_days} days · ${window}${next}`;
+}
+
+function ScheduleDetail({
+  schedule,
+  latestCycle,
+  cyclesError,
+}: {
+  schedule: CarrySchedule;
+  latestCycle: CarryCycle | null;
+  cyclesError: string | null;
+}) {
+  return (
+    <div class="detail-drawer">
+      <section class="detail-block schedule-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Next</p>
+            <h2>Rebalance schedule</h2>
+          </div>
+          <span class={`window-pill ${schedule.in_rebalance_window ? "open" : "shut"}`}>
+            {schedule.in_rebalance_window ? "Window open" : "Window closed"}
+          </span>
+        </div>
+
+        {schedule.venues.length === 0 ? (
+          <div class="clean-empty">
+            <strong>No venue has a schedule yet</strong>
+            <span>A venue appears here once it records a cycle or holds a position.</span>
+          </div>
+        ) : (
+          <div class="schedule-stack">
+            {schedule.venues.map((venue) => (
+              <article class={`schedule-row tone-${SCHEDULE_TONE[venue.state]}`} key={venue.venue}>
+                <div class="schedule-identity">
+                  <strong>{venue.venue}</strong>
+                  {/* A state added on the server renders under its own name
+                      rather than as "undefined", which reads as a bug in the
+                      page instead of a vocabulary the page has not learned. */}
+                  <span>{SCHEDULE_LABEL[venue.state] ?? venue.state}</span>
+                </div>
+                <div class="schedule-countdown">
+                  {venue.days_until_due === null ? (
+                    <span class="schedule-nodate">—</span>
+                  ) : (
+                    <>
+                      <strong>{venue.days_until_due}</strong>
+                      <span>{venue.days_until_due === 1 ? "day left" : "days left"}</span>
+                    </>
+                  )}
+                </div>
+                <p class="schedule-detail">{venue.detail}</p>
+              </article>
+            ))}
+          </div>
+        )}
+
+        <div class="schedule-refusal">
+          <p class="eyebrow">Last refusal</p>
+          {schedule.last_refusal ? (
+            <>
+              <p class="schedule-refusal-reason">{schedule.last_refusal.reason}</p>
+              <p class="schedule-refusal-meta">
+                {schedule.last_refusal.venue} · {schedule.last_refusal.guard} ·{" "}
+                {formatTimestamp(schedule.last_refusal.attempted_at)}
+              </p>
+            </>
+          ) : (
+            <p class="schedule-refusal-reason">{schedule.last_refusal_unavailable}</p>
+          )}
+        </div>
+      </section>
+
+      <section class="detail-block activity-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Latest activity</p>
+            <h2>{latestCycle ? (latestCycle.halted ? "Cycle halted" : "Cycle completed") : "No cycle recorded"}</h2>
+          </div>
+        </div>
+        {latestCycle ? (
+          <>
+            <p class="activity-summary">
+              {latestCycle.halted
+                ? latestCycle.halt_reason || "The cycle stopped before changing the book."
+                : latestCycle.abstention
+                  ? latestCycle.abstention
+                  : `${latestCycle.pairs_held} pair${latestCycle.pairs_held === 1 ? "" : "s"} held after the run.`}
+            </p>
+            <dl class="activity-facts">
+              <div><dt>Venue</dt><dd>{latestCycle.venue}</dd></div>
+              <div><dt>Funding</dt><dd>{formatMoney(latestCycle.funding_collected)}</dd></div>
+              <div><dt>Fees</dt><dd>{formatMoney(latestCycle.fees_paid)}</dd></div>
+              <div><dt>Run</dt><dd>{formatTimestamp(latestCycle.as_of)}</dd></div>
+            </dl>
+          </>
+        ) : (
+          <p class="activity-summary">Activity will appear after the first recorded carry cycle.</p>
+        )}
+        {cyclesError ? <p class="inline-warning">Cycle history unavailable: {cyclesError}</p> : null}
+      </section>
+    </div>
+  );
+}
+
 export function PortfolioView() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [positionFilter, setPositionFilter] = useState<PositionFilter>("all");
   const [chartRange, setChartRange] = useState<ChartRange>("1y");
+  const [scheduleOpen, setScheduleOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [portfolio, cycles, history, reconciliation, classification, schedule] =
+      const [portfolio, cycles, history, reconciliation, classification, schedule, briefing] =
         await Promise.allSettled([
           getPortfolio(),
           getCarryCycles(),
@@ -211,6 +295,7 @@ export function PortfolioView() {
           getReconciliation(),
           getClassification(),
           getCarrySchedule(),
+          getBriefing(),
         ]);
       if (cancelled) return;
       if (portfolio.status === "rejected") {
@@ -240,6 +325,15 @@ export function PortfolioView() {
         reconciliation: resource(reconciliation),
         classification: resource(classification),
         schedule: resource(schedule),
+        // The band is supplementary to this page: only findings that clear the
+        // bar render, and a failed feed fetch renders nothing rather than an
+        // error -- the page makes no claim to carry the feed.
+        noteworthy:
+          briefing.status === "fulfilled"
+            ? briefing.value
+                .filter((finding) => finding.confidence >= NOTEWORTHY_CONFIDENCE)
+                .slice(0, NOTEWORTHY_MAX)
+            : [],
       });
     })();
     return () => {
@@ -269,27 +363,18 @@ export function PortfolioView() {
             <span class="health-orb" aria-hidden="true" />
             <div>
               <h1>Portfolio</h1>
-              <p>No managed trading book exists for this account.</p>
+              <p>No managed portfolio, positions, or recorded trading NAV for this account.</p>
             </div>
           </div>
         </header>
-        <div class="book-band" aria-labelledby="managed-book-heading">
-          <div class="book-band-label">
-            <h2 id="managed-book-heading">Managed trading book</h2>
-            <p>This account has no managed portfolio, positions, or recorded trading NAV.</p>
-          </div>
-          <div class="surface-card clean-empty">
-            <strong>No managed portfolio</strong>
-            <span>External public-address tracking remains available independently below.</span>
-          </div>
+        <div class="surface-card clean-empty">
+          <strong>No managed portfolio</strong>
+          <span>This system has not opened a managed trading book for this account.</span>
         </div>
-        <div class="book-band book-band-external" aria-labelledby="external-holdings-heading">
-          <div class="book-band-label">
-            <h2 id="external-holdings-heading">External holdings, read only</h2>
-            <p>Public addresses this system watches and never trades.</p>
-          </div>
+        <details class="external-wallets" open>
+          <summary>External wallets · watched, never traded</summary>
           <WalletAccounts />
-        </div>
+        </details>
       </div>
     );
   }
@@ -335,21 +420,13 @@ export function PortfolioView() {
             <span class="health-orb" aria-hidden="true" />
             <div>
               <h1>Portfolio</h1>
-              <p>{health.headline} · {health.detail}</p>
+              <p>{health.headline} · last valued {formatTimestamp(portfolio.as_of)}</p>
             </div>
           </div>
         </div>
-        <div class="portfolio-asof">
-          <span>Last valued</span>
-          <strong>{formatTimestamp(portfolio.as_of)}</strong>
-        </div>
       </header>
 
-      <div class="book-band" aria-labelledby="managed-book-heading">
-        <div class="book-band-label">
-          <h2 id="managed-book-heading">Managed trading book</h2>
-          <p>Positions this system opened, values it recorded, and the cadence it trades on.</p>
-        </div>
+      <NoteworthyBand findings={state.noteworthy} />
 
       <section class="primary-metrics" aria-label="Portfolio summary">
         <article class="primary-metric primary-metric-featured">
@@ -379,7 +456,7 @@ export function PortfolioView() {
 
       <section class="surface-card portfolio-chart-card">
         <div class="section-heading-row section-heading-compact">
-          <div><p class="eyebrow">Recorded value</p><h2>Portfolio over time</h2><p>Actual NAV snapshots only; missing intervals are left disconnected.</p></div>
+          <div><p class="eyebrow">Recorded value</p><h2>Portfolio over time</h2></div>
           <div class="view-switch chart-range-switch">
             {(["1m", "3m", "1y", "all"] as ChartRange[]).map((range) => (
               <button type="button" class={chartRange === range ? "active" : ""} onClick={() => setChartRange(range)}>{range === "all" ? "All" : range.toUpperCase()}</button>
@@ -389,123 +466,92 @@ export function PortfolioView() {
         <NavChart points={chartHistory} />
       </section>
 
-      {state.schedule.kind === "ok" ? (
-        <CarryScheduleCard schedule={state.schedule.data} />
-      ) : (
-        <section class="surface-card schedule-card">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Next</p>
-              <h2>Rebalance schedule</h2>
-            </div>
+      <section class="surface-card holdings-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Now</p>
+            <h2>What the portfolio holds</h2>
           </div>
-          <p class="inline-warning">Schedule unavailable: {state.schedule.message}</p>
-        </section>
-      )}
-
-      <div class="portfolio-grid">
-        <section class="surface-card holdings-card">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Now</p>
-              <h2>What the portfolio holds</h2>
-            </div>
-            <span class="count-badge">{filteredGroups.length} of {groups.length}</span>
+          <span class="count-badge">{filteredGroups.length} of {groups.length}</span>
+        </div>
+        <div class="position-filters" aria-label="Position type">
+          {(["all", ...presentClasses, ...(hasUnclassified ? ["unclassified"] : [])] as PositionFilter[]).map((filter) => (
+            <button type="button" class={positionFilter === filter ? "active" : ""} onClick={() => setPositionFilter(filter)}>
+              {filter === "all" ? "All" : CLASS_LABELS[filter] ?? filter}
+            </button>
+          ))}
+        </div>
+        {state.classification.kind === "error" ? (
+          <p class="inline-warning">
+            Classification unavailable, so these are grouped without one:{" "}
+            {state.classification.message}
+          </p>
+        ) : null}
+        {filteredGroups.length === 0 ? (
+          <div class="clean-empty">
+            <strong>{groups.length ? "No positions in this group" : "Holding cash"}</strong>
+            <span>{groups.length ? "Choose another filter to see current holdings." : "No market positions are open."}</span>
           </div>
-          <div class="position-filters" aria-label="Position type">
-            {(["all", ...presentClasses, ...(hasUnclassified ? ["unclassified"] : [])] as PositionFilter[]).map((filter) => (
-              <button type="button" class={positionFilter === filter ? "active" : ""} onClick={() => setPositionFilter(filter)}>
-                {filter === "all" ? "All" : CLASS_LABELS[filter] ?? filter}
-              </button>
-            ))}
-          </div>
-          {state.classification.kind === "error" ? (
-            <p class="inline-warning">
-              Classification unavailable, so these are grouped without one:{" "}
-              {state.classification.message}
-            </p>
-          ) : null}
-          {filteredGroups.length === 0 ? (
-            <div class="clean-empty">
-              <strong>{groups.length ? "No positions in this group" : "Holding cash"}</strong>
-              <span>{groups.length ? "Choose another filter to see current holdings." : "No market positions are open."}</span>
-            </div>
-          ) : (
-            <div class="position-stack">
-              {filteredGroups.map((group) => (
-                <article class="position-card" key={`${group.venue}:${group.asset}`}>
-                  <div class="position-identity">
-                    <span class="asset-mark">{group.asset.slice(0, 2)}</span>
-                    <div>
-                      <strong>{group.asset}</strong>
-                      <span>
-                        {group.venue}
-                        {group.assetClass ? ` · ${CLASS_LABELS[group.assetClass] ?? group.assetClass}` : ""}
-                      </span>
-                    </div>
-                  </div>
-                  <div class="position-purpose">
-                    <strong>{group.hasSpot && group.hasPerpetual ? "Paired carry" : "Unpaired exposure"}</strong>
+        ) : (
+          <div class="position-stack">
+            {filteredGroups.map((group) => (
+              <article class="position-card" key={`${group.venue}:${group.asset}`}>
+                <div class="position-identity">
+                  <span class="asset-mark">{group.asset.slice(0, 2)}</span>
+                  <div>
+                    <strong>{group.asset}</strong>
                     <span>
-                      {group.assetClass === null && group.classRefusal
-                        ? group.classRefusal
-                        : group.hasSpot && group.hasPerpetual
-                          ? "Spot and perpetual legs are both present"
-                          : "Only one market leg is present"}
+                      {group.venue}
+                      {group.assetClass ? ` · ${CLASS_LABELS[group.assetClass] ?? group.assetClass}` : ""}
                     </span>
                   </div>
-                  <div class="position-leg-count">{group.notional === null ? `${group.legs.length} legs` : formatMoney(String(group.notional))}</div>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <aside class="surface-card activity-card">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Latest activity</p>
-              <h2>{latestCycle ? (latestCycle.halted ? "Cycle halted" : "Cycle completed") : "No cycle recorded"}</h2>
-            </div>
+                </div>
+                <div class="position-purpose">
+                  <strong>{group.hasSpot && group.hasPerpetual ? "Paired carry" : "Unpaired exposure"}</strong>
+                  <span>
+                    {group.assetClass === null && group.classRefusal
+                      ? group.classRefusal
+                      : group.hasSpot && group.hasPerpetual
+                        ? "Spot and perpetual legs are both present"
+                        : "Only one market leg is present"}
+                  </span>
+                </div>
+                <div class="position-leg-count">{group.notional === null ? `${group.legs.length} legs` : formatMoney(String(group.notional))}</div>
+              </article>
+            ))}
           </div>
-          {latestCycle ? (
-            <>
-              <p class="activity-summary">
-                {latestCycle.halted
-                  ? latestCycle.halt_reason || "The cycle stopped before changing the book."
-                  : latestCycle.abstention
-                    ? latestCycle.abstention
-                    : `${latestCycle.pairs_held} pair${latestCycle.pairs_held === 1 ? "" : "s"} held after the run.`}
-              </p>
-              <dl class="activity-facts">
-                <div><dt>Venue</dt><dd>{latestCycle.venue}</dd></div>
-                <div><dt>Funding</dt><dd>{formatMoney(latestCycle.funding_collected)}</dd></div>
-                <div><dt>Fees</dt><dd>{formatMoney(latestCycle.fees_paid)}</dd></div>
-                <div><dt>Run</dt><dd>{formatTimestamp(latestCycle.as_of)}</dd></div>
-              </dl>
-            </>
-          ) : (
-            <p class="activity-summary">Activity will appear after the first recorded carry cycle.</p>
-          )}
-          {state.cycles.kind === "error" ? (
-            <p class="inline-warning">Cycle history unavailable: {state.cycles.message}</p>
-          ) : null}
-        </aside>
-      </div>
-      </div>
+        )}
+      </section>
 
-      <div class="book-band book-band-external" aria-labelledby="external-holdings-heading">
-        <div class="book-band-label">
-          <h2 id="external-holdings-heading">External holdings, read only</h2>
-          <p>
-            Public addresses this system watches and never trades. These balances
-            are <strong>not</strong> part of the {formatMoney(portfolio.nav)} trading
-            NAV above, and chain and price coverage is incomplete — see each
-            wallet for what was reachable.
-          </p>
-        </div>
+      {state.schedule.kind === "ok" ? (
+        <>
+          <button
+            type="button"
+            class="disclosure-button"
+            aria-expanded={scheduleOpen}
+            onClick={() => setScheduleOpen((open) => !open)}
+          >
+            <span>{scheduleOneLine(state.schedule.data)}</span>
+            <span aria-hidden="true">{scheduleOpen ? "−" : "+"}</span>
+          </button>
+          {scheduleOpen ? (
+            <ScheduleDetail
+              schedule={state.schedule.data}
+              latestCycle={latestCycle}
+              cyclesError={state.cycles.kind === "error" ? state.cycles.message : null}
+            />
+          ) : null}
+        </>
+      ) : (
+        <p class="inline-warning">Schedule unavailable: {state.schedule.message}</p>
+      )}
+
+      <details class="external-wallets">
+        <summary>
+          External wallets · watched, never traded · not part of the {formatMoney(portfolio.nav)} NAV
+        </summary>
         <WalletAccounts />
-      </div>
+      </details>
     </div>
   );
 }

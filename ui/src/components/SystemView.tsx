@@ -12,7 +12,6 @@ import {
   type LoopStatus,
 } from "../lib/system";
 import { errorMessage, lastOkAt, refresh, state, status } from "../lib/systemStore";
-import { formatMoney, getCarryCycles, recordedCarry } from "../lib/portfolio";
 import {
   describeRecord,
   formatT,
@@ -57,6 +56,143 @@ function LoopRow({ loop }: { loop: LoopStatus }) {
   );
 }
 
+// The strategy research record, compressed to the one line an operator needs
+// unless they ask for more: how much has been tested and how much of it held
+// up. The rising bar and the permanent table are behind the disclosure.
+function ResearchSection({
+  research,
+  onRetry,
+}: {
+  research:
+    | { kind: "loading" }
+    | { kind: "ok"; data: ResearchRecord }
+    | { kind: "error"; message: string; detail?: string };
+  onRetry: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  if (research.kind === "loading") {
+    return (
+      <section class="surface-card research-record">
+        <Loading label="Loading the research record…" />
+      </section>
+    );
+  }
+  if (research.kind === "error") {
+    return (
+      <section class="surface-card research-record">
+        <div class="section-heading">
+          <div><p class="eyebrow">Strategy research</p><h2>Research record unavailable</h2></div>
+          <button type="button" class="btn-secondary compact-button" onClick={onRetry}>Try again</button>
+        </div>
+        <ErrorState message={research.message} detail={research.detail} />
+      </section>
+    );
+  }
+
+  const { summary, tests } = research.data;
+  if (summary.tests === 0) {
+    return (
+      <section class="surface-card research-record">
+        <p class="research-one-line">
+          Strategy research · no hypothesis recorded here yet. Runs append to the registry on the
+          machine that runs them; publish with <code>ops/publish_research.py</code>.
+        </p>
+      </section>
+    );
+  }
+
+  const cleared = tests.filter(isPass).length;
+  return (
+    <section class="surface-card research-record">
+      <button
+        type="button"
+        class="disclosure-button research-disclosure"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span>
+          What has been tested · {summary.tests} hypotheses · {cleared} cleared the bar · best |t| {formatT(summary.best_t)}
+        </span>
+        <span aria-hidden="true">{open ? "−" : "+"}</span>
+      </button>
+      {open ? (
+        <div class="detail-drawer">
+          <div class="detail-block">
+            <p class="settings-lead">{describeRecord(summary)}</p>
+            <div class="research-bars">
+              <div>
+                <span class="metric-kicker">Significance bar</span>
+                <strong>{formatT(summary.bar)}</strong>
+                <span class="metric-context">
+                  |t| a result must clear, from {summary.cells} statistics ever run
+                </span>
+              </div>
+              <div>
+                <span class="metric-kicker">Best result so far</span>
+                <strong>{formatT(summary.best_t)}</strong>
+                <span class="metric-context">highest |t| on the most recent third</span>
+              </div>
+            </div>
+
+            <div class="responsive-table">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Hypothesis</th>
+                    <th>Data</th>
+                    <th>Statistics</th>
+                    <th>Best |t|</th>
+                    <th>Bar</th>
+                    <th>Verdict</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tests.map((entry) => {
+                    const share = shareOfBar(entry, summary.bar);
+                    const passed = isPass(entry);
+                    return (
+                      <tr key={`${entry.name}-${entry.recorded_at}`}>
+                        <td><strong>{entry.name}</strong></td>
+                        <td><small>{entry.source}</small></td>
+                        <td>{entry.cells}</td>
+                        <td>
+                          {formatT(entry.detail?.best_recent_third_t)}
+                          {share === null ? null : (
+                            <span
+                              class="research-meter"
+                              style={{ "--share": String(share) }}
+                              aria-hidden="true"
+                            />
+                          )}
+                        </td>
+                        <td>{formatT(entry.detail?.bar ?? summary.bar)}</td>
+                        <td>
+                          <span class={`fill fill-${passed ? "good" : "blocked"}`}>
+                            {passed ? "cleared" : "did not clear"}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <p class="research-note">
+              The bar is <code>sqrt(2 ln N)</code> over every statistic this system has ever
+              computed, never below 2.5. It rises as the search widens, so a result found
+              after a long search must be stronger than the same result found early. A test
+              recorded here is permanent — retiring a failed hypothesis from the record would
+              make every later result look more significant than it is.
+            </p>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function SystemView() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [reconciliation, setReconciliation] = useState<
@@ -64,7 +200,6 @@ export function SystemView() {
     | { kind: "ok"; data: ReconciliationReport }
     | { kind: "error"; message: string }
   >({ kind: "loading" });
-  const [automationOutcome, setAutomationOutcome] = useState<{ carry: number | null; cycles: number } | null>(null);
   const [research, setResearch] = useState<
     | { kind: "loading" }
     | { kind: "ok"; data: ResearchRecord }
@@ -90,9 +225,6 @@ export function SystemView() {
         kind: "error",
         message: "Trading reconciliation is currently unavailable.",
       }));
-    void getCarryCycles()
-      .then(({ cycles }) => setAutomationOutcome({ carry: recordedCarry(cycles), cycles: cycles.length }))
-      .catch(() => setAutomationOutcome(null));
   }, []);
 
   const snapshot = status.value;
@@ -156,26 +288,16 @@ export function SystemView() {
           <strong>{snapshot.production_24h.findings}</strong>
           <span class="metric-context">calls surfaced from {snapshot.production_24h.predictions} predictions</span>
         </article>
-        <article class="primary-metric">
-          <span class="metric-kicker">Automation outcome</span>
-          <strong class={automationOutcome?.carry !== null && automationOutcome?.carry !== undefined && automationOutcome.carry < 0 ? "value-negative" : "value-positive"}>
-            {automationOutcome?.carry === null || automationOutcome?.carry === undefined ? "—" : formatMoney(String(automationOutcome.carry))}
-          </strong>
-          <span class="metric-context">recorded net carry across {automationOutcome?.cycles ?? 0} completed cycles</span>
-        </article>
       </section>
 
-      <section class="surface-card attention-card">
-        <div class="section-heading">
-          <div><p class="eyebrow">Attention</p><h2>{unhealthy.length === 0 ? "Nothing needs you" : "Review these jobs"}</h2></div>
-          <span class={`count-badge ${unhealthy.length > 0 ? "count-warning" : ""}`}>{unhealthy.length}</span>
-        </div>
-        {unhealthy.length === 0 ? (
-          <div class="clean-empty success-empty">
-            <strong>No active system issues</strong>
-            <span>Quiet on-demand jobs are normal and are not treated as failures.</span>
+      {unhealthy.length === 0 ? (
+        <p class="quiet-line">No active system issues. Quiet on-demand jobs are normal.</p>
+      ) : (
+        <section class="surface-card attention-card">
+          <div class="section-heading">
+            <div><p class="eyebrow">Attention</p><h2>Review these jobs</h2></div>
+            <span class="count-badge count-warning">{unhealthy.length}</span>
           </div>
-        ) : (
           <div class="issue-list">
             {unhealthy.map((issue) => (
               <article class="issue-row" key={issue.loop}>
@@ -184,116 +306,10 @@ export function SystemView() {
               </article>
             ))}
           </div>
-        )}
-      </section>
-
-      {research.kind === "loading" ? (
-        <section class="surface-card research-record">
-          <div class="section-heading">
-            <div><p class="eyebrow">Strategy research</p><h2>What has been tested</h2></div>
-          </div>
-          <Loading label="Loading the research record…" />
-        </section>
-      ) : research.kind === "error" ? (
-        <section class="surface-card research-record">
-          <div class="section-heading">
-            <div><p class="eyebrow">Strategy research</p><h2>Research record unavailable</h2></div>
-            <button type="button" class="btn-secondary compact-button" onClick={loadResearch}>Try again</button>
-          </div>
-          <ErrorState message={research.message} detail={research.detail} />
-        </section>
-      ) : (
-        <section class="surface-card research-record">
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">Strategy research</p>
-              <h2>What has been tested</h2>
-            </div>
-            <span class="count-badge">{research.data.summary.tests}</span>
-          </div>
-
-          <p class="settings-lead">{describeRecord(research.data.summary)}</p>
-
-          {research.data.summary.tests === 0 ? (
-            <div class="clean-empty">
-              <strong>No hypothesis has been recorded here yet</strong>
-              <span>
-                Research runs append to the registry on the machine that runs them. Publish
-                it with <code>ops/publish_research.py</code> to show the record here.
-              </span>
-            </div>
-          ) : (
-            <>
-            <div class="research-bars">
-              <div>
-                <span class="metric-kicker">Significance bar</span>
-                <strong>{formatT(research.data.summary.bar)}</strong>
-                <span class="metric-context">
-                  |t| a result must clear, from {research.data.summary.cells} statistics ever run
-                </span>
-              </div>
-              <div>
-                <span class="metric-kicker">Best result so far</span>
-                <strong>{formatT(research.data.summary.best_t)}</strong>
-                <span class="metric-context">highest |t| on the most recent third</span>
-              </div>
-            </div>
-
-            <div class="responsive-table">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Hypothesis</th>
-                    <th>Data</th>
-                    <th>Statistics</th>
-                    <th>Best |t|</th>
-                    <th>Bar</th>
-                    <th>Verdict</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {research.data.tests.map((entry) => {
-                    const share = shareOfBar(entry, research.data.summary.bar);
-                    const passed = isPass(entry);
-                    return (
-                      <tr key={`${entry.name}-${entry.recorded_at}`}>
-                        <td><strong>{entry.name}</strong></td>
-                        <td><small>{entry.source}</small></td>
-                        <td>{entry.cells}</td>
-                        <td>
-                          {formatT(entry.detail?.best_recent_third_t)}
-                          {share === null ? null : (
-                            <span
-                              class="research-meter"
-                              style={{ "--share": String(share) }}
-                              aria-hidden="true"
-                            />
-                          )}
-                        </td>
-                        <td>{formatT(entry.detail?.bar ?? research.data.summary.bar)}</td>
-                        <td>
-                          <span class={`fill fill-${passed ? "good" : "blocked"}`}>
-                            {passed ? "cleared" : "did not clear"}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <p class="research-note">
-              The bar is <code>sqrt(2 ln N)</code> over every statistic this system has ever
-              computed, never below 2.5. It rises as the search widens, so a result found
-              after a long search must be stronger than the same result found early. A test
-              recorded here is permanent — retiring a failed hypothesis from the record would
-              make every later result look more significant than it is.
-            </p>
-            </>
-          )}
         </section>
       )}
+
+      <ResearchSection research={research} onRetry={loadResearch} />
 
       <button
         type="button"

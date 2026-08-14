@@ -119,6 +119,8 @@ const BEHAVIOR_LABELS: Record<MarketBehavior, string> = {
   unrated: "Not measured",
 };
 
+const TOP_PICKS_PER_CLASS = 3;
+
 function percent(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
@@ -129,16 +131,56 @@ function tone(value: number | null | undefined): string {
   return value > 0 ? "value-positive" : value < 0 ? "value-negative" : "";
 }
 
+// The front door of Discover: the strongest few assets in each class, one row
+// each. Everything below it is the supporting depth.
+function TopPicks({ data }: { data: ScannerData }) {
+  return (
+    <section class="top-picks" aria-label="Top picks">
+      <div class="top-picks-heading">
+        <h2>Top picks now</h2>
+        <p>The highest-ranked assets in each class, by the same measured score.</p>
+      </div>
+      <div class="top-picks-grid">
+        {CATEGORY_DETAILS.map((category) => {
+          const assets = (data.category_rankings[category.key] ?? []).slice(0, TOP_PICKS_PER_CLASS);
+          return (
+            <article class="top-picks-column" key={category.key}>
+              <h3>{category.title}</h3>
+              {assets.length === 0 ? (
+                <p class="top-pick-empty">Not measured yet.</p>
+              ) : (
+                <ol>
+                  {assets.map((asset, index) => (
+                    <li key={asset.symbol}>
+                      <span class="leader-rank">{index + 1}</span>
+                      <span class="top-pick-asset">
+                        <strong>{asset.symbol}</strong>
+                        <small>{asset.name}</small>
+                      </span>
+                      <strong class="canonical-score">{asset.scores.balanced?.toFixed(0) ?? "—"}</strong>
+                      <span class={`top-pick-return ${tone(asset.returns?.["365d"])}`}>
+                        {percent(asset.returns?.["365d"])}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function RankedCategory({
   title,
   description,
   assets,
-  behaviorLens,
 }: {
   title: string;
   description: string;
   assets: AssetMetric[];
-  behaviorLens: boolean;
 }) {
   return (
     <section class="rank-category">
@@ -154,10 +196,9 @@ function RankedCategory({
               <th>Asset</th>
               <th>Score</th>
               <th>1 year</th>
-              <th>5y / year</th>
               <th>Median year</th>
               <th>Volatility</th>
-              <th>{behaviorLens ? "Market role" : "Risk"}</th>
+              <th>Market role</th>
             </tr>
           </thead>
           <tbody>
@@ -175,19 +216,12 @@ function RankedCategory({
                 </td>
                 <td><strong class="canonical-score">{asset.scores.balanced?.toFixed(0) ?? "—"}</strong></td>
                 <td class={tone(asset.returns?.["365d"])}>{percent(asset.returns?.["365d"])}</td>
-                <td class={tone(asset.cagr_5y)}>{percent(asset.cagr_5y)}</td>
                 <td class={tone(asset.median_annual_return)}>{percent(asset.median_annual_return)}</td>
                 <td>{percent(asset.volatility)}</td>
                 <td>
-                  {behaviorLens ? (
-                    <span class={`behavior-badge behavior-badge-${asset.market_behavior}`}>
-                      {BEHAVIOR_LABELS[asset.market_behavior]}
-                    </span>
-                  ) : (
-                    <span class={`risk-badge risk-badge-${asset.risk_tier}`}>
-                      {asset.risk_tier === "unrated" ? "Unrated" : asset.risk_tier}
-                    </span>
-                  )}
+                  <span class={`behavior-badge behavior-badge-${asset.market_behavior}`}>
+                    {BEHAVIOR_LABELS[asset.market_behavior]}
+                  </span>
                 </td>
               </tr>
             ))}
@@ -270,7 +304,7 @@ function SectorLeadership({ data }: { data: ScannerData }) {
 
 export function ScannerView() {
   const [state, setState] = useState<State>({ kind: "loading" });
-  const [behaviorLens, setBehaviorLens] = useState(false);
+  const [companiesOpen, setCompaniesOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -287,52 +321,48 @@ export function ScannerView() {
   if (state.kind === "loading") return <Loading label="Ranking the measured market…" />;
   if (state.kind === "error") return <ErrorState message={state.message} detail={state.detail} />;
 
-  const assetCount = Object.values(state.data.category_rankings)
-    .reduce((total, assets) => total + assets.length, 0);
-  const companyCount = state.data.sectors.reduce((total, sector) => total + sector.coverage, 0);
-
   return (
     <div class="scanner-view product-page">
       <header class="discover-page-heading">
-        <div><h1>Discover</h1><p>The measured list, ranked from strongest to weakest within each category.</p></div>
+        <div><h1>Discover</h1><p>The best investments across the measured universe, ranked strongest to weakest.</p></div>
         <div class="discover-compact-meta">
-          <span><strong>{assetCount}</strong> broad assets</span>
-          <span><strong>{companyCount}</strong> companies</span>
           <time dateTime={state.data.as_of}>Updated {new Date(state.data.as_of).toLocaleString()}</time>
         </div>
       </header>
 
-      <section class="ranking-definition">
-        <div>
-          <strong>One canonical score</strong>
-          <p>{state.data.ranking_method.balanced} {state.data.ranking_method.scope}</p>
-        </div>
-        <button
-          type="button"
-          class={`behavior-toggle ${behaviorLens ? "active" : ""}`}
-          aria-pressed={behaviorLens}
-          onClick={() => setBehaviorLens((current) => !current)}
-        >
-          <span class="toggle-track" aria-hidden="true"><span /></span>
-          Show market role
-        </button>
-      </section>
+      <TopPicks data={state.data} />
+
+      <div class="canonical-rankings">
+        {CATEGORY_DETAILS.map((category) => (
+          <RankedCategory
+            key={category.key}
+            title={category.title}
+            description={category.description}
+            assets={state.data.category_rankings[category.key] ?? []}
+          />
+        ))}
+      </div>
+
+      <details class="methodology-note canonical-methodology">
+        <summary>How these are measured</summary>
+        <p>{state.data.ranking_method.balanced} {state.data.ranking_method.scope}</p>
+        <p>{state.data.ranking_method.history}</p>
+        <p>Volatility is annualized from daily returns. Market role uses correlation to SPY and is descriptive, not a guaranteed hedge.</p>
+      </details>
 
       <section class={`coverage-summary ${state.data.coverage.complete ? "coverage-complete" : "coverage-partial"}`}>
         <div class="coverage-summary-title">
           <span class="health-orb" aria-hidden="true" />
           <div>
-            <strong>{state.data.coverage.complete ? "Universe coverage complete" : "Universe coverage is still closing"}</strong>
-            <p>Policy {state.data.coverage.policy_version} · every omission is now classified.</p>
+            <strong>{state.data.coverage.complete ? "Coverage complete" : "Coverage is still closing"}</strong>
+            <p>
+              Policy {state.data.coverage.policy_version} · {state.data.coverage.crypto.ranked} crypto ranked ·{" "}
+              {state.data.coverage.companies.sectors_measured}/{state.data.coverage.companies.sectors_required} company sectors
+            </p>
           </div>
         </div>
-        <div class="coverage-summary-facts">
-          <span><strong>{state.data.coverage.crypto.ranked}</strong> crypto ranked</span>
-          <span><strong>{state.data.coverage.crypto.unmapped.length}</strong> need mapping</span>
-          <span><strong>{state.data.coverage.companies.sectors_measured}/{state.data.coverage.companies.sectors_required}</strong> company sectors</span>
-        </div>
         <details>
-          <summary>View coverage audit</summary>
+          <summary>Coverage audit</summary>
           <div class="coverage-audit-grid">
             <div>
               <strong>Explicitly excluded ({state.data.coverage.crypto.excluded.length})</strong>
@@ -368,27 +398,24 @@ export function ScannerView() {
         </details>
       </section>
 
-      <div class="canonical-rankings">
-        {CATEGORY_DETAILS.map((category) => (
-          <RankedCategory
-            key={category.key}
-            title={category.title}
-            description={category.description}
-            assets={state.data.category_rankings[category.key] ?? []}
-            behaviorLens={behaviorLens}
-          />
-        ))}
-      </div>
+      <button
+        type="button"
+        class="disclosure-button"
+        aria-expanded={companiesOpen}
+        onClick={() => setCompaniesOpen((open) => !open)}
+      >
+        <span>{companiesOpen ? "Hide individual companies" : `Individual companies · ${state.data.sectors.reduce((t, s) => t + s.coverage, 0)} ranked`}</span>
+        <span aria-hidden="true">{companiesOpen ? "−" : "+"}</span>
+      </button>
 
-      <details class="methodology-note canonical-methodology">
-        <summary>Measurement details</summary>
-        <p>{state.data.ranking_method.history}</p>
-        <p>Volatility is annualized from daily returns. Market role uses correlation to SPY and is descriptive, not a guaranteed hedge.</p>
-      </details>
-
-      <SectorLeadership data={state.data} />
-
-      <CompaniesPanel />
+      {companiesOpen ? (
+        <div class="detail-drawer">
+          <div class="detail-block">
+            <SectorLeadership data={state.data} />
+            <CompaniesPanel />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
