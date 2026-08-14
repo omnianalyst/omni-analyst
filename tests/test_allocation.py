@@ -9,15 +9,11 @@ forced and the other rules' answers are different.
 """
 
 import math
-import sys
 from datetime import date, timedelta
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omni.research.allocation import (
     MIN_ANNUAL_VOLATILITY,
@@ -27,7 +23,7 @@ from omni.research.allocation import (
     risk_balanced,
     top_measured,
 )
-from ops.shadow_book_record import next_session
+from omni.research.shadow_run import next_session
 
 SESSIONS = 200
 INDEX = pd.bdate_range("2025-01-01", periods=SESSIONS)

@@ -26,94 +26,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from datetime import UTC, datetime
 
-import pandas as pd
+from asyncpg.exceptions import UniqueViolationError
 
 from omni.config import settings
 from omni.db import connect
 from omni.research.allocation import AllocationRefused, equal_weight, risk_balanced, top_measured
 from omni.research.shadow_book import ShadowBookRefused, record_decision
-
-# The sector ETFs the store actually covers, plus the benchmark every book is
-# measured against. GLD, TLT and BND are deliberately absent: the store holds no
-# prices for them, so the two multi-asset rules the brief names cannot be run at
-# all, and running them over the subset that exists would be a different rule
-# under the same name.
-SECTORS = ["XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
-BENCHMARK = "SPY"
-
-# Charged against turnover into the recorded weights. 2 bps is the ETF spread
-# assumption `etf_replication` already uses; stating it on the row means a later
-# reader cannot discover a kinder number after seeing the outcome.
-COST_BPS = Decimal(2)
+from omni.research.shadow_run import BENCHMARK, COST_BPS, SECTORS, load_panel, next_session
 
 RULES = (equal_weight, top_measured, risk_balanced)
-
-_PANEL = """
-SELECT e.symbol, c.event_date, (c.value->>'close')::float8 AS close
-FROM claim c
-JOIN entity e ON e.id = c.entity_id
-WHERE c.claim_type = 'price_snapshot'
-  AND e.symbol = ANY($1::text[])
-  AND c.value->>'close' IS NOT NULL
-  AND c.audience_user_id IS NOT DISTINCT FROM $2
-ORDER BY e.symbol, c.event_date, c.knowledge_date
-"""
-
-_AUDIENCE = """
-SELECT c.audience_user_id
-FROM claim c
-JOIN entity e ON e.id = c.entity_id
-WHERE c.claim_type = 'price_snapshot' AND e.symbol = ANY($1::text[])
-GROUP BY c.audience_user_id
-ORDER BY count(*) DESC
-LIMIT 1
-"""
-
-
-async def load_panel(pool, symbols: list[str]) -> tuple[pd.DataFrame, object]:
-    """The adjusted-close panel for these symbols, from one audience.
-
-    Scoped to a single `audience_user_id` rather than pooled across all of them:
-    these are `byo_only` Polygon claims, and a panel assembled from two
-    audiences would be this deployment redistributing one user's licensed data
-    into another's decision record.
-    """
-    audience = await pool.fetchval(_AUDIENCE, symbols)
-    rows = await pool.fetch(_PANEL, symbols, audience)
-    frame = pd.DataFrame(rows, columns=["symbol", "date", "close"])
-    if frame.empty:
-        raise RuntimeError(
-            f"no price claims for {', '.join(symbols)} under audience {audience}"
-        )
-    frame["date"] = (
-        pd.to_datetime(frame["date"], utc=True).dt.tz_convert(None).dt.normalize()
-    )
-    frame = frame.drop_duplicates(["symbol", "date"], keep="last")
-    panel = frame.pivot(index="date", columns="symbol", values="close").sort_index()
-    return panel, audience
-
-
-def next_session(last_close: date, *, today: date) -> date:
-    """The first session a decision made now can apply to.
-
-    Two bounds, and the later one wins. The next business day after the last
-    close is the market's answer; strictly after today is the point-in-time
-    rule's answer, and it is what stops a run on a stale panel from stamping a
-    decision onto a session that has already happened. Holidays are not modelled
-    -- if the chosen day is a market holiday the scorer opens the window at the
-    first session on or after it, which is the same book either way.
-    """
-    candidate = last_close + timedelta(days=1)
-    while candidate.weekday() >= 5:
-        candidate += timedelta(days=1)
-    if candidate <= today:
-        candidate = today + timedelta(days=1)
-        while candidate.weekday() >= 5:
-            candidate += timedelta(days=1)
-    return candidate
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -142,6 +65,7 @@ async def main(argv: list[str] | None = None) -> int:
         print()
 
         recorded = 0
+        already = 0
         refused = 0
         for rule in RULES:
             try:
@@ -175,11 +99,27 @@ async def main(argv: list[str] | None = None) -> int:
                 refused += 1
                 print(f"                 REFUSED  {exc}")
                 continue
+            except UniqueViolationError:
+                # This session already has a decision for this book, and it
+                # stands. On a daily cron it is the ordinary outcome of a run
+                # whose panel has not advanced -- a weekend, a holiday, a second
+                # run the same evening -- so it is reported rather than raised.
+                #
+                # It is emphatically not upgraded to an upsert. Overwriting the
+                # earlier row with weights computed from a later panel is the
+                # revision this whole table exists to make impossible, and it
+                # would arrive looking like a bug fix.
+                already += 1
+                print(f"                 already recorded for {effective}; left as it was")
+                continue
             recorded += 1
             print(f"                 recorded {decision.id}")
 
         print()
-        print(f"recorded {recorded}, refused {refused}, of {len(RULES)} rules")
+        print(
+            f"recorded {recorded}, already present {already}, refused {refused}, "
+            f"of {len(RULES)} rules"
+        )
         return 0 if refused == 0 else 1
     finally:
         await client.close()

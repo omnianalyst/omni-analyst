@@ -70,9 +70,9 @@ containers     omni-v2-api-1        running
                omni_postgres        running   (TimescaleDB)
                caddy                shared, outside the app compose project
 
-migrations     57  (local tree and live DB agree)
-images         omni-api:69b73ce / omni-scheduler:69b73ce, also :latest
-rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = c39ea15
+migrations     58  (local tree and live DB agree)
+images         omni-api:d431866 / omni-scheduler:d431866, also :latest
+rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = 69b73ce
 release        v0.3.0 = dad01c7 -- the deployed image (69b73ce) plus docs only
 host path      /home/user/omni-v2
 public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
@@ -119,9 +119,10 @@ SOL out of six tradeable candidates.
 ### Scheduled work
 
 ```
-17 */6 * * *   ops/launch_sweep.sh
-40 7   * * *   ops/nav_snapshot.sh
-0  21  * * *   ops/carry_cycle.sh     21:00 America/Vancouver = 04:00/05:00 UTC
+17 */6 * * *     ops/launch_sweep.sh
+40 7   * * *     ops/nav_snapshot.sh
+30 18  * * 1-5   ops/shadow_book.sh    after the US close, before the next open
+0  21  * * *     ops/carry_cycle.sh    21:00 America/Vancouver = 04:00/05:00 UTC
 ```
 
 The carry runner independently refuses any cycle outside 03:00-07:00 UTC or
@@ -705,21 +706,35 @@ venue state on startup and on a bounded scheduler interval.
 outcome, unavailable integrations do not look configurable, secrets never reach
 the browser, and a restart preserves intended state.
 
-### P2 — ETF allocation experiment and forward shadow book
+### P2 — ETF allocation experiment and forward shadow book — DONE
 
-More promising than picking individual stocks. Test fixed diversified allocation,
-equal-weight sector ETFs, top-three measured sector ETFs, risk-balanced sector
-ETFs, and a stocks/international/bonds/gold/crypto portfolio, under static,
-quarterly and threshold rebalancing.
+Full report: `docs/ETF_ALLOCATION_EXPERIMENT.md`.
 
-**Start the forward shadow book now.** Persist every decision, its score inputs,
-target weights and timestamp *before* the following session. Never revise an old
-decision with new data. Compare to fixed ETF baselines after explicit costs. Do
-not move capital until a predeclared sample and gate pass.
+**The experiment answered no.** 0 of 9 rule/cadence combinations beat SPY
+buy-and-hold on CAGR after costs, and none beat it on Sharpe. Equal weight and
+risk-balanced buy a real 3.7-4.3 point drawdown improvement and pay about 5
+points of CAGR for it. The price-quality ranker fails for the third independent
+time, at -11.60% to -12.93% excess. Cadence barely matters -- under 0.9 points
+of CAGR separates static, quarterly and threshold within any rule.
 
-For decision-grade historical tests, obtain dated ETF constituents and weights,
-ticker and share-class history, delisting/merger/bankruptcy returns, reinvested
-distributions, roughly ten years of data, and an untouched recent holdout.
+Two of the five briefed rules were **not run and not approximated**: the store
+holds no GLD, TLT or BND, so fixed diversified allocation and the
+stocks/international/bonds/gold/crypto portfolio have no data, and a version
+restricted to the assets that happen to be present would be a different rule
+under the same name. Ingesting those three is the work that would unblock them.
+
+**The forward shadow book is live** (migration 058) and recording all three
+rules daily at 18:30 local via `ops/shadow_book.sh`. Decisions are written
+before the session they apply to -- enforced in Python and again by a CHECK
+constraint -- and both tables refuse UPDATE and DELETE by trigger. It is the
+only evidence that could upgrade the result above from exploratory, and it
+cannot be backfilled.
+
+Still open, and unchanged: for decision-grade historical tests, obtain dated ETF
+constituents and weights, ticker and share-class history, delisting/merger/
+bankruptcy returns, reinvested distributions, roughly ten years of data, and an
+untouched recent holdout. **Do not move capital** until a predeclared sample and
+gate pass.
 
 ### P3 — complete Discover coverage — DONE, except by external blockers
 
@@ -919,6 +934,7 @@ to make a global invocation green.
 | `_orchestrator/TRADING_API_CONTRACT.md` | The frozen JSON shape API and UI share | Anything else |
 | `_orchestrator/RESEARCH_AGENDA.md` | Ranked directions, with priors and traps | State |
 | `docs/ETF_PORTFOLIO_EXPERIMENT.md` | The ETF-versus-constituent result | Live allocation |
+| `docs/ETF_ALLOCATION_EXPERIMENT.md` | The allocation-across-ETFs result, and the shadow book it started | Live allocation |
 | `docs/NEXT_SESSION.md` | The brief for the work left: P0 tag, P2, P5 | Current state |
 | `docs/HISTORY.md` | v1 lineage, retired strategies, superseded docs | Anything current |
 | `DEPLOY.md` | Detailed build and configuration reference | Live topology |
@@ -1134,3 +1150,57 @@ Naming `api scheduler` on `docker compose up -d` matters. A bare `up -d` also
 starts the compose `edge` service, which fails on `Bind for 0.0.0.0:80` — the
 shared `caddy` container owns port 80 — and leaves a dead `omni_edge` container
 behind. The offline `docker commit` patch in §13 is retired; normal builds work.
+
+---
+
+## 15. Changes on 2026-08-14 (P2)
+
+### The forward shadow book (migration 058)
+
+Allocation decisions written before the session they apply to, in a table that
+cannot be edited. Two constraints carry it, both enforced by the database rather
+than by convention:
+
+- **`effective_from` must be strictly after the day the row was written.** A
+  decision recorded after the close it claims to precede is a perfect forecast
+  and is indistinguishable from an honest one by inspection. Checked in Python
+  for the readable error and again by a CHECK constraint, cast in UTC explicitly
+  so the same row cannot pass on one connection and fail on another.
+- **UPDATE and DELETE are refused by trigger** on `shadow_decision` and
+  `shadow_outcome`. A shadow book that can be edited is a backtest wearing a
+  costume. DELETE is refused alongside UPDATE because delete-then-insert is an
+  update with an extra step, and it is the first shape anyone reaches for when
+  the unique key conflicts. TRUNCATE is deliberately left open — it destroys the
+  record rather than flattering it, and blocking it would leave the suite unable
+  to reset between cases.
+
+Outcomes are a separate table so the writer can never set them, matching the
+prediction ledger. Scoring refuses a missing mark rather than dropping the name:
+a dropped holding is a costless liquidation at an unobserved price.
+
+Recording began 2026-08-13, effective 2026-08-17, for three books. Verified
+against production: UPDATE and DELETE both refused, all rows satisfy the
+point-in-time property.
+
+### The allocation experiment answered no
+
+Full report: `docs/ETF_ALLOCATION_EXPERIMENT.md`. 0 of 9 combinations beat SPY
+buy-and-hold. The price-quality ranker fails for the third independent time.
+This does not carry the constituent experiment's survivorship bias — the eleven
+SPDR sector ETFs all existed across the window — but two years is one regime
+with no holdout.
+
+### An operational note worth keeping
+
+The deployed image ships only `src/` and `migrations/`. An ops script is piped in
+over stdin, so **anything it imports must be installed** — the first version of
+the recorder kept `load_panel` in `ops/`, which worked locally and failed in
+production with `No module named 'ops'`. Shared logic belongs in
+`src/omni/research/`, which is where `shadow_run.py` now lives.
+
+A second run on the same day hits the one-decision-per-session unique key. That
+is reported as "already recorded, left as it was" and exits 0, because on a daily
+cron it is the ordinary outcome of a panel that has not advanced. It is
+deliberately not an upsert: overwriting the earlier row with weights computed
+from a later panel is exactly the revision the table exists to prevent, and it
+would arrive looking like a bug fix.

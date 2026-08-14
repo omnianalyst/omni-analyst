@@ -22,7 +22,7 @@ from omni.config import settings
 from omni.db import connect
 from omni.research.allocation import equal_weight, risk_balanced, top_measured
 from omni.research.etf_allocation import run_allocation_experiment, summary
-from ops.shadow_book_record import BENCHMARK, SECTORS, load_panel
+from omni.research.shadow_run import BENCHMARK, SECTORS, load_panel
 
 RULES = {
     "equal_weight": equal_weight,
