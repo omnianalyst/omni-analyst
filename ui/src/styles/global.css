@@ -5463,36 +5463,93 @@ tr.row.tier-unknown td:first-child {
 .scanner-view .disclosure-button {
   padding: 11px 16px;
 }
-.blend-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  align-self: flex-start;
-  padding: 7px 12px;
+.scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 10px;
+}
+.scenario-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
   border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
+  border-radius: var(--r-md);
+  background: rgba(11, 17, 26, 0.54);
 }
-.blend-toggle:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
+.scenario-card header {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
 }
-.blend-toggle.active {
-  border-color: rgba(92, 197, 255, 0.45);
-  background: rgba(92, 197, 255, 0.08);
-  color: var(--text);
+.scenario-dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
-.blend-toggle.active .toggle-track {
-  border-color: rgba(92, 197, 255, 0.45);
-  background: rgba(92, 197, 255, 0.12);
+.scenario-card h3 {
+  margin: 0;
+  font-size: 13px;
 }
-.blend-toggle.active .toggle-track > span {
-  background: var(--accent);
-  transform: translateX(13px);
+.scenario-card small {
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.scenario-pick {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "eyebrow eyebrow"
+    "symbol return"
+    "name return";
+  align-items: center;
+  gap: 2px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: rgba(16, 26, 43, 0.5);
+}
+.scenario-pick .eyebrow {
+  grid-area: eyebrow;
+  margin: 0 0 4px;
+  font-size: 9px;
+}
+.scenario-pick strong:first-of-type {
+  grid-area: symbol;
+  font-family: var(--mono);
+  font-size: 15px;
+}
+.scenario-pick small {
+  grid-area: name;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scenario-pick .top-pick-return {
+  grid-area: return;
+  font-size: 13px;
+}
+.scenario-alternatives {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.scenario-alternatives li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.scenario-alternatives .top-pick-return {
+  font-size: 11px;
 }
 .blend {
   display: flex;
