@@ -11,6 +11,7 @@ from omni.api.scanner import (
     _compute_metrics,
     _correlation_to_market,
     _drop_broken_seed_prefix,
+    _feed_defect_reasons,
     _market_behavior,
     _overall_leaders,
     _payload,
@@ -279,3 +280,70 @@ def test_a_series_of_mostly_broken_prints_truncates_to_honest_emptiness() -> Non
     dropped = _drop_broken_seed_prefix(prices)
 
     assert list(dropped.values) == [100.0, 102.0, 99.0, 101.0]
+
+
+def _flip_series(flip_count: int) -> pd.Series:
+    """A feed alternating between a real ~$3 scale and a broken ~$0.5 scale --
+    the measured TON-USD shape. Each flip prints a move past 3x."""
+    index = pd.date_range("2024-01-01", periods=200, freq="D", tz=UTC)
+    values: list[float] = []
+    level = 3.0
+    for day in range(200):
+        level *= 1.0 + (0.01 if day % 2 == 0 else -0.008)
+        if day in [50, 80, 110, 140, 170, 190][:flip_count]:
+            values.append(0.5)
+        else:
+            values.append(level)
+    return pd.Series(values, index=index)
+
+
+def test_a_feed_flipping_between_scales_is_refused_not_priced() -> None:
+    """TON-USD measured 2026-08-14: six daily moves beyond 3x from a feed
+    oscillating between a wrong and a right price scale. A cluster of
+    impossible moves is a feed defect; the asset must be refused, not ranked
+    at the garbage volatility the series implies."""
+    reasons = _feed_defect_reasons(_flip_series(6), census_price=None)
+
+    assert reasons, "a scale-flipping feed produced no defect reason"
+    assert "6 daily moves" in reasons[0]
+
+
+def test_one_real_mania_print_is_not_a_feed_defect() -> None:
+    """DOGE really printed +355% on 2021-04-16 -- the single worst legitimate
+    day in the ranked universe. One such day must not refuse the feed; the
+    check exists to remove broken feeds, not history."""
+    series = _flip_series(1)
+
+    assert _feed_defect_reasons(series, census_price=None) == []
+
+
+def test_a_wrong_scale_tail_disagrees_with_the_live_census_price() -> None:
+    """TON's second shape: a smooth, internally consistent tail at the wrong
+    price level ($0.005 against a live $3). No move check can catch a
+    consistent series; the census cross-check is what does."""
+    index = pd.date_range("2024-01-01", periods=200, freq="D", tz=UTC)
+    tail = pd.Series([0.005 * (1 + 0.001 * day) for day in range(200)], index=index)
+
+    reasons = _feed_defect_reasons(tail, census_price=3.0)
+
+    assert len(reasons) == 1
+    assert "$0.005" in reasons[0] and "$3" in reasons[0]
+
+
+def test_a_tail_matching_the_census_price_is_kept() -> None:
+    index = pd.date_range("2024-01-01", periods=200, freq="D", tz=UTC)
+    tail = pd.Series([3.0 * (1 + 0.001 * day) for day in range(200)], index=index)
+
+    assert _feed_defect_reasons(tail, census_price=3.2) == []
+
+
+def test_without_a_census_price_the_price_check_degrades_to_not_running() -> None:
+    """The registry-fallback census carries no live price. The move check
+    still refuses a flipping feed; the price check must degrade honestly
+    rather than trust or condemn the tail it cannot see."""
+    assert len(_feed_defect_reasons(_flip_series(6), census_price=None)) == 1
+    tail = pd.Series(
+        [0.005 * (1 + 0.001 * day) for day in range(200)],
+        index=pd.date_range("2024-01-01", periods=200, freq="D", tz=UTC),
+    )
+    assert _feed_defect_reasons(tail, census_price=None) == []

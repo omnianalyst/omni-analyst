@@ -157,7 +157,15 @@ def evaluate_crypto_census(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if coin_id in EXCLUDED_CRYPTO_IDS:
             excluded.append({**item, "reason": EXCLUDED_CRYPTO_IDS[coin_id]})
         elif coin_id in CRYPTO_REGISTRY:
-            included.append({**item, "registered_symbol": CRYPTO_REGISTRY[coin_id]["symbol"]})
+            included.append({
+                **item,
+                "registered_symbol": CRYPTO_REGISTRY[coin_id]["symbol"],
+                # Carried so the display feed's latest close can be cross-checked
+                # against the live price it claims to track. Without it (registry
+                # fallback), the check degrades to not running rather than to
+                # trusting the display feed alone.
+                "price": row.get("current_price"),
+            })
         else:
             # An unmapped asset stays unmapped whether or not anyone has looked
             # into why. The recorded finding replaces the generic sentence, and

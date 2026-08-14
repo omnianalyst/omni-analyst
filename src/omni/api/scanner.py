@@ -200,6 +200,47 @@ def _drop_broken_seed_prefix(prices: pd.Series) -> pd.Series:
     return prices
 
 
+# A display feed can rot after its mapping was verified -- measured 2026-08-14,
+# TON-USD flipped between a ~$0.5 scale and the real ~$3 market through mid-2025
+# and ended on a smooth but wrong ~$0.005 tail. Two runtime checks catch the two
+# shapes, and both refuse rather than price the defect:
+#
+# * a cluster of impossible daily moves. Measured across the whole ranked
+#   universe after seed truncation, no legitimate asset has more than ONE
+#   daily move beyond 3x -- DOGE's real +355% mania print is the single worst
+#   case -- while the broken TON feed carries six. One is a mania print; a
+#   cluster is a feed flipping between scales.
+# * a current-price disagreement. The latest display close is compared to the
+#   same asset's live CoinGecko price (the census already fetches it); a
+#   factor-of-4 gap is a wrong instrument or scale, not a market move.
+IMPOSSIBLE_MOVE_RETURN = 2.0
+MAX_IMPOSSIBLE_MOVES = 1
+CENSUS_PRICE_FACTOR = 4.0
+
+
+def _feed_defect_reasons(series: pd.Series, census_price: float | None) -> list[str]:
+    series = series.dropna()
+    if len(series) < 2:
+        return []
+    reasons: list[str] = []
+    ret = series.pct_change().dropna()
+    wild = int((ret.abs() > IMPOSSIBLE_MOVE_RETURN).sum())
+    if wild > MAX_IMPOSSIBLE_MOVES:
+        reasons.append(
+            f"display feed carries {wild} daily moves beyond 3x; no ranked asset "
+            f"has more than one, so the feed is flipping between price scales"
+        )
+    latest = float(series.iloc[-1])
+    if census_price is not None and census_price > 0:
+        factor = latest / census_price
+        if factor > CENSUS_PRICE_FACTOR or factor < 1 / CENSUS_PRICE_FACTOR:
+            reasons.append(
+                f"display feed's last close ${latest:.6g} disagrees with the live "
+                f"census price ${census_price:.6g} by more than {CENSUS_PRICE_FACTOR:.0f}x"
+            )
+    return reasons
+
+
 def _fetch_prices() -> pd.DataFrame:
     import yfinance as yf
 
@@ -646,6 +687,7 @@ async def _build_scanner(app: App, audience) -> dict:
     all_entries: list[dict] = []
     unavailable_assets: list[str] = []
     insufficient_crypto: list[dict[str, Any]] = []
+    feed_defects: list[dict[str, Any]] = []
     for bucket_name, assets in ASSETS.items():
         bucket_assets: list[dict] = []
         for a in assets:
@@ -661,6 +703,20 @@ async def _build_scanner(app: App, audience) -> dict:
                     "symbol": symbol,
                     "observations": observations,
                     "required": MIN_CRYPTO_OBSERVATIONS,
+                })
+                continue
+            census_price = (
+                eligible_crypto[symbol].get("price")
+                if a["asset_class"] == "crypto"
+                else None
+            )
+            defect_reasons = _feed_defect_reasons(prices[symbol], census_price)
+            if defect_reasons:
+                feed_defects.append({
+                    "symbol": symbol,
+                    "reasons": defect_reasons,
+                    "last_close": float(prices[symbol].dropna().iloc[-1]),
+                    **({"census_price": census_price} if census_price is not None else {}),
                 })
                 continue
             metrics = _compute_metrics(prices[symbol], a["asset_class"])
@@ -713,10 +769,12 @@ async def _build_scanner(app: App, audience) -> dict:
         crypto_census["live"]
         and not crypto_census["unmapped"]
         and not insufficient_crypto
+        and not feed_defects
     )
     coverage = {
         "policy_version": POLICY_VERSION,
         "complete": company_complete and crypto_complete and not unavailable_assets,
+        "feed_defects": feed_defects,
         "crypto": {
             "source": crypto_census["source"],
             "live": crypto_census["live"],

@@ -62,6 +62,12 @@ interface ScannerData {
   coverage: {
     policy_version: string;
     complete: boolean;
+    feed_defects?: Array<{
+      symbol: string;
+      reasons: string[];
+      last_close: number;
+      census_price?: number;
+    }>;
     crypto: {
       source: string;
       live: boolean;
@@ -669,8 +675,23 @@ export function ScannerView() {
                 Policy {coverage.policy_version} · {coverage.crypto.ranked} crypto ranked ·{" "}
                 {coverage.crypto.unmapped.length} need mapping ·{" "}
                 {coverage.companies.sectors_measured}/{coverage.companies.sectors_required} company sectors
+                {(coverage.feed_defects?.length ?? 0) > 0
+                  ? ` · ${coverage.feed_defects!.length} refused for a broken price feed`
+                  : ""}
               </p>
               <div class="coverage-audit-grid">
+                {(coverage.feed_defects?.length ?? 0) > 0 ? (
+                  <div>
+                    <strong>Broken price feeds ({coverage.feed_defects!.length})</strong>
+                    <ul class="coverage-audit-list">
+                      {coverage.feed_defects!.map((defect) => (
+                        <li key={defect.symbol}>
+                          <span>{defect.symbol}</span> — refused, not ranked: {defect.reasons.join("; ")}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
                 <div>
                   <strong>Explicitly excluded ({coverage.crypto.excluded.length})</strong>
                   <p>{coverage.crypto.excluded.length
