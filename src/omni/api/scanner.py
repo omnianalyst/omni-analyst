@@ -178,6 +178,28 @@ async def _crypto_census() -> dict[str, Any]:
         }
 
 
+# A price series from a provider sometimes opens with a broken seed print --
+# observed 2026-08-14 on five yfinance crypto feeds (AAVE, TAO, TON, WLD, SHIB):
+# a first close one or two orders of magnitude off (AAVE seeded $0.52 against a
+# real $53), implying a single-day move of 90x-7000x. No ranked asset has ever
+# moved 10x in one calendar day, so a 10x multiple (a +900% daily return) is a
+# feed defect, not a market event -- and letting it through priced AAVE at
+# 4,207% annualised volatility (true: ~109%) and corrupted every CAGR that
+# divides by the start price. The series is truncated to start after the break:
+# the seed print is discarded, not corrected to a guessed value.
+IMPOSSIBLE_DAILY_RETURN = 9.0
+
+
+def _drop_broken_seed_prefix(prices: pd.Series) -> pd.Series:
+    while len(prices) > 2:
+        ret = prices.pct_change().dropna()
+        broken = ret[ret.abs() > IMPOSSIBLE_DAILY_RETURN]
+        if broken.empty:
+            return prices
+        prices = prices.loc[broken.index[0]:]
+    return prices
+
+
 def _fetch_prices() -> pd.DataFrame:
     import yfinance as yf
 
@@ -198,7 +220,9 @@ def _fetch_prices() -> pd.DataFrame:
     if len(all_tickers) == 1:
         asset = ASSETS[next(iter(ASSETS.keys()))][0]
         try:
-            frames[asset["symbol"]] = raw[("Close", asset["yf"])].dropna()
+            series = _drop_broken_seed_prefix(raw[("Close", asset["yf"])].dropna())
+            if len(series) > 0:
+                frames[asset["symbol"]] = series
         except (KeyError, TypeError):
             pass
     else:
@@ -208,7 +232,9 @@ def _fetch_prices() -> pd.DataFrame:
                     col = raw[a["yf"]]["Close"]
                     s = col.dropna() if hasattr(col, "dropna") else None
                     if s is not None and not s.empty:
-                        frames[a["symbol"]] = s
+                        s = _drop_broken_seed_prefix(s)
+                        if not s.empty:
+                            frames[a["symbol"]] = s
                 except (KeyError, TypeError):
                     continue
 

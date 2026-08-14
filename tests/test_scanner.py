@@ -10,6 +10,7 @@ from omni.api.scanner import (
     SECTOR_RETURN_WINDOW,
     _compute_metrics,
     _correlation_to_market,
+    _drop_broken_seed_prefix,
     _market_behavior,
     _overall_leaders,
     _payload,
@@ -227,3 +228,54 @@ def test_payload_publishes_a_risk_census_for_every_category() -> None:
     assert set(census) == {"stocks", "defensive", "crypto"}
     for category in census.values():
         assert category["high"] == 0
+
+
+def test_a_broken_seed_print_is_dropped_not_priced() -> None:
+    """The AAVE defect, reconstructed. Yahoo seeded AAVE-USD at $0.52 against a
+    real first close of $53 -- a single 100x day that reported as 4,207%
+    annualised volatility (the true figure was ~109%). The seed must be
+    truncated away, and the honest vol of the remaining series is what shows.
+    """
+    index = pd.date_range("2024-01-01", periods=501, freq="D", tz=UTC)
+    rng = __import__("numpy").random.default_rng(11)
+    steps = rng.normal(0.0005, 0.02, size=500).cumsum()
+    real = pd.Series(100.0 * __import__("numpy").exp(steps), index=index[1:])
+    seeded = pd.concat([pd.Series([1.0], index=index[:1]), real])
+
+    dropped = _drop_broken_seed_prefix(seeded)
+
+    assert dropped.index[0] == real.index[0], "the seed print is gone"
+    assert len(dropped) == 500
+    metrics = _compute_metrics(dropped, "crypto")
+    assert metrics["volatility"] < 60, (
+        f"{metrics['volatility']}% vol -- the seed survived and priced a 100x day"
+    )
+    # Discrimination: the untruncated series prices the seed as an impossible
+    # market, which is the defect these assertions exist to catch.
+    poisoned = _compute_metrics(seeded, "crypto")
+    assert poisoned["volatility"] > 500
+
+
+def test_a_real_crash_day_is_not_treated_as_a_broken_seed() -> None:
+    """The floor must not eat genuine history. Crypto majors have printed
+    -80% days; a drop inside the 10x multiple stays in the series, and only a
+    jump past it truncates."""
+    index = pd.date_range("2024-01-01", periods=500, freq="D", tz=UTC)
+    values = [100.0] * 250 + [20.0] + [21.0] * 249  # -80% single day
+    prices = pd.Series(values, index=index)
+
+    dropped = _drop_broken_seed_prefix(prices)
+
+    assert len(dropped) == 500, "a real crash day is kept"
+    assert dropped.index[0] == index[0]
+
+
+def test_a_series_of_mostly_broken_prints_truncates_to_honest_emptiness() -> None:
+    """Two seeds in a row (0.01 -> 1 -> 100): the loop keeps cutting until the
+    series is continuous. What survives is measured; nothing is invented."""
+    index = pd.date_range("2024-01-01", periods=6, freq="D", tz=UTC)
+    prices = pd.Series([0.01, 1.0, 100.0, 102.0, 99.0, 101.0], index=index)
+
+    dropped = _drop_broken_seed_prefix(prices)
+
+    assert list(dropped.values) == [100.0, 102.0, 99.0, 101.0]
