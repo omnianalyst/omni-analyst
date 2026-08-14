@@ -57,7 +57,7 @@ interface ScannerData {
   category_rankings: Record<AssetClass, AssetMetric[]>;
   sectors: SectorLeaders[];
   overall_leaders: OverallLeader[];
-  ranking_method: { balanced: string; history: string; scope: string };
+  ranking_method: { balanced: string; history: string; scope: string; risk_tier: string };
   sector_coverage: { available: number; total: number; window_sessions: number };
   coverage: {
     policy_version: string;
@@ -125,10 +125,11 @@ const TIER_COLUMNS: Array<{
   tier: Exclude<RiskTier, "unrated">;
   title: string;
   hint: string;
+  accent: string;
 }> = [
-  { tier: "low", title: "Steady", hint: "under 10% volatility" },
-  { tier: "medium", title: "Balanced", hint: "10\u201330% volatility" },
-  { tier: "high", title: "Aggressive", hint: "30%+ volatility" },
+  { tier: "low", title: "Steady", hint: "under 10% volatility", accent: "var(--tier-fresh)" },
+  { tier: "medium", title: "Balanced", hint: "10\u201330% volatility", accent: "var(--accent)" },
+  { tier: "high", title: "Aggressive", hint: "30%+ volatility", accent: "var(--tier-aging)" },
 ];
 
 // The market angles a balanced portfolio holds alongside growth: assets that
@@ -139,8 +140,8 @@ const HEDGE_ROLES: Array<{
   title: string;
   hint: string;
 }> = [
-  { behavior: "counterweight", title: "Moves against stocks", hint: "correlation to SPY at or below \u22120.15" },
-  { behavior: "diversifier", title: "Marches to its own drum", hint: "correlation to SPY below 0.35" },
+  { behavior: "counterweight", title: "Moves against stocks", hint: "correlation to SPY \u2264 \u22120.15" },
+  { behavior: "diversifier", title: "Marches to its own drum", hint: "correlation to SPY < 0.35" },
 ];
 
 function percent(value: number | null | undefined): string {
@@ -223,10 +224,8 @@ function PortfolioBuilder({ data }: { data: ScannerData }) {
       <div class="top-picks-heading">
         <h2>Build a balanced portfolio</h2>
         <p>
-          Top assets by median annual return at each level of risk -- the median of every
-          complete calendar year each asset has measured ({MIN_COMPLETE_YEARS}+ years required).
-          Pick a core from each column, then hold the angles below to stay balanced when the
-          market turns.
+          Median annual return over each asset&apos;s complete measured history (3-year minimum).
+          One core from each column; the angles below balance against the market.
         </p>
       </div>
       <div class="top-picks-grid">
@@ -236,7 +235,7 @@ function PortfolioBuilder({ data }: { data: ScannerData }) {
             .sort(byMedian)
             .slice(0, TOP_PER_TIER);
           return (
-            <article class="top-picks-column" key={column.tier}>
+            <article class="top-picks-column" key={column.tier} style={{ borderTopColor: column.accent }}>
               <h3>{column.title}</h3>
               <small class="builder-hint">{column.hint}</small>
               {assets.length === 0 ? (
@@ -400,6 +399,7 @@ function SectorLeadership({ data }: { data: ScannerData }) {
 
 export function ScannerView() {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [rankingsOpen, setRankingsOpen] = useState(false);
   const [companiesOpen, setCompaniesOpen] = useState(false);
 
   useEffect(() => {
@@ -417,10 +417,15 @@ export function ScannerView() {
   if (state.kind === "loading") return <Loading label="Ranking the measured market…" />;
   if (state.kind === "error") return <ErrorState message={state.message} detail={state.detail} />;
 
+  const assetCount = Object.values(state.data.category_rankings)
+    .reduce((total, assets) => total + assets.length, 0);
+  const companyCount = state.data.sectors.reduce((total, sector) => total + sector.coverage, 0);
+  const { coverage } = state.data;
+
   return (
     <div class="scanner-view product-page">
       <header class="discover-page-heading">
-        <div><h1>Discover</h1><p>The best investments across the measured universe, ranked strongest to weakest.</p></div>
+        <div><h1>Discover</h1><p>Everything measured, funnelled to the picks that matter.</p></div>
         <div class="discover-compact-meta">
           <time dateTime={state.data.as_of}>Updated {new Date(state.data.as_of).toLocaleString()}</time>
         </div>
@@ -428,71 +433,27 @@ export function ScannerView() {
 
       <PortfolioBuilder data={state.data} />
 
-      <div class="canonical-rankings">
-        {CATEGORY_DETAILS.map((category) => (
-          <RankedCategory
-            key={category.key}
-            title={category.title}
-            description={category.description}
-            assets={state.data.category_rankings[category.key] ?? []}
-          />
-        ))}
-      </div>
-
-      <details class="methodology-note canonical-methodology">
-        <summary>How these are measured</summary>
-        <p>{state.data.ranking_method.balanced} {state.data.ranking_method.scope}</p>
-        <p>{state.data.ranking_method.history}</p>
-        <p>Volatility is annualized from daily returns. Market role uses correlation to SPY and is descriptive, not a guaranteed hedge.</p>
-      </details>
-
-      <section class={`coverage-summary ${state.data.coverage.complete ? "coverage-complete" : "coverage-partial"}`}>
-        <div class="coverage-summary-title">
-          <span class="health-orb" aria-hidden="true" />
-          <div>
-            <strong>{state.data.coverage.complete ? "Coverage complete" : "Coverage is still closing"}</strong>
-            <p>
-              Policy {state.data.coverage.policy_version} · {state.data.coverage.crypto.ranked} crypto ranked ·{" "}
-              {state.data.coverage.companies.sectors_measured}/{state.data.coverage.companies.sectors_required} company sectors
-            </p>
-          </div>
+      <button
+        type="button"
+        class="disclosure-button"
+        aria-expanded={rankingsOpen}
+        onClick={() => setRankingsOpen((open) => !open)}
+      >
+        <span>{rankingsOpen ? "Hide every measured asset" : `Every measured asset · ${assetCount} ranked`}</span>
+        <span aria-hidden="true">{rankingsOpen ? "−" : "+"}</span>
+      </button>
+      {rankingsOpen ? (
+        <div class="detail-drawer">
+          {CATEGORY_DETAILS.map((category) => (
+            <RankedCategory
+              key={category.key}
+              title={category.title}
+              description={category.description}
+              assets={state.data.category_rankings[category.key] ?? []}
+            />
+          ))}
         </div>
-        <details>
-          <summary>Coverage audit</summary>
-          <div class="coverage-audit-grid">
-            <div>
-              <strong>Explicitly excluded ({state.data.coverage.crypto.excluded.length})</strong>
-              <p>{state.data.coverage.crypto.excluded.length
-                ? state.data.coverage.crypto.excluded.map((item) => `${item.symbol}: ${item.reason}`).join(" · ")
-                : "No live exclusions returned."}</p>
-            </div>
-            <div>
-              <strong>Needs a verified mapping ({state.data.coverage.crypto.unmapped.length})</strong>
-              {state.data.coverage.crypto.unmapped.length ? (
-                <ul class="coverage-audit-list">
-                  {state.data.coverage.crypto.unmapped.map((item) => (
-                    <li key={item.coin_id}>
-                      <span>#{item.rank} {item.symbol}</span> — {item.reason}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p>Every eligible census asset is mapped.</p>
-              )}
-            </div>
-            <div>
-              <strong>Insufficient price history ({state.data.coverage.crypto.insufficient_history.length})</strong>
-              <p>{state.data.coverage.crypto.insufficient_history.length
-                ? state.data.coverage.crypto.insufficient_history.map((item) => `${item.symbol}: ${item.observations}/${item.required} observations`).join(" · ")
-                : "Every mapped asset meets the history floor."}</p>
-            </div>
-            <div>
-              <strong>Industries</strong>
-              <p>{state.data.coverage.industries.reason}</p>
-            </div>
-          </div>
-        </details>
-      </section>
+      ) : null}
 
       <button
         type="button"
@@ -500,10 +461,9 @@ export function ScannerView() {
         aria-expanded={companiesOpen}
         onClick={() => setCompaniesOpen((open) => !open)}
       >
-        <span>{companiesOpen ? "Hide individual companies" : `Individual companies · ${state.data.sectors.reduce((t, s) => t + s.coverage, 0)} ranked`}</span>
+        <span>{companiesOpen ? "Hide individual companies" : `Individual companies · ${companyCount} ranked`}</span>
         <span aria-hidden="true">{companiesOpen ? "−" : "+"}</span>
       </button>
-
       {companiesOpen ? (
         <div class="detail-drawer">
           <div class="detail-block">
@@ -512,6 +472,62 @@ export function ScannerView() {
           </div>
         </div>
       ) : null}
+
+      <footer class="scanner-foot">
+        <div class="scanner-foot-row">
+          <details class="foot-details">
+            <summary>Method</summary>
+            <div class="foot-panel">
+              <p>{state.data.ranking_method.balanced} {state.data.ranking_method.scope}</p>
+              <p>{state.data.ranking_method.history}</p>
+              <p>{state.data.ranking_method.risk_tier}</p>
+              <p>Volatility is annualized from daily returns. Market role uses correlation to SPY and is descriptive, not a guaranteed hedge.</p>
+            </div>
+          </details>
+          <details class="foot-details">
+            <summary>Coverage · {coverage.complete ? "complete" : "closing"}</summary>
+            <div class="foot-panel">
+              <p>
+                Policy {coverage.policy_version} · {coverage.crypto.ranked} crypto ranked ·{" "}
+                {coverage.crypto.unmapped.length} need mapping ·{" "}
+                {coverage.companies.sectors_measured}/{coverage.companies.sectors_required} company sectors
+              </p>
+              <div class="coverage-audit-grid">
+                <div>
+                  <strong>Explicitly excluded ({coverage.crypto.excluded.length})</strong>
+                  <p>{coverage.crypto.excluded.length
+                    ? coverage.crypto.excluded.map((item) => `${item.symbol}: ${item.reason}`).join(" · ")
+                    : "No live exclusions returned."}</p>
+                </div>
+                <div>
+                  <strong>Needs a verified mapping ({coverage.crypto.unmapped.length})</strong>
+                  {coverage.crypto.unmapped.length ? (
+                    <ul class="coverage-audit-list">
+                      {coverage.crypto.unmapped.map((item) => (
+                        <li key={item.coin_id}>
+                          <span>#{item.rank} {item.symbol}</span> — {item.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>Every eligible census asset is mapped.</p>
+                  )}
+                </div>
+                <div>
+                  <strong>Insufficient price history ({coverage.crypto.insufficient_history.length})</strong>
+                  <p>{coverage.crypto.insufficient_history.length
+                    ? coverage.crypto.insufficient_history.map((item) => `${item.symbol}: ${item.observations}/${item.required} observations`).join(" · ")
+                    : "Every mapped asset meets the history floor."}</p>
+                </div>
+                <div>
+                  <strong>Industries</strong>
+                  <p>{coverage.industries.reason}</p>
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+      </footer>
     </div>
   );
 }
