@@ -119,7 +119,29 @@ const BEHAVIOR_LABELS: Record<MarketBehavior, string> = {
   unrated: "Not measured",
 };
 
-const TOP_PICKS_PER_CLASS = 3;
+const TOP_PER_TIER = 5;
+
+const TIER_COLUMNS: Array<{
+  tier: Exclude<RiskTier, "unrated">;
+  title: string;
+  hint: string;
+}> = [
+  { tier: "low", title: "Steady", hint: "under 10% volatility" },
+  { tier: "medium", title: "Balanced", hint: "10\u201330% volatility" },
+  { tier: "high", title: "Aggressive", hint: "30%+ volatility" },
+];
+
+// The market angles a balanced portfolio holds alongside growth: assets that
+// move against stocks, and assets that march to their own drum. They are how
+// the page answers "what protects this when the market turns".
+const HEDGE_ROLES: Array<{
+  behavior: "counterweight" | "diversifier";
+  title: string;
+  hint: string;
+}> = [
+  { behavior: "counterweight", title: "Moves against stocks", hint: "correlation to SPY at or below \u22120.15" },
+  { behavior: "diversifier", title: "Marches to its own drum", hint: "correlation to SPY below 0.35" },
+];
 
 function percent(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
@@ -131,43 +153,96 @@ function tone(value: number | null | undefined): string {
   return value > 0 ? "value-positive" : value < 0 ? "value-negative" : "";
 }
 
-// The front door of Discover: the strongest few assets in each class, one row
-// each. Everything below it is the supporting depth.
-function TopPicks({ data }: { data: ScannerData }) {
+function classLabel(asset: AssetMetric): string {
+  const entry = CATEGORY_DETAILS.find((category) => category.key === asset.asset_class);
+  return entry ? entry.title : asset.asset_class;
+}
+
+// Ranked by median annual return -- the steady-centre metric, not the trailing
+// year. An asset without a measured median cannot be ranked by it and stays
+// out rather than being seated by a stand-in number.
+function byMedian(a: AssetMetric, b: AssetMetric): number {
+  const left = a.median_annual_return;
+  const right = b.median_annual_return;
+  if (left === null || left === undefined) return 1;
+  if (right === null || right === undefined) return -1;
+  return right - left;
+}
+
+function BuilderRow({ asset }: { asset: AssetMetric }) {
   return (
-    <section class="top-picks" aria-label="Top picks">
+    <li>
+      <span class="top-pick-asset">
+        <strong>{asset.symbol}</strong>
+        <small>{asset.name}</small>
+      </span>
+      <span class={`behavior-badge behavior-badge-${asset.market_behavior}`} title={classLabel(asset)}>
+        {BEHAVIOR_LABELS[asset.market_behavior]}
+      </span>
+      <strong class={`top-pick-return ${tone(asset.median_annual_return)}`}>
+        {percent(asset.median_annual_return)}
+      </strong>
+    </li>
+  );
+}
+
+// The front door of Discover: a portfolio in one glance. One pick from each
+// volatility column is a core; the angles below are the balance against
+// market conditions. Everything after this section is the supporting depth.
+function PortfolioBuilder({ data }: { data: ScannerData }) {
+  const universe = (Object.values(data.category_rankings) as AssetMetric[][]).flat();
+  const hedges = HEDGE_ROLES.map((role) => ({
+    ...role,
+    assets: universe
+      .filter((asset) => asset.market_behavior === role.behavior && asset.median_annual_return != null)
+      .sort(byMedian)
+      .slice(0, 2),
+  }));
+
+  return (
+    <section class="builder" aria-label="Build a balanced portfolio">
       <div class="top-picks-heading">
-        <h2>Top picks now</h2>
-        <p>The highest-ranked assets in each class, by the same measured score.</p>
+        <h2>Build a balanced portfolio</h2>
+        <p>
+          The top assets by median annual return at each level of risk. Pick a core from each
+          column, then hold the angles below to stay balanced when the market turns.
+        </p>
       </div>
       <div class="top-picks-grid">
-        {CATEGORY_DETAILS.map((category) => {
-          const assets = (data.category_rankings[category.key] ?? []).slice(0, TOP_PICKS_PER_CLASS);
+        {TIER_COLUMNS.map((column) => {
+          const assets = universe
+            .filter((asset) => asset.risk_tier === column.tier)
+            .sort(byMedian)
+            .slice(0, TOP_PER_TIER);
           return (
-            <article class="top-picks-column" key={category.key}>
-              <h3>{category.title}</h3>
+            <article class="top-picks-column" key={column.tier}>
+              <h3>{column.title}</h3>
+              <small class="builder-hint">{column.hint}</small>
               {assets.length === 0 ? (
-                <p class="top-pick-empty">Not measured yet.</p>
+                <p class="top-pick-empty">No measured asset sits in this tier.</p>
               ) : (
                 <ol>
-                  {assets.map((asset, index) => (
-                    <li key={asset.symbol}>
-                      <span class="leader-rank">{index + 1}</span>
-                      <span class="top-pick-asset">
-                        <strong>{asset.symbol}</strong>
-                        <small>{asset.name}</small>
-                      </span>
-                      <strong class="canonical-score">{asset.scores.balanced?.toFixed(0) ?? "—"}</strong>
-                      <span class={`top-pick-return ${tone(asset.returns?.["365d"])}`}>
-                        {percent(asset.returns?.["365d"])}
-                      </span>
-                    </li>
-                  ))}
+                  {assets.map((asset) => <BuilderRow key={asset.symbol} asset={asset} />)}
                 </ol>
               )}
             </article>
           );
         })}
+      </div>
+      <div class="builder-angles">
+        {hedges.map((angle) => (
+          <article class="builder-angle" key={angle.behavior}>
+            <h3>{angle.title}</h3>
+            <small class="builder-hint">{angle.hint}</small>
+            {angle.assets.length === 0 ? (
+              <p class="top-pick-empty">Nothing measured here yet.</p>
+            ) : (
+              <ol>
+                {angle.assets.map((asset) => <BuilderRow key={asset.symbol} asset={asset} />)}
+              </ol>
+            )}
+          </article>
+        ))}
       </div>
     </section>
   );
@@ -330,7 +405,7 @@ export function ScannerView() {
         </div>
       </header>
 
-      <TopPicks data={state.data} />
+      <PortfolioBuilder data={state.data} />
 
       <div class="canonical-rankings">
         {CATEGORY_DETAILS.map((category) => (

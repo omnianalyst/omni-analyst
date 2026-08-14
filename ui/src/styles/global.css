@@ -5246,11 +5246,11 @@ tr.row.tier-unknown td:first-child {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
-/* ---------- concise pages: top picks, noteworthy, quiet lines ---------- */
-.top-picks {
+/* ---------- concise pages: portfolio builder, noteworthy, quiet lines ---------- */
+.builder {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 .top-picks-heading h2 {
   margin: 0;
@@ -5274,15 +5274,22 @@ tr.row.tier-unknown td:first-child {
   border-radius: var(--r-md);
   background: rgba(11, 17, 26, 0.54);
 }
-.top-picks-column h3 {
-  margin: 0 0 8px;
+.top-picks-column h3,
+.builder-angle h3 {
+  margin: 0;
   color: var(--muted);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.top-picks-column ol {
+.builder-hint {
+  margin: 2px 0 10px;
+  color: var(--faint);
+  font-size: 10px;
+}
+.top-picks-column ol,
+.builder-angle ol {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -5290,10 +5297,11 @@ tr.row.tier-unknown td:first-child {
   padding: 0;
   list-style: none;
 }
-.top-picks-column li {
+.top-picks-column li,
+.builder-angle li {
   display: grid;
   align-items: center;
-  grid-template-columns: 14px minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
 }
 .top-pick-asset {
@@ -5321,6 +5329,20 @@ tr.row.tier-unknown td:first-child {
   margin: 0;
   color: var(--faint);
   font-size: 11px;
+}
+.builder-angles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+.builder-angle {
+  padding: 12px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  background: rgba(11, 17, 26, 0.35);
+}
+.builder-angle li .top-pick-return {
+  font-size: 12px;
 }
 .noteworthy-band {
   display: flex;
