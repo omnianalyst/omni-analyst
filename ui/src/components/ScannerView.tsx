@@ -119,7 +119,7 @@ const BEHAVIOR_LABELS: Record<MarketBehavior, string> = {
   unrated: "Not measured",
 };
 
-const TOP_PER_TIER = 5;
+const TOP_PER_TIER = 10;
 
 const TIER_COLUMNS: Array<{
   tier: Exclude<RiskTier, "unrated">;
@@ -132,16 +132,16 @@ const TIER_COLUMNS: Array<{
   { tier: "high", title: "Aggressive", hint: "30%+ volatility", accent: "var(--tier-aging)" },
 ];
 
-// The market angles a balanced portfolio holds alongside growth: assets that
-// move against stocks, and assets that march to their own drum. They are how
-// the page answers "what protects this when the market turns".
+// The market angles a balanced portfolio holds alongside growth: assets whose
+// returns run against stocks, and assets whose returns ignore them. They are
+// how the page answers "what protects this when the market turns".
 const HEDGE_ROLES: Array<{
   behavior: "counterweight" | "diversifier";
   title: string;
   hint: string;
 }> = [
-  { behavior: "counterweight", title: "Moves against stocks", hint: "correlation to SPY \u2264 \u22120.15" },
-  { behavior: "diversifier", title: "Marches to its own drum", hint: "correlation to SPY < 0.35" },
+  { behavior: "counterweight", title: "Counterweights", hint: "correlation to stocks \u2264 \u22120.15" },
+  { behavior: "diversifier", title: "Diversifiers", hint: "correlation to stocks < 0.35" },
 ];
 
 function percent(value: number | null | undefined): string {
@@ -183,20 +183,165 @@ function rankableByMedian(asset: AssetMetric): boolean {
   );
 }
 
-function BuilderRow({ asset }: { asset: AssetMetric }) {
+// The measured facts behind a row, on demand. Nothing here is derived in the
+// browser -- every field is what the scanner measured for that asset.
+function AssetInfo({ asset }: { asset: AssetMetric }) {
   return (
-    <li>
-      <span class="top-pick-asset">
-        <strong>{asset.symbol}</strong>
-        <small>{asset.name}</small>
-      </span>
-      <span class={`behavior-badge behavior-badge-${asset.market_behavior}`} title={classLabel(asset)}>
-        {BEHAVIOR_LABELS[asset.market_behavior]}
-      </span>
-      <strong class={`top-pick-return ${tone(asset.median_annual_return)}`}>
-        {percent(asset.median_annual_return)}
-      </strong>
-    </li>
+    <div class="builder-info" role="note">
+      <p class="builder-info-kind">
+        {classLabel(asset)} · {asset.area}
+        {asset.market_cap_rank ? ` · market cap #${asset.market_cap_rank}` : ""}
+        {` · ${asset.history_years}y measured, ${asset.complete_years} complete years`}
+      </p>
+      <dl>
+        <div><dt>Volatility</dt><dd>{percent(asset.volatility)}</dd></div>
+        <div><dt>Max drawdown</dt><dd>{percent(asset.max_drawdown)}</dd></div>
+        <div><dt>1 year</dt><dd class={tone(asset.returns?.["365d"])}>{percent(asset.returns?.["365d"])}</dd></div>
+        <div><dt>5y / year</dt><dd class={tone(asset.cagr_5y)}>{percent(asset.cagr_5y)}</dd></div>
+        <div><dt>10y / year</dt><dd class={tone(asset.cagr_10y)}>{percent(asset.cagr_10y)}</dd></div>
+        <div><dt>Median year</dt><dd class={tone(asset.median_annual_return)}>{percent(asset.median_annual_return)}</dd></div>
+        <div><dt>Correlation to stocks</dt><dd>{asset.correlation_to_spy?.toFixed(2) ?? "—"}</dd></div>
+        <div><dt>Balanced score</dt><dd>{asset.scores.balanced?.toFixed(0) ?? "—"}</dd></div>
+      </dl>
+    </div>
+  );
+}
+
+function BuilderRow({
+  asset,
+  rank,
+  infoOpen,
+  onToggleInfo,
+}: {
+  asset: AssetMetric;
+  rank: number;
+  infoOpen: boolean;
+  onToggleInfo: (symbol: string) => void;
+}) {
+  return (
+    <>
+      <li class={infoOpen ? "builder-row-open" : undefined}>
+        <span class="leader-rank">{rank}</span>
+        <span class="top-pick-asset">
+          <strong>{asset.symbol}</strong>
+          <small>{asset.name}</small>
+        </span>
+        <span class={`behavior-badge behavior-badge-${asset.market_behavior}`}>
+          {BEHAVIOR_LABELS[asset.market_behavior]}
+        </span>
+        <strong class={`top-pick-return ${tone(asset.median_annual_return)}`}>
+          {percent(asset.median_annual_return)}
+        </strong>
+        <button
+          type="button"
+          class={`info-dot ${infoOpen ? "info-dot-open" : ""}`}
+          aria-label={`${asset.symbol} details`}
+          aria-expanded={infoOpen}
+          onClick={() => onToggleInfo(asset.symbol)}
+        >
+          i
+        </button>
+      </li>
+      {infoOpen ? <li class="builder-info-row"><AssetInfo asset={asset} /></li> : null}
+    </>
+  );
+}
+
+// One header over every list so the number column says what it is: the median
+// of complete calendar years, per year.
+function BuilderListHeader() {
+  return (
+    <div class="builder-col-head" aria-hidden="true">
+      <span>Asset</span>
+      <span>Median / yr</span>
+    </div>
+  );
+}
+
+function BuilderList({
+  assets,
+  openInfo,
+  onToggleInfo,
+  ranked,
+}: {
+  assets: AssetMetric[];
+  openInfo: string | null;
+  onToggleInfo: (symbol: string) => void;
+  ranked?: boolean;
+}) {
+  if (assets.length === 0) return <p class="top-pick-empty">Nothing measured here yet.</p>;
+  return (
+    <>
+      <BuilderListHeader />
+      <ol>
+        {assets.map((asset, index) => (
+          <BuilderRow
+            key={asset.symbol}
+            asset={asset}
+            rank={ranked ? index + 1 : 0}
+            infoOpen={openInfo === asset.symbol}
+            onToggleInfo={onToggleInfo}
+          />
+        ))}
+      </ol>
+    </>
+  );
+}
+
+// The blend: equal weight across the leader of each tier plus the two market
+// angles -- five positions, 20% each. Rendered as one stacked bar where each
+// segment is that pick's contribution to the blend's historical median. The
+// segments describe history; they are not a forecast or advice.
+function BlendVisual({ picks }: { picks: Array<{ asset: AssetMetric; label: string; color: string }> }) {
+  const weight = 1 / picks.length;
+  const contributions = picks.map((pick) => ({
+    ...pick,
+    contribution: (pick.asset.median_annual_return ?? 0) * weight * 100,
+  }));
+  const total = contributions.reduce((sum, entry) => sum + entry.contribution, 0);
+  const positiveTotal = contributions.reduce(
+    (sum, entry) => sum + Math.max(entry.contribution, 0),
+    0,
+  );
+  return (
+    <div class="blend">
+      <div class="blend-bar" role="img" aria-label={`Equal-weight blend of ${picks.map((p) => p.asset.symbol).join(", ")}`}>
+        {contributions.map((entry) => (
+          entry.contribution > 0 ? (
+            <span
+              key={entry.asset.symbol}
+              class="blend-segment"
+              style={{
+                width: `${Math.max((entry.contribution / positiveTotal) * 100, 3)}%`,
+                background: entry.color,
+              }}
+              title={`${entry.asset.symbol} · ${entry.label} · ${(weight * 100).toFixed(0)}% weight`}
+            />
+          ) : null
+        ))}
+      </div>
+      <div class="blend-total">
+        <span class="metric-kicker">Blend median year</span>
+        <strong class={total > 0 ? "value-positive" : "value-negative"}>
+          {total > 0 ? "+" : ""}{total.toFixed(1)}%
+        </strong>
+        <span class="metric-context">
+          equal weight ({(weight * 100).toFixed(0)}% each) of each pick&apos;s historical median
+        </span>
+      </div>
+      <ol class="blend-legend">
+        {contributions.map((entry) => (
+          <li key={entry.asset.symbol}>
+            <span class="blend-swatch" style={{ background: entry.color }} />
+            <strong>{entry.asset.symbol}</strong>
+            <span class="muted">{entry.label}</span>
+            <span class={`mono ${tone(entry.contribution)}`}>
+              {entry.contribution > 0 ? "+" : ""}{entry.contribution.toFixed(1)}%
+            </span>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
@@ -209,8 +354,18 @@ function BuilderRow({ asset }: { asset: AssetMetric }) {
 // universe does not have. Only assets with at least MIN_COMPLETE_YEARS
 // measured years compete, so a young listing cannot win on one lucky year.
 function PortfolioBuilder({ data }: { data: ScannerData }) {
+  const [openInfo, setOpenInfo] = useState<string | null>(null);
+  const [blendOpen, setBlendOpen] = useState(false);
+
   const universe = (Object.values(data.category_rankings) as AssetMetric[][]).flat();
   const rankable = universe.filter(rankableByMedian);
+  const tierTops = TIER_COLUMNS.map((column) => ({
+    ...column,
+    assets: rankable
+      .filter((asset) => asset.risk_tier === column.tier)
+      .sort(byMedian)
+      .slice(0, TOP_PER_TIER),
+  }));
   const hedges = HEDGE_ROLES.map((role) => ({
     ...role,
     assets: universe
@@ -218,6 +373,25 @@ function PortfolioBuilder({ data }: { data: ScannerData }) {
       .sort(byMedian)
       .slice(0, 2),
   }));
+
+  function toggleInfo(symbol: string) {
+    setOpenInfo((current) => (current === symbol ? null : symbol));
+  }
+
+  // The blend takes the leader of each tier and the leader of each angle --
+  // every role a balanced portfolio wants, at equal weight.
+  const blendPicks = [
+    ...tierTops.map((tier) =>
+      tier.assets.length > 0
+        ? { asset: tier.assets[0], label: tier.title, color: tier.accent }
+        : null,
+    ),
+    ...hedges.map((hedge) =>
+      hedge.assets.length > 0
+        ? { asset: hedge.assets[0], label: hedge.title, color: "var(--border-strong)" }
+        : null,
+    ),
+  ].filter((pick): pick is { asset: AssetMetric; label: string; color: string } => pick !== null);
 
   return (
     <section class="builder" aria-label="Build a balanced portfolio">
@@ -228,39 +402,43 @@ function PortfolioBuilder({ data }: { data: ScannerData }) {
           One core from each column; the angles below balance against the market.
         </p>
       </div>
+
+      <button
+        type="button"
+        class={`blend-toggle ${blendOpen ? "active" : ""}`}
+        aria-expanded={blendOpen}
+        onClick={() => setBlendOpen((open) => !open)}
+      >
+        <span class="toggle-track" aria-hidden="true"><span /></span>
+        {blendOpen ? "Hide the balanced blend" : "Show the balanced blend"}
+      </button>
+      {blendOpen && blendPicks.length > 0 ? <BlendVisual picks={blendPicks} /> : null}
+
       <div class="top-picks-grid">
-        {TIER_COLUMNS.map((column) => {
-          const assets = rankable
-            .filter((asset) => asset.risk_tier === column.tier)
-            .sort(byMedian)
-            .slice(0, TOP_PER_TIER);
-          return (
-            <article class="top-picks-column" key={column.tier} style={{ borderTopColor: column.accent }}>
-              <h3>{column.title}</h3>
-              <small class="builder-hint">{column.hint}</small>
-              {assets.length === 0 ? (
-                <p class="top-pick-empty">No measured asset sits in this tier.</p>
-              ) : (
-                <ol>
-                  {assets.map((asset) => <BuilderRow key={asset.symbol} asset={asset} />)}
-                </ol>
-              )}
-            </article>
-          );
-        })}
+        {tierTops.map((column) => (
+          <article class="top-picks-column" key={column.tier} style={{ borderTopColor: column.accent }}>
+            <h3>{column.title}</h3>
+            <small class="builder-hint">{column.hint}</small>
+            <BuilderList
+              assets={column.assets}
+              openInfo={openInfo}
+              onToggleInfo={toggleInfo}
+              ranked
+            />
+          </article>
+        ))}
       </div>
       <div class="builder-angles">
         {hedges.map((angle) => (
           <article class="builder-angle" key={angle.behavior}>
             <h3>{angle.title}</h3>
             <small class="builder-hint">{angle.hint}</small>
-            {angle.assets.length === 0 ? (
-              <p class="top-pick-empty">Nothing measured here yet.</p>
-            ) : (
-              <ol>
-                {angle.assets.map((asset) => <BuilderRow key={asset.symbol} asset={asset} />)}
-              </ol>
-            )}
+            <BuilderList
+              assets={angle.assets}
+              openInfo={openInfo}
+              onToggleInfo={toggleInfo}
+              ranked={false}
+            />
           </article>
         ))}
       </div>

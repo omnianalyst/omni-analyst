@@ -5298,13 +5298,6 @@ tr.row.tier-unknown td:first-child {
   padding: 0;
   list-style: none;
 }
-.top-picks-column li,
-.builder-angle li {
-  display: grid;
-  align-items: center;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 8px;
-}
 .top-pick-asset {
   display: flex;
   min-width: 0;
@@ -5469,4 +5462,183 @@ tr.row.tier-unknown td:first-child {
 }
 .scanner-view .disclosure-button {
   padding: 11px 16px;
+}
+.blend-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  align-self: flex-start;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.blend-toggle:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.blend-toggle.active {
+  border-color: rgba(92, 197, 255, 0.45);
+  background: rgba(92, 197, 255, 0.08);
+  color: var(--text);
+}
+.blend-toggle.active .toggle-track {
+  border-color: rgba(92, 197, 255, 0.45);
+  background: rgba(92, 197, 255, 0.12);
+}
+.blend-toggle.active .toggle-track > span {
+  background: var(--accent);
+  transform: translateX(13px);
+}
+.blend {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: rgba(11, 17, 26, 0.54);
+}
+.blend-bar {
+  display: flex;
+  overflow: hidden;
+  height: 26px;
+  border-radius: var(--r-sm);
+  background: rgba(16, 26, 43, 0.6);
+}
+.blend-segment {
+  min-width: 3%;
+  transition: width 0.2s ease;
+}
+.blend-segment + .blend-segment {
+  border-left: 1px solid rgba(9, 13, 20, 0.7);
+}
+.blend-total {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.blend-total strong {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.blend-total .metric-context {
+  color: var(--faint);
+  font-size: 11px;
+}
+.blend-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.blend-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.blend-legend .muted {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.blend-legend .mono {
+  font-variant-numeric: tabular-nums;
+}
+.blend-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.builder-col-head {
+  display: flex;
+  justify-content: space-between;
+  margin: 0 0 6px;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.top-picks-column li,
+.builder-angle li {
+  display: grid;
+  align-items: center;
+  grid-template-columns: 14px minmax(0, 1fr) auto auto 18px;
+  gap: 7px;
+}
+.builder-info-row {
+  display: block !important;
+  grid-template-columns: none !important;
+}
+.builder-info {
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: rgba(16, 26, 43, 0.5);
+}
+.builder-info-kind {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.builder-info dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+}
+.builder-info dl div {
+  display: flex;
+  flex-direction: column;
+}
+.builder-info dt {
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.builder-info dd {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.info-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-style: italic;
+  line-height: 1;
+  cursor: pointer;
+}
+.info-dot:hover,
+.info-dot-open {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.builder-row-open {
+  background: rgba(16, 26, 43, 0.5);
+  border-radius: var(--r-sm);
 }
