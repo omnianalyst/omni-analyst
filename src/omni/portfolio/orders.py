@@ -395,8 +395,9 @@ async def record_fill(pool, order_id: UUID, fill: Fill) -> None:
 
     `average_fill_price` becomes the quantity-weighted mean over every fill so
     far, not the price of this one. The status becomes `filled` once the
-    accumulated quantity reaches the order's quantity and `partially_filled`
-    below it.
+    accumulated quantity equals the order's quantity and `partially_filled`
+    below it. A fill that would take the accumulated quantity above the order
+    quantity is refused before the ledger is mutated.
 
     No tolerance is applied to that comparison: `filled_quantity` is an exact
     Decimal sum of exact Decimal fills, so a shortfall of 1e-18 is a real
@@ -430,19 +431,24 @@ async def record_fill(pool, order_id: UUID, fill: Fill) -> None:
         order_quantity: Decimal = row["quantity"]
 
         accumulated = prior_quantity + fill.filled_quantity
-        prior_notional = (
-            Decimal(0) if prior_average is None else prior_average * prior_quantity
-        )
-        average = (
-            prior_notional + fill.average_price * fill.filled_quantity
-        ) / accumulated
-
         target = (
             OrderStatus.FILLED
             if accumulated >= order_quantity
             else OrderStatus.PARTIALLY_FILLED
         )
         _check_transition(OrderStatus(row["status"]), target)
+        if accumulated > order_quantity:
+            raise OrderLedgerError(
+                f"fill of {fill.filled_quantity} would overfill order {order_id}: "
+                f"{prior_quantity} already filled of {order_quantity} ordered"
+            )
+
+        prior_notional = (
+            Decimal(0) if prior_average is None else prior_average * prior_quantity
+        )
+        average = (
+            prior_notional + fill.average_price * fill.filled_quantity
+        ) / accumulated
 
         await conn.execute(
             _INSERT_EVENT,

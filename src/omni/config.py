@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,7 +71,7 @@ class Settings(BaseSettings):
     #: Derived-threshold-friendly -- raising it surfaces only higher-conviction
     #: calls and silences weak methods; lowering it surfaces more (noisier).
     #: 0.6 is lenient (3-in-5); 0.7 is a defensible "high conviction" bar.
-    target_hit_rate: float = 0.6
+    target_hit_rate: float = Field(default=0.6, ge=0.0, le=1.0, allow_inf_nan=False)
 
     #: Auth token lifetime in seconds. 3600 (1h) is conservative; for a solo
     #: operator on a private deployment, a longer session (e.g. 604800 = 7d)

@@ -26,7 +26,8 @@ async def _clean(db):
 async def _row(pool, name="sweep"):
     return await pool.fetchrow(
         "SELECT last_success_at, last_failure_at, consecutive_failures, "
-        "last_error, expected_interval_seconds FROM loop_health WHERE loop_name = $1",
+        "last_error, expected_interval_seconds, last_status, last_result "
+        "FROM loop_health WHERE loop_name = $1",
         name,
     )
 
@@ -42,7 +43,8 @@ class TestRecordLoopHealth:
         row = await _row(db.pool)
         assert row["consecutive_failures"] == 0
         assert row["last_success_at"] is not None
-        assert row["last_error"] is None
+        assert row["last_error"] == "boom"
+        assert row["last_status"] == "success"
         assert float(row["expected_interval_seconds"]) == 300.0
 
     async def test_failure_increments_consecutive_and_captures_the_error(self, db):
@@ -59,7 +61,30 @@ class TestRecordLoopHealth:
         assert row["consecutive_failures"] == 2
         assert row["last_failure_at"] is not None
         assert row["last_success_at"] is None
+        assert row["last_status"] == "failure"
         assert "second-outage" in row["last_error"]
+
+    async def test_result_state_is_replaced_and_bounded(self, db):
+        await record_loop_health(
+            db.pool,
+            loop_name="nav",
+            ok=True,
+            result="first result",
+            expected_interval_seconds=86_400,
+        )
+        await record_loop_health(
+            db.pool,
+            loop_name="nav",
+            ok=True,
+            result="x" * 2500,
+            expected_interval_seconds=86_400,
+        )
+
+        row = await _row(db.pool, "nav")
+        assert row["last_result"] == "x" * 2000
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM loop_health WHERE loop_name = 'nav'"
+        ) == 1
 
     async def test_a_first_failure_records_one_not_zero(self, db):
         # The INSERT path must seed consecutive_failures at 1, not the column

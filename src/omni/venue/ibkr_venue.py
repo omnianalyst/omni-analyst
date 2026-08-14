@@ -1,4 +1,4 @@
-"""Interactive Brokers venue adapter — full equity trading via IB Gateway.
+"""Inactive Interactive Brokers account adapter via IB Gateway.
 
 Connects to a local IB Gateway process (managed by Docker, see settings)
 using the ib_async library (maintained fork of ib_insync). The Gateway
@@ -6,9 +6,8 @@ handles the socket protocol to IBKR's servers; this adapter speaks to it
 over localhost.
 
 **Architecture:**
-    Settings → enable IBKR → Docker starts IB Gateway container →
-    this adapter connects to localhost:4001 (paper) or 4002 (live) →
-    Venue protocol methods proxy through ib_async.
+    This adapter is not exposed by Settings or the venue manager. The product
+    does not ship the required Gateway process or ib_async dependency.
 
 **Paper vs Live:** Paper trading (port 4001/4003) requires no 2FA and is
 recommended for always-on automation. Live trading (port 4002/4004) requires
@@ -31,10 +30,8 @@ from omni.venue.protocol import (
     Capabilities,
     Fill,
     MarketType,
-    OrderKind,
     Position,
     Quote,
-    Side,
     TradeIntent,
     Venue,
     VenueUnavailable,
@@ -66,11 +63,11 @@ class IBKRVenue(Venue):
         self._port = port
         self._client_id = client_id
         self._capabilities = Capabilities(
-            spot=True,
-            margin=True,
+            spot=False,
+            margin=False,
             perpetuals=False,
-            limit_orders=True,
-            shorting=True,
+            limit_orders=False,
+            shorting=False,
             funding_data=False,
             maker_fee_bps=Decimal(0),
             taker_fee_bps=Decimal("0.35"),
@@ -154,48 +151,7 @@ class IBKRVenue(Venue):
         )
 
     async def execute(self, intent: TradeIntent) -> Fill:
-        self._ensure_connected()
-        from ib_async import LimitOrder as IBLimitOrder
-        from ib_async import MarketOrder as IBMarketOrder
-
-        contract = self._contract(intent.symbol)
-        action = "BUY" if intent.side is Side.BUY else "SELL"
-        qty = float(intent.quantity)
-
-        if intent.order_kind is OrderKind.LIMIT:
-            assert intent.limit_price is not None
-            order = IBLimitOrder(action, qty, float(intent.limit_price))
-        else:
-            order = IBMarketOrder(action, qty)
-
-        trade = self._ib.placeOrder(contract, order)
-        deadline = asyncio.get_event_loop().time() + 30
-        while not trade.isDone():
-            if asyncio.get_event_loop().time() > deadline:
-                raise VenueUnavailable(
-                    f"ibkr order for {intent.symbol} did not fill in 30s"
-                )
-            await asyncio.sleep(0.5)
-
-        fill_data = trade.fills[-1] if trade.fills else None
-        if fill_data is None:
-            raise VenueUnavailable(f"ibkr order {intent.symbol} completed with no fills")
-
-        execution = fill_data.execution
-        fee = Decimal(str(execution.commission)) if execution.commission else Decimal(0)
-
-        return Fill(
-            intent_id=intent.idempotency_key,
-            venue=self.name,
-            symbol=intent.symbol,
-            side=intent.side,
-            filled_quantity=Decimal(str(execution.shares)),
-            average_price=Decimal(str(execution.price)),
-            fee_paid=fee,
-            filled_at=datetime.now(UTC),
-            external_id=str(execution.execId),
-            raw={"order_id": str(execution.orderId)},
-        )
+        raise VenueUnavailable("ibkr execution is unavailable in this build")
 
     async def positions(self) -> list[Position]:
         self._ensure_connected()
@@ -236,16 +192,7 @@ class IBKRVenue(Venue):
         return balances
 
     async def cancel(self, external_id: str) -> bool:
-        self._ensure_connected()
-        try:
-            trades = self._ib.openTrades()
-            for t in trades:
-                if str(t.order.orderId) == external_id:
-                    self._ib.cancelOrder(t.order)
-                    return True
-            return False
-        except Exception:  # noqa: BLE001
-            return False
+        raise VenueUnavailable("ibkr execution is unavailable in this build")
 
     # --- internals ---
 

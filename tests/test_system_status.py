@@ -59,11 +59,38 @@ async def _setup_token(client) -> str:
     return r.json()["token"]
 
 
+async def _member_token(client, operator_token: str) -> str:
+    created = await client.post(
+        "/auth/register",
+        json={"email": "member@example.com", "password": "b" * 16},
+        headers={"authorization": f"Bearer {operator_token}"},
+    )
+    assert created.status_code == 201, created.text
+    login = await client.post(
+        "/auth/login",
+        json={"email": "member@example.com", "password": "b" * 16},
+    )
+    assert login.status_code == 200, login.text
+    return login.json()["token"]
+
+
 async def test_status_refuses_anonymous_caller(db, database_url):
     app = create_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
         r = await client.get("/system/status")
     assert r.status_code == 401
+
+
+async def test_status_refuses_authenticated_member(db, database_url):
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        operator_token = await _setup_token(client)
+        member_token = await _member_token(client, operator_token)
+        r = await client.get(
+            "/system/status",
+            headers={"authorization": f"Bearer {member_token}"},
+        )
+    assert r.status_code == 403
 
 
 async def test_status_returns_freshness_per_loop_for_operator(db, database_url):
@@ -161,7 +188,27 @@ async def test_health_overall_is_none_on_a_fresh_deployment(db, database_url):
     assert r.status_code == 200
     body = r.json()
     assert body["health"]["overall"] is None
-    assert body["health"]["loops"] == []
+    by_loop = {row["loop"]: row for row in body["health"]["loops"]}
+    assert {
+        "autonomous.macro",
+        "venue_reconciliation",
+        "carry",
+        "nav",
+        "shadow_decision",
+        "shadow_scoring",
+        "launch_sweep",
+    }.issubset(by_loop)
+    assert by_loop["carry"] == {
+        "loop": "carry",
+        "state": "never_run",
+        "last_status": None,
+        "last_success_at": None,
+        "last_failure_at": None,
+        "consecutive_failures": 0,
+        "last_error": None,
+        "last_result": None,
+        "expected_interval_seconds": 86400.0,
+    }
 
 
 async def test_health_grades_each_loop_from_its_recorded_state(db, database_url):
@@ -169,6 +216,7 @@ async def test_health_grades_each_loop_from_its_recorded_state(db, database_url)
     #  - 'fill':    recent success, no failures                 -> ok
     #  - 'predict': recent success but consecutive_failures > 0 -> failing
     #  - 'sweep':   success long ago (>5x its interval)         -> stale
+    await db.pool.execute("TRUNCATE loop_health")
     await db.pool.execute(
         """
         INSERT INTO loop_health
@@ -202,6 +250,7 @@ async def test_health_marks_a_loop_that_only_ever_failed_as_failing(db, database
     # last_success_at NULL + consecutive_failures > 0: a loop that has never
     # succeeded. This is the quietly-broken case the feature exists to catch --
     # it must not grade 'stale' (which implies a prior success) or 'ok'.
+    await db.pool.execute("TRUNCATE loop_health")
     await db.pool.execute(
         """
         INSERT INTO loop_health

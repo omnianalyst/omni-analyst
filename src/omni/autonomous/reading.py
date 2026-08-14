@@ -15,9 +15,24 @@ had not been published yet.
 from __future__ import annotations
 
 import json
+import math
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
+
+from omni.coverage.visibility import visible_claims_cte
+
+
+@dataclass(frozen=True)
+class ClaimProvenance:
+    id: UUID
+    entity_id: UUID
+    value: Any
+    event_date: datetime
+    knowledge_date: datetime
+    redistributable: str
+    audience_user_id: UUID | None
 
 
 async def latest_shared_claim(
@@ -57,7 +72,8 @@ async def latest_shared_claim(
         params.append(as_of)
         clauses.append(f"knowledge_date <= ${len(params)}")
     sql = (
-        "SELECT id, entity_id, value, event_date, knowledge_date, evidence "
+        "SELECT id, entity_id, value, event_date, knowledge_date, evidence, "
+        "redistributable::text, audience_user_id "
         "FROM claim WHERE "
         + " AND ".join(clauses)
         + " ORDER BY knowledge_date DESC, event_date DESC LIMIT 1"
@@ -109,6 +125,81 @@ async def macro_series_values(
     return vals
 
 
+async def sector_price_histories(
+    pool,
+    *,
+    entity_ids: list[UUID],
+    audience_user_id: UUID | None,
+    as_of: datetime,
+    limit: int = 65,
+) -> dict[UUID, list[ClaimProvenance]]:
+    """Visible point-in-time sector closes with provenance, oldest-first."""
+    if not entity_ids:
+        return {}
+    rows = await pool.fetch(
+        f"""
+        WITH visible AS (
+            {visible_claims_cte("$1")}
+        ), point_in_time AS (
+            SELECT DISTINCT ON (entity_id, event_date)
+                   id, entity_id, value, event_date, knowledge_date,
+                   redistributable::text, audience_user_id
+            FROM visible
+            WHERE entity_id = ANY($2::uuid[])
+              AND claim_type = 'price_snapshot'
+              AND event_date <= $3
+              AND knowledge_date <= $3
+            ORDER BY entity_id, event_date, knowledge_date DESC, id DESC
+        ), ranked AS (
+            SELECT *, row_number() OVER (
+                PARTITION BY entity_id
+                ORDER BY event_date DESC, knowledge_date DESC, id DESC
+            ) AS observation_rank
+            FROM point_in_time
+        )
+        SELECT id, entity_id, value, event_date, knowledge_date,
+               redistributable, audience_user_id
+        FROM ranked
+        WHERE observation_rank <= $4
+        ORDER BY entity_id, event_date, knowledge_date, id
+        """,
+        audience_user_id,
+        entity_ids,
+        as_of,
+        limit,
+    )
+    histories: dict[UUID, list[ClaimProvenance]] = {}
+    for row in rows:
+        raw = row["value"]
+        if isinstance(raw, (str, bytes)):
+            raw = json.loads(raw)
+        if not isinstance(raw, dict) or raw.get("close") is None:
+            continue
+        try:
+            close = float(raw["close"])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(close) or close <= 0.0:
+            continue
+        entity_id = UUID(str(row["entity_id"]))
+        histories.setdefault(entity_id, []).append(
+            ClaimProvenance(
+                id=UUID(str(row["id"])),
+                entity_id=entity_id,
+                value=close,
+                event_date=row["event_date"],
+                knowledge_date=row["knowledge_date"],
+                redistributable=row["redistributable"],
+                audience_user_id=(
+                    UUID(str(row["audience_user_id"]))
+                    if row["audience_user_id"] is not None
+                    else None
+                ),
+            )
+        )
+    return histories
+
+
 async def latest_claim_for_entity(
     pool,
     *,
@@ -116,16 +207,7 @@ async def latest_claim_for_entity(
     claim_type: str,
     key: str | None = None,
 ) -> Any | None:
-    """The newest claim of a type on a specific entity, across all audiences.
-
-    Used by the sector scanner to read an ETF's prices. Price claims are
-    ``byo_only`` (Polygon's terms forbid redistribution), so they are never in
-    shared coverage. On a single-operator deployment -- which is what the
-    autonomous layer targets first -- the operator's byo_only prices ARE the
-    system's prices, and the scanner reads them without an audience filter. A
-    multi-tenant deployment would need to scope this to the operator's audience;
-    that is a documented follow-up, not a silent assumption.
-    """
+    """The newest claim of a type on a specific entity, across all audiences."""
     clauses = [
         "entity_id = $1",
         "claim_type = $2::claim_type",
@@ -188,10 +270,11 @@ def to_returns(closes: list[float]) -> list[float]:
     """Simple returns from a close series, one shorter than the input."""
     if len(closes) < 2:
         return []
+    if any(not math.isfinite(close) or close <= 0.0 for close in closes):
+        return []
     return [
         (closes[i] / closes[i - 1] - 1.0)
         for i in range(1, len(closes))
-        if closes[i - 1] != 0.0
     ]
 
 

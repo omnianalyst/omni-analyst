@@ -10,9 +10,8 @@
 # (pyproject.toml [tool.uv.sources] -> ../../Neutron/python). That path lives
 # outside any build context rooted at the repo, and Docker cannot COPY above the
 # context. The operator therefore builds the Neutron wheel on the host and
-# places it under vendor/ before building. See DEPLOY.md ("Build prerequisites")
-# for the one-line command. The wheel is pinned by filename; pass
-# --build-arg NEUTRON_WHEEL=... if the Neutron version differs.
+# places it under vendor/ before building. The wheel carries its source commit,
+# which must match the explicit NEUTRON_REVISION build argument.
 
 # --------------------------------------------------------------------------- #
 # Stage 1 - builder: resolve and install every dependency into a clean venv.   #
@@ -46,11 +45,15 @@ RUN uv export --frozen --no-dev --no-emit-project --no-annotate \
 # Now the local framework, from the operator-built wheel. Placed after the heavy
 # registry install so a Neutron rebuild invalidates only this thin layer.
 ARG NEUTRON_WHEEL=vendor/neutron_py-0.1.0-py3-none-any.whl
+ARG NEUTRON_REVISION
 # Copy into a directory rather than to a fixed filename. A wheel renamed to
 # neutron.whl loses its version, and uv rejects it: PEP 427 filenames carry the
 # version and installers parse it rather than reading metadata first.
 COPY ${NEUTRON_WHEEL} /tmp/wheels/
-RUN uv pip install --python /app/.venv/bin/python /tmp/wheels/*.whl
+COPY ops/build_neutron_wheel.py /tmp/build_neutron_wheel.py
+RUN python /tmp/build_neutron_wheel.py verify \
+        --wheel /tmp/wheels/*.whl --expected "${NEUTRON_REVISION}" \
+ && uv pip install --python /app/.venv/bin/python /tmp/wheels/*.whl
 
 # Application source and migrations. We do NOT pip-install the project: the
 # migrations loader (omni.db) finds migrations/ by walking up from this file
@@ -64,10 +67,23 @@ COPY migrations/ ./migrations/
 # --------------------------------------------------------------------------- #
 FROM python:3.12-slim-bookworm AS runtime
 
+ARG OMNI_REVISION
+ARG NEUTRON_REVISION
+
+RUN printf '%s\n%s\n' "${OMNI_REVISION}" "${NEUTRON_REVISION}" \
+      | grep -Eq '^[0-9a-f]{40}$' \
+ && test "$(printf '%s\n%s\n' "${OMNI_REVISION}" "${NEUTRON_REVISION}" \
+      | grep -Ec '^[0-9a-f]{40}$')" -eq 2
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
-    PATH=/app/.venv/bin:${PATH}
+    PATH=/app/.venv/bin:${PATH} \
+    OMNI_BUILD_REVISION=${OMNI_REVISION} \
+    NEUTRON_BUILD_REVISION=${NEUTRON_REVISION}
+
+LABEL org.opencontainers.image.revision=${OMNI_REVISION} \
+      com.omnianalyst.neutron.revision=${NEUTRON_REVISION}
 
 # Non-root user. uid 10001 avoids colliding with any host uid bind-mounted in.
 RUN useradd --create-home --uid 10001 --shell /sbin/nologin omni

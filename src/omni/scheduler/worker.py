@@ -43,84 +43,9 @@ from omni.conviction.producers import producers_for
 from omni.conviction.publish import load_calibration, record
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.fill.pipeline import drain
+from omni.scheduler.health import record_loop_health
 
 logger = logging.getLogger(__name__)
-
-# A loop is "degraded" once it has failed this many times in a row. The point is
-# to surface a chronically-failing loop (every cycle raises) above the per-error
-# exception log, so an unattended operator notices the loop is stuck rather than
-# just flaky. Below this, a transient failure stays a single exception line.
-_DEGRADED_THRESHOLD = 3
-
-
-async def record_loop_health(
-    pool,
-    *,
-    loop_name: str,
-    ok: bool,
-    error: str | None = None,
-    expected_interval_seconds: float | None = None,
-) -> int:
-    """Record one loop iteration's outcome into the loop_health state row.
-
-    A success stamps last_success_at and resets consecutive_failures; a failure
-    stamps last_failure_at, captures the error and increments consecutive
-    failures. Returns the resulting consecutive_failures count. When that count
-    reaches ``_DEGRADED_THRESHOLD`` a WARNING is logged -- the one push signal
-    that a chronically-failing loop is stuck, since the loops themselves only
-    log per-error tracebacks that are easy to miss in volume.
-
-    Cancellation is not a failure and is never recorded here; callers re-raise
-    ``CancelledError`` before reaching this path.
-    """
-    if ok:
-        row = await pool.fetchrow(
-            """
-            INSERT INTO loop_health
-                (loop_name, last_success_at, last_failure_at,
-                 consecutive_failures, last_error, expected_interval_seconds)
-            VALUES ($1, now(), NULL, 0, NULL, $2)
-            ON CONFLICT (loop_name) DO UPDATE SET
-                last_success_at           = now(),
-                consecutive_failures      = 0,
-                last_error                = NULL,
-                expected_interval_seconds = EXCLUDED.expected_interval_seconds,
-                updated_at                = now()
-            RETURNING consecutive_failures
-            """,
-            loop_name,
-            expected_interval_seconds,
-        )
-        return int(row["consecutive_failures"])
-
-    row = await pool.fetchrow(
-        """
-        INSERT INTO loop_health
-            (loop_name, last_success_at, last_failure_at,
-             consecutive_failures, last_error, expected_interval_seconds)
-        VALUES ($1, NULL, now(), 1, $2, $3)
-        ON CONFLICT (loop_name) DO UPDATE SET
-            last_failure_at           = now(),
-            consecutive_failures      = loop_health.consecutive_failures + 1,
-            last_error                = EXCLUDED.last_error,
-            expected_interval_seconds = EXCLUDED.expected_interval_seconds,
-            updated_at                = now()
-        RETURNING consecutive_failures
-        """,
-        loop_name,
-        error,
-        expected_interval_seconds,
-    )
-    consecutive = int(row["consecutive_failures"])
-    if consecutive >= _DEGRADED_THRESHOLD:
-        logger.warning(
-            "loop '%s' degraded: %d consecutive failures (last: %s)",
-            loop_name,
-            consecutive,
-            error,
-        )
-    return consecutive
-
 
 @dataclass
 class SchedulerConfig:

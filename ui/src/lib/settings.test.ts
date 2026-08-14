@@ -6,6 +6,7 @@ function venue(overrides: Partial<VenueEntry> = {}): VenueEntry {
     key: "questrade",
     label: "Questrade (Read-Only)",
     type: "equity",
+    connectable: true,
     requires_process: false,
     description: "Canadian broker.",
     fields: [{ name: "refresh_token", label: "Refresh Token", type: "password", required: true }],
@@ -34,10 +35,16 @@ describe("describeSource", () => {
 
   it("tells the operator a deployment venue cannot be set from the browser", () => {
     const out = describeSource(
-      venue({ key: "hyperliquid", configured: false, configuration_source: "deployment" }),
+      venue({
+        key: "hyperliquid",
+        connectable: false,
+        configured: false,
+        configuration_source: "deployment",
+      }),
     );
 
-    expect(out.detail).toMatch(/cannot be set from the browser/);
+    expect(out.label).toBe("Scheduler deployment");
+    expect(out.detail).toMatch(/not visible here/);
   });
 
   it("distinguishes a configured deployment venue from an unconfigured one", () => {
@@ -58,9 +65,14 @@ describe("canEnable / blockedReason", () => {
   });
 
   it("points at the deployment environment when that is where the gap is", () => {
-    const entry = venue({ key: "hyperliquid", configuration_source: "deployment" });
+    const entry = venue({
+      key: "hyperliquid",
+      connectable: false,
+      configuration_source: "deployment",
+    });
 
-    expect(blockedReason(entry)).toBe("Waiting on deployment secrets");
+    expect(blockedReason(entry)).toBe("Managed by the scheduler");
+    expect(canEnable(entry)).toBe(false);
   });
 
   it("allows the toggle once credentials exist", () => {

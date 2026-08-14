@@ -11,16 +11,19 @@ ever asked.
 """
 
 import asyncio
+import json
 import os
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 from neutron.auth.jwt import create_token
 from neutron.test import TestClient
 
+from omni.alerts.rules import evaluate
 from omni.api.watchlist import build_router
 from omni.coverage.gaps import detect_gaps, persist_gaps
-from omni.demand.ledger import rank
+from omni.demand.ledger import direct_attention, rank
 from omni.main import create_app
 from omni.watchlist import lists as wl
 
@@ -236,6 +239,126 @@ class TestRemoval:
         )
 
         assert await rank(db.pool) == []
+
+    async def test_removing_one_list_preserves_the_same_entity_on_another_list(self, db):
+        user = await _user(db, "a@example.com")
+        entity = await _entity(db, "company", "AAPL")
+        first = (await wl.create(db.pool, user_id=user, name="first"))["id"]
+        second = (await wl.create(db.pool, user_id=user, name="second"))["id"]
+        await wl.add_entity(
+            db.pool, watchlist_id=first, entity_id=entity, user_id=user
+        )
+        await wl.add_entity(
+            db.pool, watchlist_id=second, entity_id=entity, user_id=user
+        )
+
+        first_ids = {
+            row["demand_id"]
+            for row in await db.pool.fetch(
+                "SELECT demand_id FROM watchlist_entry_demand WHERE watchlist_id = $1",
+                first,
+            )
+        }
+        second_ids = {
+            row["demand_id"]
+            for row in await db.pool.fetch(
+                "SELECT demand_id FROM watchlist_entry_demand WHERE watchlist_id = $1",
+                second,
+            )
+        }
+        assert len(first_ids) == 2
+        assert len(second_ids) == 2
+        assert first_ids.isdisjoint(second_ids)
+
+        assert await wl.remove_entity(
+            db.pool, watchlist_id=first, entity_id=entity, user_id=user
+        )
+
+        active_ids = {
+            row["id"]
+            for row in await db.pool.fetch(
+                "SELECT id FROM demand WHERE entity_id = $1 AND active", entity
+            )
+        }
+        inactive_ids = {
+            row["id"]
+            for row in await db.pool.fetch(
+                "SELECT id FROM demand WHERE entity_id = $1 AND NOT active", entity
+            )
+        }
+        assert active_ids == second_ids
+        assert inactive_ids == first_ids
+
+    async def test_remove_preserves_direct_and_alert_created_demand(self, db):
+        user = await _user(db, "a@example.com")
+        entity = await _entity(db, "company", "AAPL")
+        wl_id = (await wl.create(db.pool, user_id=user, name="mine"))["id"]
+        await wl.add_entity(
+            db.pool, watchlist_id=wl_id, entity_id=entity, user_id=user
+        )
+        watchlist_ids = {
+            row["demand_id"]
+            for row in await db.pool.fetch(
+                "SELECT demand_id FROM watchlist_entry_demand WHERE watchlist_id = $1",
+                wl_id,
+            )
+        }
+        direct_id = await direct_attention(
+            db.pool,
+            entity_id=entity,
+            claim_type="fundamental_metric",
+            requested_by=user,
+        )
+
+        now = datetime.now(UTC)
+        claim_id = await db.pool.fetchval(
+            "INSERT INTO claim "
+            "(entity_id, claim_type, key, value, source, event_date, knowledge_date, "
+            "confidence, redistributable) "
+            "VALUES ($1, 'price_snapshot', 'close', $2::jsonb, 'test', $3, $4, "
+            "0.9, 'allowed') RETURNING id",
+            entity,
+            json.dumps({"value": 150}),
+            now - timedelta(days=1),
+            now,
+        )
+        alert = await db.pool.fetchrow(
+            "INSERT INTO alert (user_id, entity_id, claim_type, condition) "
+            "VALUES ($1, $2, 'price_snapshot', $3::jsonb) RETURNING *",
+            user,
+            entity,
+            json.dumps({"kind": "value_above", "threshold": 100}),
+        )
+        fired = await evaluate(db.pool, alert, audience=user)
+        assert [row["id"] for row in fired] == [claim_id]
+
+        all_ids = {
+            row["id"]
+            for row in await db.pool.fetch(
+                "SELECT id FROM demand WHERE entity_id = $1", entity
+            )
+        }
+        alert_ids = all_ids - watchlist_ids - {direct_id}
+        assert len(alert_ids) == 1
+
+        assert await wl.remove_entity(
+            db.pool, watchlist_id=wl_id, entity_id=entity, user_id=user
+        )
+
+        active_ids = {
+            row["id"]
+            for row in await db.pool.fetch(
+                "SELECT id FROM demand WHERE entity_id = $1 AND active", entity
+            )
+        }
+        inactive_ids = {
+            row["id"]
+            for row in await db.pool.fetch(
+                "SELECT id FROM demand WHERE entity_id = $1 AND NOT active", entity
+            )
+        }
+        assert active_ids == {direct_id} | alert_ids
+        assert inactive_ids == watchlist_ids
 
 
 class TestVisibility:

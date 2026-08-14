@@ -16,10 +16,9 @@ and an alive-but-idle loop's fresh ``last_success_at`` (sweep finding no gaps
 writes nothing, yet is healthy). ``health.overall`` is the worst per-loop
 verdict so a glance is enough: ok / stale / failing.
 
-Read-only. Any authenticated user (there is no operator/admin role yet, so the
-auth model's "any signed-in principal" is the strongest gate available). It
-reveals loop freshness, demand volume and provider fill rates. The public
-``/health`` stays minimal for anonymous uptime checks.
+Read-only and operator-only. It reveals loop freshness, demand volume and
+provider fill rates. The public ``/health`` stays minimal for anonymous uptime
+checks.
 """
 
 from __future__ import annotations
@@ -27,10 +26,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from neutron import App, Router
-from neutron.error import unauthorized
+from neutron.error import forbidden, unauthorized
 from starlette.requests import Request
 
-from omni.auth import resolve_audience_from_request
+from omni.auth import resolve_audience_from_request, resolve_role_from_request
+from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS
 
 # A loop is stale when its last success is older than this many times its own
 # scheduled interval -- a loop missing several consecutive beats is stuck, not
@@ -50,6 +50,8 @@ def build_router(app: App) -> Router:
     async def system_status(request: Request) -> dict:
         if resolve_audience_from_request(request) is None:
             raise unauthorized("Authentication required")
+        if resolve_role_from_request(request) != "operator":
+            raise forbidden("Operator access required")
         pool = app.db.pool
         now = datetime.now(UTC)
 
@@ -121,22 +123,51 @@ def build_router(app: App) -> Router:
         health_rows = await pool.fetch(
             """
             SELECT loop_name, last_success_at, last_failure_at,
-                   consecutive_failures, last_error, expected_interval_seconds
+                   consecutive_failures, last_error, expected_interval_seconds,
+                   last_status, last_result
             FROM loop_health
             """
         )
         health_loops = []
         worst_severity = -1
         worst_state: str | None = None
-        for r in health_rows:
+        recorded = {r["loop_name"]: r for r in health_rows}
+        operation_names = [
+            *EXPECTED_OPERATION_INTERVALS,
+            *sorted(set(recorded) - set(EXPECTED_OPERATION_INTERVALS)),
+        ]
+        for operation_name in operation_names:
+            r = recorded.get(operation_name)
+            default_interval = EXPECTED_OPERATION_INTERVALS.get(operation_name)
+            if r is None:
+                health_loops.append(
+                    {
+                        "loop": operation_name,
+                        "state": "never_run",
+                        "last_status": None,
+                        "last_success_at": None,
+                        "last_failure_at": None,
+                        "consecutive_failures": 0,
+                        "last_error": None,
+                        "last_result": None,
+                        "expected_interval_seconds": default_interval,
+                    }
+                )
+                continue
             consec = int(r["consecutive_failures"])
             last_success = r["last_success_at"]
-            interval = r["expected_interval_seconds"]
+            interval = r["expected_interval_seconds"] or default_interval
             # A loop with open failures is failing even if it succeeded recently
             # -- the current iteration raised. last_success NULL means it has
             # only ever failed, which is failing too.
-            if consec > 0 or last_success is None:
+            if consec > 0 or r["last_status"] == "failure":
                 state = "failing"
+            elif (
+                r["last_status"] is None
+                and last_success is None
+                and r["last_failure_at"] is None
+            ):
+                state = "never_run"
             elif interval is not None and interval > 0 and (
                 now - last_success
             ).total_seconds() > _STALE_INTERVAL_MULTIPLIER * float(interval):
@@ -145,8 +176,9 @@ def build_router(app: App) -> Router:
                 state = "ok"
             health_loops.append(
                 {
-                    "loop": r["loop_name"],
+                    "loop": operation_name,
                     "state": state,
+                    "last_status": r["last_status"],
                     "last_success_at": last_success.isoformat()
                     if last_success
                     else None,
@@ -155,12 +187,15 @@ def build_router(app: App) -> Router:
                     else None,
                     "consecutive_failures": consec,
                     "last_error": r["last_error"],
+                    "last_result": r["last_result"],
+                    "expected_interval_seconds": interval,
                 }
             )
-            sev = _SEVERITY[state]
-            if sev > worst_severity:
-                worst_severity = sev
-                worst_state = state
+            if state != "never_run":
+                sev = _SEVERITY[state]
+                if sev > worst_severity:
+                    worst_severity = sev
+                    worst_state = state
 
         return {
             "now": now.isoformat(),

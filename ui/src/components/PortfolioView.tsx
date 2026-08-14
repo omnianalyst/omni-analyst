@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { describeError } from "../lib/api";
+import { ApiHttpError, describeError } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
 import {
   classificationIndex,
@@ -36,6 +36,7 @@ type Resource<T> =
 type State =
   | { kind: "loading" }
   | { kind: "auth" }
+  | { kind: "empty" }
   | { kind: "error"; message: string; detail?: string }
   | {
       kind: "ok";
@@ -217,6 +218,10 @@ export function PortfolioView() {
           setState({ kind: "auth" });
           return;
         }
+        if (portfolio.reason instanceof ApiHttpError && portfolio.reason.status === 404) {
+          setState({ kind: "empty" });
+          return;
+        }
         const error = describeError(portfolio.reason);
         setState({ kind: "error", message: error.message, detail: error.detail });
         return;
@@ -255,6 +260,38 @@ export function PortfolioView() {
   }
   if (state.kind === "error") {
     return <ErrorState message={state.message} detail={state.detail} />;
+  }
+  if (state.kind === "empty") {
+    return (
+      <div class="portfolio-view product-page">
+        <header class="compact-status-heading health-quiet">
+          <div class="health-title-row">
+            <span class="health-orb" aria-hidden="true" />
+            <div>
+              <h1>Portfolio</h1>
+              <p>No managed trading book exists for this account.</p>
+            </div>
+          </div>
+        </header>
+        <div class="book-band" aria-labelledby="managed-book-heading">
+          <div class="book-band-label">
+            <h2 id="managed-book-heading">Managed trading book</h2>
+            <p>This account has no managed portfolio, positions, or recorded trading NAV.</p>
+          </div>
+          <div class="surface-card clean-empty">
+            <strong>No managed portfolio</strong>
+            <span>External public-address tracking remains available independently below.</span>
+          </div>
+        </div>
+        <div class="book-band book-band-external" aria-labelledby="external-holdings-heading">
+          <div class="book-band-label">
+            <h2 id="external-holdings-heading">External holdings, read only</h2>
+            <p>Public addresses this system watches and never trades.</p>
+          </div>
+          <WalletAccounts />
+        </div>
+      </div>
+    );
   }
 
   const { portfolio } = state;

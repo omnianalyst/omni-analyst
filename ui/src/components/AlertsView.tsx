@@ -2,11 +2,19 @@ import { useEffect, useState } from "preact/hooks";
 import { describeError } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
 import {
+  buildCondition,
+  CONDITION_KINDS,
+  conditionForm,
+  conditionLabel,
+  deleteAlert,
   describeCondition,
   describeLastFired,
   listAlerts,
   listFirings,
+  updateAlert,
   type Alert,
+  type ConditionFormState,
+  type ConditionKind,
   type Firing,
 } from "../lib/alerts";
 import { ErrorState } from "./ErrorState";
@@ -21,6 +29,20 @@ type State =
 
 export function AlertsView() {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [notice, setNotice] = useState<string | null>(null);
+
+  function replaceAlert(next: Alert) {
+    setState((current) => current.kind === "ok"
+      ? { ...current, alerts: current.alerts.map((alert) => alert.id === next.id ? next : alert) }
+      : current);
+  }
+
+  function dropAlert(id: string) {
+    setState((current) => current.kind === "ok"
+      ? { ...current, alerts: current.alerts.filter((alert) => alert.id !== id) }
+      : current);
+    setNotice("Alert deleted.");
+  }
 
   async function reload() {
     setState({ kind: "loading" });
@@ -59,6 +81,7 @@ export function AlertsView() {
 
       <section class="panel">
         <h2 class="panel-title">Configured alerts</h2>
+        {notice ? <p class="alert-feedback alert-panel-feedback" role="status">{notice}</p> : null}
         {state.kind === "loading" ? (
           <Loading label={"Loading alerts\u2026"} />
         ) : null}
@@ -87,7 +110,12 @@ export function AlertsView() {
         {state.kind === "ok" && state.alerts.length > 0 ? (
           <ul class="gaps">
             {state.alerts.map((a) => (
-              <AlertRow key={a.id} alert={a} />
+              <AlertRow
+                key={a.id}
+                alert={a}
+                onChanged={replaceAlert}
+                onDeleted={dropAlert}
+              />
             ))}
           </ul>
         ) : null}
@@ -113,9 +141,80 @@ const activeBadge = (active: boolean) =>
     color: active ? "var(--tier-fresh)" : "var(--faint)",
   }) as const;
 
-function AlertRow({ alert }: { alert: Alert }) {
+type ActionState =
+  | { kind: "idle" }
+  | { kind: "busy" }
+  | { kind: "ok"; message: string }
+  | { kind: "error"; message: string; detail?: string };
+
+function AlertRow({
+  alert,
+  onChanged,
+  onDeleted,
+}: {
+  alert: Alert;
+  onChanged(alert: Alert): void;
+  onDeleted(id: string): void;
+}) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<ConditionFormState>(() => conditionForm(alert.condition));
+  const [action, setAction] = useState<ActionState>({ kind: "idle" });
   const [firings, setFirings] = useState<FiringsState>({ kind: "idle" });
+
+  function actionError(error: unknown) {
+    if (error instanceof AuthRequiredError) {
+      setAction({
+        kind: "error",
+        message: "Authentication required",
+        detail: "Your token is missing or no longer valid.",
+      });
+      return;
+    }
+    const { message, detail } = describeError(error);
+    setAction({ kind: "error", message, detail });
+  }
+
+  async function toggleActive() {
+    setAction({ kind: "busy" });
+    try {
+      const next = await updateAlert(alert.id, { active: !alert.active });
+      onChanged(next);
+      setAction({ kind: "ok", message: next.active ? "Alert resumed." : "Alert paused." });
+    } catch (error) {
+      actionError(error);
+    }
+  }
+
+  async function saveCondition(event: Event) {
+    event.preventDefault();
+    const built = buildCondition(form);
+    if (!built.ok) {
+      setAction({ kind: "error", message: built.error });
+      return;
+    }
+    setAction({ kind: "busy" });
+    try {
+      const next = await updateAlert(alert.id, { condition: built.condition });
+      onChanged(next);
+      setForm(conditionForm(next.condition));
+      setEditing(false);
+      setAction({ kind: "ok", message: "Alert condition updated." });
+    } catch (error) {
+      actionError(error);
+    }
+  }
+
+  async function remove() {
+    if (!window.confirm("Delete this alert? Its firing history will no longer be available here.")) return;
+    setAction({ kind: "busy" });
+    try {
+      await deleteAlert(alert.id);
+      onDeleted(alert.id);
+    } catch (error) {
+      actionError(error);
+    }
+  }
 
   async function loadFirings() {
     setFirings({ kind: "loading" });
@@ -175,7 +274,61 @@ function AlertRow({ alert }: { alert: Alert }) {
         >
           {open ? "Hide firings" : "Show firings"}
         </button>
+        <button type="button" class="alert-action" disabled={action.kind === "busy"} onClick={() => void toggleActive()}>
+          {alert.active ? "Pause" : "Resume"}
+        </button>
+        <button
+          type="button"
+          class="alert-action"
+          disabled={action.kind === "busy"}
+          onClick={() => {
+            setForm(conditionForm(alert.condition));
+            setEditing((value) => !value);
+            setAction({ kind: "idle" });
+          }}
+        >
+          {editing ? "Cancel edit" : "Edit"}
+        </button>
+        <button type="button" class="alert-action alert-action-delete" disabled={action.kind === "busy"} onClick={() => void remove()}>
+          Delete
+        </button>
       </div>
+
+      {editing ? (
+        <form class="alert-edit-form" onSubmit={(event) => void saveCondition(event)}>
+          <label>
+            Condition
+            <select
+              value={form.kind}
+              onChange={(event) => setForm((current) => ({ ...current, kind: event.currentTarget.value as ConditionKind }))}
+            >
+              {CONDITION_KINDS.map((kind) => <option key={kind} value={kind}>{conditionLabel(kind)}</option>)}
+            </select>
+          </label>
+          {form.kind === "value_above" || form.kind === "value_below" ? (
+            <>
+              <label>
+                Level
+                <input type="number" step="any" value={form.threshold} onInput={(event) => setForm((current) => ({ ...current, threshold: event.currentTarget.value }))} />
+              </label>
+              <label>
+                Field
+                <input value={form.field} onInput={(event) => setForm((current) => ({ ...current, field: event.currentTarget.value }))} />
+              </label>
+            </>
+          ) : null}
+          {form.kind === "staleness_exceeds" ? (
+            <label>
+              Seconds
+              <input type="number" min="0" step="any" value={form.seconds} onInput={(event) => setForm((current) => ({ ...current, seconds: event.currentTarget.value }))} />
+            </label>
+          ) : null}
+          <button type="submit" class="alert-action" disabled={action.kind === "busy"}>Save condition</button>
+        </form>
+      ) : null}
+
+      {action.kind === "ok" ? <p class="alert-feedback" role="status">{action.message}</p> : null}
+      {action.kind === "error" ? <ErrorState message={action.message} detail={action.detail} /> : null}
 
       {open ? (
         <div style={{ marginTop: "10px" }}>

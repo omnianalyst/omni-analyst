@@ -20,7 +20,7 @@ from omni.db import connect, migrate
 from omni.entities.identify import run as populate_identifiers
 from omni.entities.seed import run as seed_market_universe
 from omni.scheduler.worker import Scheduler, SchedulerConfig, default_registry
-from omni.venue.manager import reconcile_forever
+from omni.venue.manager import disconnect_all, reconcile_forever
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -88,6 +88,7 @@ async def main() -> None:
         venues.cancel()
         with suppress(asyncio.CancelledError):
             await venues
+        await disconnect_all()
         await autonomous.stop()
         await scheduler.stop()
         await client.close()

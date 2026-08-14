@@ -244,12 +244,12 @@ class TestFullDeductionChain:
                now() + interval '90 days', '{}'::jsonb) RETURNING id""",
             aapl,
         )
-        await db.pool.execute(
+        finding_id = await db.pool.fetchval(
             """INSERT INTO finding (entity_id, status, method, confidence,
                threshold, calibrated_hit_rate, supporting, disconfirming,
                prediction_id)
                VALUES ($1, 'surfaced', 'trend.sma', 0.7, 0.6, 0.7,
-               '["autonomous call"]'::jsonb, '[]'::jsonb, $2)""",
+               '["autonomous call"]'::jsonb, '[]'::jsonb, $2) RETURNING id""",
             aapl, pid,
         )
 
@@ -257,7 +257,9 @@ class TestFullDeductionChain:
         assert report.findings_enriched == 1
 
         chain_raw = await db.pool.fetchval(
-            "SELECT deduction_chain FROM finding WHERE prediction_id = $1", pid
+            "SELECT deduction_chain FROM finding_enrichment_revision "
+            "WHERE finding_id = $1 ORDER BY evidence_as_of DESC LIMIT 1",
+            finding_id,
         )
         chain = json.loads(chain_raw) if isinstance(chain_raw, str) else chain_raw
         layers = [c["layer"] for c in chain]

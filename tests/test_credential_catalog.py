@@ -39,6 +39,10 @@ class TestRedistributionFor:
     def test_polygon_is_byo_only(self):
         assert redistribution_for("polygon") == FALLBACK_BYO_ONLY
 
+    def test_okx_is_byo_only_even_though_public_market_data_is_keyless(self):
+        assert PROVIDER_CATALOG["okx"]["key_required"] is False
+        assert redistribution_for("okx") == FALLBACK_BYO_ONLY
+
     def test_yahoo_is_prohibited(self):
         assert redistribution_for("yahoo") == FALLBACK_PROHIBITED
 

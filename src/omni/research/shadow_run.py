@@ -16,11 +16,9 @@ from decimal import Decimal
 
 import pandas as pd
 
-# The sector ETFs the store actually covers, plus the benchmark every book is
-# measured against. GLD, TLT and BND are deliberately absent: the store holds no
-# prices for them, so the two multi-asset rules the P2 brief names cannot be run
-# at all, and running them over the subset that exists would be a different rule
-# under the same name.
+# The sector ETFs and benchmark the current three shadow books record. The
+# separately seeded allocation funds are not folded into this universe: that
+# would silently change the three existing rules.
 SECTORS = ["XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
 BENCHMARK = "SPY"
 

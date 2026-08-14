@@ -12,10 +12,14 @@ a top-level `status`/`resultsCount` pair where an `ERROR` status arrives over
 HTTP 200.
 """
 
+import json
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import pytest
 
+from omni.capability.registry import Callability, Capability, Maturity, Registry
+from omni.fill.pipeline import run_once
 from omni.ingest.polygon import PolygonAdapter, parse_aggregates
 from omni.ingest.protocol import Unavailable
 
@@ -53,6 +57,12 @@ AGGREGATES_PAYLOAD = {
 
 def _at(iso: str) -> datetime:
     return datetime.fromisoformat(iso).replace(tzinfo=UTC)
+
+
+def _payload_with_bar(**updates):
+    bar = dict(AGGREGATES_PAYLOAD["results"][0])
+    bar.update(updates)
+    return {"status": "OK", "resultsCount": 1, "results": [bar]}
 
 
 class TestParsing:
@@ -116,24 +126,63 @@ class TestParsing:
         )
         assert drafts[0].unit == "USD"
 
-    def test_a_bar_without_a_timestamp_is_skipped_not_guessed(self):
-        payload = {
-            "status": "OK",
-            "results": [
-                {"o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10},
-                {"o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10, "t": "not-a-ts"},
-                {
-                    "o": 1,
-                    "h": 2,
-                    "l": 0.5,
-                    "c": 1.5,
-                    "v": 10,
-                    "t": 1709251200000,
-                },
-            ],
-        }
-        drafts = parse_aggregates(payload, symbol="AAPL")
-        assert len(drafts) == 1
+    @pytest.mark.parametrize(
+        "timestamp",
+        [None, True, "not-a-ts", float("nan"), float("inf"), 0, -1],
+    )
+    def test_a_malformed_timestamp_is_refused_not_guessed(self, timestamp):
+        with pytest.raises(Unavailable, match="timestamp"):
+            parse_aggregates(_payload_with_bar(t=timestamp), symbol="AAPL")
+
+    @pytest.mark.parametrize("bar", [None, [], "not-a-bar"])
+    def test_a_non_object_bar_is_refused(self, bar):
+        with pytest.raises(Unavailable, match="malformed bar"):
+            parse_aggregates({"status": "OK", "results": [bar]}, symbol="AAPL")
+
+    @pytest.mark.parametrize("results", [None, {}, "not-a-list"])
+    def test_malformed_results_are_refused(self, results):
+        with pytest.raises(Unavailable, match="malformed results"):
+            parse_aggregates({"status": "OK", "results": results}, symbol="AAPL")
+
+    @pytest.mark.parametrize("field", ["o", "h", "l", "c", "v"])
+    def test_every_ohlcv_field_is_required(self, field):
+        payload = _payload_with_bar()
+        del payload["results"][0][field]
+        with pytest.raises(Unavailable, match="finite positive number"):
+            parse_aggregates(payload, symbol="AAPL")
+
+    @pytest.mark.parametrize("field", ["o", "h", "l", "c", "v"])
+    @pytest.mark.parametrize(
+        "bad_value",
+        [None, True, "not-a-number", float("nan"), float("inf"), float("-inf"), 0, -1],
+    )
+    def test_nonnumeric_nonfinite_and_nonpositive_ohlcv_is_refused(self, field, bad_value):
+        with pytest.raises(Unavailable, match="finite positive number"):
+            parse_aggregates(
+                _payload_with_bar(**{field: bad_value}),
+                symbol="AAPL",
+            )
+
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"l": 179.0},
+            {"h": 178.2},
+            {"l": 178.2, "h": 178.1},
+        ],
+    )
+    def test_inconsistent_ohlc_ranges_are_refused(self, updates):
+        with pytest.raises(Unavailable, match="inconsistent"):
+            parse_aggregates(_payload_with_bar(**updates), symbol="AAPL")
+
+    def test_one_bad_bar_refuses_the_batch_instead_of_returning_partial_coverage(self):
+        payload = dict(AGGREGATES_PAYLOAD)
+        payload["results"] = [
+            dict(AGGREGATES_PAYLOAD["results"][0]),
+            {**AGGREGATES_PAYLOAD["results"][1], "c": None},
+        ]
+        with pytest.raises(Unavailable, match="close"):
+            parse_aggregates(payload, symbol="AAPL")
 
 
 class TestAdapter:
@@ -174,3 +223,45 @@ class TestAdapter:
         adapter = PolygonAdapter()
         assert adapter.source == "polygon"
         assert adapter.provider_key == "polygon"
+
+    async def test_a_malformed_bar_is_unfillable_and_writes_no_coverage(self, db):
+        await db.pool.execute("TRUNCATE entity, demand CASCADE")
+        owner = uuid4()
+        entity_id = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name, identifiers) "
+            "VALUES ('company', 'AAPL', 'Apple', $1::jsonb) RETURNING id",
+            json.dumps({"polygon": "AAPL"}),
+        )
+        await db.pool.execute(
+            "INSERT INTO gap (entity_id, claim_type, gap_class, audience_user_id, score) "
+            "VALUES ($1, 'price_snapshot', 'missing', $2, 1.0)",
+            entity_id,
+            owner,
+        )
+
+        async def malformed(_symbol: str) -> dict:
+            return _payload_with_bar(c=float("nan"))
+
+        adapter = PolygonAdapter(fetch_fn=malformed)
+        registry = Registry()
+        registry.add(
+            Capability(
+                name="polygon.invalid-bar-test",
+                description="Polygon invalid bar regression",
+                produces=("price_snapshot",),
+                entity_kinds=("company",),
+                provider_key=adapter.provider_key,
+                source=adapter.source,
+                touches_byo=True,
+                maturity=Maturity.WIRED,
+                callability=Callability.YES,
+                call=adapter.fetch,
+            )
+        )
+
+        result = await run_once(db.pool, registry=registry, worker_id="polygon-test")
+        assert result is not None
+        assert result.outcome == "unfillable"
+        assert result.claim_ids == []
+        assert result.reason is not None and "finite positive number" in result.reason
+        assert await db.pool.fetchval("SELECT count(*) FROM claim") == 0

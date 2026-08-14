@@ -16,6 +16,7 @@ The venue is the real `PaperVenue`, so the cycles these tests record are cycles
 that actually traded.
 """
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -25,8 +26,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from omni.portfolio.state import create_portfolio
-from omni.trading.carry_loop import CarryConfig, CarryHalt
+from omni.trading.carry_loop import CarryConfig, CarryHalt, CarryRiskPolicy
 from omni.trading.carry_runner import (
+    GUARD_CYCLE_OWNED,
     GUARD_INSIDE_HOLD,
     GUARD_INSTANT_ALREADY_COVERED,
     GUARD_NO_RECORDED_CYCLE,
@@ -76,32 +78,42 @@ CAPABILITIES = Capabilities(
 )
 
 
-def _config() -> CarryConfig:
-    return CarryConfig(
-        enter_rank=2,
-        exit_rank=4,
-        notional_per_pair=NOTIONAL,
-        funding_venue=FUNDING_VENUE,
-        spread_bps=SPREAD_BPS,
-        reconciliation_tolerance=Decimal("0.01"),
-        lookback_days=7,
-    )
+def _config(**overrides) -> CarryConfig:
+    values = {
+        "enter_rank": 2,
+        "exit_rank": 4,
+        "notional_per_pair": NOTIONAL,
+        "funding_venue": FUNDING_VENUE,
+        "spread_bps": SPREAD_BPS,
+        "reconciliation_tolerance": Decimal("0.01"),
+        "risk_policy": CarryRiskPolicy(
+            max_gross_notional=Decimal(4000),
+            daily_loss_limit_pct_nav=Decimal("0.02"),
+            max_drawdown_pct=Decimal("0.10"),
+        ),
+        "lookback_days": 7,
+    }
+    values.update(overrides)
+    return CarryConfig(**values)
 
 
-def _bars() -> RecordedBars:
+def _bars(*, later_at=None) -> RecordedBars:
     bars = RecordedBars()
     for symbol in RATES:
-        bars.add(
-            Bar(
-                symbol=symbol,
-                open=PRICE,
-                high=Decimal(110),
-                low=Decimal(90),
-                close=PRICE,
-                volume=Decimal(1000000),
-                at=NOW - timedelta(days=30),
+        for at in (NOW - timedelta(days=30), later_at):
+            if at is None:
+                continue
+            bars.add(
+                Bar(
+                    symbol=symbol,
+                    open=PRICE,
+                    high=Decimal(110),
+                    low=Decimal(90),
+                    close=PRICE,
+                    volume=Decimal(1000000),
+                    at=at,
+                )
             )
-        )
     return bars
 
 
@@ -193,16 +205,45 @@ async def _world(db, audience) -> dict[str, UUID]:
 
 
 async def _run(db, *, venue, portfolio_id, ids, owner, now=NOW, **overrides):
+    config = overrides.pop("config", None)
+    universe = overrides.pop("universe", None)
     return await run_due_cycle(
         db.pool,
         venue=venue,
         portfolio_id=portfolio_id,
-        config=_config(),
-        entity_ids=list(ids.values()),
+        config=config or _config(),
+        entity_ids=list(ids.values()) if universe is None else universe,
         audience_user_id=owner,
         now=now,
         **overrides,
     )
+
+
+class _VenueProbe:
+    def __init__(self, inner, *, block_positions=False):
+        self._inner = inner
+        self.calls: list[str] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.block_positions = block_positions
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    async def positions(self):
+        self.calls.append("positions")
+        if self.block_positions:
+            self.started.set()
+            await self.release.wait()
+        return await self._inner.positions()
+
+    async def balances(self):
+        self.calls.append("balances")
+        return await self._inner.balances()
+
+    async def execute(self, intent):
+        self.calls.append("execute")
+        return await self._inner.execute(intent)
 
 
 async def _rows(db, portfolio_id):
@@ -398,6 +439,246 @@ class TestTheFundingBoundary:
         await _record_a_cycle(db, portfolio_id, as_of=NOW, since=INCEPTION)
 
         assert (await boundary(db.pool, portfolio_id, "hyperliquid")).opens_at is None
+
+    async def test_an_unresolved_held_pair_does_not_advance_the_boundary(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+        first = await _run(
+            db,
+            venue=venue,
+            portfolio_id=portfolio_id,
+            ids=ids,
+            owner=owner,
+            inception=INCEPTION,
+        )
+        assert ids["AAA/USD"] in first.held
+
+        result = await _run(
+            db,
+            venue=venue,
+            portfolio_id=portfolio_id,
+            ids=ids,
+            owner=owner,
+            now=NOW + REBALANCE_PERIOD,
+            universe=[
+                entity_id
+                for symbol, entity_id in ids.items()
+                if symbol != "AAA/USD"
+            ],
+        )
+
+        assert result.halted
+        assert CarryHalt.UNRESOLVED_PAIR.value in result.halt_reason
+        assert result.funding_settled_through is None
+        assert (await boundary(db.pool, portfolio_id, VENUE)).opens_at == NOW
+        rows = await _rows(db, portfolio_id)
+        assert [row["funding_settled_through"] for row in rows] == [NOW, None]
+
+
+class TestCycleOwnershipAndRisk:
+    async def test_two_concurrent_runners_make_one_venue_call_sequence(
+        self, db, owner, portfolio_id
+    ):
+        ids = await _world(db, owner)
+        first = _VenueProbe(
+            PaperVenue(
+                _bars(),
+                CAPABILITIES,
+                name=VENUE,
+                spread_bps=SPREAD_BPS,
+                starting_balances={"USD": Decimal(100000)},
+            ),
+            block_positions=True,
+        )
+        second = _VenueProbe(
+            PaperVenue(
+                _bars(),
+                CAPABILITIES,
+                name=VENUE,
+                spread_bps=SPREAD_BPS,
+                starting_balances={"USD": Decimal(100000)},
+            )
+        )
+        first_task = asyncio.create_task(
+            _run(
+                db,
+                venue=first,
+                portfolio_id=portfolio_id,
+                ids=ids,
+                owner=owner,
+                inception=INCEPTION,
+            )
+        )
+        await asyncio.wait_for(first.started.wait(), timeout=2)
+        refusal = None
+        try:
+            try:
+                await _run(
+                    db,
+                    venue=second,
+                    portfolio_id=portfolio_id,
+                    ids=ids,
+                    owner=owner,
+                    inception=INCEPTION,
+                )
+            except CarryRunRefused as exc:
+                refusal = exc
+        finally:
+            first.release.set()
+        result = await first_task
+
+        assert refusal is not None
+        assert refusal.guard == GUARD_CYCLE_OWNED
+        assert second.calls == []
+        assert not result.halted
+        assert first.calls == [
+            "positions",
+            "balances",
+            "execute",
+            "execute",
+            "execute",
+            "execute",
+        ]
+        assert len(await _rows(db, portfolio_id)) == 1
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM trade_order WHERE portfolio_id = $1", portfolio_id
+        ) == 4
+
+    async def test_failed_risk_policy_makes_no_venue_call_or_boundary_advance(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+        watching = _VenueProbe(venue)
+        policy = CarryRiskPolicy(
+            max_gross_notional=NOTIONAL,
+            daily_loss_limit_pct_nav=Decimal("0.02"),
+            max_drawdown_pct=Decimal("0.10"),
+        )
+
+        result = await _run(
+            db,
+            venue=watching,
+            portfolio_id=portfolio_id,
+            ids=ids,
+            owner=owner,
+            inception=INCEPTION,
+            config=_config(risk_policy=policy),
+        )
+
+        assert result.halted
+        assert CarryHalt.RISK_POLICY.value in result.halt_reason
+        assert "configured pair authority is 4000" in result.halt_reason
+        assert result.funding_settled_through is None
+        assert watching.calls == []
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM trade_order WHERE portfolio_id = $1", portfolio_id
+        ) == 0
+        assert (await boundary(db.pool, portfolio_id, VENUE)).opens_at == INCEPTION
+
+    async def test_daily_loss_policy_halts_before_another_venue_call(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+        later = NOW + timedelta(days=3)
+        venue = PaperVenue(
+            _bars(later_at=later),
+            CAPABILITIES,
+            name=VENUE,
+            spread_bps=SPREAD_BPS,
+            starting_balances={"USD": Decimal(100000)},
+        )
+        await _run(
+            db,
+            venue=venue,
+            portfolio_id=portfolio_id,
+            ids=ids,
+            owner=owner,
+            inception=INCEPTION,
+        )
+        flipped = {
+            "AAA/USD": "-0.0009",
+            "BBB/USD": "-0.0008",
+            "CCC/USD": "0.0009",
+            "DDD/USD": "0.0008",
+            "EEE/USD": "0.0007",
+            "FFF/USD": "0.0006",
+        }
+        for symbol, entity_id in ids.items():
+            for step in (2, 1):
+                await _claim(
+                    db,
+                    entity_id,
+                    "funding_rate",
+                    f"{FUNDING_VENUE}:{symbol}",
+                    {
+                        "rate": flipped[symbol],
+                        "venue": FUNDING_VENUE,
+                        "symbol": symbol,
+                    },
+                    later - SETTLEMENT * step,
+                    owner,
+                    "derivatives",
+                )
+        rotated = await _run(
+            db,
+            venue=venue,
+            portfolio_id=portfolio_id,
+            ids=ids,
+            owner=owner,
+            now=later,
+            ignore_cadence=True,
+            config=_config(lookback_days=1),
+        )
+        assert len(rotated.closed) == 2
+
+        watching = _VenueProbe(venue)
+        policy = CarryRiskPolicy(
+            max_gross_notional=Decimal(4000),
+            daily_loss_limit_pct_nav=Decimal("0.000001"),
+            max_drawdown_pct=Decimal("0.10"),
+        )
+        result = await _run(
+            db,
+            venue=watching,
+            portfolio_id=portfolio_id,
+            ids=ids,
+            owner=owner,
+            now=later + timedelta(hours=1),
+            ignore_cadence=True,
+            config=_config(risk_policy=policy),
+        )
+
+        assert result.halted
+        assert "today's realised loss" in result.halt_reason
+        assert watching.calls == []
+
+    async def test_drawdown_policy_halts_before_a_venue_call(
+        self, db, owner, portfolio_id, venue
+    ):
+        ids = await _world(db, owner)
+        await db.pool.execute(
+            "INSERT INTO nav_snapshot (portfolio_id, nav, cash, gross_exposure, "
+            "net_exposure, taken_at) VALUES ($1,200000,200000,0,0,$2)",
+            portfolio_id,
+            NOW - timedelta(days=1),
+        )
+        watching = _VenueProbe(venue)
+
+        result = await _run(
+            db,
+            venue=watching,
+            portfolio_id=portfolio_id,
+            ids=ids,
+            owner=owner,
+            inception=INCEPTION,
+        )
+
+        assert result.halted
+        assert CarryHalt.RISK_POLICY.value in result.halt_reason
+        assert "drawdown" in result.halt_reason
+        assert "exceeds 0.10" in result.halt_reason
+        assert watching.calls == []
 
 
 class TestTheRebalanceCadence:

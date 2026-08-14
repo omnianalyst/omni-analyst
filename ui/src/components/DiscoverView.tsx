@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { ScannerView } from "./ScannerView";
 import { SearchView } from "./SearchView";
 import { WatchlistView } from "./WatchlistView";
@@ -13,8 +13,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "alerts", label: "Alerts" },
 ];
 
-function initialTab(): Tab {
-  if (typeof window === "undefined") return "scanner";
+function requestedTab(): Tab {
   const params = new URLSearchParams(window.location.search);
   const requested = params.get("tab");
   if (requested && TABS.some((tab) => tab.id === requested)) return requested as Tab;
@@ -22,7 +21,11 @@ function initialTab(): Tab {
 }
 
 export function DiscoverView() {
-  const [tab, setTab] = useState<Tab>(initialTab);
+  const [tab, setTab] = useState<Tab>("scanner");
+
+  useEffect(() => {
+    setTab(requestedTab());
+  }, []);
 
   function selectTab(next: Tab) {
     setTab(next);

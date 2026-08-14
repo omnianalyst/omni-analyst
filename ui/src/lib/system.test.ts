@@ -7,6 +7,7 @@ import {
   scheduledLoopTier,
   unhealthyLoops,
   worstScheduledTier,
+  type LoopHealthEntry,
   type LoopStatus,
   type SystemHealth,
 } from "./system";
@@ -21,6 +22,21 @@ function loop(
   neverRun = false,
 ): LoopStatus {
   return { loop: name, last_activity: null, age_seconds: ageSeconds, never_run: neverRun };
+}
+
+function healthEntry(
+  entry: Pick<LoopHealthEntry, "loop" | "state"> & Partial<LoopHealthEntry>,
+): LoopHealthEntry {
+  return {
+    last_status: entry.state === "failing" ? "failure" : "success",
+    last_success_at: null,
+    last_failure_at: null,
+    consecutive_failures: 0,
+    last_error: null,
+    last_result: null,
+    expected_interval_seconds: 60,
+    ...entry,
+  };
 }
 
 describe("scheduledLoopTier", () => {
@@ -161,7 +177,7 @@ describe("unhealthyLoops", () => {
     expect(unhealthyLoops(health([]))).toEqual([]);
     expect(
       unhealthyLoops(
-        health([{ loop: "sweep", state: "ok", last_success_at: "t", last_failure_at: null, consecutive_failures: 0, last_error: null }]),
+        health([healthEntry({ loop: "sweep", state: "ok", last_success_at: "t" })]),
       ),
     ).toEqual([]);
   });
@@ -169,9 +185,9 @@ describe("unhealthyLoops", () => {
   it("flags a failing loop with its error and streak, failing above stale", () => {
     const out = unhealthyLoops(
       health([
-        { loop: "sweep", state: "ok", last_success_at: "t", last_failure_at: null, consecutive_failures: 0, last_error: null },
-        { loop: "predict", state: "stale", last_success_at: "old", last_failure_at: null, consecutive_failures: 0, last_error: null },
-        { loop: "fill", state: "failing", last_success_at: "t", last_failure_at: "t2", consecutive_failures: 3, last_error: "RuntimeError: NoCoverage" },
+        healthEntry({ loop: "sweep", state: "ok", last_success_at: "t" }),
+        healthEntry({ loop: "predict", state: "stale", last_success_at: "old" }),
+        healthEntry({ loop: "fill", state: "failing", last_success_at: "t", last_failure_at: "t2", consecutive_failures: 3, last_error: "RuntimeError: NoCoverage" }),
       ]),
     );
     // Failing sorts first; the streak count and error text are both carried --
@@ -184,7 +200,7 @@ describe("unhealthyLoops", () => {
   it("omits the streak when a loop has failed exactly once", () => {
     const out = unhealthyLoops(
       health([
-        { loop: "resolve", state: "failing", last_success_at: null, last_failure_at: "t", consecutive_failures: 1, last_error: "boom" },
+        healthEntry({ loop: "resolve", state: "failing", last_success_at: null, last_failure_at: "t", consecutive_failures: 1, last_error: "boom" }),
       ]),
     );
     expect(out[0].detail).toBe("failing: boom");

@@ -19,11 +19,14 @@ export interface LoopStatus {
 // kept as separate views rather than joined.
 export interface LoopHealthEntry {
   loop: string;
-  state: "ok" | "stale" | "failing";
+  state: "ok" | "stale" | "failing" | "never_run";
+  last_status: "success" | "failure" | null;
   last_success_at: string | null;
   last_failure_at: string | null;
   consecutive_failures: number;
   last_error: string | null;
+  last_result: string | null;
+  expected_interval_seconds: number | null;
 }
 
 export interface SystemHealth {

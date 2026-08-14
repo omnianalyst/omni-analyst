@@ -26,10 +26,17 @@ export function CommandPalette({ commands }: { commands: CommandItem[] }) {
   const [entities, setEntities] = useState<EntityResult[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  const openRef = useRef(open);
+  const activeRef = useRef(active);
+  const resultsRef = useRef<Array<{ href: string }>>([]);
+  const commandsRef = useRef(commands);
 
   const navResults = filterRoutes(commands, query);
 
-  useEffect(() => { setActive(0); }, [query, open]);
+  useEffect(() => {
+    activeRef.current = 0;
+    setActive(0);
+  }, [query, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -62,40 +69,69 @@ export function CommandPalette({ commands }: { commands: CommandItem[] }) {
       hint: e.kind,
     })),
   ];
+  openRef.current = open;
+  activeRef.current = active;
+  resultsRef.current = allResults;
+  commandsRef.current = commands;
 
   useEffect(() => {
     function go(href: string) {
       navigate(href as never);
+      openRef.current = false;
       setOpen(false);
       setQuery("");
     }
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault(); setOpen((o) => !o); return;
+        e.preventDefault();
+        openRef.current = !openRef.current;
+        setOpen(openRef.current);
+        return;
       }
-      if (open) {
-        if (e.key === "Escape") { e.preventDefault(); setOpen(false); return; }
-        if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(a + 1, Math.max(allResults.length - 1, 0))); return; }
-        if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(a - 1, 0)); return; }
+      if (openRef.current) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          openRef.current = false;
+          setOpen(false);
+          return;
+        }
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          activeRef.current = Math.min(
+            activeRef.current + 1,
+            Math.max(resultsRef.current.length - 1, 0),
+          );
+          setActive(activeRef.current);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          activeRef.current = Math.max(activeRef.current - 1, 0);
+          setActive(activeRef.current);
+          return;
+        }
         if (e.key === "Enter") {
-          const item = allResults[active];
+          const item = resultsRef.current[activeRef.current];
           if (item) { e.preventDefault(); go(item.href); }
           return;
         }
       }
       if (!isTyping() && /^[1-9]$/.test(e.key)) {
-        const item = commands[Number(e.key) - 1];
+        const item = commandsRef.current[Number(e.key) - 1];
         if (item) { e.preventDefault(); go(item.href); }
       }
     }
-    function onOpen() { setOpen(true); }
+    function onOpen() {
+      openRef.current = true;
+      setOpen(true);
+    }
     window.addEventListener("keydown", onKey);
     window.addEventListener(OPEN_COMMAND_PALETTE, onOpen);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener(OPEN_COMMAND_PALETTE, onOpen);
     };
-  }, [open, allResults, active, commands]);
+  }, []);
 
   if (!open) return null;
 
@@ -127,7 +163,10 @@ export function CommandPalette({ commands }: { commands: CommandItem[] }) {
                   <a
                     href={item.href}
                     class={`palette-row ${i === active ? "palette-row-active" : ""}`}
-                    onMouseEnter={() => setActive(i)}
+                    onMouseEnter={() => {
+                      activeRef.current = i;
+                      setActive(i);
+                    }}
                     onClick={(e) => {
                       e.preventDefault();
                       navigate(item.href as never);

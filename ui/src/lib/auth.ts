@@ -1,6 +1,12 @@
 import { getAuthToken, request, sendJson } from "./api";
 
-export { AUTH_TOKEN_KEY, clearAuthToken, getAuthToken, setAuthToken } from "./api";
+export {
+  AUTH_STATE_EVENT,
+  AUTH_TOKEN_KEY,
+  clearAuthToken,
+  getAuthToken,
+  setAuthToken,
+} from "./api";
 
 export class AuthRequiredError extends Error {
   constructor() {

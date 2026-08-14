@@ -46,13 +46,37 @@ async def create_user(pool: asyncpg.Pool, *, email: str, password: str) -> Any:
             """
             INSERT INTO users (email, password_hash)
             VALUES ($1, $2)
-            RETURNING id, email, created_at, active
+            RETURNING id, email, created_at, active, role
             """,
             canonical,
             hash_password(password),
         )
     except asyncpg.UniqueViolationError:
         raise conflict("email already registered")
+
+
+async def create_initial_operator(
+    pool: asyncpg.Pool, *, email: str, password: str
+) -> Any:
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise PasswordTooShort
+    canonical = _normalise_email(email)
+    try:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO users (email, password_hash, role)
+            SELECT $1, $2, 'operator'
+            WHERE NOT EXISTS (SELECT 1 FROM users)
+            RETURNING id, email, created_at, active, role
+            """,
+            canonical,
+            hash_password(password),
+        )
+    except asyncpg.UniqueViolationError:
+        raise conflict("setup is already complete")
+    if row is None:
+        raise conflict("setup is already complete")
+    return row
 
 
 async def authenticate_user(
@@ -66,7 +90,7 @@ async def authenticate_user(
     """
     canonical = _normalise_email(email)
     row = await pool.fetchrow(
-        "SELECT id, email, password_hash, created_at, active "
+        "SELECT id, email, password_hash, created_at, active, role "
         "FROM users WHERE lower(email) = $1",
         canonical,
     )
@@ -81,7 +105,7 @@ async def authenticate_user(
 
 async def get_user(pool: asyncpg.Pool, user_id: UUID) -> Any | None:
     return await pool.fetchrow(
-        "SELECT id, email, created_at, active FROM users WHERE id = $1",
+        "SELECT id, email, created_at, active, role FROM users WHERE id = $1",
         user_id,
     )
 

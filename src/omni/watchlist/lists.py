@@ -24,14 +24,9 @@ a crypto asset gets price and on-chain. The map is explicit per kind rather
 than a single hardcoded list, because demanding on-chain flows for a stock or a
 10-K filing for a token would be noise dressed as coverage.
 
-The one place the demand ledger fought this design: ``direct_attention``
-hardcodes ``channel = 'direct'``, so watchlist-raised demand is indistinguishable
-from question-raised demand. ``watchlist_entry.demand_id`` is a single column
-but add_entity raises one row per default claim type, so it cannot name the
-whole set. Removal therefore withdraws the rows add_entity wrote by their shape
-(entity, owner, keyless, channel 'direct', claim types in the kind's defaults)
-rather than by id alone. A precise origin marker on the ledger would remove the
-one residual ambiguity noted in the report.
+Every demand row raised for an entry is recorded in ``watchlist_entry_demand``.
+Removal follows those exact links; it never infers ownership from a demand row's
+shape because direct attention and alert-created demand have that same shape.
 """
 
 from __future__ import annotations
@@ -117,51 +112,57 @@ async def add_entity(
     would inflate weight without adding signal -- exactly the deduplication the
     ledger forbids on the write path.
     """
-    owned = await pool.fetchval(
-        "SELECT 1 FROM watchlist WHERE id = $1 AND user_id = $2",
-        watchlist_id,
-        user_id,
-    )
-    if owned is None:
-        return None
-
-    kind = await pool.fetchval("SELECT kind FROM entity WHERE id = $1", entity_id)
-    if kind is None:
-        return None
-
-    existing = await pool.fetchrow(
-        "SELECT watchlist_id, entity_id, added_at, demand_id "
-        "FROM watchlist_entry WHERE watchlist_id = $1 AND entity_id = $2",
-        watchlist_id,
-        entity_id,
-    )
-    if existing is not None:
-        return existing
-
-    claim_types = claim_types_for_kind(kind)
-    first_demand_id = None
-    for claim_type in claim_types:
-        demand_id = await direct_attention(
-            pool,
-            entity_id=entity_id,
-            claim_type=claim_type,
-            key=None,
-            requested_by=user_id,
+    async with pool.acquire() as conn, conn.transaction():
+        owned = await conn.fetchval(
+            "SELECT 1 FROM watchlist WHERE id = $1 AND user_id = $2 FOR SHARE",
+            watchlist_id,
+            user_id,
         )
-        if first_demand_id is None:
-            first_demand_id = demand_id
+        if owned is None:
+            return None
 
-    # demand_id names one of the rows raised (the representative link). A single
-    # column cannot name the per-claim-type set; removal matches the rows by
-    # shape. See the module docstring.
-    return await pool.fetchrow(
-        "INSERT INTO watchlist_entry (watchlist_id, entity_id, demand_id) "
-        "VALUES ($1, $2, $3) "
-        "RETURNING watchlist_id, entity_id, added_at, demand_id",
-        watchlist_id,
-        entity_id,
-        first_demand_id,
-    )
+        kind = await conn.fetchval("SELECT kind FROM entity WHERE id = $1", entity_id)
+        if kind is None:
+            return None
+
+        existing = await conn.fetchrow(
+            "SELECT watchlist_id, entity_id, added_at, demand_id "
+            "FROM watchlist_entry WHERE watchlist_id = $1 AND entity_id = $2",
+            watchlist_id,
+            entity_id,
+        )
+        if existing is not None:
+            return existing
+
+        demand_ids = []
+        for claim_type in claim_types_for_kind(kind):
+            demand_ids.append(
+                await direct_attention(
+                    conn,
+                    entity_id=entity_id,
+                    claim_type=claim_type,
+                    key=None,
+                    requested_by=user_id,
+                )
+            )
+
+        entry = await conn.fetchrow(
+            "INSERT INTO watchlist_entry (watchlist_id, entity_id, demand_id) "
+            "VALUES ($1, $2, $3) "
+            "RETURNING watchlist_id, entity_id, added_at, demand_id",
+            watchlist_id,
+            entity_id,
+            demand_ids[0],
+        )
+        for demand_id in demand_ids:
+            await conn.execute(
+                "INSERT INTO watchlist_entry_demand "
+                "(watchlist_id, entity_id, demand_id) VALUES ($1, $2, $3)",
+                watchlist_id,
+                entity_id,
+                demand_id,
+            )
+        return entry
 
 
 async def remove_entity(
@@ -177,49 +178,35 @@ async def remove_entity(
     not exist. The demand rows are deactivated (the ledger is a record), not
     deleted.
     """
-    owned = await pool.fetchval(
-        "SELECT 1 FROM watchlist WHERE id = $1 AND user_id = $2",
-        watchlist_id,
-        user_id,
-    )
-    if owned is None:
-        return False
+    async with pool.acquire() as conn, conn.transaction():
+        entry = await conn.fetchrow(
+            "SELECT 1 FROM watchlist_entry e "
+            "JOIN watchlist w ON w.id = e.watchlist_id "
+            "WHERE e.watchlist_id = $1 AND e.entity_id = $2 AND w.user_id = $3 "
+            "FOR UPDATE OF e",
+            watchlist_id,
+            entity_id,
+            user_id,
+        )
+        if entry is None:
+            return False
 
-    entry = await pool.fetchrow(
-        "SELECT 1 FROM watchlist_entry "
-        "WHERE watchlist_id = $1 AND entity_id = $2",
-        watchlist_id,
-        entity_id,
-    )
-    if entry is None:
-        return False
+        rows = await conn.fetch(
+            "SELECT demand_id FROM watchlist_entry_demand "
+            "WHERE watchlist_id = $1 AND entity_id = $2",
+            watchlist_id,
+            entity_id,
+        )
+        for row in rows:
+            await withdraw(conn, row["demand_id"])
 
-    kind = await pool.fetchval("SELECT kind FROM entity WHERE id = $1", entity_id)
-    claim_types = list(claim_types_for_kind(kind))
-
-    # Withdraw the rows add_entity wrote. They are keyless ('direct' channel, no
-    # specific series) and target the kind's default claim types; matching that
-    # shape deactivates exactly the set raised. withdraw itself only flips
-    # active, so history is preserved.
-    rows = await pool.fetch(
-        "SELECT id FROM demand "
-        "WHERE entity_id = $1 AND requested_by = $2 AND key IS NULL "
-        "AND channel = 'direct' AND claim_type = ANY($3::claim_type[]) "
-        "AND active",
-        entity_id,
-        user_id,
-        claim_types,
-    )
-    for row in rows:
-        await withdraw(pool, row["id"])
-
-    await pool.execute(
-        "DELETE FROM watchlist_entry "
-        "WHERE watchlist_id = $1 AND entity_id = $2",
-        watchlist_id,
-        entity_id,
-    )
-    return True
+        await conn.execute(
+            "DELETE FROM watchlist_entry "
+            "WHERE watchlist_id = $1 AND entity_id = $2",
+            watchlist_id,
+            entity_id,
+        )
+        return True
 
 
 async def entries(pool, *, watchlist_id: UUID, user_id: UUID) -> list | None:

@@ -3,10 +3,12 @@
 import json
 from datetime import UTC, datetime, timedelta
 
+import asyncpg
 import pytest
 
 from omni.autonomous.meta import meta_hit_rate, resolve_meta
 from omni.autonomous.synthesis import enrich_findings
+from omni.conviction.publish import briefing
 
 
 async def _seed_entity(db, kind, symbol, name=None):
@@ -16,10 +18,21 @@ async def _seed_entity(db, kind, symbol, name=None):
     )
 
 
-async def _seed_claim(db, *, entity_id, claim_type, value, key="k", days_ago=0, source="test"):
+async def _seed_claim(
+    db,
+    *,
+    entity_id,
+    claim_type,
+    value,
+    key="k",
+    days_ago=0,
+    source="test",
+    event_date=None,
+    knowledge_date=None,
+):
     now = datetime.now(UTC)
-    event = now - timedelta(days=days_ago + 1)
-    knowledge = now - timedelta(days=days_ago)
+    event = event_date or now - timedelta(days=days_ago + 1)
+    knowledge = knowledge_date or now - timedelta(days=days_ago)
     return await db.pool.fetchval(
         """
         INSERT INTO claim (entity_id, claim_type, key, value, source,
@@ -83,17 +96,32 @@ async def _seed_price_path(db, entity_id, *, start_price, end_price, start_days_
         )
 
 
-async def _seed_finding(db, *, entity_id, prediction_id):
-    await db.pool.execute(
+async def _seed_finding(db, *, entity_id, prediction_id, audience_user_id=None):
+    return await db.pool.fetchval(
         """
-        INSERT INTO finding (claim_id, entity_id, status, method, confidence,
+        INSERT INTO finding (claim_id, entity_id, audience_user_id, status, method, confidence,
                              threshold, calibrated_hit_rate, supporting,
                              disconfirming, prediction_id)
-        VALUES (NULL, $1, 'surfaced', 'trend.sma', 0.7, 0.6, 0.7,
+        VALUES (NULL, $1, $3, 'surfaced', 'trend.sma', 0.7, 0.6, 0.7,
                 '["autonomous directional call"]'::jsonb, '[]'::jsonb, $2)
+        RETURNING id
         """,
-        entity_id, prediction_id,
+        entity_id, prediction_id, audience_user_id,
     )
+
+
+async def _latest_chain(db, finding_id):
+    raw = await db.pool.fetchval(
+        """
+        SELECT deduction_chain
+        FROM finding_enrichment_revision
+        WHERE finding_id = $1
+        ORDER BY evidence_as_of DESC, created_at DESC, id DESC
+        LIMIT 1
+        """,
+        finding_id,
+    )
+    return json.loads(raw) if isinstance(raw, str) else raw
 
 
 async def _seed_prediction(db, *, entity_id):
@@ -123,6 +151,8 @@ class TestSynthesis:
         company = await _seed_entity(db, "company", "AAPL")
         etf = await _seed_entity(db, "sector_etf", "XLK")
         macro = await _seed_entity(db, "macro", "US_MACRO")
+        evidence_event = datetime.now(UTC) - timedelta(days=2)
+        evidence_knowledge = evidence_event + timedelta(days=1)
         await db.pool.execute(
             "INSERT INTO entity_edge (from_entity, to_entity, relation, source) "
             "VALUES ($1, $2, 'member_of_sector', 'test')",
@@ -133,22 +163,25 @@ class TestSynthesis:
                           key="xlk")
         await _seed_claim(db, entity_id=macro, claim_type="regime_assessment",
                           value={"cycle_phase": "expansion", "risk_regime": "risk_on"},
-                          key="us_macro")
+                          key="us_macro", event_date=evidence_event,
+                          knowledge_date=evidence_knowledge)
         pid = await _seed_prediction(db, entity_id=company)
-        await _seed_finding(db, entity_id=company, prediction_id=pid)
+        finding_id = await _seed_finding(db, entity_id=company, prediction_id=pid)
 
         report = await enrich_findings(db.pool)
         assert report.findings_enriched == 1
 
-        chain_raw = await db.pool.fetchval(
-            "SELECT deduction_chain FROM finding WHERE prediction_id = $1", pid
-        )
-        chain = json.loads(chain_raw) if isinstance(chain_raw, str) else chain_raw
+        chain = await _latest_chain(db, finding_id)
         layers = [c["layer"] for c in chain]
         assert layers == ["macro", "sector", "stock"]
         assert chain[0]["cycle_phase"] == "expansion"
         assert chain[1]["etf_symbol"] == "XLK"
         assert chain[2]["direction"] == "up"
+        assert chain[0]["evidence"]["source"] == "test"
+        assert chain[0]["evidence"]["redistributable"] == "allowed"
+        assert chain[0]["evidence"]["audience_user_id"] is None
+        assert chain[0]["evidence"]["event_date"] == evidence_event.isoformat()
+        assert chain[0]["evidence"]["knowledge_date"] == evidence_knowledge.isoformat()
 
     async def test_partial_chain_when_no_regime(self, db):
         company = await _seed_entity(db, "company", "AAPL")
@@ -162,24 +195,26 @@ class TestSynthesis:
                           value={"rs_percentile": 0.7, "trend": "uptrend", "macro_alignment": "favorable"},
                           key="xlk")
         pid = await _seed_prediction(db, entity_id=company)
-        await _seed_finding(db, entity_id=company, prediction_id=pid)
+        finding_id = await _seed_finding(db, entity_id=company, prediction_id=pid)
 
         await enrich_findings(db.pool)
-        chain_raw = await db.pool.fetchval(
-            "SELECT deduction_chain FROM finding WHERE prediction_id = $1", pid
-        )
-        chain = json.loads(chain_raw) if isinstance(chain_raw, str) else chain_raw
+        chain = await _latest_chain(db, finding_id)
         layers = [c["layer"] for c in chain]
         assert layers == ["sector", "stock"]
 
     async def test_idempotent(self, db):
         company = await _seed_entity(db, "company", "AAPL")
         pid = await _seed_prediction(db, entity_id=company)
-        await _seed_finding(db, entity_id=company, prediction_id=pid)
+        finding_id = await _seed_finding(db, entity_id=company, prediction_id=pid)
 
         await enrich_findings(db.pool)
         report2 = await enrich_findings(db.pool)
         assert report2.findings_enriched == 0
+        assert report2.findings_skipped == 1
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM finding_enrichment_revision WHERE finding_id = $1",
+            finding_id,
+        ) == 1
 
     async def test_byo_only_sector_score_does_not_leak_into_shared_finding(self, db):
         # The licensing invariant: a byo_only claim (audience = operator X,
@@ -207,9 +242,10 @@ class TestSynthesis:
             """
             INSERT INTO claim (entity_id, claim_type, key, value, source,
                                event_date, knowledge_date, confidence,
-                               redistributable, audience_user_id, derivation)
+                               credential_owner, redistributable,
+                               audience_user_id, derivation)
             VALUES ($1, 'sector_score', 'xlk', $2::jsonb, 'polygon',
-                    $3, $4, 1.0, 'byo_only', $5, 'ingested')
+                    $3, $4, 1.0, 'operator-x', 'byo_only', $5, 'ingested')
             """,
             etf,
             json.dumps({"rs_percentile": 0.85, "trend": "uptrend",
@@ -218,19 +254,111 @@ class TestSynthesis:
         )
         # A SHARED finding (audience_user_id NULL) on the company.
         pid = await _seed_prediction(db, entity_id=company)
-        await _seed_finding(db, entity_id=company, prediction_id=pid)
+        finding_id = await _seed_finding(db, entity_id=company, prediction_id=pid)
 
         await enrich_findings(db.pool)
 
-        chain_raw = await db.pool.fetchval(
-            "SELECT deduction_chain FROM finding WHERE prediction_id = $1", pid
-        )
-        chain = json.loads(chain_raw) if isinstance(chain_raw, str) else chain_raw
+        chain = await _latest_chain(db, finding_id)
         layers = [c["layer"] for c in chain]
         # The byo_only sector_score is invisible to a shared finding, so the
         # sector layer is absent -- the chain carries only stock.
         assert "sector" not in layers
         assert layers == ["stock"]
+
+        private_pid = await _seed_prediction(db, entity_id=company)
+        private_finding_id = await _seed_finding(
+            db,
+            entity_id=company,
+            prediction_id=private_pid,
+            audience_user_id=operator,
+        )
+        await enrich_findings(db.pool)
+        private_chain = await _latest_chain(db, private_finding_id)
+        assert private_chain[0]["layer"] == "sector"
+        assert private_chain[0]["evidence"]["credential_owner"] == "operator-x"
+        assert private_chain[0]["evidence"]["redistributable"] == "byo_only"
+        assert private_chain[0]["evidence"]["audience_user_id"] == str(operator)
+
+    async def test_future_evidence_creates_a_later_revision_without_mutating_history(
+        self, db
+    ):
+        company = await _seed_entity(db, "company", "AAPL")
+        etf = await _seed_entity(db, "sector_etf", "XLK")
+        await db.pool.execute(
+            "INSERT INTO entity_edge (from_entity, to_entity, relation, source) "
+            "VALUES ($1, $2, 'member_of_sector', 'test')",
+            company, etf,
+        )
+        base = datetime.now(UTC)
+        old_claim = await _seed_claim(
+            db,
+            entity_id=etf,
+            claim_type="sector_score",
+            value={"rs_percentile": 0.6, "trend": "flat"},
+            key="old",
+            event_date=base - timedelta(days=2),
+            knowledge_date=base - timedelta(days=1),
+        )
+        future_claim = await _seed_claim(
+            db,
+            entity_id=etf,
+            claim_type="sector_score",
+            value={"rs_percentile": 0.95, "trend": "uptrend"},
+            key="future",
+            event_date=base + timedelta(minutes=30),
+            knowledge_date=base + timedelta(hours=2),
+        )
+        pid = await _seed_prediction(db, entity_id=company)
+        finding_id = await _seed_finding(db, entity_id=company, prediction_id=pid)
+        finding_before = dict(
+            await db.pool.fetchrow("SELECT * FROM finding WHERE id = $1", finding_id)
+        )
+
+        first_as_of = base + timedelta(hours=1)
+        await enrich_findings(db.pool, as_of=first_as_of)
+        first_revision = await db.pool.fetchrow(
+            "SELECT id, deduction_chain FROM finding_enrichment_revision "
+            "WHERE finding_id = $1",
+            finding_id,
+        )
+        first_chain = json.loads(first_revision["deduction_chain"])
+        assert first_chain[0]["claim_id"] == str(old_claim)
+        assert str(future_claim) not in first_revision["deduction_chain"]
+
+        second_as_of = base + timedelta(hours=3)
+        report = await enrich_findings(db.pool, as_of=second_as_of)
+        assert report.findings_enriched == 1
+        revisions = await db.pool.fetch(
+            "SELECT id, deduction_chain FROM finding_enrichment_revision "
+            "WHERE finding_id = $1 ORDER BY evidence_as_of",
+            finding_id,
+        )
+        assert len(revisions) == 2
+        assert revisions[0]["id"] == first_revision["id"]
+        assert revisions[0]["deduction_chain"] == first_revision["deduction_chain"]
+        second_chain = json.loads(revisions[1]["deduction_chain"])
+        assert second_chain[0]["claim_id"] == str(future_claim)
+        assert dict(await db.pool.fetchrow(
+            "SELECT * FROM finding WHERE id = $1", finding_id
+        )) == finding_before
+        assert (await briefing(db.pool))[0]["deduction_chain"] == revisions[1]["deduction_chain"]
+
+    async def test_finding_and_enrichment_revisions_refuse_mutation(self, db):
+        company = await _seed_entity(db, "company", "AAPL")
+        pid = await _seed_prediction(db, entity_id=company)
+        finding_id = await _seed_finding(db, entity_id=company, prediction_id=pid)
+        await enrich_findings(db.pool)
+
+        with pytest.raises(asyncpg.RestrictViolationError):
+            await db.pool.execute(
+                "UPDATE finding SET confidence = 0.1 WHERE id = $1", finding_id
+            )
+        with pytest.raises(asyncpg.RestrictViolationError):
+            await db.pool.execute(
+                "UPDATE finding_enrichment_revision "
+                "SET deduction_chain = '[]'::jsonb WHERE finding_id = $1",
+                finding_id,
+            )
 
 
 # -- Phase F: meta-calibration ------------------------------------------------

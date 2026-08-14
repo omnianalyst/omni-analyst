@@ -1,12 +1,9 @@
-"""Settings API for reporting configuration and controlling venue state.
-
-Secret values are deployment-managed. The API reports whether they are
-configured without returning them to the browser.
-"""
+"""Settings API for reporting configuration and controlling venue state."""
 
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from neutron import App, Router
@@ -27,17 +24,6 @@ async def _load_settings(pool, user_id) -> dict[str, Any]:
     if row is None:
         return {"providers": {}, "venues": {}}
     return json.loads(row["data"]) if isinstance(row["data"], str) else row["data"]
-
-
-async def _save_settings(pool, user_id, data: dict) -> None:
-    """Persist settings, upserting."""
-    await pool.execute(
-        """
-        INSERT INTO user_settings (user_id, data) VALUES ($1, $2::jsonb)
-        ON CONFLICT (user_id) DO UPDATE SET data = $2::jsonb
-        """,
-        user_id, json.dumps(data),
-    )
 
 
 def _provider_catalog_payload() -> list[dict]:
@@ -64,35 +50,21 @@ VENUE_CATALOG = [
         "key": "hyperliquid",
         "label": "Hyperliquid (Crypto)",
         "type": "crypto",
+        "connectable": False,
         "requires_process": False,
-        "description": "Perpetual + spot crypto. The carry book runs here.",
-        "fields": [
-            {"name": "wallet_address", "label": "Wallet Address", "type": "text", "required": True},
-            {"name": "private_key", "label": "Private Key", "type": "password", "required": True},
-        ],
+        "description": "The carry book is scheduler-managed. Its trading key never enters the API.",
+        "fields": [],
     },
     {
         "key": "questrade",
         "label": "Questrade (Read-Only)",
         "type": "equity",
+        "connectable": True,
         "requires_process": False,
         "description": "Canadian broker. Read-only (balance/positions) — trade scope is partner-gated.",
         "fields": [
             {"name": "refresh_token", "label": "Refresh Token", "type": "password", "required": True},
             {"name": "practice", "label": "Practice Mode", "type": "checkbox", "required": False},
-        ],
-    },
-    {
-        "key": "ibkr",
-        "label": "Interactive Brokers (Full Trading)",
-        "type": "equity",
-        "requires_process": True,
-        "description": "Full equity trading. Requires IB Gateway container (managed by this system). Paper trading recommended for always-on.",
-        "fields": [
-            {"name": "username", "label": "IBKR Username", "type": "text", "required": True},
-            {"name": "password", "label": "IBKR Password", "type": "password", "required": True},
-            {"name": "mode", "label": "Trading Mode", "type": "select", "options": ["paper", "live"], "required": True},
-            {"name": "account_id", "label": "Account ID (optional)", "type": "text", "required": False},
         ],
     },
 ]
@@ -124,12 +96,7 @@ def _venue_catalog_payload(saved: dict) -> list[dict]:
         credentials = stored.get("credentials") or {}
 
         if key == "hyperliquid":
-            # The carry book's keys are deployment-managed on purpose: the
-            # scheduler holds them and the api never receives them.
-            configured = bool(
-                settings.hyperliquid_wallet_address
-                and settings.hyperliquid_private_key
-            )
+            configured = False
             source = "deployment"
         elif credentials:
             secret_fields = SECRET_FIELDS.get(key, ())
@@ -167,16 +134,6 @@ def _sanitized_venues(saved: dict) -> dict:
     }
 
 
-def _body_contains_secrets(body: dict) -> bool:
-    if body.get("providers"):
-        return True
-    venues = body.get("venues", {})
-    return any(
-        isinstance(value, dict) and "credentials" in value
-        for value in venues.values()
-    )
-
-
 def build_router(app: App) -> Router:
     router = Router()
 
@@ -208,42 +165,17 @@ def build_router(app: App) -> Router:
             "venue_catalog": _venue_catalog_payload(saved),
         }
 
-    @router.post("/settings")
-    async def save_settings(request: Request) -> dict:
-        audience = resolve_audience_from_request(request)
-        if audience is None:
-            from neutron.error import unauthorized
-            raise unauthorized("Authentication required")
-
-        body = await request.json()
-        if _body_contains_secrets(body):
-            from neutron.error import bad_request
-
-            raise bad_request(
-                "Secret values cannot be saved through the browser; configure "
-                "them in the deployment environment"
-            )
-        saved = await _load_settings(app.db.pool, audience)
-        if "providers" in body:
-            saved["providers"] = {**saved.get("providers", {}), **body["providers"]}
-        if "venues" in body:
-            saved["venues"] = {**saved.get("venues", {}), **body["venues"]}
-        await _save_settings(app.db.pool, audience, saved)
-        return {"status": "saved"}
-
     @router.post("/settings/venue/{venue_key}/credentials")
     async def set_venue_credentials(venue_key: str, request: Request) -> dict:
         """Store a venue's credentials, encrypted at rest.
 
-        The ONE door for secrets. `POST /settings` still refuses them, so there
-        is exactly one path into storage and it always encrypts -- a second
+        The ONE door for secrets. There is no generic Settings mutation, so
+        there is exactly one path into storage and it always encrypts -- a second
         writer that forgot would leave plaintext rows that read back perfectly
         and nothing would report it.
 
-        Nothing is ever returned. The response says what was stored and whether
-        the venue then connected, and the connection attempt runs immediately so
-        a wrong credential is reported now rather than at the next scheduler
-        cycle.
+        Nothing is ever returned. An enabled venue reconnects immediately;
+        credentials for a disabled venue are checked when it is enabled.
         """
         from neutron.error import bad_request, not_found, unauthorized
 
@@ -255,10 +187,7 @@ def build_router(app: App) -> Router:
         if entry is None:
             raise not_found(f"unknown venue {venue_key}")
 
-        if venue_key == "hyperliquid":
-            # Refusing is the security boundary, not an inconvenience. These keys
-            # can move the carry book, they live only in the scheduler's
-            # environment, and the api process is deliberately never given them.
+        if not entry.get("connectable"):
             raise bad_request(
                 "Hyperliquid credentials are deployment-managed and cannot be set "
                 "from the browser. The api process does not hold trading keys."
@@ -282,10 +211,25 @@ def build_router(app: App) -> Router:
         ]
         if missing:
             raise bad_request(f"missing required field(s): {', '.join(missing)}")
+        invalid_selects = [
+            field["name"]
+            for field in entry.get("fields", [])
+            if field.get("type") == "select"
+            and supplied.get(field["name"]) not in field.get("options", [])
+        ]
+        if invalid_selects:
+            raise bad_request(
+                f"invalid selection for field(s): {', '.join(invalid_selects)}"
+            )
 
-        from omni.venue.manager import refresh_venues, store_venue_credentials
+        from omni.venue.manager import (
+            disconnect_venue,
+            refresh_venues,
+            store_venue_credentials,
+        )
 
         await store_venue_credentials(app.db.pool, audience, venue_key, supplied)
+        await disconnect_venue(audience, venue_key)
         status = await refresh_venues(app.db.pool, audience)
 
         return {
@@ -301,24 +245,23 @@ def build_router(app: App) -> Router:
         Needed as much for the legacy-plaintext case as for revocation: the only
         way to clear a pre-keyring row is to remove it.
         """
-        from neutron.error import unauthorized
+        from neutron.error import bad_request, not_found, unauthorized
 
         audience = resolve_audience_from_request(request)
         if audience is None:
             raise unauthorized("Authentication required")
 
-        saved = await _load_settings(app.db.pool, audience)
-        venues = saved.setdefault("venues", {})
-        entry = venues.get(venue_key)
+        entry = next((v for v in VENUE_CATALOG if v["key"] == venue_key), None)
         if entry is None:
-            return {"status": "not stored"}
+            raise not_found(f"unknown venue {venue_key}")
+        if not entry.get("connectable"):
+            raise bad_request("Hyperliquid is scheduler-managed")
 
-        entry.pop("credentials", None)
-        entry["enabled"] = False
-        await _save_settings(app.db.pool, audience, saved)
+        from omni.venue.manager import clear_venue_credentials as clear_stored_credentials
+
+        await clear_stored_credentials(app.db.pool, audience, venue_key)
 
         from omni.venue.manager import refresh_venues
-
         await refresh_venues(app.db.pool, audience)
         return {"status": "cleared"}
 
@@ -329,65 +272,98 @@ def build_router(app: App) -> Router:
             from neutron.error import unauthorized
             raise unauthorized("Authentication required")
 
+        from neutron.error import bad_request, not_found
+
+        entry = next((v for v in VENUE_CATALOG if v["key"] == venue_key), None)
+        if entry is None:
+            raise not_found(f"unknown venue {venue_key}")
+        if not entry.get("connectable"):
+            raise bad_request("Hyperliquid is scheduler-managed")
+
         body = await request.json()
-        if "credentials" in body:
-            from neutron.error import bad_request
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            raise bad_request("enabled must be a boolean")
 
-            raise bad_request(
-                "Venue credentials cannot be saved through the browser; "
-                "configure them in the deployment environment"
-            )
-        enabled = body.get("enabled", False)
-        saved = await _load_settings(app.db.pool, audience)
-        saved.setdefault("venues", {})
-        if venue_key not in saved["venues"]:
-            saved["venues"][venue_key] = {}
-        saved["venues"][venue_key]["enabled"] = enabled
+        from omni.venue.manager import refresh_venues, set_venue_enabled
 
-        await _save_settings(app.db.pool, audience, saved)
-
-        from omni.venue.manager import refresh_venues
+        changed = await set_venue_enabled(
+            app.db.pool, audience, venue_key, enabled
+        )
+        if not changed:
+            raise bad_request("Add credentials before enabling this venue")
         status = await refresh_venues(app.db.pool, audience)
 
-        if venue_key == "ibkr" and enabled:
-            return {"status": "enabled", "note": "IB Gateway container will start on next scheduler cycle"}
         return {"status": "enabled" if enabled else "disabled", "venue_status": status.get(venue_key, "unknown")}
 
     @router.get("/settings/venues/status")
     async def venue_status(request: Request) -> dict:
-        """Live status of all connected venues — positions and balances."""
+        """Live, timestamped status of the caller's venue connections."""
         audience = resolve_audience_from_request(request)
         if audience is None:
             from neutron.error import unauthorized
             raise unauthorized("Authentication required")
 
         from omni.venue.manager import connected_venues, refresh_venues
+
+        saved = await _load_settings(app.db.pool, audience)
         status = await refresh_venues(app.db.pool, audience)
-        venues = connected_venues()
+        venues = connected_venues(audience)
 
         venue_data: list[dict] = []
-        for key, venue in venues.items():
-            entry: dict[str, Any] = {"key": key, "name": getattr(venue, "name", key)}
-            try:
-                positions = await venue.positions()
-                entry["positions"] = [
-                    {"symbol": p.symbol, "quantity": str(p.quantity),
-                     "market_type": p.market_type.value if hasattr(p.market_type, "value") else str(p.market_type),
-                     "average_entry": str(p.average_entry)}
-                    for p in positions
-                ]
-            except Exception:  # noqa: BLE001
-                entry["positions"] = []
-            try:
-                balances = await venue.balances()
-                entry["balances"] = [
-                    {"asset": b.asset, "free": str(b.free), "locked": str(b.locked)}
-                    for b in balances
-                ]
-            except Exception:  # noqa: BLE001
-                entry["balances"] = []
+        for catalog_entry in _venue_catalog_payload(saved):
+            key = catalog_entry["key"]
+            live = venues.get(key)
+            errors: list[str] = []
+            entry: dict[str, Any] = {
+                "key": key,
+                "positions": [],
+                "balances": [],
+                "error": None,
+            }
+
+            if not catalog_entry.get("connectable"):
+                entry["status"] = "scheduler_only"
+            elif not catalog_entry["configured"]:
+                entry["status"] = "not_configured"
+            elif not catalog_entry["enabled"]:
+                entry["status"] = "disabled"
+            elif status.get(key, "").startswith("error: "):
+                entry["status"] = "error"
+                entry["error"] = status[key][7:]
+            elif status.get(key) != "connected" or live is None:
+                entry["status"] = "error"
+                entry["error"] = status.get(key, "connection unavailable")
+            else:
+                try:
+                    positions = await live.positions()
+                    entry["positions"] = [
+                        {
+                            "symbol": p.symbol,
+                            "quantity": str(p.quantity),
+                            "market_type": p.market_type.value
+                            if hasattr(p.market_type, "value")
+                            else str(p.market_type),
+                            "average_entry": str(p.average_entry),
+                        }
+                        for p in positions
+                    ]
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"positions: {str(exc)[:100]}")
+                try:
+                    balances = await live.balances()
+                    entry["balances"] = [
+                        {"asset": b.asset, "free": str(b.free), "locked": str(b.locked)}
+                        for b in balances
+                    ]
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"balances: {str(exc)[:100]}")
+                entry["status"] = "error" if errors else "connected"
+                entry["error"] = "; ".join(errors) or None
+
+            entry["checked_at"] = datetime.now(UTC).isoformat()
             venue_data.append(entry)
 
-        return {"venues": venue_data, "status": status}
+        return {"checked_at": datetime.now(UTC).isoformat(), "venues": venue_data}
 
     return router

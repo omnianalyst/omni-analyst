@@ -15,10 +15,11 @@ Three endpoints over the planner and executor:
 
 The router closes over the Neutron ``App`` (for ``app.db``) and over
 ``default_registry()``, so the endpoints see everything runnable rather than
-only the built-in adapters. The audience comes from a verified JWT
-(``resolve_audience_from_request``), the same identity the coverage API uses;
-a ``shareable`` objective ignores it because the answer is destined for the
-shared network, which forbids licensed inputs regardless of who is asking.
+only the built-in adapters. Execution requires an active user from a verified
+JWT (``resolve_audience_from_request``), the same identity the coverage API uses.
+A ``shareable`` objective still requires an authenticated caller, then omits
+that audience because the answer is destined for the shared network, which
+forbids licensed inputs regardless of who is asking.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from neutron import App, Router
-from neutron.error import not_found
+from neutron.error import not_found, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
@@ -193,12 +194,15 @@ def build_router(app: App) -> Router:
 
     @router.post("/objective/run")
     async def run_objective(req: ObjectiveRequest, request: Request) -> dict:
+        caller = _audience(request)
+        if caller is None:
+            raise unauthorized("Authentication required")
         entity_id = await _resolve_entity_id(
             app.db.pool, req.target, req.entity_kind
         )
         if entity_id is None:
             raise not_found(f"No entity with symbol '{req.target}'")
-        audience = None if req.shareable else _audience(request)
+        audience = None if req.shareable else caller
         objective = Objective(
             text=req.text,
             target=req.target,
@@ -235,12 +239,14 @@ def build_router(app: App) -> Router:
     async def run_analysis_by_name(
         req: AnalysisRequest, request: Request
     ) -> dict:
+        audience = _audience(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
         entity_id = await _resolve_entity_id(
             app.db.pool, req.target, req.entity_kind
         )
         if entity_id is None:
             raise not_found(f"No entity with symbol '{req.target}'")
-        audience = _audience(request)
         result = await run_analysis(
             registry,
             app.db.pool,

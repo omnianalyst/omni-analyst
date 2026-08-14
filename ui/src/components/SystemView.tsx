@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { describeError } from "../lib/api";
 import { formatAge } from "../lib/age";
 import {
   engineStatusWord,
@@ -34,6 +35,15 @@ function timestamp(iso: string | null): string {
   return iso.slice(0, 19).replace("T", " ");
 }
 
+function interval(seconds: number | null): string {
+  if (seconds === null) return "Not recorded";
+  if (seconds < 60) return `Every ${seconds} seconds`;
+  if (seconds < 3600) return `Every ${seconds / 60} minutes`;
+  if (seconds < 86400) return `Every ${seconds / 3600} hours`;
+  if (seconds === 86400) return "Every day";
+  return `Every ${seconds / 86400} days`;
+}
+
 function LoopRow({ loop }: { loop: LoopStatus }) {
   const cadence = loopCadence(loop.loop);
   const tier = scheduledLoopTier(loop.age_seconds, loop.never_run);
@@ -58,13 +68,21 @@ export function SystemView() {
   const [research, setResearch] = useState<
     | { kind: "loading" }
     | { kind: "ok"; data: ResearchRecord }
-    | { kind: "error" }
+    | { kind: "error"; message: string; detail?: string }
   >({ kind: "loading" });
 
-  useEffect(() => {
+  function loadResearch() {
+    setResearch({ kind: "loading" });
     void getResearchRecord()
       .then((data) => setResearch({ kind: "ok", data }))
-      .catch(() => setResearch({ kind: "error" }));
+      .catch((error) => {
+        const { message, detail } = describeError(error);
+        setResearch({ kind: "error", message, detail });
+      });
+  }
+
+  useEffect(() => {
+    loadResearch();
     void refresh();
     void getReconciliation()
       .then((data) => setReconciliation({ kind: "ok", data }))
@@ -90,10 +108,7 @@ export function SystemView() {
   const worst = worstScheduledTier(snapshot.loops);
   const word = engineStatusWord(worst);
   const unhealthy = unhealthyLoops(snapshot.health);
-  const scheduled = snapshot.loops.filter((loop) => loopCadence(loop.loop) === "scheduled");
-  const healthyScheduled = scheduled.filter(
-    (loop) => ["fresh", "recent"].includes(scheduledLoopTier(loop.age_seconds, loop.never_run)),
-  ).length;
+  const healthyScheduled = snapshot.health.loops.filter((loop) => loop.state === "ok").length;
   const fillEntries = Object.entries(snapshot.fill_last_hour).sort((a, b) => b[1] - a[1]);
   const disconnected = storeState === "error";
   const critical = word === "inactive" || word === "stalled";
@@ -133,7 +148,7 @@ export function SystemView() {
       <section class="primary-metrics system-metrics" aria-label="System summary">
         <article class="primary-metric">
           <span class="metric-kicker">Automation</span>
-          <strong>{healthyScheduled}/{scheduled.length}</strong>
+          <strong>{healthyScheduled}/{snapshot.health.loops.length}</strong>
           <span class="metric-context">scheduled jobs reporting normally</span>
         </article>
         <article class="primary-metric">
@@ -172,7 +187,22 @@ export function SystemView() {
         )}
       </section>
 
-      {research.kind === "ok" ? (
+      {research.kind === "loading" ? (
+        <section class="surface-card research-record">
+          <div class="section-heading">
+            <div><p class="eyebrow">Strategy research</p><h2>What has been tested</h2></div>
+          </div>
+          <Loading label="Loading the research record…" />
+        </section>
+      ) : research.kind === "error" ? (
+        <section class="surface-card research-record">
+          <div class="section-heading">
+            <div><p class="eyebrow">Strategy research</p><h2>Research record unavailable</h2></div>
+            <button type="button" class="btn-secondary compact-button" onClick={loadResearch}>Try again</button>
+          </div>
+          <ErrorState message={research.message} detail={research.detail} />
+        </section>
+      ) : (
         <section class="surface-card research-record">
           <div class="section-heading">
             <div>
@@ -263,7 +293,7 @@ export function SystemView() {
             </>
           )}
         </section>
-      ) : null}
+      )}
 
       <button
         type="button"
@@ -302,6 +332,33 @@ export function SystemView() {
                 })}
               </div>
             )}
+          </section>
+          <section class="detail-block">
+            <div class="section-heading"><div><p class="eyebrow">Scheduled units</p><h2>Last execution result</h2></div><small>Assessed {timestamp(snapshot.now)}</small></div>
+            <div class="responsive-table">
+              <table class="data-table">
+                <thead><tr><th>Job</th><th>Result</th><th>Expected</th><th>Last success</th><th>Last error</th></tr></thead>
+                <tbody>
+                  {snapshot.health.loops.map((loop) => (
+                    <tr key={loop.loop}>
+                      <td><strong>{loop.loop}</strong></td>
+                      <td>
+                        <span class={`fill fill-${loop.state === "ok" ? "good" : loop.state === "never_run" ? "neutral" : "failed"}`}>
+                          {loop.last_status ?? "never run"}
+                        </span>
+                        {loop.last_result ? <small>{loop.last_result}</small> : null}
+                      </td>
+                      <td>{interval(loop.expected_interval_seconds)}</td>
+                      <td>{timestamp(loop.last_success_at)}</td>
+                      <td>
+                        {loop.last_error ?? "None recorded"}
+                        {loop.last_failure_at ? <small>{timestamp(loop.last_failure_at)}</small> : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </section>
           <section class="detail-block">
             <div class="section-heading"><div><p class="eyebrow">Background jobs</p><h2>Activity by loop</h2></div><small>Assessed {timestamp(snapshot.now)}</small></div>

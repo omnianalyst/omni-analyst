@@ -15,14 +15,14 @@ Sampled, not streamed. A book snapshot and a trade are point-in-time
 observations a gap-filler fetches on demand; a streaming path is a later phase.
 
 The targeted venue is OKX (V5 ``/api/v5/market/books`` and
-``/api/v5/market/trades``). Those endpoints are keyless public market data,
-which is the ``allowed`` licence class -- the same posture as the derivatives
-adapter -- so claims here accumulate as shared network coverage rather than
-being pinned to one user. The adapter therefore declares
-``provider_key = venue`` (per the P12 rule: the licence is per venue, and
-collapsing every venue onto one key would give one venue's terms to all of
-them) and produces drafts; ``ClaimDraft`` has no audience field, so the adapter
-cannot and does not make the redistribution decision. That is the writer's job.
+``/api/v5/market/trades``). Those endpoints are public and keyless, but OKX's
+market-data terms still restrict serving the data on to third parties. The
+credential catalog therefore classifies OKX as ``byo_only``: user-scoped demand
+can write claims pinned to that user, while shared demand without an owner is
+refused. The adapter declares ``provider_key = venue`` because the licence is
+per venue; collapsing every venue onto one key would give one venue's terms to
+all of them. ``ClaimDraft`` has no audience field, so the writer remains the
+single place that enforces this decision.
 
 Routing mirrors ``OnChainAdapter``/``DerivativesAdapter``: a ``"<kind>:<symbol>"``
 key dispatches to one of two parse paths. An unknown kind raises

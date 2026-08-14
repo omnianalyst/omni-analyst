@@ -1,0 +1,7 @@
+services:
+  postgres:
+    container_name: ${OMNI_CI_POSTGRES_CONTAINER:?OMNI_CI_POSTGRES_CONTAINER is required}
+
+networks:
+  default:
+    internal: true

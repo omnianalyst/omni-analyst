@@ -52,12 +52,6 @@ class FakeQuestrade:
             return {"perCurrencyBalances": [{"currency": "CAD", "cash": 10000.00}]}
         if "positions" in url:
             return {"positions": []}
-        if "orders" in url and method == "POST":
-            return {"id": 999}
-        if "orders" in url and method == "GET":
-            return {"orders": [{"state": "Filled", "filledQuantity": 10,
-                                "executionPrice": 380.05, "side": "Buy",
-                                "symbol": "VTI"}]}
         return {}
 
 
@@ -95,6 +89,32 @@ class TestConnect:
         assert v._api_server == "https://api-test.questrade.com"
         assert v._account_id == "111"
 
+    async def test_rotated_refresh_token_is_persisted_and_used_after_restart(self):
+        persisted = []
+
+        async def persist(token):
+            persisted.append(token)
+
+        first = FakeQuestrade()
+        await QuestradeVenue.connect(
+            refresh_token="initial-refresh",
+            fetch_fn=first,
+            on_refresh_token=persist,
+        )
+        assert persisted == ["new-refresh"]
+        token_call = next(call for call in first.calls if "oauth2/token" in call[1])
+        assert "initial-refresh" not in token_call[1]
+        assert token_call[2]["params"]["refresh_token"] == "initial-refresh"
+
+        second = FakeQuestrade()
+        await QuestradeVenue.connect(
+            refresh_token=persisted[-1],
+            fetch_fn=second,
+            on_refresh_token=persist,
+        )
+        restarted_call = next(call for call in second.calls if "oauth2/token" in call[1])
+        assert restarted_call[2]["params"]["refresh_token"] == "new-refresh"
+
 
 class TestSymbolFor:
     def test_spot_returns_ticker(self):
@@ -121,13 +141,23 @@ class TestQuote:
 
 
 class TestExecute:
-    async def test_market_buy_fills(self, venue):
-        v, _fake = venue
-        fill = await v.execute(_intent())
-        assert fill.filled_quantity == Decimal(10)
-        assert fill.average_price == Decimal("380.05")
-        assert fill.side is Side.BUY
-        assert fill.external_id == "999"
+    async def test_order_submission_is_refused_before_any_order_request(self, venue):
+        v, fake = venue
+        before = list(fake.calls)
+
+        with pytest.raises(VenueUnavailable, match="read-only"):
+            await v.execute(_intent())
+
+        assert fake.calls == before
+
+    async def test_order_cancellation_is_refused_before_any_request(self, venue):
+        v, fake = venue
+        before = list(fake.calls)
+
+        with pytest.raises(VenueUnavailable, match="read-only"):
+            await v.cancel("999")
+
+        assert fake.calls == before
 
 
 class TestPositions:
@@ -167,10 +197,12 @@ class TestBalances:
 
 
 class TestCapabilities:
-    def test_equity_only(self):
+    def test_read_only_adapter_declares_no_execution_market(self):
         v = QuestradeVenue(refresh_token="x", fetch_fn=FakeQuestrade())
         caps = v.capabilities
-        assert caps.spot is True
+        assert caps.spot is False
+        assert caps.margin is False
         assert caps.perpetuals is False
-        assert caps.shorting is True
+        assert caps.shorting is False
+        assert caps.limit_orders is False
         assert caps.taker_fee_bps == Decimal(0)

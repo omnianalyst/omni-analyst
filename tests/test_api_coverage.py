@@ -33,6 +33,17 @@ def _auth(user_id):
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _user(db) -> uuid4:
+    """A real principal. The auth middleware checks the token subject against
+    the users table, so a minted token for an id with no row is anonymous."""
+    uid = uuid4()
+    return await db.pool.fetchval(
+        "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') "
+        "RETURNING id",
+        uid, f"{uid}@example.com",
+    )
+
+
 
 async def _entity(db, symbol="AAPL", name=None):
     return await db.pool.fetchval(
@@ -186,8 +197,8 @@ async def test_coverage_summary_reports_per_type_counts_and_newest_knowledge_dat
 async def test_a_byo_only_claim_is_not_visible_to_another_user(db, database_url):
     """The leak test: A's private claim and gap must not reach B or anonymous."""
     entity_id = await _entity(db, symbol="PRIV")
-    owner_a = uuid4()
-    owner_b = uuid4()
+    owner_a = await _user(db)
+    owner_b = await _user(db)
 
     # One shared claim everyone may see, one private claim only A may see.
     await _claim(
@@ -431,8 +442,8 @@ async def test_summary_private_count_is_audience_scoped(db, database_url):
     lifts A's private_count; it must reach neither B's nor anonymous' count nor
     their private_count, which is the redistribution invariant again."""
     entity_id = await _entity(db, symbol="MIX", name="Mixed")
-    owner_a = uuid4()
-    owner_b = uuid4()
+    owner_a = await _user(db)
+    owner_b = await _user(db)
 
     await _claim(
         db, entity_id, key="Revenues", source="pubsrc",

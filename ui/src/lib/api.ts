@@ -1,6 +1,13 @@
 import { API_BASE_URL } from "../config";
 
 export const AUTH_TOKEN_KEY = "omni.auth.token";
+export const AUTH_STATE_EVENT = "omni:auth-state";
+
+function notifyAuthState(token: string | null): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(AUTH_STATE_EVENT, { detail: { token } }));
+  }
+}
 
 export function getAuthToken(): string | null {
   try {
@@ -16,6 +23,7 @@ export function setAuthToken(token: string): void {
   } catch {
     /* storage unavailable; auth cannot persist across reloads */
   }
+  notifyAuthState(token);
 }
 
 export function clearAuthToken(): void {
@@ -24,12 +32,13 @@ export function clearAuthToken(): void {
   } catch {
     /* storage unavailable */
   }
+  notifyAuthState(null);
 }
 
 // A request that carried a token and came back 401 means the session is dead
 // (expired or rejected). Left unhandled, every authed panel fills with 401
-// errors and the app reads as broken; clearing the stale token and redirecting
-// to /login once turns a silent expiry into "sign in again". Anonymous 401s --
+// errors and the app reads as broken; clearing the stale token lets the layout
+// immediately hide private content and redirect to /login. Anonymous 401s --
 // a request that sent no token -- are left alone, because "auth required" there
 // is a real condition (e.g. a wrong password on /auth/login), not a stale
 // session, and redirecting would loop or mask it.
@@ -40,9 +49,6 @@ function handleStaleSession(status: number, headers: Record<string, string>): vo
   );
   if (!hadToken) return;
   clearAuthToken();
-  if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
-    window.location.replace("/login");
-  }
 }
 
 export class ApiUnavailableError extends Error {

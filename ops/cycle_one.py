@@ -37,13 +37,19 @@ from uuid import UUID
 
 from omni.config import settings
 from omni.db import connect
-from omni.trading.carry_loop import CarryConfig
-from omni.trading.carry_runner import CarryRunRefused, run_due_cycle
+from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS, record_loop_health
+from omni.trading.carry_loop import CarryConfig, CarryRiskPolicy
+from omni.trading.carry_runner import (
+    CarryRunRefused,
+    carry_cycle_ownership,
+    run_due_cycle,
+)
 from omni.venue.ccxt_venue import CCXTVenue, TradingMode
 from omni.venue.credentials import wallet_credentials
 
 OWNER = UUID("97e7737f-cad3-439a-b8b3-3ae4536a7eac")
 UNIVERSE = ["BTC", "ETH", "SOL", "HYPE", "PENGU", "PURR"]
+VENUE = "hyperliquid"
 LIVE = "--live" in sys.argv
 IGNORE_WINDOW = "--ignore-window" in sys.argv
 IGNORE_CADENCE = "--ignore-cadence" in sys.argv
@@ -51,12 +57,6 @@ IGNORE_CADENCE = "--ignore-cadence" in sys.argv
 
 async def main() -> int:
     c = await connect(settings.database_url)
-    v = await CCXTVenue.connect(
-        venue="hyperliquid",
-        quote_asset="USDC",
-        credentials=wallet_credentials(settings, "hyperliquid"),
-        mode=TradingMode.LIVE if LIVE else TradingMode.READ_ONLY,
-    )
     try:
         pid = await c.pool.fetchval("SELECT id FROM portfolio LIMIT 1")
         inception = await c.pool.fetchval(
@@ -74,6 +74,11 @@ async def main() -> int:
             funding_venue="hyperliquid",
             spread_bps=Decimal(5),
             reconciliation_tolerance=Decimal("0.01"),
+            risk_policy=CarryRiskPolicy(
+                max_gross_notional=Decimal(280),
+                daily_loss_limit_pct_nav=Decimal("0.02"),
+                max_drawdown_pct=Decimal("0.10"),
+            ),
             lookback_days=7,
             min_settlements=2,
         )
@@ -83,20 +88,34 @@ async def main() -> int:
         print(f"inception      {inception}")
         print()
 
-        result = await run_due_cycle(
-            c.pool,
-            venue=v,
-            portfolio_id=pid,
-            config=config,
-            entity_ids=list(assets),
-            audience_user_id=OWNER,
-            now=datetime.now(UTC),
-            inception=inception,
-            max_execution_bps=Decimal(40),
-            assets=assets,
-            ignore_window=IGNORE_WINDOW,
-            ignore_cadence=IGNORE_CADENCE,
-        )
+        now = datetime.now(UTC)
+        async with carry_cycle_ownership(
+            c.pool, portfolio_id=pid, venue=VENUE, now=now
+        ) as ownership:
+            v = await CCXTVenue.connect(
+                venue=VENUE,
+                quote_asset="USDC",
+                credentials=wallet_credentials(settings, VENUE),
+                mode=TradingMode.LIVE if LIVE else TradingMode.READ_ONLY,
+            )
+            try:
+                result = await run_due_cycle(
+                    c.pool,
+                    venue=v,
+                    portfolio_id=pid,
+                    config=config,
+                    entity_ids=list(assets),
+                    audience_user_id=OWNER,
+                    now=now,
+                    inception=inception,
+                    max_execution_bps=Decimal(40),
+                    assets=assets,
+                    ignore_window=IGNORE_WINDOW,
+                    ignore_cadence=IGNORE_CADENCE,
+                    ownership=ownership,
+                )
+            finally:
+                await v.aclose()
 
         print(f"as_of          {result.as_of}")
         print(f"halted         {result.halted}  {result.halt_reason or ''}")
@@ -112,12 +131,41 @@ async def main() -> int:
         print(f"settled thru   {result.funding_settled_through}")
         if result.refused:
             print(f"refused        {result.refused}")
+        await record_loop_health(
+            c.pool,
+            loop_name="carry",
+            ok=not result.halted,
+            error=result.halt_reason if result.halted else None,
+            result=(
+                f"held={len(result.held)} opened={len(result.opened)} "
+                f"closed={len(result.closed)} halted={result.halted}"
+            ),
+            expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["carry"],
+        )
         return 1 if result.halted else 0
     except CarryRunRefused as exc:
         print(f"REFUSED [{exc.guard}], book untouched:\n  {exc}")
+        await record_loop_health(
+            c.pool,
+            loop_name="carry",
+            ok=True,
+            result=f"refused [{exc.guard}]: {exc}",
+            expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["carry"],
+        )
         return 2
+    except BaseException as exc:
+        try:
+            await record_loop_health(
+                c.pool,
+                loop_name="carry",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["carry"],
+            )
+        except Exception:  # noqa: BLE001,S110
+            pass
+        raise
     finally:
-        await v.aclose()
         await c.close()
 
 

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
-import { getSettings, type ProviderEntry, type SettingsData } from "../lib/settings";
+import {
+  getSettings,
+  getVenueStatus,
+  type ProviderEntry,
+  type SettingsData,
+  type VenueStatusResponse,
+} from "../lib/settings";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 import { VenueCard } from "./VenueCard";
@@ -9,7 +15,7 @@ import { VenueCard } from "./VenueCard";
 type State =
   | { kind: "loading" }
   | { kind: "auth" }
-  | { kind: "ok"; data: SettingsData }
+  | { kind: "ok"; data: SettingsData; live: VenueStatusResponse }
   | { kind: "error"; message: string; detail?: string };
 
 export function SettingsView() {
@@ -20,8 +26,8 @@ export function SettingsView() {
       setState({ kind: "auth" });
       return;
     }
-    getSettings()
-      .then((data) => setState({ kind: "ok", data }))
+    Promise.all([getSettings(), getVenueStatus()])
+      .then(([data, live]) => setState({ kind: "ok", data, live }))
       .catch((error) => {
         if (error instanceof AuthRequiredError) {
           setState({ kind: "auth" });
@@ -43,7 +49,8 @@ export function SettingsView() {
   const providers = state.data.provider_catalog.filter((provider) => provider.wired);
   const unavailable = state.data.provider_catalog.filter((provider) => !provider.wired);
   const configuredProviders = providers.filter((provider) => provider.configured).length;
-  const configuredVenues = state.data.venue_catalog.filter((venue) => venue.configured).length;
+  const configurableVenues = state.data.venue_catalog.filter((venue) => venue.connectable);
+  const configuredVenues = configurableVenues.filter((venue) => venue.configured).length;
   const categories = providers.reduce<Record<string, ProviderEntry[]>>((grouped, provider) => {
     (grouped[provider.category || "Other"] ||= []).push(provider);
     return grouped;
@@ -57,7 +64,7 @@ export function SettingsView() {
           <p>Connections, data sources, and deployment configuration.</p>
         </div>
         <div class="settings-summary">
-          <span><strong>{configuredVenues}</strong> venues configured</span>
+          <span><strong>{configuredVenues}/{configurableVenues.length}</strong> user-managed venues configured</span>
           <span><strong>{configuredProviders}</strong> data sources configured</span>
         </div>
       </header>
@@ -65,11 +72,16 @@ export function SettingsView() {
       <section class="settings-section">
         <div class="section-heading settings-section-heading">
           <div><p class="eyebrow">Trading</p><h2>Venue connections</h2></div>
-          <p>Trading secrets stay outside the browser.</p>
+          <p>Connection state is checked live; desired state is shown separately.</p>
         </div>
         <div class="connection-grid">
           {state.data.venue_catalog.map((venue) => (
-            <VenueCard key={venue.key} entry={venue} onChanged={load} />
+            <VenueCard
+              key={venue.key}
+              entry={venue}
+              status={state.live.venues.find((item) => item.key === venue.key)}
+              onChanged={load}
+            />
           ))}
         </div>
       </section>

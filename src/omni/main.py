@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
 
-from neutron import App
+from neutron import App, CORSMiddleware
+from starlette.middleware import Middleware
 
+from omni.auth.middleware import ActivePrincipalMiddleware
 from omni.config import settings
 from omni.db import connect, migrate
 
@@ -14,17 +16,29 @@ def create_app(database_url: str | None = None) -> App:
         client = await connect(url)
         await migrate(client)
         neutron_app.db = client
+        neutron_app.state.db = client
         try:
             yield
         finally:
+            from omni.venue.manager import disconnect_all
+
+            await disconnect_all()
             await client.close()
             neutron_app.db = None
+            neutron_app.state.db = None
 
     app = App(
         title="Omni Analyst v2",
         version="0.1.0",
         debug=settings.debug,
         lifespan=lifespan,
+        middleware=[
+            CORSMiddleware(
+                allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+                allow_headers=["Authorization", "Content-Type"],
+            ),
+            Middleware(ActivePrincipalMiddleware),
+        ],
     )
 
     from omni.api.alerts import build_router as alerts_router
@@ -35,6 +49,7 @@ def create_app(database_url: str | None = None) -> App:
     from omni.api.companies import build_router as companies_router
     from omni.api.coverage import build_router as coverage_router
     from omni.api.exposure import build_router as exposure_router
+    from omni.api.mcp import build_mount as mcp_mount
     from omni.api.objective import build_router as objective_router
     from omni.api.portfolio import build_router as portfolio_router
     from omni.api.profile import build_router as profile_router
@@ -66,6 +81,7 @@ def create_app(database_url: str | None = None) -> App:
     app.include_router(companies_router(app))
     app.include_router(settings_router(app))
     app.include_router(wallets_router(app))
+    app.include_router(mcp_mount(app))
     return app
 
 

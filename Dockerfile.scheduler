@@ -36,11 +36,15 @@ RUN uv export --frozen --no-dev --no-emit-project --no-annotate \
  && uv pip install --python /app/.venv/bin/python -r /tmp/requirements.txt
 
 ARG NEUTRON_WHEEL=vendor/neutron_py-0.1.0-py3-none-any.whl
+ARG NEUTRON_REVISION
 # Copy into a directory rather than to a fixed filename. A wheel renamed to
 # neutron.whl loses its version, and uv rejects it: PEP 427 filenames carry the
 # version and installers parse it rather than reading metadata first.
 COPY ${NEUTRON_WHEEL} /tmp/wheels/
-RUN uv pip install --python /app/.venv/bin/python /tmp/wheels/*.whl
+COPY ops/build_neutron_wheel.py /tmp/build_neutron_wheel.py
+RUN python /tmp/build_neutron_wheel.py verify \
+        --wheel /tmp/wheels/*.whl --expected "${NEUTRON_REVISION}" \
+ && uv pip install --python /app/.venv/bin/python /tmp/wheels/*.whl
 
 COPY src/        ./src/
 COPY migrations/ ./migrations/
@@ -50,10 +54,23 @@ COPY migrations/ ./migrations/
 # --------------------------------------------------------------------------- #
 FROM python:3.12-slim-bookworm AS runtime
 
+ARG OMNI_REVISION
+ARG NEUTRON_REVISION
+
+RUN printf '%s\n%s\n' "${OMNI_REVISION}" "${NEUTRON_REVISION}" \
+      | grep -Eq '^[0-9a-f]{40}$' \
+ && test "$(printf '%s\n%s\n' "${OMNI_REVISION}" "${NEUTRON_REVISION}" \
+      | grep -Ec '^[0-9a-f]{40}$')" -eq 2
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
-    PATH=/app/.venv/bin:${PATH}
+    PATH=/app/.venv/bin:${PATH} \
+    OMNI_BUILD_REVISION=${OMNI_REVISION} \
+    NEUTRON_BUILD_REVISION=${NEUTRON_REVISION}
+
+LABEL org.opencontainers.image.revision=${OMNI_REVISION} \
+      com.omnianalyst.neutron.revision=${NEUTRON_REVISION}
 
 RUN useradd --create-home --uid 10001 --shell /sbin/nologin omni
 

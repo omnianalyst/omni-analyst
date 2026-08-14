@@ -5,7 +5,12 @@ import { CommandPalette, OPEN_COMMAND_PALETTE } from "../components/CommandPalet
 import { HeaderBulletin } from "../components/HeaderBulletin";
 import { StatusRail } from "../components/StatusRail";
 import type { CommandItem } from "../lib/command";
-import { clearAuthToken, getAuthToken } from "../lib/auth";
+import {
+  AUTH_STATE_EVENT,
+  AUTH_TOKEN_KEY,
+  clearAuthToken,
+  getAuthToken,
+} from "../lib/auth";
 import { fetchSetupStatus } from "../lib/auth";
 
 export const config = { hydrate: true };
@@ -92,34 +97,55 @@ export default function Layout({
   });
 
   useEffect(() => {
+    const syncAuth = () => {
+      const nextSignedIn = getAuthToken() !== null;
+      setSignedIn(nextSignedIn);
+      if (nextSignedIn) {
+        setAllowed(true);
+        return;
+      }
+      if (!isPublicPath(window.location.pathname)) {
+        setAllowed(false);
+        window.setTimeout(() => window.location.replace("/login"), 0);
+      }
+    };
+    const syncStoredAuth = (event: StorageEvent) => {
+      if (event.key === AUTH_TOKEN_KEY) syncAuth();
+    };
+    window.addEventListener(AUTH_STATE_EVENT, syncAuth);
+    window.addEventListener("storage", syncStoredAuth);
+
     setSignedIn(getAuthToken() !== null);
     const path = window.location.pathname;
+    const tokenPresent = getAuthToken() !== null;
     if (isPublicPath(path)) {
       setAllowed(true);
-      return;
-    }
-    if (getAuthToken() !== null) {
+    } else if (tokenPresent) {
       setAllowed(true);
-      return;
+    } else {
+      // No token on a protected route: send the visitor where they can get one.
+      // First-run (zero users) -> /setup; otherwise -> /login. replace() so the
+      // guarded page is not retained in history (back button does not re-land
+      // on a page that will immediately bounce them again).
+      fetchSetupStatus()
+        .then((s) => {
+          window.location.replace(s.setup_required ? "/setup" : "/login");
+        })
+        .catch(() => {
+          window.location.replace("/login");
+        });
     }
-    // No token on a protected route: send the visitor where they can get one.
-    // First-run (zero users) -> /setup; otherwise -> /login. replace() so the
-    // guarded page is not retained in history (back button does not re-land
-    // on a page that will immediately bounce them again).
-    fetchSetupStatus()
-      .then((s) => {
-        window.location.replace(s.setup_required ? "/setup" : "/login");
-      })
-      .catch(() => {
-        window.location.replace("/login");
-      });
+    return () => {
+      window.removeEventListener(AUTH_STATE_EVENT, syncAuth);
+      window.removeEventListener("storage", syncStoredAuth);
+    };
   }, []);
 
   const [menuOpen, setMenuOpen] = useState(false);
 
   function signOut() {
+    setAllowed(false);
     clearAuthToken();
-    setSignedIn(false);
   }
 
   // Close dropdown on outside click

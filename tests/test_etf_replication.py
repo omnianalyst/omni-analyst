@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from omni.research import etf_replication
 from omni.research.etf_replication import price_quality_scores, run_experiment
 
 
@@ -33,6 +34,20 @@ def _run(panel=None, **overrides):
     }
     params.update(overrides)
     return run_experiment(**params)
+
+
+def _metrics(strategy_returns: np.ndarray, benchmark_returns: np.ndarray):
+    index = pd.bdate_range("2025-01-02", periods=len(strategy_returns))
+    returns = pd.Series(strategy_returns, index=index)
+    benchmark = pd.Series(benchmark_returns, index=index)
+    values = (1.0 + returns).cumprod()
+    return etf_replication._metrics(
+        values,
+        returns,
+        benchmark,
+        turnover=0.0,
+        modelled_cost=0.0,
+    )
 
 
 def test_current_membership_preview_cannot_look_like_point_in_time():
@@ -93,3 +108,47 @@ def test_etf_calendar_and_short_constituent_gaps_are_handled_without_fake_liquid
 def test_invalid_membership_mode_is_refused():
     with pytest.raises(ValueError, match="membership_mode"):
         _run(membership_mode="pretend_history")
+
+
+def test_constant_decimal_like_returns_do_not_fabricate_ratios_from_float_noise():
+    strategy = np.full(60, 0.05)
+    benchmark = np.full(60, 0.01)
+    active = strategy - benchmark
+    assert pd.Series(strategy).std(ddof=1) > 0.0
+    assert pd.Series(active).std(ddof=1) > 0.0
+
+    metrics = _metrics(strategy, benchmark)
+
+    assert metrics.sharpe is None
+    assert metrics.information_ratio is None
+
+
+def test_near_constant_positive_volatility_is_treated_as_float_noise():
+    strategy = np.array([0.05 - 5e-13, 0.05 + 5e-13] * 30)
+    benchmark = np.full(60, 0.01)
+    strategy_volatility = pd.Series(strategy).std(ddof=1)
+    active_volatility = pd.Series(strategy - benchmark).std(ddof=1)
+    assert 0.0 < strategy_volatility < 1e-12
+    assert 0.0 < active_volatility < 1e-12
+
+    metrics = _metrics(strategy, benchmark)
+
+    assert metrics.sharpe is None
+    assert metrics.information_ratio is None
+
+
+def test_non_finite_returns_cannot_emit_risk_adjusted_ratios():
+    strategy = np.array([0.01, -0.02, np.inf, 0.03])
+    benchmark = np.array([0.005, -0.01, 0.002, 0.015])
+    index = pd.bdate_range("2025-01-02", periods=len(strategy))
+
+    metrics = etf_replication._metrics(
+        pd.Series([1.0, 0.98, 1.01, 1.04], index=index),
+        pd.Series(strategy, index=index),
+        pd.Series(benchmark, index=index),
+        turnover=0.0,
+        modelled_cost=0.0,
+    )
+
+    assert metrics.sharpe is None
+    assert metrics.information_ratio is None

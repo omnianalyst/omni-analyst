@@ -21,6 +21,7 @@ from omni.portfolio.orders import (
     LEGAL_TRANSITIONS,
     IllegalTransition,
     Order,
+    OrderLedgerError,
     OrderStatus,
     UnknownOrder,
     get,
@@ -368,6 +369,52 @@ class TestFillAccumulation:
         order_id = await self._submitted(db)
         await record_fill(db.pool, order_id, _fill(Decimal("9.999999999"), Decimal(100)))
         assert (await get(db.pool, order_id)).status is OrderStatus.PARTIALLY_FILLED
+
+    async def test_a_single_fill_larger_than_the_order_is_refused_without_mutation(self, db):
+        order_id = await self._submitted(db)
+
+        with pytest.raises(OrderLedgerError, match="overfill"):
+            await record_fill(
+                db.pool,
+                order_id,
+                _fill(Decimal(11), Decimal(125), fee=Decimal("1.25"), external_id="X-11"),
+            )
+
+        order = await get(db.pool, order_id)
+        assert order.status is OrderStatus.SUBMITTED
+        assert order.filled_quantity == Decimal(0)
+        assert order.average_fill_price is None
+        assert order.fee_paid == Decimal(0)
+        assert order.external_id is None
+        assert [e["status"] for e in await _events(db, order_id)] == ["intent", "submitted"]
+
+    async def test_cumulative_overfill_preserves_the_valid_partial_fill(self, db):
+        order_id = await self._submitted(db)
+        await record_fill(
+            db.pool,
+            order_id,
+            _fill(Decimal(6), Decimal(100), fee=Decimal("0.60"), external_id="X-6"),
+        )
+
+        with pytest.raises(OrderLedgerError, match="overfill"):
+            await record_fill(
+                db.pool,
+                order_id,
+                _fill(Decimal(5), Decimal(200), fee=Decimal("1.00"), external_id="X-5"),
+            )
+
+        order = await get(db.pool, order_id)
+        assert order.status is OrderStatus.PARTIALLY_FILLED
+        assert order.filled_quantity == Decimal(6)
+        assert order.remaining_quantity == Decimal(4)
+        assert order.average_fill_price == Decimal(100)
+        assert order.fee_paid == Decimal("0.60")
+        assert order.external_id == "X-6"
+        assert [e["status"] for e in await _events(db, order_id)] == [
+            "intent",
+            "submitted",
+            "partially_filled",
+        ]
 
     async def test_fees_accumulate_across_fills(self, db):
         order_id = await self._submitted(db)

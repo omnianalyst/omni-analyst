@@ -29,7 +29,7 @@ from omni.api import trading
 from omni.api.trading import build_router as trading_router
 from omni.main import create_app
 from omni.trading import carry_runner
-from omni.trading.carry_loop import CarryConfig
+from omni.trading.carry_loop import CarryConfig, CarryRiskPolicy
 from omni.trading.carry_runner import CarryRunRefused, run_due_cycle
 
 GOOD_SECRET = "x" * 48
@@ -190,6 +190,11 @@ def _config() -> CarryConfig:
         funding_venue=VENUE,
         spread_bps=Decimal(2),
         reconciliation_tolerance=Decimal("0.0001"),
+        risk_policy=CarryRiskPolicy(
+            max_gross_notional=Decimal(500),
+            daily_loss_limit_pct_nav=Decimal("0.02"),
+            max_drawdown_pct=Decimal("0.10"),
+        ),
     )
 
 

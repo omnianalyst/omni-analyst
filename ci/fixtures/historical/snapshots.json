@@ -1,0 +1,10 @@
+[
+  {
+    "version": 52,
+    "fixture": "representative_coverage.sql"
+  },
+  {
+    "version": 58,
+    "fixture": "representative_coverage.sql"
+  }
+]

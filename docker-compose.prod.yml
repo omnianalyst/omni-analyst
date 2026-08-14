@@ -44,6 +44,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        NEUTRON_WHEEL: ${NEUTRON_WHEEL:-vendor/neutron_py-0.1.0-py3-none-any.whl}
+        OMNI_REVISION: ${OMNI_REVISION:?OMNI_REVISION is required}
+        NEUTRON_REVISION: ${NEUTRON_REVISION:?NEUTRON_REVISION is required}
     image: omni-api:latest
     # Public market/reference providers must not depend on the host's optional
     # Tailscale MagicDNS resolver. Docker still resolves compose service names.
@@ -86,6 +90,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.scheduler
+      args:
+        NEUTRON_WHEEL: ${NEUTRON_WHEEL:-vendor/neutron_py-0.1.0-py3-none-any.whl}
+        OMNI_REVISION: ${OMNI_REVISION:?OMNI_REVISION is required}
+        NEUTRON_REVISION: ${NEUTRON_REVISION:?NEUTRON_REVISION is required}
     image: omni-scheduler:latest
     dns:
       - 1.1.1.1

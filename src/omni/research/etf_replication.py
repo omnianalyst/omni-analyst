@@ -24,6 +24,7 @@ import pandas as pd
 
 MembershipMode = Literal["point_in_time", "current_membership_preview"]
 TRADING_DAYS = 252
+_ZERO_VOLATILITY_ATOL = 1e-12
 
 
 @dataclass(frozen=True)
@@ -31,7 +32,7 @@ class PortfolioMetrics:
     total_return_pct: float
     cagr_pct: float
     volatility_pct: float
-    sharpe: float
+    sharpe: float | None
     max_drawdown_pct: float
     turnover: float
     modelled_cost_pct: float
@@ -178,6 +179,19 @@ def _simulate(
     )
 
 
+def _annualized_volatility_and_ratio(series: pd.Series) -> tuple[float, float | None]:
+    observations = series.to_numpy(dtype=float)
+    if len(observations) < 2 or not np.isfinite(observations).all():
+        return float("nan"), None
+    daily_volatility = float(observations.std(ddof=1))
+    annualized_volatility = daily_volatility * math.sqrt(TRADING_DAYS)
+    if np.isclose(daily_volatility, 0.0, rtol=0.0, atol=_ZERO_VOLATILITY_ATOL):
+        return annualized_volatility, None
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        ratio = float(np.divide(observations.mean(), daily_volatility) * math.sqrt(TRADING_DAYS))
+    return annualized_volatility, ratio if np.isfinite(ratio) else None
+
+
 def _metrics(
     values: pd.Series,
     returns: pd.Series,
@@ -192,18 +206,10 @@ def _metrics(
     years = sessions / TRADING_DAYS
     total = float(values.iloc[-1] - 1.0)
     cagr = float(values.iloc[-1] ** (1.0 / years) - 1.0)
-    volatility = float(returns.std(ddof=1) * math.sqrt(TRADING_DAYS))
-    sharpe = (
-        float(returns.mean() / returns.std(ddof=1) * math.sqrt(TRADING_DAYS))
-        if returns.std(ddof=1) > 0 else 0.0
-    )
+    volatility, sharpe = _annualized_volatility_and_ratio(returns)
     drawdown = values.div(values.cummax()).sub(1.0)
     active = aligned["strategy"] - aligned["benchmark"]
-    tracking = float(active.std(ddof=1) * math.sqrt(TRADING_DAYS))
-    information = (
-        float(active.mean() / active.std(ddof=1) * math.sqrt(TRADING_DAYS))
-        if active.std(ddof=1) > 0 else None
-    )
+    tracking, information = _annualized_volatility_and_ratio(active)
     return PortfolioMetrics(
         total_return_pct=total * 100.0,
         cagr_pct=cagr * 100.0,

@@ -41,13 +41,14 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 
+from omni.portfolio.orders import OrderLedgerError
 from omni.portfolio.reconcile import Divergence
 from omni.portfolio.risk import RiskLimits, RiskRefusal
 from omni.trading.bridge import BridgeRefusal
 from omni.trading.loop import CycleResult, LoopConfig, LoopRefusal, run_cycle
 from omni.trading.policy import Ineligible, TradingPhase
 from omni.venue.paper_venue import Bar, PaperVenue, RecordedBars
-from omni.venue.protocol import Capabilities, MarketType, Position
+from omni.venue.protocol import Capabilities, Fill, MarketType, Position
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 HORIZON = NOW + timedelta(days=30)
@@ -424,6 +425,68 @@ class _DivergentVenue:
 
     async def cancel(self, external_id):
         return False
+
+
+class _OverfillingVenue:
+    def __init__(self, inner: PaperVenue) -> None:
+        self.name = inner.name
+        self.capabilities = inner.capabilities
+        self._inner = inner
+
+    async def quote(self, intent):
+        return await self._inner.quote(intent)
+
+    async def execute(self, intent):
+        return Fill(
+            intent_id=intent.idempotency_key,
+            venue=self.name,
+            symbol=intent.symbol,
+            side=intent.side,
+            filled_quantity=intent.quantity + Decimal(1),
+            average_price=intent.reference_price,
+            fee_paid=Decimal("1.01"),
+            filled_at=NOW,
+            external_id="OVER-1",
+        )
+
+    async def positions(self):
+        return await self._inner.positions()
+
+    async def balances(self):
+        return await self._inner.balances()
+
+    async def cancel(self, external_id):
+        return False
+
+
+class TestOverfillsStopBeforePortfolioMutation:
+    async def test_an_overfill_does_not_change_local_position_or_cash(self, db, portfolio):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+
+        with pytest.raises(OrderLedgerError, match="overfill"):
+            await _cycle(db, portfolio, _OverfillingVenue(_venue(symbol)))
+
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM position WHERE portfolio_id = $1", portfolio
+        ) == 0
+        assert await db.pool.fetchval(
+            "SELECT free FROM cash_balance "
+            "WHERE portfolio_id = $1 AND venue = 'paper' AND asset = 'USD'",
+            portfolio,
+        ) == NAV
+
+        (order,) = await _orders(db, portfolio)
+        assert order["status"] == "submitted"
+        assert order["filled_quantity"] == Decimal(0)
+        assert order["average_fill_price"] is None
+        assert order["fee_paid"] == Decimal(0)
+        events = await db.pool.fetch(
+            "SELECT status FROM order_event WHERE order_id = $1 ORDER BY at, id",
+            order["id"],
+        )
+        assert [event["status"] for event in events] == ["intent", "submitted"]
 
 
 class TestReconciliationGatesTheCycle:

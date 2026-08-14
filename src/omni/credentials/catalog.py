@@ -224,6 +224,8 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "fallback": FALLBACK_BYO_ONLY,
     },
     "okx": {
+        # Its market-data endpoints are public and keyless, but the venue terms
+        # still restrict serving that data on to third parties.
         "label": "OKX",
         "category": CATEGORY_CRYPTO,
         "settings_field": "okx_api_key",

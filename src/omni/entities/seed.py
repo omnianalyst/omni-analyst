@@ -44,6 +44,7 @@ import logging
 from dataclasses import dataclass
 
 from omni.entities._seed_data import (
+    ALLOCATION_ETFS,
     INDICES,
     MACRO_ENTITIES,
     SECTOR_ETFS,
@@ -57,6 +58,7 @@ logger = logging.getLogger("omni.entities.seed")
 
 COMPANY_KIND = "company"
 SECTOR_ETF_KIND = "sector_etf"
+ETF_KIND = "etf"
 INDEX_KIND = "index"
 MACRO_KIND = "macro"
 
@@ -136,6 +138,7 @@ WHERE index_symbol = $1
 class SeedReport:
     companies: int = 0
     sector_etfs: int = 0
+    allocation_etfs: int = 0
     indices: int = 0
     macro_entities: int = 0
     edges: int = 0
@@ -155,7 +158,13 @@ class SeedReport:
 
     @property
     def total(self) -> int:
-        return self.companies + self.sector_etfs + self.indices + self.macro_entities
+        return (
+            self.companies
+            + self.sector_etfs
+            + self.allocation_etfs
+            + self.indices
+            + self.macro_entities
+        )
 
 
 async def _upsert(pool, kind: str, symbol: str, name: str, identifiers: dict) -> str:
@@ -242,6 +251,11 @@ async def seed_market_universe(pool) -> SeedReport:
         sector_etf_ids[gics_sector] = entity_id
         etf_count += 1
 
+    allocation_etf_count = 0
+    for symbol, name in ALLOCATION_ETFS:
+        await _upsert(pool, ETF_KIND, symbol, name, {_POLYGON_KEY: symbol})
+        allocation_etf_count += 1
+
     index_count = 0
     for symbol, name in INDICES:
         await _upsert(pool, INDEX_KIND, symbol, name, {_POLYGON_KEY: symbol})
@@ -284,6 +298,7 @@ async def seed_market_universe(pool) -> SeedReport:
     return SeedReport(
         companies=company_count,
         sector_etfs=etf_count,
+        allocation_etfs=allocation_etf_count,
         indices=index_count,
         macro_entities=macro_count,
         edges=edge_count,

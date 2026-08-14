@@ -44,6 +44,15 @@ INDICES = (
     ("IWM", "iShares Russell 2000 ETF"),
 )
 
+# The allocation experiment also needs these three broad funds. They are not
+# sector ETF or index barometers, but each is priceable through Polygon and is
+# a required member of one of the otherwise-unrunnable allocation universes.
+ALLOCATION_ETFS = (
+    ("BND", "Vanguard Total Bond Market ETF"),
+    ("GLD", "SPDR Gold Shares"),
+    ("TLT", "iShares 20+ Year Treasury Bond ETF"),
+)
+
 # The macro entity the autonomous regime loop writes regime_assessment claims
 # on. One entity for the whole US economy: macro signals (yield curve, Sahm,
 # CPI, LEI, output gap) are global facts, not per-company, and the regime

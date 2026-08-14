@@ -73,6 +73,9 @@ jobs:
         working-directory: omni-analyst/app-v2
       - run: uv run pytest -q
         working-directory: omni-analyst/app-v2
+      - name: Test persisted historical-schema upgrades
+        run: uv run python ci/historical_schema_upgrade.py
+        working-directory: omni-analyst/app-v2
 
   ui:
     # The Preact app's typecheck, tests, and build were entirely outside CI;
@@ -90,3 +93,20 @@ jobs:
       - run: npm --prefix ui run typecheck
       - run: npm --prefix ui run test
       - run: npm --prefix ui run build
+      - run: npm --prefix ui run test:browser:ci
+
+  production-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: omni-analyst/app-v2
+      - uses: actions/checkout@v4
+        with:
+          repository: neutron-build/neutron
+          path: Neutron
+      - uses: astral-sh/setup-uv@v3
+      - name: Build and boot production images
+        run: ./ci/production_smoke.sh ../../Neutron/python
+        working-directory: omni-analyst/app-v2

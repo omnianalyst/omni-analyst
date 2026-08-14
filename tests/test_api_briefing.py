@@ -42,6 +42,17 @@ def _auth(user_id):
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _user(db) -> uuid4:
+    """A real principal. The auth middleware checks the token subject against
+    the users table, so a minted token for an id with no row is anonymous."""
+    uid = uuid4()
+    return await db.pool.fetchval(
+        "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') "
+        "RETURNING id",
+        uid, f"{uid}@example.com",
+    )
+
+
 
 class _Lifespan:
     """Drive the ASGI lifespan protocol, which httpx's ASGITransport skips."""
@@ -312,11 +323,12 @@ async def test_a_resolved_call_leaves_the_feed_but_stays_on_the_scorecard(
     """
     e = await _entity(db)
     await _surface(db, entity_id=e, claim_id=None, outcome="upper")
+    viewer = await _user(db)
 
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
         feed = (await client.get("/briefing")).json()
-        card = (await client.get("/briefing/scorecard", headers=_auth(uuid4()))).json()
+        card = (await client.get("/briefing/scorecard", headers=_auth(viewer))).json()
 
     assert feed == []
     # Still counted, and counted as a hit -- leaving the feed is not forgetting.
@@ -350,8 +362,8 @@ async def test_a_private_finding_leaks_to_neither_another_user_nor_the_shared_fe
     the most dangerous place for this rule to slip, because it speaks unprompted.
     """
     e = await _entity(db)
-    owner_a = uuid4()
-    owner_b = uuid4()
+    owner_a = await _user(db)
+    owner_b = await _user(db)
     c = await _claim(db, e, owner=owner_a)
     await _surface(db, entity_id=e, claim_id=c, owner=owner_a)
 
@@ -410,10 +422,11 @@ async def test_a_method_below_the_sample_floor_reports_hit_rate_null(
     c = await _claim(db, e)
     for _ in range(3):
         await _surface(db, entity_id=e, claim_id=c, outcome="upper")
+    viewer = await _user(db)
 
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
-        r = await client.get("/briefing/scorecard", headers=_auth(uuid4()))
+        r = await client.get("/briefing/scorecard", headers=_auth(viewer))
 
     assert r.status_code == 200, r.text
     card = r.json()[0]
@@ -428,6 +441,7 @@ async def test_a_method_below_the_sample_floor_reports_hit_rate_null(
 async def test_refusals_are_counted_by_reason(db, database_url):
     e = await _entity(db)
     c = await _claim(db, e)
+    viewer = await _user(db)
     await record(db.pool, assess(_candidate(c), []), entity_id=e)
     await record(
         db.pool,
@@ -437,7 +451,7 @@ async def test_refusals_are_counted_by_reason(db, database_url):
 
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
-        r = await client.get("/briefing/refusals", headers=_auth(uuid4()))
+        r = await client.get("/briefing/refusals", headers=_auth(viewer))
 
     assert r.status_code == 200, r.text
     counts = r.json()

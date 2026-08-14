@@ -26,6 +26,8 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from omni.scheduler.health import run_with_health
+
 logger = logging.getLogger("omni.autonomous.runner")
 
 
@@ -155,12 +157,18 @@ class AutonomousRunner:
             macro_id,
         )
 
-        # Sector ETF + index prices (byo_only Polygon). The operator must
-        # exist for the fill pipeline to attribute these.
+        # Sector ETF, index, and the three allocation-fund prices (byo_only
+        # Polygon). The operator must exist for the fill pipeline to attribute
+        # these.
         if self._operator_user_id is not None:
+            from omni.entities._seed_data import ALLOCATION_ETFS
+
             etf_rows = await self._pool.fetch(
                 "SELECT id, symbol FROM entity "
-                "WHERE kind IN ('sector_etf', 'index') ORDER BY symbol"
+                "WHERE kind IN ('sector_etf', 'index') "
+                "OR (kind = 'etf' AND symbol = ANY($1::text[])) "
+                "ORDER BY symbol",
+                [symbol for symbol, _ in ALLOCATION_ETFS],
             )
             for row in etf_rows:
                 exists = await self._pool.fetchval(
@@ -181,7 +189,7 @@ class AutonomousRunner:
         if created:
             logger.info(
                 "bootstrap: created %d autonomous demand rows "
-                "(FRED series + derived signals + ETF/index prices)", created,
+                "(FRED series + derived signals + ETF/index/allocation prices)", created,
             )
 
     async def stop(self) -> None:
@@ -197,9 +205,14 @@ class AutonomousRunner:
 
     async def _run_all(self) -> None:
         """Run every autonomous loop once. Errors are contained per-loop."""
-        for name, fn in self._loops():
+        for name, fn, interval in self._loops():
             try:
-                await fn()
+                await run_with_health(
+                    self._pool,
+                    loop_name=f"autonomous.{name}",
+                    interval=interval,
+                    fn=fn,
+                )
             except Exception:
                 logger.exception("autonomous %s failed at startup", name)
 
@@ -211,13 +224,23 @@ class AutonomousRunner:
         from omni.autonomous.synthesis import enrich_findings
 
         return [
-            ("macro", lambda: assess_macro_regime(self._pool)),
+            (
+                "macro",
+                lambda: assess_macro_regime(self._pool),
+                self._config.macro_interval,
+            ),
             ("sector", lambda: scan_sectors(
-                self._pool, operator_user_id=self._operator_user_id)),
+                self._pool, operator_user_id=self._operator_user_id),
+                self._config.sector_interval),
             ("demand", lambda: create_autonomous_demand(
-                self._pool, operator_user_id=self._operator_user_id)),
-            ("synthesis", lambda: enrich_findings(self._pool)),
-            ("meta", lambda: resolve_meta(self._pool)),
+                self._pool, operator_user_id=self._operator_user_id),
+                self._config.demand_interval),
+            (
+                "synthesis",
+                lambda: enrich_findings(self._pool),
+                self._config.synthesis_interval,
+            ),
+            ("meta", lambda: resolve_meta(self._pool), self._config.meta_interval),
         ]
 
     async def _run_backfill(self) -> None:
@@ -239,7 +262,12 @@ class AutonomousRunner:
             return
         while self._running:
             try:
-                await fn()
+                await run_with_health(
+                    self._pool,
+                    loop_name=f"autonomous.{name}",
+                    interval=interval,
+                    fn=fn,
+                )
             except asyncio.CancelledError:
                 break
             except Exception:

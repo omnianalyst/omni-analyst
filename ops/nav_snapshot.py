@@ -16,6 +16,7 @@ from uuid import UUID
 
 from omni.config import settings
 from omni.db import connect
+from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS, record_loop_health
 from omni.trading.carry_health import Verdict, assess
 from omni.trading.nav_job import Unmarkable, snapshot
 from omni.trading.tradeable import affordability, affordable_ids
@@ -28,15 +29,23 @@ UNIVERSE = ["BTC", "ETH", "SOL", "HYPE", "PENGU", "PURR"]
 
 async def main() -> int:
     c = await connect(settings.database_url)
-    v = await CCXTVenue.connect(
-        venue="hyperliquid", quote_asset="USDC",
-        credentials=wallet_credentials(settings, "hyperliquid"),
-        mode=TradingMode.READ_ONLY,
-    )
+    v = None
     try:
+        v = await CCXTVenue.connect(
+            venue="hyperliquid", quote_asset="USDC",
+            credentials=wallet_credentials(settings, "hyperliquid"),
+            mode=TradingMode.READ_ONLY,
+        )
         pid = await c.pool.fetchval("SELECT id FROM portfolio LIMIT 1")
         if pid is None:
             print("no portfolio; nothing to mark")
+            await record_loop_health(
+                c.pool,
+                loop_name="nav",
+                ok=True,
+                result="no portfolio; nothing to mark",
+                expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["nav"],
+            )
             return 0
         rows = await c.pool.fetch(
             "SELECT id, symbol FROM entity WHERE symbol = ANY($1::text[])", UNIVERSE
@@ -52,6 +61,14 @@ async def main() -> int:
             # the exposure nobody could price. A gap in the series is the
             # honest outcome and is visible; a wrong point is neither.
             print(f"refused, nothing written: {exc}")
+            await record_loop_health(
+                c.pool,
+                loop_name="nav",
+                ok=False,
+                error=f"Unmarkable: {exc}",
+                result="no NAV snapshot written",
+                expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["nav"],
+            )
             return 1
         print(f"nav {nav}")
 
@@ -85,9 +102,29 @@ async def main() -> int:
             print(f"    {asset:<7} {pct:>7.2f}%/yr")
         if health.verdict in (Verdict.DEGRADED, Verdict.BELOW_FLOOR):
             print(f"WARNING [{health.verdict.value}] {health.verdict.detail}")
+        await record_loop_health(
+            c.pool,
+            loop_name="nav",
+            ok=True,
+            result=f"NAV snapshot {nav}; carry health {health.verdict.value}",
+            expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["nav"],
+        )
         return 0
+    except BaseException as exc:
+        try:
+            await record_loop_health(
+                c.pool,
+                loop_name="nav",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["nav"],
+            )
+        except Exception:  # noqa: BLE001,S110
+            pass
+        raise
     finally:
-        await v.aclose()
+        if v is not None:
+            await v.aclose()
         await c.close()
 
 

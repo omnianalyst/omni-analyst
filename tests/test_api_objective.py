@@ -27,6 +27,8 @@ from neutron.test import TestClient
 from omni.api.objective import build_router
 from omni.main import create_app
 
+GOOD_SECRET = "x" * 48
+
 
 class _Lifespan:
     """Drive the ASGI lifespan protocol, which httpx's ASGITransport skips."""
@@ -58,6 +60,15 @@ def _make_app(database_url):
     return app
 
 
+async def _auth_headers(client):
+    response = await client.post(
+        "/auth/setup",
+        json={"email": "operator@example.com", "password": "a" * 16},
+    )
+    assert response.status_code == 200, response.text
+    return {"authorization": f"Bearer {response.json()['token']}"}
+
+
 async def _entity(db, symbol="AAPL", kind="company", name=None):
     return await db.pool.fetchval(
         "INSERT INTO entity (kind, symbol, name) VALUES ($1, $2, $3) "
@@ -70,7 +81,13 @@ async def _entity(db, symbol="AAPL", kind="company", name=None):
 
 @pytest.fixture(autouse=True)
 async def _clean(db):
-    await db.pool.execute("TRUNCATE entity CASCADE")
+    await db.pool.execute("TRUNCATE users, entity CASCADE")
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _secret(monkeypatch):
+    monkeypatch.setenv("OMNI_JWT_SECRET", GOOD_SECRET)
     yield
 
 
@@ -163,6 +180,7 @@ async def test_an_unanswerable_objective_produces_demand_rows(
     await _entity(db, symbol="AAPL")
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
+        headers = await _auth_headers(client)
         before = await db.pool.fetchval("SELECT count(*) FROM demand")
         r = await client.post(
             "/objective/run",
@@ -171,6 +189,7 @@ async def test_an_unanswerable_objective_produces_demand_rows(
                 "target": "AAPL",
                 "needs": [claim_type],
             },
+            headers=headers,
         )
         after = await db.pool.fetchval("SELECT count(*) FROM demand")
 
@@ -193,6 +212,7 @@ async def test_a_licensing_shortfall_produces_no_demand(db, database_url):
     await _entity(db, symbol="AAPL")
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
+        headers = await _auth_headers(client)
         before = await db.pool.fetchval("SELECT count(*) FROM demand")
         r = await client.post(
             "/objective/run",
@@ -202,6 +222,7 @@ async def test_a_licensing_shortfall_produces_no_demand(db, database_url):
                 "needs": ["price_snapshot"],
                 "shareable": True,
             },
+            headers=headers,
         )
         after = await db.pool.fetchval("SELECT count(*) FROM demand")
 
@@ -210,6 +231,42 @@ async def test_a_licensing_shortfall_produces_no_demand(db, database_url):
     assert body["shortfalls"][0]["reason"] == "only_licensed_sources_can_produce_this"
     assert body["demand_raised"] == []
     assert after == before
+
+
+async def test_anonymous_objective_run_does_not_plan_execute_or_write(
+    db, database_url, monkeypatch
+):
+    from omni.api import objective as objective_module
+
+    await _entity(db, symbol="AAPL")
+    called = []
+
+    def fail_plan(*args, **kwargs):
+        called.append("plan")
+        raise AssertionError("anonymous request reached planning")
+
+    async def fail_execute(*args, **kwargs):
+        called.append("execute")
+        raise AssertionError("anonymous request reached execution")
+
+    monkeypatch.setattr(objective_module, "plan", fail_plan)
+    monkeypatch.setattr(objective_module, "execute", fail_execute)
+    before = await db.pool.fetchval("SELECT count(*) FROM demand")
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        response = await client.post(
+            "/objective/run",
+            json={
+                "text": "fundamentals for AAPL",
+                "target": "AAPL",
+                "needs": ["fundamental_metric"],
+            },
+        )
+
+    assert response.status_code == 401
+    assert called == []
+    assert await db.pool.fetchval("SELECT count(*) FROM demand") == before
 
 
 async def test_plan_writes_nothing_to_the_database(db, database_url):
@@ -324,9 +381,11 @@ async def test_analysis_run_returns_result_with_evidence_and_licence(
 
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
+        headers = await _auth_headers(client)
         r = await client.post(
             "/analysis/run",
             json={"capability": "perception.divergence", "target": "AAPL"},
+            headers=headers,
         )
 
     assert r.status_code == 200, r.text
@@ -363,9 +422,11 @@ async def test_analysis_run_serializes_a_non_claim_declared_result(
 
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
+        headers = await _auth_headers(client)
         r = await client.post(
             "/analysis/run",
             json={"capability": "market_risk.credit_risk", "target": "AAPL"},
+            headers=headers,
         )
 
     assert r.status_code == 200, r.text
@@ -382,9 +443,11 @@ async def test_analysis_run_unknown_capability_is_not_found(db, database_url):
     await _entity(db, symbol="AAPL")
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
+        headers = await _auth_headers(client)
         r = await client.post(
             "/analysis/run",
             json={"capability": "does.not.exist", "target": "AAPL"},
+            headers=headers,
         )
 
     assert r.status_code == 404, r.text
@@ -398,12 +461,14 @@ async def test_analysis_run_no_declared_arguments_is_bad_request(
     await _entity(db, symbol="AAPL")
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
+        headers = await _auth_headers(client)
         r = await client.post(
             "/analysis/run",
             json={
                 "capability": "backtest.evaluate_strategy_sharpe",
                 "target": "AAPL",
             },
+            headers=headers,
         )
 
     assert r.status_code == 400, r.text
@@ -427,9 +492,11 @@ async def test_analysis_run_writes_nothing_to_the_database(db, database_url):
 
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
+        headers = await _auth_headers(client)
         r = await client.post(
             "/analysis/run",
             json={"capability": "perception.divergence", "target": "AAPL"},
+            headers=headers,
         )
 
     assert r.status_code == 200, r.text

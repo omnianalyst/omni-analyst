@@ -715,6 +715,63 @@ tr.row.tier-unknown td:first-child {
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
+
+.alert-action {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.alert-action:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.alert-action:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.alert-action-delete {
+  color: var(--tier-dead);
+}
+.alert-edit-form {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+}
+.alert-edit-form label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.alert-edit-form input,
+.alert-edit-form select {
+  min-width: 130px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+.alert-feedback {
+  margin: 10px 0 0;
+  color: var(--tier-fresh);
+  font-size: 12px;
+}
+.alert-panel-feedback {
+  padding: 0 var(--s-5);
+}
 .byo {
   color: var(--tier-aging);
 }
@@ -5025,7 +5082,8 @@ tr.row.tier-unknown td:first-child {
 }
 
 .venue-field input[type="text"],
-.venue-field input[type="password"] {
+.venue-field input[type="password"],
+.venue-field select {
   padding: 7px 10px;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
@@ -5034,6 +5092,15 @@ tr.row.tier-unknown td:first-child {
   font-size: 13px;
   font-family: inherit;
 }
+
+.venue-last-check,
+.venue-live-error {
+  margin: -8px 0 12px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.venue-last-check { color: var(--faint); }
 
 .venue-form-actions {
   display: flex;

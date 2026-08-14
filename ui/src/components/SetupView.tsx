@@ -73,7 +73,6 @@ export function SetupView() {
               class="search-input"
               type="password"
               required
-              minlength={12}
               autocomplete="new-password"
               value={password}
               onInput={(e) => setPassword((e.target as HTMLInputElement).value)}
@@ -85,7 +84,6 @@ export function SetupView() {
               class="search-input"
               type="password"
               required
-              minlength={12}
               autocomplete="new-password"
               value={confirm}
               onInput={(e) => setConfirm((e.target as HTMLInputElement).value)}

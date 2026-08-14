@@ -7,7 +7,7 @@ answer is a verified JWT, decoded here.
 
 The contract of ``resolve_audience_from_request`` is narrow and load-bearing:
 
-* a valid token yields that user's id;
+* a valid token for a currently active user yields that user's id;
 * an absent, malformed, expired or tampered token yields ``None`` -- the shared
   network only;
 * it never reads ``X-User-Id`` and never falls back to another identity;
@@ -54,7 +54,7 @@ def jwt_secret() -> str:
     return raw
 
 
-def resolve_audience_from_request(request: Request) -> UUID | None:
+def verified_token_subject(request: Request) -> UUID | None:
     """Return the caller's user id from a verified Bearer token, else ``None``.
 
     Never raises: any failure to produce a verified identity is the anonymous
@@ -81,4 +81,29 @@ def resolve_audience_from_request(request: Request) -> UUID | None:
         return None
 
 
-__all__ = ["jwt_secret", "resolve_audience_from_request"]
+def resolve_audience_from_request(request: Request) -> UUID | None:
+    """Return the active principal established by request middleware.
+
+    Direct callers without middleware retain token-only decoding for isolated
+    signature verification; application requests always use the database-backed
+    middleware result.
+    """
+    state = getattr(request, "state", None)
+    if state is not None and getattr(state, "_omni_auth_checked", False):
+        return getattr(state, "_omni_audience", None)
+    return verified_token_subject(request)
+
+
+def resolve_role_from_request(request: Request) -> str | None:
+    state = getattr(request, "state", None)
+    if state is None or not getattr(state, "_omni_auth_checked", False):
+        return None
+    return getattr(state, "_omni_role", None)
+
+
+__all__ = [
+    "jwt_secret",
+    "resolve_audience_from_request",
+    "resolve_role_from_request",
+    "verified_token_subject",
+]

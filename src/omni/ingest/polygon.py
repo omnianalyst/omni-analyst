@@ -25,6 +25,7 @@ backtest peek at prices that had not happened yet.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -69,7 +70,12 @@ async def _respect_rate_limit() -> None:
 
 def _event_date(bar: dict[str, Any]) -> datetime | None:
     ts_ms = bar.get("t")
-    if ts_ms is None:
+    if (
+        isinstance(ts_ms, bool)
+        or not isinstance(ts_ms, (int, float))
+        or not math.isfinite(ts_ms)
+        or ts_ms <= 0
+    ):
         return None
     try:
         return datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
@@ -87,6 +93,41 @@ def _close_knowledge_date(event_date: datetime) -> datetime:
         event_date.replace(hour=0, minute=0, second=0, microsecond=0)
         + timedelta(days=1)
     )
+
+
+def _validated_ohlcv(bar: dict[str, Any], *, symbol: str) -> dict[str, int | float]:
+    fields = {
+        "open": "o",
+        "high": "h",
+        "low": "l",
+        "close": "c",
+        "volume": "v",
+    }
+    values: dict[str, int | float] = {}
+    for name, field in fields.items():
+        value = bar.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise Unavailable(
+                f"Polygon returned malformed {symbol} bar: {name} must be a "
+                f"finite positive number, got {value!r}"
+            )
+        values[name] = value
+
+    if not (
+        values["low"] <= values["open"] <= values["high"]
+        and values["low"] <= values["close"] <= values["high"]
+    ):
+        raise Unavailable(
+            f"Polygon returned inconsistent {symbol} OHLC bar: "
+            f"open={values['open']!r}, high={values['high']!r}, "
+            f"low={values['low']!r}, close={values['close']!r}"
+        )
+    return values
 
 
 def parse_aggregates(
@@ -109,25 +150,25 @@ def parse_aggregates(
             f"{payload.get('error', 'unknown')}"
         )
 
-    results = payload.get("results") or []
+    results = payload.get("results", [])
+    if not isinstance(results, list):
+        raise Unavailable(f"Polygon returned malformed results for {symbol}")
+
     drafts: list[ClaimDraft] = []
     for bar in results:
+        if not isinstance(bar, dict):
+            raise Unavailable(f"Polygon returned a malformed bar for {symbol}: {bar!r}")
         event_date = _event_date(bar)
         if event_date is None:
-            # No timestamp means no event_date, and without it the bitemporal
-            # guarantee cannot be made. Skip rather than guess.
-            continue
+            raise Unavailable(
+                f"Polygon returned malformed {symbol} bar timestamp: {bar.get('t')!r}"
+            )
+        value = _validated_ohlcv(bar, symbol=symbol)
         drafts.append(
             ClaimDraft(
                 claim_type=CLAIM_TYPE,
                 key=symbol,
-                value={
-                    "open": bar.get("o"),
-                    "high": bar.get("h"),
-                    "low": bar.get("l"),
-                    "close": bar.get("c"),
-                    "volume": bar.get("v"),
-                },
+                value=value,
                 event_date=event_date,
                 knowledge_date=_close_knowledge_date(event_date),
                 confidence=1.0,

@@ -45,6 +45,7 @@ from omni.trading.carry_loop import (
     CarryConfig,
     CarryHalt,
     CarryRefusal,
+    CarryRiskPolicy,
     _legs_by_asset,
     _PairSymbols,
     _unpaired,
@@ -115,6 +116,11 @@ def _config(**overrides) -> CarryConfig:
         # makes the reconciliation a formality that always passes, and every
         # test below would then be asserting over a check that cannot fail.
         "reconciliation_tolerance": Decimal("0.01"),
+        "risk_policy": CarryRiskPolicy(
+            max_gross_notional=Decimal(4000),
+            daily_loss_limit_pct_nav=Decimal("0.02"),
+            max_drawdown_pct=Decimal("0.10"),
+        ),
         "lookback_days": 7,
     }
     settings.update(overrides)
@@ -645,21 +651,21 @@ class TestFunding:
             as_of=NOW + SETTLEMENT, since=NOW,
         )
 
+        assert result.halted
+        assert CarryHalt.ACCRUAL_INCOMPLETE.value in result.halt_reason
         assert result.refused[CarryRefusal.NO_MARK.value] == 1
-        assert [a.symbol for a in result.funding] == ["BBB/USD"]
-        quantity = NOTIONAL / PRICE
-        assert result.funding_collected == quantity * PRICE * Decimal(RATES["BBB/USD"])
+        assert result.funding == ()
+        assert result.funding_collected == 0
+        assert result.funding_settled_through is None
 
-    async def test_a_pair_dropped_from_the_universe_is_counted_not_silently_starved(
+    async def test_a_pair_dropped_from_the_universe_halts_without_settling_the_window(
         self, db, owner, portfolio_id, venue
     ):
         """A name the universe stops naming can be neither ranked nor settled.
 
-        The pair stays on the book -- nothing has told it to leave -- and stops
-        collecting, which is the same silent understatement of carry as a skipped
-        settlement except that it lasts for as long as the name is out. Selling
-        it instead would be turnover the signal never asked for, so it is
-        counted rather than acted on.
+        The pair stays on the book because nothing has told it to leave, but the
+        accounting boundary stays open until the pair can map and accrue. Selling
+        it instead would be turnover the signal never asked for.
         """
         ids = await _world(db, owner)
         for symbol, entity_id in ids.items():
@@ -676,8 +682,11 @@ class TestFunding:
             universe=[ids[s] for s in RATES if s != "AAA/USD"],
         )
 
+        assert result.halted
+        assert CarryHalt.UNRESOLVED_PAIR.value in result.halt_reason
         assert result.refused[CarryRefusal.OUTSIDE_UNIVERSE.value] == 1
-        assert [a.symbol for a in result.funding] == ["BBB/USD"]
+        assert result.funding == ()
+        assert result.funding_settled_through is None
         assert ids["AAA/USD"] not in result.held
         spot, perp = await _legs(db, portfolio_id, "AAA/USD")
         assert spot.quantity == -perp.quantity == NOTIONAL / PRICE
@@ -860,6 +869,11 @@ class TestCostsAndClock:
                 exit_rank=4,
                 notional_per_pair=NOTIONAL,
                 funding_venue=FUNDING_VENUE,
+                risk_policy=CarryRiskPolicy(
+                    max_gross_notional=Decimal(4000),
+                    daily_loss_limit_pct_nav=Decimal("0.02"),
+                    max_drawdown_pct=Decimal("0.10"),
+                ),
             )
         with pytest.raises(TypeError, match="Decimal"):
             _config(notional_per_pair=1000.0)

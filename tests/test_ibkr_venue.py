@@ -74,17 +74,20 @@ def test_perpetual_returns_none():
 def test_capabilities():
     v = IBKRVenue(ib_client=FakeIB())
     c = v.capabilities
-    assert c.spot and c.shorting and not c.perpetuals
+    assert not c.spot and not c.margin and not c.shorting and not c.perpetuals
+    assert not c.limit_orders
     assert c.taker_fee_bps == Decimal("0.35")
 
 
 async def test_market_buy():
-    v = IBKRVenue(ib_client=FakeIB(), account="U12345")
-    fill = await v.execute(_intent())
-    assert fill.filled_quantity == Decimal(10)
-    assert fill.average_price == Decimal("380.05")
-    assert fill.fee_paid == Decimal("0.35")
-    assert fill.side is Side.BUY
+    ib = FakeIB()
+    ib.placeOrder = MagicMock(side_effect=AssertionError("must not place an order"))
+    v = IBKRVenue(ib_client=ib, account="U12345")
+
+    with pytest.raises(VenueUnavailable, match="unavailable"):
+        await v.execute(_intent())
+
+    ib.placeOrder.assert_not_called()
 
 
 async def test_empty_positions():

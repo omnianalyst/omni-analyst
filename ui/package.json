@@ -9,6 +9,8 @@
     "preview": "neutron-ts preview",
     "start": "neutron-ts start",
     "test": "vitest run",
+    "test:browser": "playwright test",
+    "test:browser:ci": "playwright install --with-deps chromium && playwright test",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
@@ -20,9 +22,12 @@
     "preact-render-to-string": "^6.5.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@preact/preset-vite": "^2.9.4",
+    "@testing-library/preact": "^3.2.4",
+    "jsdom": "^26.1.0",
     "typescript": "^5.7.2",
-    "vite": "^6.0.7",
-    "vitest": "^2.1.8"
+    "vite": "^6.4.3",
+    "vitest": "^4.1.10"
   }
 }

@@ -141,6 +141,7 @@ async def test_setup_then_login_round_trips_to_the_same_user(db, database_url):
         )
         assert r_setup.status_code == 200, r_setup.text
         registered_id = r_setup.json()["user"]["id"]
+        assert r_setup.json()["user"]["role"] == "operator"
         # setup returns a token already; prove it resolves to the new user.
         setup_token = r_setup.json()["token"]
 
@@ -205,6 +206,26 @@ async def test_setup_refuses_once_any_user_exists(db, database_url):
     assert count == 0
 
 
+async def test_concurrent_setup_creates_exactly_one_operator(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        first, second = await asyncio.gather(
+            client.post(
+                "/auth/setup",
+                json={"email": "first@example.com", "password": "a" * 16},
+            ),
+            client.post(
+                "/auth/setup",
+                json={"email": "second@example.com", "password": "b" * 16},
+            ),
+        )
+
+    assert sorted((first.status_code, second.status_code)) == [200, 409]
+    rows = await db.pool.fetch("SELECT email, role FROM users")
+    assert len(rows) == 1
+    assert rows[0]["role"] == "operator"
+
+
 async def test_register_requires_a_signed_in_operator(db, database_url):
     """Open registration on an internet-reachable domain lets anyone create an
     account that sees its own audience-scoped slice. After setup, /auth/register
@@ -227,6 +248,35 @@ async def test_register_requires_a_signed_in_operator(db, database_url):
             headers=_bearer(token),
         )
         assert r_authed.status_code == 201, r_authed.text
+        assert r_authed.json()["role"] == "member"
+
+
+async def test_member_cannot_register_another_user(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        operator_token = await _setup_first_user(client)
+        created = await client.post(
+            "/auth/register",
+            json={"email": "member@example.com", "password": "b" * 16},
+            headers=_bearer(operator_token),
+        )
+        assert created.status_code == 201, created.text
+
+        login = await client.post(
+            "/auth/login",
+            json={"email": "member@example.com", "password": "b" * 16},
+        )
+        member_token = login.json()["token"]
+        denied = await client.post(
+            "/auth/register",
+            json={"email": "third@example.com", "password": "c" * 16},
+            headers=_bearer(member_token),
+        )
+
+    assert denied.status_code == 403
+    assert await db.pool.fetchval(
+        "SELECT count(*) FROM users WHERE email = 'third@example.com'"
+    ) == 0
 
 
 async def test_forged_or_tampered_token_resolves_to_none_not_the_named_user(
@@ -386,6 +436,24 @@ async def test_inactive_user_cannot_log_in(db, database_url):
     assert r_login.status_code == 401
     # No token is handed to a deactivated principal.
     assert "token" not in r_login.json()
+
+
+async def test_token_issued_before_deactivation_is_refused(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_first_user(client, email="frozen@example.com")
+        user_id = await db.pool.fetchval(
+            "SELECT id FROM users WHERE email = 'frozen@example.com'"
+        )
+        before = await client.get("/auth/me", headers=_bearer(token))
+        assert before.status_code == 200
+
+        await db.pool.execute(
+            "UPDATE users SET active = FALSE WHERE id = $1", user_id
+        )
+        after = await client.get("/auth/me", headers=_bearer(token))
+
+    assert after.status_code == 401
 
 
 async def test_change_password_rotates_then_new_password_logs_in(db, database_url):

@@ -35,6 +35,7 @@ from omni.db import connect
 from omni.research.allocation import AllocationRefused, equal_weight, risk_balanced, top_measured
 from omni.research.shadow_book import ShadowBookRefused, record_decision
 from omni.research.shadow_run import BENCHMARK, COST_BPS, SECTORS, load_panel, next_session
+from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS, record_loop_health
 
 RULES = (equal_weight, top_measured, risk_balanced)
 
@@ -120,7 +121,35 @@ async def main(argv: list[str] | None = None) -> int:
             f"recorded {recorded}, already present {already}, refused {refused}, "
             f"of {len(RULES)} rules"
         )
-        return 0 if refused == 0 else 1
+        status = 0 if refused == 0 else 1
+        await record_loop_health(
+            client.pool,
+            loop_name="shadow_decision",
+            ok=status == 0,
+            error=f"{refused} of {len(RULES)} rules refused" if refused else None,
+            result=(
+                f"recorded {recorded}, already present {already}, refused {refused}, "
+                f"of {len(RULES)} rules"
+            ),
+            expected_interval_seconds=EXPECTED_OPERATION_INTERVALS[
+                "shadow_decision"
+            ],
+        )
+        return status
+    except BaseException as exc:
+        try:
+            await record_loop_health(
+                client.pool,
+                loop_name="shadow_decision",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                expected_interval_seconds=EXPECTED_OPERATION_INTERVALS[
+                    "shadow_decision"
+                ],
+            )
+        except Exception:  # noqa: BLE001,S110
+            pass
+        raise
     finally:
         await client.close()
 

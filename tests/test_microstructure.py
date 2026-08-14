@@ -19,9 +19,12 @@ locked book is emitted, and ``knowledge_date == event_date`` for every claim.
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
+from omni.coverage.writer import MissingCredentialOwner, write_claims
+from omni.credentials.catalog import FALLBACK_BYO_ONLY, redistribution_for
 from omni.ingest.microstructure import (
     MicrostructureAdapter,
     parse_book,
@@ -360,10 +363,53 @@ class TestAdapterRouting:
 
 class TestAdapterDeclaration:
     def test_provider_key_is_the_venue_for_licence_lookup(self):
-        # Per the P12 rule: the licence class is per venue, so provider_key is
-        # the venue, not the literal "microstructure". Asserted for two venues.
+        # The licence class is per venue, so provider_key is the venue, not the
+        # literal "microstructure". Asserted for two venues.
         assert MicrostructureAdapter(venue="okx").provider_key == "okx"
         assert MicrostructureAdapter(venue="binance").provider_key == "binance"
+
+    async def test_okx_shared_demand_is_refused_by_the_catalog_to_writer_contract(self, db):
+        await db.pool.execute("TRUNCATE entity CASCADE")
+        entity_id = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name) "
+            "VALUES ('crypto_asset', 'BTC', 'Bitcoin') RETURNING id"
+        )
+        adapter = MicrostructureAdapter(venue="okx")
+        drafts = parse_book(BOOK_PAYLOAD, symbol="BTC-USDT", venue="okx")
+        assert redistribution_for(adapter.provider_key) == FALLBACK_BYO_ONLY
+        with pytest.raises(MissingCredentialOwner, match="okx is byo_only"):
+            await write_claims(
+                db.pool,
+                drafts,
+                entity_id=entity_id,
+                source=adapter.source,
+                provider_key=adapter.provider_key,
+            )
+        assert await db.pool.fetchval("SELECT count(*) FROM claim") == 0
+
+    async def test_okx_byo_demand_is_pinned_to_the_requesting_user(self, db):
+        await db.pool.execute("TRUNCATE entity CASCADE")
+        entity_id = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name) "
+            "VALUES ('crypto_asset', 'BTC', 'Bitcoin') RETURNING id"
+        )
+        adapter = MicrostructureAdapter(venue="okx")
+        owner = uuid4()
+        written = await write_claims(
+            db.pool,
+            parse_book(BOOK_PAYLOAD, symbol="BTC-USDT", venue="okx"),
+            entity_id=entity_id,
+            source=adapter.source,
+            provider_key=adapter.provider_key,
+            credential_owner=owner,
+        )
+        assert len(written) == 1
+        row = await db.pool.fetchrow(
+            "SELECT redistributable::text, audience_user_id FROM claim WHERE id = $1",
+            written[0],
+        )
+        assert row["redistributable"] == FALLBACK_BYO_ONLY
+        assert row["audience_user_id"] == owner
 
     def test_source_is_microstructure(self):
         assert MicrostructureAdapter(venue="okx").source == "microstructure"

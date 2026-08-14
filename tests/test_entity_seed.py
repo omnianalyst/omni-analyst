@@ -16,12 +16,14 @@ import json
 import pytest
 
 from omni.entities._seed_data import (
+    ALLOCATION_ETFS,
     INDICES,
     SECTOR_ETFS,
     SP500_CONSTITUENTS,
 )
 from omni.entities.seed import (
     COMPANY_KIND,
+    ETF_KIND,
     INDEX_KIND,
     MEMBER_OF_SECTOR,
     SECTOR_ETF_KIND,
@@ -64,6 +66,7 @@ class TestSeed:
 
         assert report.companies == len(SP500_CONSTITUENTS)
         assert report.sector_etfs == len(SECTOR_ETFS)
+        assert report.allocation_etfs == len(ALLOCATION_ETFS)
         assert report.indices == len(INDICES)
         assert report.unlinked == ()
 
@@ -75,6 +78,7 @@ class TestSeed:
         }
         assert kinds[COMPANY_KIND] == len(SP500_CONSTITUENTS)
         assert kinds[SECTOR_ETF_KIND] == len(SECTOR_ETFS)
+        assert kinds[ETF_KIND] == len(ALLOCATION_ETFS)
         assert kinds[INDEX_KIND] == len(INDICES)
 
     async def test_companies_get_polygon_identifier_equal_to_symbol(self, db):
@@ -158,6 +162,14 @@ class TestSeed:
 
         spy = await _entity(db, kind=INDEX_KIND, symbol="SPY")
         assert (await _identifiers(db.pool, spy["id"]))["polygon"] == "SPY"
+
+    async def test_allocation_etfs_get_polygon_identifiers(self, db):
+        await seed_market_universe(db.pool)
+
+        for symbol, _ in ALLOCATION_ETFS:
+            entity = await _entity(db, kind=ETF_KIND, symbol=symbol)
+            assert entity is not None
+            assert (await _identifiers(db.pool, entity["id"]))["polygon"] == symbol
 
     async def test_member_of_sector_edge_links_constituent_to_its_etf(self, db):
         await seed_market_universe(db.pool)
@@ -258,7 +270,11 @@ class TestSeed:
         # under different kinds -- ambiguous for resolve(). The static data must
         # keep these sets disjoint.
         constituent_symbols = {s for s, _, _, _ in SP500_CONSTITUENTS}
-        other_symbols = {s for s, *_ in SECTOR_ETFS} | {s for s, _ in INDICES}
+        other_symbols = (
+            {s for s, *_ in SECTOR_ETFS}
+            | {s for s, _ in ALLOCATION_ETFS}
+            | {s for s, _ in INDICES}
+        )
         overlap = constituent_symbols & other_symbols
         assert not overlap, f"constituent symbol(s) reused as ETF/index: {overlap}"
 

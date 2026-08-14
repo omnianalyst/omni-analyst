@@ -13,12 +13,7 @@ that backdates a decision.
 
 **Every rule refuses rather than degrades.** A rule that quietly drops a name
 with a short history changes its own universe, and the recorded universe is the
-only evidence of what it was choosing from. Two of the five rules the brief
-names -- fixed diversified allocation, and a stocks/international/bonds/gold/
-crypto portfolio -- are absent from this module for the same reason: the store
-holds no GLD, TLT or BND, so they cannot be run at all, and a version of them
-restricted to the assets that happen to be present would be a different rule
-wearing the name of the one that was asked for.
+only evidence of what it was choosing from.
 """
 
 from __future__ import annotations

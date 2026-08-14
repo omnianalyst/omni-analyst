@@ -45,7 +45,15 @@ async def _entity(db, symbol="AAPL"):
 
 
 async def _price_claim(
-    db, entity_id, price, event_date, *, high=None, low=None, owner=None
+    db,
+    entity_id,
+    price,
+    event_date,
+    *,
+    high=None,
+    low=None,
+    owner=None,
+    knowledge_date=None,
 ):
     shared = owner is None
     value = {"price": price}
@@ -65,7 +73,7 @@ async def _price_claim(
         json.dumps(value),
         "seed" if shared else "polygon",
         event_date,
-        event_date,
+        event_date if knowledge_date is None else knowledge_date,
         "allowed" if shared else "byo_only",
         owner,
     )
@@ -299,6 +307,39 @@ class TestResolution:
         )
         assert row["outcome"] == "pending"
         assert row["resolved_at"] is None
+
+    async def test_a_price_learned_after_the_resolution_cutoff_stays_pending(self, db):
+        e = await _entity(db)
+        cutoff = NOW - timedelta(hours=12)
+        pid = await _seed_prediction(
+            db,
+            e,
+            entry=100.0,
+            upper=110.0,
+            lower=90.0,
+            created_at=NOW - timedelta(days=10),
+            horizon_ends_at=NOW - timedelta(days=1),
+        )
+        await _price_claim(
+            db,
+            e,
+            112.0,
+            NOW - timedelta(days=5),
+            knowledge_date=cutoff + timedelta(hours=1),
+        )
+
+        assert await resolve_due_predictions(db.pool, now=cutoff) == 0
+        row = await db.pool.fetchrow(
+            "SELECT outcome, resolved_at, exit_price, exit_at "
+            "FROM prediction WHERE id=$1",
+            pid,
+        )
+        assert dict(row) == {
+            "outcome": "pending",
+            "resolved_at": None,
+            "exit_price": None,
+            "exit_at": None,
+        }
 
 
 class TestBothBarriersCrossed:

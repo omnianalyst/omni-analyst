@@ -23,17 +23,22 @@ from typing import Any
 
 from neutron import App, Router
 from neutron.auth.jwt import create_token
-from neutron.error import bad_request, conflict, rate_limited, unauthorized
+from neutron.error import bad_request, forbidden, rate_limited, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
-from omni.auth import jwt_secret, resolve_audience_from_request
+from omni.auth import (
+    jwt_secret,
+    resolve_audience_from_request,
+    resolve_role_from_request,
+)
 from omni.auth.ratelimit import check_rate_limit
 from omni.auth.users import (
     MIN_PASSWORD_LENGTH,
     PasswordTooShort,
     authenticate_user,
     change_password,
+    create_initial_operator,
     create_user,
     get_user,
     user_count,
@@ -69,6 +74,7 @@ def _user_dict(row: Any) -> dict:
         "email": row["email"],
         "created_at": created_at.isoformat() if created_at else None,
         "active": row["active"],
+        "role": row["role"],
     }
 
 
@@ -91,10 +97,8 @@ def build_router(app: App) -> Router:
         # reachable during the first-run window.
         if not check_rate_limit(_client_ip(request)):
             raise rate_limited("Too many attempts; wait a minute and try again.")
-        if await user_count(app.db.pool) > 0:
-            raise conflict("setup is already complete")
         try:
-            row = await create_user(
+            row = await create_initial_operator(
                 app.db.pool, email=body.email, password=body.password
             )
         except PasswordTooShort:
@@ -120,8 +124,11 @@ def build_router(app: App) -> Router:
         # signed-in operator. This keeps registration off the public surface --
         # app.omnianalyst.com is internet-reachable, and an open register would
         # let anyone create an account that sees its own audience-scoped slice.
-        if resolve_audience_from_request(request) is None:
+        audience = resolve_audience_from_request(request)
+        if audience is None:
             raise unauthorized("Authentication required")
+        if resolve_role_from_request(request) != "operator":
+            raise forbidden("Operator access required")
         try:
             row = await create_user(
                 app.db.pool, email=body.email, password=body.password

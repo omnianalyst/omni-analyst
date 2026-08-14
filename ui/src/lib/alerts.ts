@@ -89,6 +89,22 @@ export const listAlerts = (): Promise<AlertsResponse> =>
 export const createAlert = (req: CreateAlertRequest): Promise<Alert> =>
   authedSendJson<Alert>("POST", "/alerts", req);
 
+export const updateAlert = (
+  alertId: string,
+  patch: { active?: boolean; condition?: AlertCondition },
+): Promise<Alert> =>
+  authedSendJson<Alert>(
+    "PATCH",
+    `/alerts/${encodeURIComponent(alertId)}`,
+    patch,
+  );
+
+export const deleteAlert = (alertId: string): Promise<{ deleted: boolean }> =>
+  authedSendJson<{ deleted: boolean }>(
+    "DELETE",
+    `/alerts/${encodeURIComponent(alertId)}`,
+  );
+
 export const listFirings = (alertId: string): Promise<FiringsResponse> =>
   authedGetJson<FiringsResponse>(
     `/alerts/${encodeURIComponent(alertId)}/firings`,
@@ -103,6 +119,19 @@ export interface ConditionFormState {
 
 export function defaultConditionForm(): ConditionFormState {
   return { kind: "value_above", threshold: "", field: "value", seconds: "" };
+}
+
+export function conditionForm(condition: unknown): ConditionFormState {
+  const initial = defaultConditionForm();
+  if (typeof condition !== "object" || condition === null) return initial;
+  const value = condition as Record<string, unknown>;
+  if (!CONDITION_KINDS.includes(value.kind as ConditionKind)) return initial;
+  return {
+    kind: value.kind as ConditionKind,
+    threshold: value.threshold === undefined ? "" : String(value.threshold),
+    field: typeof value.field === "string" ? value.field : "value",
+    seconds: value.seconds === undefined ? "" : String(value.seconds),
+  };
 }
 
 export type BuildResult =

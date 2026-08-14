@@ -77,6 +77,7 @@ function AccountRow({
 export function WalletAccounts() {
   const [accounts, setAccounts] = useState<WalletAccount[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [addMode, setAddMode] = useState<AddMode>("closed");
@@ -84,19 +85,25 @@ export function WalletAccounts() {
   const [address, setAddress] = useState("");
   const [label, setLabel] = useState("");
 
-  useEffect(() => {
+  const load = () => {
     let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
     void getWallets()
       .then((response) => {
         if (!cancelled) setAccounts(response.accounts);
       })
       .catch((error) => {
-        if (!cancelled) setMessage(readableError(error));
+        if (!cancelled) setLoadError(readableError(error));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
+  };
+
+  useEffect(() => {
+    return load();
   }, []);
 
   const merge = (account: WalletAccount) => {
@@ -259,7 +266,12 @@ export function WalletAccounts() {
         </form>
       ) : null}
 
-      {loading ? <div class="clean-empty"><strong>Loading wallets…</strong></div> : accounts.length ? (
+      {loading ? <div class="clean-empty"><strong>Loading wallets…</strong></div> : loadError ? (
+        <div class="clean-empty wallet-empty" role="alert">
+          <strong>Wallet accounts unavailable</strong>
+          <span>{loadError} <button type="button" onClick={load}>Try again</button>.</span>
+        </div>
+      ) : accounts.length ? (
         <div class="wallet-account-list">
           {accounts.map((account) => (
             <AccountRow

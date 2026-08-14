@@ -70,7 +70,7 @@ containers     omni-v2-api-1        running
                omni_postgres        running   (TimescaleDB)
                caddy                shared, outside the app compose project
 
-migrations     58  (local tree and live DB agree)
+migrations     live 58 / local 59 (auth roles; local change is not deployed)
 images         omni-api:6179ae2 / omni-scheduler:6179ae2, also :latest
 rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = 69b73ce
 release        v0.4.0 = 95b6ed0 -- the deployed image (6179ae2) plus docs only
@@ -655,8 +655,11 @@ Two caveats, both open:
   whether it is set, is unverified. As it stands this protects against deletion
   and corruption but not the box dying.
 
-**The restore has never been tested.** An untested backup is a hope, not a
-recovery.
+**Restore drill passed 2026-08-14.** The 180 MB
+`omni_v2-20260813T100001Z.dump` restored into a disposable production-host
+database in 49 seconds, verified 55 migration rows and 1,312,515 claims, and was
+dropped afterward. This proves that dump is readable and restorable; it does not
+put a copy off-box or prove recovery from the newest production schema.
 
 ### Verification
 
@@ -688,10 +691,11 @@ of the next one.
 
 Current truth: `SettingsView.tsx` only calls `GET /settings/config`. Backend
 venue-toggle and venue-status endpoints exist but the UI does not use them.
-`refresh_venues` runs when those endpoints are called, not at startup or on a
-scheduler cycle, despite comments implying otherwise. Production shows FRED and
-Polygon configured; Hyperliquid, Questrade and IBKR unconfigured. Production
-compose manages no IB Gateway container.
+Live venue objects and status are now user-scoped; Settings changes reconcile
+the caller immediately, and the scheduler reconciles every active configured
+user on startup and every six minutes. Production shows FRED and Polygon
+configured; Hyperliquid, Questrade and IBKR unconfigured. Production compose
+manages no IB Gateway container.
 
 Add real enable/disable controls **only** for venues that can actually connect.
 Show live connection status and last-checked time without leaking secrets.
@@ -796,9 +800,11 @@ deploy rather than four days. Pre-migration dumps were taken for both 056 and
 057. The four cron-driven operational files that existed only on the host are
 now in `ops/`.
 
-What is left: **the restore has still never been tested**, `/opt/omni-backup.sh`
-still differs from the repo's `ops/backup.sh`, and `OMNI_RSYNC_TARGET` is wired
-but unset so the dumps sit on the box they protect.
+What is left: `/opt/omni-backup.sh` still differs from the repo's `ops/backup.sh`,
+and `OMNI_RSYNC_TARGET` is wired but unset so the dumps sit on the box they
+protect. The restore drill is now proven, but its 2026-08-13 dump predates
+migrations 056-058; repeat the disposable restore after the next backup to prove
+the current schema too.
 
 Add deployment smoke tests covering health, migration version, API routing and UI
 asset hashes. Track provider latency, failure and coverage-gate regressions.
@@ -932,7 +938,7 @@ to make a global invocation green.
 | `docs/OMNI_ANALYST.md` (this) | Current state, invariants, deployment, backlog | Detailed evidence |
 | `docs/NEXT_SESSION.md` | The work that is left, ranked | Current state |
 
-Five more exist because they answer a question these three deliberately do not.
+Six more exist because they answer a question these three deliberately do not.
 
 | File | Authoritative for | Not for |
 |---|---|---|
@@ -941,8 +947,9 @@ Five more exist because they answer a question these three deliberately do not.
 | `_orchestrator/REMEASURE_RUNBOOK.md` | How to re-run GATE A at depth | Results |
 | `_orchestrator/TRADING_API_CONTRACT.md` | The frozen JSON shape API and UI share | Anything else |
 | `DEPLOY.md` | Detailed build and configuration reference | Live topology |
+| `docs/PRODUCT_AUDIT.md` | Living evidence-backed engineering review queue | Current live state or strategy results |
 
-And four are standing reference: `_orchestrator/RESEARCH_AGENDA.md` (ranked
+And five are standing references: `_orchestrator/RESEARCH_AGENDA.md` (ranked
 directions with priors), `_orchestrator/FLOW_FAMILY_SCOPE.md` (the one open
 producer family), `docs/ETF_PORTFOLIO_EXPERIMENT.md` and
 `docs/ETF_ALLOCATION_EXPERIMENT.md` (two results, neither decision-grade), and

@@ -18,6 +18,7 @@ from decimal import Decimal
 
 import pytest
 
+from omni.research import launches
 from omni.research.launches import (
     PAGE_SIZE,
     FeedUnavailable,
@@ -27,6 +28,7 @@ from omni.research.launches import (
     parse_pool,
     record,
     reobserve,
+    sweep,
 )
 
 NOW = datetime(2026, 8, 10, 5, 0, tzinfo=UTC)
@@ -172,6 +174,24 @@ class TestADeathIsRecordedNotSkipped:
 
 
 class TestTheSweepMakesAbsenceReadable:
+    async def test_feed_failure_is_returned_to_the_operation_health_caller(
+        self, db, monkeypatch
+    ):
+        async def unavailable(_network):
+            raise FeedUnavailable("upstream timeout")
+
+        async def none_known(*_args, **_kwargs):
+            return []
+
+        monkeypatch.setattr(launches, "discover", unavailable)
+        monkeypatch.setattr(launches, "known_pools", none_known)
+        errors: list[str] = []
+
+        counts = await sweep(db.pool, networks=[NETWORK], now=NOW, errors=errors)
+
+        assert counts == {}
+        assert errors == ["discover eth: upstream timeout"]
+
     async def test_every_sweep_is_recorded_with_its_count(self, db):
         observed = await discover(NETWORK, fetch=_feed([_entry("0xa"), _entry("0xb")]))
         await record(db.pool, network=NETWORK, kind="discover",

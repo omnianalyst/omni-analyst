@@ -1,7 +1,8 @@
-"""Questrade venue adapter — equity execution for the Canadian market.
+"""Read-only Questrade adapter for Canadian account data.
 
-Implements the same Venue protocol as CCXTVenue, routed through Questrade's
-REST API. This is what connects the scanner's "hold VTI" to an actual order.
+Implements the read side of the Venue protocol through Questrade's REST API.
+Order submission is deliberately refused because Questrade execution is
+partner-gated and is not part of this product's current scope.
 
 **Auth flow:** Questrade uses OAuth 2.0 with refresh tokens. The operator
 obtains an initial refresh token from Questrade's API portal (one-time manual
@@ -30,10 +31,8 @@ from omni.venue.protocol import (
     Capabilities,
     Fill,
     MarketType,
-    OrderKind,
     Position,
     Quote,
-    Side,
     TradeIntent,
     Venue,
     VenueUnavailable,
@@ -45,6 +44,7 @@ TOKEN_URL = "https://login.questrade.com/oauth2/token"
 PRACTICE_TOKEN_URL = "https://practice-login.questrade.com/oauth2/token"
 
 HttpFetcher = Callable[..., Awaitable[dict[str, Any]]]
+TokenRotated = Callable[[str], Awaitable[None]]
 
 
 class QuestradeVenue(Venue):
@@ -59,6 +59,7 @@ class QuestradeVenue(Venue):
         practice: bool = True,
         account_id: str | None = None,
         fetch_fn: HttpFetcher | None = None,
+        on_refresh_token: TokenRotated | None = None,
     ) -> None:
         self._refresh_token = refresh_token
         self._practice = practice
@@ -68,12 +69,13 @@ class QuestradeVenue(Venue):
         self._api_server: str | None = None
         self._symbol_cache: dict[str, int] = {}
         self._fetch = fetch_fn or self._default_fetch
+        self._on_refresh_token = on_refresh_token
         self._capabilities = Capabilities(
-            spot=True,
-            margin=True,
+            spot=False,
+            margin=False,
             perpetuals=False,
-            limit_orders=True,
-            shorting=True,
+            limit_orders=False,
+            shorting=False,
             funding_data=False,
             maker_fee_bps=Decimal(0),
             taker_fee_bps=Decimal(0),
@@ -92,12 +94,14 @@ class QuestradeVenue(Venue):
         practice: bool = True,
         account_id: str | None = None,
         fetch_fn: HttpFetcher | None = None,
+        on_refresh_token: TokenRotated | None = None,
     ) -> QuestradeVenue:
         venue = cls(
             refresh_token=refresh_token,
             practice=practice,
             account_id=account_id,
             fetch_fn=fetch_fn,
+            on_refresh_token=on_refresh_token,
         )
         await venue._refresh_access_token()
         if account_id is None:
@@ -142,18 +146,7 @@ class QuestradeVenue(Venue):
         )
 
     async def execute(self, intent: TradeIntent) -> Fill:
-        await self._ensure_token()
-        symbol_id = await self._resolve_symbol(intent.symbol)
-        order_format = self._build_order(intent, symbol_id)
-        path = f"{self._api_server}/v1/accounts/{self._account_id}/orders"
-        resp = await self._fetch("POST", path, token=self._access_token, json=order_format)
-        order_id = resp.get("id")
-        if order_id is None:
-            raise VenueUnavailable(
-                f"questrade order for {intent.symbol} returned no id: {resp}"
-            )
-        filled = await self._poll_order(order_id)
-        return filled
+        raise VenueUnavailable("questrade is read-only; order submission is disabled")
 
     async def positions(self) -> list[Position]:
         await self._ensure_token()
@@ -200,18 +193,13 @@ class QuestradeVenue(Venue):
         return balances
 
     async def cancel(self, external_id: str) -> bool:
-        await self._ensure_token()
-        path = f"{self._api_server}/v1/accounts/{self._account_id}/orders/{external_id}"
-        try:
-            await self._fetch("DELETE", path, token=self._access_token)
-            return True
-        except VenueUnavailable:
-            return False
+        raise VenueUnavailable("questrade is read-only; order cancellation is disabled")
 
     # --- internals ---
 
     async def _default_fetch(
-        self, method: str, url: str, *, token: str | None = None, json: dict | None = None,
+        self, method: str, url: str, *, token: str | None = None,
+        json: dict | None = None, params: dict | None = None,
     ) -> dict[str, Any]:
         import httpx
 
@@ -220,7 +208,9 @@ class QuestradeVenue(Venue):
             headers["authorization"] = f"Bearer {token}"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.request(method, url, headers=headers, json=json)
+                resp = await client.request(
+                    method, url, headers=headers, json=json, params=params
+                )
         except httpx.HTTPError as exc:
             raise VenueUnavailable(f"questrade {method} {url} failed: {exc}") from exc
         if resp.status_code >= 400:
@@ -231,13 +221,22 @@ class QuestradeVenue(Venue):
 
     async def _refresh_access_token(self) -> None:
         url = (PRACTICE_TOKEN_URL if self._practice else TOKEN_URL)
-        path = f"{url}?grant_type=refresh_token&refresh_token={self._refresh_token}"
-        resp = await self._fetch("POST", path)
+        resp = await self._fetch(
+            "POST",
+            url,
+            params={
+                "grant_type": "refresh_token",
+                "refresh_token": self._refresh_token,
+            },
+        )
+        rotated = resp.get("refresh_token")
+        if rotated and rotated != self._refresh_token and self._on_refresh_token:
+            await self._on_refresh_token(rotated)
         self._access_token = resp["access_token"]
         self._api_server = resp["api_server"].rstrip("/")
         expires_in = int(resp.get("expires_in", 1800))
         self._token_expiry = datetime.now(UTC) + timedelta(seconds=expires_in - 60)
-        self._refresh_token = resp.get("refresh_token", self._refresh_token)
+        self._refresh_token = rotated or self._refresh_token
         logger.debug("questrade token refreshed, expires at %s", self._token_expiry)
 
     async def _ensure_token(self) -> None:
@@ -267,57 +266,6 @@ class QuestradeVenue(Venue):
         symbol_id = int(exact[0]["symbolId"])
         self._symbol_cache[ticker] = symbol_id
         return symbol_id
-
-    def _build_order(self, intent: TradeIntent, symbol_id: int) -> dict[str, Any]:
-        side = "BuyAll" if intent.side is Side.BUY else "SellAll"
-        order: dict[str, Any] = {
-            "symbolId": symbol_id,
-            "quantity": int(intent.quantity),
-            "side": side,
-            "orderType": "Market" if intent.order_kind is OrderKind.MARKET else "Limit",
-            "timeInForce": "Day",
-            "accountId": int(self._account_id),
-        }
-        if intent.order_kind is OrderKind.LIMIT:
-            assert intent.limit_price is not None
-            order["limitPrice"] = float(intent.limit_price)
-        return order
-
-    async def _poll_order(self, order_id: int, timeout: int = 10) -> Fill:
-        import asyncio
-
-        path = f"{self._api_server}/v1/accounts/{self._account_id}/orders/{order_id}"
-        for _ in range(timeout):
-            await asyncio.sleep(1)
-            resp = await self._fetch("GET", path, token=self._access_token)
-            orders = resp.get("orders", [])
-            if not orders:
-                continue
-            o = orders[0]
-            state = o.get("state", "")
-            if state in ("Filled", "PartiallyFilled", "Rejected", "Cancelled"):
-                break
-        else:
-            raise VenueUnavailable(
-                f"questrade order {order_id} did not settle in {timeout}s"
-            )
-
-        filled_qty = _d(o.get("filledQuantity")) or Decimal(0)
-        avg_price = _d(o.get("executionPrice")) or _d(o.get("limitPrice")) or Decimal(0)
-
-        return Fill(
-            intent_id="",
-            venue=self.name,
-            symbol=str(o.get("symbol", "")),
-            side=Side.BUY if o.get("side") == "Buy" else Side.SELL,
-            filled_quantity=filled_qty,
-            average_price=avg_price,
-            fee_paid=Decimal(0),
-            filled_at=datetime.now(UTC),
-            external_id=str(order_id),
-            raw=o,
-        )
-
 
 def _d(value: Any) -> Decimal | None:
     if value is None:

@@ -68,11 +68,37 @@ async def _setup(client):
     return {"authorization": f"Bearer {response.json()['token']}"}
 
 
+async def _member_headers(client, operator_headers):
+    created = await client.post(
+        "/auth/register",
+        json={"email": "member@example.com", "password": "b" * 16},
+        headers=operator_headers,
+    )
+    assert created.status_code == 201, created.text
+    login = await client.post(
+        "/auth/login",
+        json={"email": "member@example.com", "password": "b" * 16},
+    )
+    assert login.status_code == 200, login.text
+    return {"authorization": f"Bearer {login.json()['token']}"}
+
+
 async def test_research_record_requires_authentication(database_url):
     app = create_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
         response = await client.get("/research/hypotheses")
     assert response.status_code == 401
+
+
+async def test_research_record_refuses_authenticated_member(database_url):
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        operator_headers = await _setup(client)
+        member_headers = await _member_headers(client, operator_headers)
+        response = await client.get(
+            "/research/hypotheses", headers=member_headers
+        )
+    assert response.status_code == 403
 
 
 async def test_mirroring_twice_inserts_nothing_the_second_time(db, tmp_path):

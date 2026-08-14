@@ -133,12 +133,19 @@ async def briefing(pool, *, audience: UUID | None = None, limit: int = 20) -> li
                    f.id, f.claim_id, f.entity_id, f.method, f.confidence,
                    f.threshold, f.calibrated_hit_rate, f.supporting,
                    f.disconfirming, f.prediction_id, f.created_at,
-                   f.deduction_chain, f.evidence_searched,
+                   enrichment.deduction_chain, f.evidence_searched,
                    e.symbol, e.name,
                    p.direction, p.entry_price, p.upper_barrier, p.lower_barrier
             FROM finding f
             JOIN entity e ON e.id = f.entity_id
             LEFT JOIN prediction p ON p.id = f.prediction_id
+            LEFT JOIN LATERAL (
+                SELECT r.deduction_chain
+                FROM finding_enrichment_revision r
+                WHERE r.finding_id = f.id
+                ORDER BY r.evidence_as_of DESC, r.created_at DESC, r.id DESC
+                LIMIT 1
+            ) enrichment ON true
             WHERE f.status = 'surfaced'
               AND (f.audience_user_id IS NULL OR f.audience_user_id = $1)
               AND (p.id IS NULL OR p.outcome = 'pending')

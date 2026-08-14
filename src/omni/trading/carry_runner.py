@@ -48,7 +48,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -109,6 +110,7 @@ GUARD_NO_RECORDED_CYCLE = "no_recorded_cycle"
 GUARD_INSTANT_ALREADY_COVERED = "instant_already_covered"
 GUARD_INSIDE_HOLD = "inside_hold"
 GUARD_NO_AFFORDABLE_NAME = "no_affordable_name"
+GUARD_CYCLE_OWNED = "cycle_already_owned"
 
 GUARDS = frozenset(
     {
@@ -117,6 +119,7 @@ GUARDS = frozenset(
         GUARD_INSTANT_ALREADY_COVERED,
         GUARD_INSIDE_HOLD,
         GUARD_NO_AFFORDABLE_NAME,
+        GUARD_CYCLE_OWNED,
     }
 )
 
@@ -147,6 +150,16 @@ class Boundary:
     opens_at: datetime | None
     last_cycle: datetime | None
     last_completed: datetime | None
+
+
+_OWNERSHIP_PROOF = object()
+
+
+@dataclass
+class _CarryCycleOwnership:
+    venue: str
+    proof: object
+    active: bool = False
 
 
 def in_rebalance_window(at: datetime) -> bool:
@@ -279,6 +292,40 @@ async def _refuse(
     raise CarryRunRefused(reason, guard=guard)
 
 
+@asynccontextmanager
+async def carry_cycle_ownership(
+    pool,
+    *,
+    portfolio_id: UUID,
+    venue: str,
+    now: datetime,
+) -> AsyncIterator[_CarryCycleOwnership]:
+    ownership = _CarryCycleOwnership(venue=venue, proof=_OWNERSHIP_PROOF)
+    async with pool.acquire() as connection, connection.transaction():
+        acquired = await connection.fetchval(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))",
+            f"omni:carry:{venue}",
+        )
+        if not acquired:
+            await _refuse(
+                pool,
+                portfolio_id=portfolio_id,
+                venue=venue,
+                attempted_at=now,
+                guard=GUARD_CYCLE_OWNED,
+                reason=(
+                    f"another carry cycle owns venue {venue}; the database lock is "
+                    f"held from before the first venue call until its cycle record "
+                    f"is written"
+                ),
+            )
+        ownership.active = True
+        try:
+            yield ownership
+        finally:
+            ownership.active = False
+
+
 async def run_due_cycle(
     pool,
     *,
@@ -293,6 +340,7 @@ async def run_due_cycle(
     ignore_cadence: bool = False,
     max_execution_bps: Decimal | None = None,
     assets: dict[UUID, str] | None = None,
+    ownership: _CarryCycleOwnership | None = None,
 ) -> CarryCycleResult:
     """Run one rebalance if one is due, and record the boundary it settled.
 
@@ -308,6 +356,37 @@ async def run_due_cycle(
         raise ValueError(
             f"now is naive ({now}); the window, the funding bounds and every claim "
             f"this cycle reads are stamped UTC"
+        )
+    if ownership is None:
+        async with carry_cycle_ownership(
+            pool,
+            portfolio_id=portfolio_id,
+            venue=venue.name,
+            now=now,
+        ) as acquired:
+            return await run_due_cycle(
+                pool,
+                venue=venue,
+                portfolio_id=portfolio_id,
+                config=config,
+                entity_ids=entity_ids,
+                audience_user_id=audience_user_id,
+                now=now,
+                inception=inception,
+                ignore_window=ignore_window,
+                ignore_cadence=ignore_cadence,
+                max_execution_bps=max_execution_bps,
+                assets=assets,
+                ownership=acquired,
+            )
+    if (
+        not ownership.active
+        or ownership.venue != venue.name
+        or ownership.proof is not _OWNERSHIP_PROOF
+    ):
+        raise ValueError(
+            f"carry ownership is not active for {venue.name}; venue calls require "
+            f"the matching database lock"
         )
     if not ignore_window and not in_rebalance_window(now):
         await _refuse(

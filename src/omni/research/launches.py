@@ -326,7 +326,13 @@ NETWORKS = ("eth", "base", "solana", "bsc", "arbitrum")
 FOLLOW_DAYS = 45
 
 
-async def sweep(pool, *, networks: Sequence[str] = NETWORKS, now: datetime) -> dict:
+async def sweep(
+    pool,
+    *,
+    networks: Sequence[str] = NETWORKS,
+    now: datetime,
+    errors: list[str] | None = None,
+) -> dict:
     """One full pass: discover new pools, then re-read everything still tracked.
 
     A network that fails is logged and skipped rather than aborting the pass.
@@ -344,6 +350,8 @@ async def sweep(pool, *, networks: Sequence[str] = NETWORKS, now: datetime) -> d
             counts[f"{network}.discovered"] = len(found)
         except FeedUnavailable as exc:
             logger.warning("discover %s failed, cohort not recorded: %s", network, exc)
+            if errors is not None:
+                errors.append(f"discover {network}: {exc}")
 
         try:
             tracked = await known_pools(
@@ -357,23 +365,53 @@ async def sweep(pool, *, networks: Sequence[str] = NETWORKS, now: datetime) -> d
                 counts[f"{network}.gone"] = sum(1 for o in seen if not o.present)
         except FeedUnavailable as exc:
             logger.warning("reobserve %s failed: %s", network, exc)
+            if errors is not None:
+                errors.append(f"reobserve {network}: {exc}")
     return counts
 
 
 async def main() -> int:
     from omni.config import settings
     from omni.db import connect
+    from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS, record_loop_health
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     client = await connect(settings.database_url)
     try:
-        counts = await sweep(client.pool, now=datetime.now(UTC))
+        errors: list[str] = []
+        counts = await sweep(
+            client.pool,
+            now=datetime.now(UTC),
+            errors=errors,
+        )
+        await record_loop_health(
+            client.pool,
+            loop_name="launch_sweep",
+            ok=not errors,
+            error="; ".join(errors) or None,
+            result=counts,
+            expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["launch_sweep"],
+        )
         logger.info("launch sweep: %s", counts)
+        return 1 if errors else 0
+    except BaseException as exc:
+        try:
+            await record_loop_health(
+                client.pool,
+                loop_name="launch_sweep",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                expected_interval_seconds=EXPECTED_OPERATION_INTERVALS[
+                    "launch_sweep"
+                ],
+            )
+        except Exception:  # noqa: BLE001,S110
+            pass
+        raise
     finally:
         await client.close()
-    return 0
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ import json
 import os
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from neutron.test import TestClient
@@ -58,6 +59,17 @@ def _auth(user_id):
 
     token = create_token({"sub": str(user_id)}, os.environ["OMNI_JWT_SECRET"])
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _user(db):
+    """A real principal. The auth middleware checks the token subject against
+    the users table, so a minted token for an id with no row is anonymous."""
+    uid = uuid4()
+    return await db.pool.fetchval(
+        "INSERT INTO users (id, email, password_hash) VALUES ($1, $2, 'x') "
+        "RETURNING id",
+        uid, f"{uid}@example.com",
+    )
 
 
 async def _etf(db, symbol, name, bucket):
@@ -199,11 +211,9 @@ class TestOverlapEndpoint:
         assert r.status_code == 400
 
     async def test_byo_holdings_scoped_to_owner(self, db, database_url):
-        from uuid import uuid4
-
         vti = await _etf(db, "VTI", "Vanguard Total Stock Market", "growth")
-        owner = uuid4()
-        other = uuid4()
+        owner = await _user(db)
+        other = await _user(db)
         await _holding(db, vti, "AAPL", Decimal("0.06"), audience=owner)
         await _holding(db, vti, "MSFT", Decimal("0.05"))
 

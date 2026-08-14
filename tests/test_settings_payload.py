@@ -1,8 +1,8 @@
 from omni.api.settings import (
-    _body_contains_secrets,
     _provider_catalog_payload,
     _sanitized_venues,
     _venue_catalog_payload,
+    build_router,
 )
 
 
@@ -36,9 +36,12 @@ def test_venue_payload_never_returns_saved_credentials():
     assert "credentials" not in sanitized["questrade"]
 
 
-def test_secret_bodies_are_distinguished_from_non_secret_controls():
-    assert _body_contains_secrets({"providers": {"fred_api_key": "secret"}})
-    assert _body_contains_secrets(
-        {"venues": {"ibkr": {"credentials": {"password": "secret"}}}}
-    )
-    assert not _body_contains_secrets({"venues": {"ibkr": {"enabled": False}}})
+def test_generic_settings_write_is_absent_and_secret_mutations_are_narrow():
+    routes = {
+        (info["method"], info["path"])
+        for info in build_router(object()).get_handler_info()
+    }
+
+    assert ("post", "/settings") not in routes
+    assert ("post", "/settings/venue/{venue_key}/credentials") in routes
+    assert ("delete", "/settings/venue/{venue_key}/credentials") in routes

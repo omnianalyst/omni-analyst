@@ -85,7 +85,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from uuid import UUID
@@ -200,6 +200,38 @@ class CarryHalt(str, Enum):
     BOOK_NOT_PAIRED = "the_book_already_held_a_leg_that_is_not_half_of_a_pair"
     UNWIND_FAILED = "a_half_filled_pair_could_not_be_unwound"
     VENUE_DISAGREES = "the_venue_and_the_book_do_not_agree"
+    RISK_POLICY = "the_carry_risk_policy_refused_the_cycle"
+    UNRESOLVED_PAIR = "a_held_pair_cannot_be_mapped_for_funding_accrual"
+    ACCRUAL_INCOMPLETE = "a_held_pair_cannot_accrue_the_complete_funding_window"
+
+
+@dataclass(frozen=True)
+class CarryRiskPolicy:
+    max_gross_notional: Decimal
+    daily_loss_limit_pct_nav: Decimal
+    max_drawdown_pct: Decimal
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.max_gross_notional, Decimal)
+            or not self.max_gross_notional.is_finite()
+            or self.max_gross_notional <= 0
+        ):
+            raise ValueError(
+                f"max_gross_notional must be a positive finite Decimal, got "
+                f"{self.max_gross_notional!r}"
+            )
+        for name in ("daily_loss_limit_pct_nav", "max_drawdown_pct"):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, Decimal)
+                or not value.is_finite()
+                or value <= 0
+                or value > 1
+            ):
+                raise ValueError(
+                    f"{name} must be a finite Decimal in (0, 1], got {value!r}"
+                )
 
 
 @dataclass(frozen=True)
@@ -233,6 +265,7 @@ class CarryConfig:
     funding_venue: str
     spread_bps: Decimal
     reconciliation_tolerance: Decimal
+    risk_policy: CarryRiskPolicy
     lookback_days: int = DEFAULT_LOOKBACK_DAYS
     min_settlements: int = MIN_SETTLEMENTS
 
@@ -272,6 +305,11 @@ class CarryConfig:
                 "funding_venue must name the data venue whose funding stream is "
                 "harvested; without it two venues' settlements for one asset collide "
                 "on the accrual key and one is silently dropped"
+            )
+        if not isinstance(self.risk_policy, CarryRiskPolicy):
+            raise TypeError(
+                "risk_policy must be an explicit CarryRiskPolicy; a missing policy "
+                "is a carry cycle with no loss, gross-notional, or drawdown boundary"
             )
 
 
@@ -316,13 +354,11 @@ class CarryCycleResult:
     the decision, so a name the selector chose and the venue refused is absent
     here rather than reported as held.
 
-    `funding_settled_through` is `as_of` once the settlement window has been
-    applied and `None` when the cycle halted before reaching it. It exists
-    because an empty `funding` tuple does not distinguish the two: a book that
-    holds nothing accrues nothing over a window it did settle. A caller
+    `funding_settled_through` is `as_of` once the complete settlement window has
+    been applied and `None` when any held pair could not accrue. A caller
     persisting the boundary for the next cycle needs that distinction, and the
-    safe direction is `None` -- a window re-walked is refused by
-    `apply_funding`'s key, a window skipped is silent.
+    safe direction is `None` -- a partial window is re-walked into idempotent
+    writes, while a skipped settlement is silent.
     """
 
     as_of: datetime
@@ -350,12 +386,6 @@ class CarryCycleResult:
                 f"funding_settled_through is {self.funding_settled_through} against "
                 f"an as_of of {self.as_of}; the window a cycle settles closes at its "
                 f"own rebalance instant and nowhere else"
-            )
-        if self.funding and self.funding_settled_through is None:
-            raise ValueError(
-                f"{len(self.funding)} settlements were applied and the cycle reports "
-                f"settling through nothing; the next cycle would reopen a window this "
-                f"one closed"
             )
         if not self.halted and self.halt_reason is not None:
             raise ValueError(
@@ -601,6 +631,60 @@ def _legs_by_asset(
 
 def _unpaired(legs: dict[str, _Legs]) -> list[str]:
     return sorted(symbol for symbol, held in legs.items() if not held.is_pair)
+
+
+_PEAK_NAV = "SELECT max(nav) FROM nav_snapshot WHERE portfolio_id = $1"
+
+
+async def _carry_risk_reason(
+    pool,
+    *,
+    book: PortfolioState,
+    config: CarryConfig,
+    as_of: datetime,
+) -> str | None:
+    policy = config.risk_policy
+    failures: list[str] = []
+
+    if book.nav <= 0:
+        failures.append(f"NAV is {book.nav}, so percentage limits cannot be measured")
+    else:
+        authorised_gross = (
+            Decimal(2) * Decimal(config.enter_rank) * config.notional_per_pair
+        )
+        if authorised_gross > policy.max_gross_notional:
+            failures.append(
+                f"configured pair authority is {authorised_gross} gross against the "
+                f"{policy.max_gross_notional} cap"
+            )
+        if book.gross_exposure > policy.max_gross_notional:
+            failures.append(
+                f"current gross exposure is {book.gross_exposure} against the "
+                f"{policy.max_gross_notional} cap"
+            )
+
+        day_opens = as_of.astimezone(UTC).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        realised = await state.realised_pnl(
+            pool, book.portfolio_id, since=day_opens, until=as_of
+        )
+        daily_limit = policy.daily_loss_limit_pct_nav * book.nav
+        if realised < 0 and -realised > daily_limit:
+            failures.append(
+                f"today's realised loss {-realised} exceeds the {daily_limit} limit"
+            )
+
+        recorded_peak = await pool.fetchval(_PEAK_NAV, book.portfolio_id)
+        peak_nav = book.nav if recorded_peak is None else max(recorded_peak, book.nav)
+        drawdown = (peak_nav - book.nav) / peak_nav
+        if drawdown > policy.max_drawdown_pct:
+            failures.append(
+                f"drawdown {drawdown} from peak NAV {peak_nav} exceeds "
+                f"{policy.max_drawdown_pct}"
+            )
+
+    return "; ".join(failures) if failures else None
 
 
 def _leg_intent(
@@ -933,13 +1017,6 @@ async def run_carry_cycle(
             "entity_ids is empty; the universe a cross-sectional rank is taken over "
             "must be stated, and an empty one abstains as though coverage were missing"
         )
-    for market_type in (MarketType.SPOT, MarketType.PERPETUAL):
-        if not venue.capabilities.supports(market_type):
-            raise ValueError(
-                f"{venue.name} does not support {market_type.value}; a carry pair "
-                f"needs both legs at one venue and half of one is a directional bet"
-            )
-
     cycle = _Cycle(pool, venue=venue, portfolio_id=portfolio_id, config=config)
     by_entity = await _symbols(pool, entity_ids, venue)
     # Asset -> entity, and every leg symbol -> asset. Two maps because the pair
@@ -959,14 +1036,6 @@ async def run_carry_cycle(
         if held.is_pair and symbol in by_asset
     )
 
-    # A pair the universe no longer names can be neither ranked nor settled, so
-    # it holds on collecting nothing. Counted rather than left implicit: a
-    # position quietly ceasing to accrue is the same silent understatement of
-    # carry as a skipped settlement, and it lasts for as long as the name is out.
-    for symbol, held in legs.items():
-        if held.is_pair and symbol not in by_asset:
-            cycle.refuse(CarryRefusal.OUTSIDE_UNIVERSE)
-
     unpaired = _unpaired(legs)
     if unpaired:
         return _result(
@@ -982,6 +1051,39 @@ async def run_carry_cycle(
                 )
             ),
         )
+
+    unresolved = sorted(
+        symbol for symbol, held in legs.items() if held.is_pair and symbol not in by_asset
+    )
+    if unresolved:
+        for _ in unresolved:
+            cycle.refuse(CarryRefusal.OUTSIDE_UNIVERSE)
+        return _result(
+            as_of=as_of,
+            held=held_ids,
+            cycle=cycle,
+            halt_reason=(
+                f"{CarryHalt.UNRESOLVED_PAIR.value}: " + ", ".join(unresolved)
+            ),
+        )
+
+    risk_reason = await _carry_risk_reason(
+        pool, book=book, config=config, as_of=as_of
+    )
+    if risk_reason is not None:
+        return _result(
+            as_of=as_of,
+            held=held_ids,
+            cycle=cycle,
+            halt_reason=f"{CarryHalt.RISK_POLICY.value}: {risk_reason}",
+        )
+
+    for market_type in (MarketType.SPOT, MarketType.PERPETUAL):
+        if not venue.capabilities.supports(market_type):
+            raise ValueError(
+                f"{venue.name} does not support {market_type.value}; a carry pair "
+                f"needs both legs at one venue and half of one is a directional bet"
+            )
 
     # Reconciliation, AFTER the pair-integrity gate and before anything else.
     #
@@ -1023,15 +1125,16 @@ async def run_carry_cycle(
             as_of=as_of, held=held_ids, cycle=cycle, halt_reason=halt_reason
         )
 
-    funding: list[FundingAccrual] = []
-    for funding_time, entity_id, rate in await _settlements(
+    settlements = await _settlements(
         pool,
         entity_ids=sorted(held_ids, key=str),
         audience=audience_user_id,
         funding_venue=config.funding_venue,
         since=funding_since,
         until=as_of,
-    ):
+    )
+    valued: list[tuple[datetime, UUID, Decimal, Decimal]] = []
+    for funding_time, entity_id, rate in settlements:
         mark = await _price_at(
             pool,
             entity_id=entity_id,
@@ -1042,6 +1145,22 @@ async def run_carry_cycle(
         if mark is None:
             cycle.refuse(CarryRefusal.NO_MARK)
             continue
+        valued.append((funding_time, entity_id, rate, mark))
+
+    if len(valued) != len(settlements):
+        return _result(
+            as_of=as_of,
+            held=held_ids,
+            cycle=cycle,
+            halt_reason=(
+                f"{CarryHalt.ACCRUAL_INCOMPLETE.value}: "
+                f"{len(settlements) - len(valued)} settlement(s) have no visible mark"
+            ),
+        )
+
+    funding: list[FundingAccrual] = []
+    funding_complete = True
+    for funding_time, entity_id, rate, mark in valued:
         accrual = await state.apply_funding(
             pool,
             portfolio_id,
@@ -1054,6 +1173,8 @@ async def run_carry_cycle(
             mark=mark,
         )
         funding.append(accrual)
+        if accrual.outcome is FundingOutcome.NO_POSITION:
+            funding_complete = False
         # A real exchange settles funding itself and a caller learns of it by
         # reading balances. A simulated venue has no schedule of its own, so it
         # is told -- and only if it says it can be told. Omitting this is not
@@ -1065,6 +1186,18 @@ async def run_carry_cycle(
         credit = getattr(venue, "credit_funding", None)
         if credit is not None and accrual.outcome is FundingOutcome.ACCRUED:
             credit(by_entity[entity_id].perp, accrual.amount)
+
+    if not funding_complete:
+        return _result(
+            as_of=as_of,
+            held=held_ids,
+            cycle=cycle,
+            funding=funding,
+            halt_reason=(
+                f"{CarryHalt.ACCRUAL_INCOMPLETE.value}: a mapped perpetual position "
+                f"was absent while its settlement was applied"
+            ),
+        )
 
     decision = await select_carry_basket(
         pool,
@@ -1087,7 +1220,7 @@ async def run_carry_cycle(
             cycle=cycle,
             funding=funding,
             abstention=decision.abstention,
-            settled=True,
+            settled=funding_complete,
         )
 
     closed: list[PairExecution] = []
@@ -1184,5 +1317,5 @@ async def run_carry_cycle(
         halt_reason=halt_reason,
         # Reached only after the funding loop, so the window is applied whether
         # or not the trading that followed it halted.
-        settled=True,
+        settled=funding_complete,
     )

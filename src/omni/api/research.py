@@ -14,10 +14,10 @@ selected by looking until something looked good.
 from __future__ import annotations
 
 from neutron import App, Router
-from neutron.error import unauthorized
+from neutron.error import forbidden, unauthorized
 from starlette.requests import Request
 
-from omni.auth import resolve_audience_from_request
+from omni.auth import resolve_audience_from_request, resolve_role_from_request
 from omni.research.publish import read_history, summarise
 
 
@@ -28,6 +28,8 @@ def build_router(app: App) -> Router:
     async def hypotheses(request: Request) -> dict:
         if resolve_audience_from_request(request) is None:
             raise unauthorized("Authentication required")
+        if resolve_role_from_request(request) != "operator":
+            raise forbidden("Operator access required")
 
         history = await read_history(app.db.pool)
         return {"summary": summarise(history), "tests": history}

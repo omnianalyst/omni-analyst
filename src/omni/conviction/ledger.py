@@ -109,6 +109,7 @@ WHERE c.entity_id = $1
   AND c.claim_type = 'price_snapshot'
   AND c.event_date >= $2
   AND c.event_date <= $3
+  AND c.knowledge_date <= $5
 ORDER BY c.event_date
 """
 
@@ -346,7 +347,7 @@ def _miss_outcome(direction: str) -> str:
     return "upper"
 
 
-async def _resolve_one(pool, prediction_id: UUID) -> bool:
+async def _resolve_one(pool, prediction_id: UUID, knowledge_cutoff: datetime) -> bool:
     """Resolve a single prediction under a row lock. Returns True if resolved.
 
     The SELECT ... FOR UPDATE SKIP LOCKED and the UPDATE share one transaction
@@ -373,6 +374,7 @@ async def _resolve_one(pool, prediction_id: UUID) -> bool:
             row["created_at"],
             row["horizon_ends_at"],
             row["audience_user_id"],
+            knowledge_cutoff,
         )
         samples = []
         for rec in prices:
@@ -429,6 +431,6 @@ async def resolve_due_predictions(
     due = await pool.fetch(_DUE_PREDICTIONS, now)
     resolved = 0
     for rec in due:
-        if await _resolve_one(pool, rec["id"]):
+        if await _resolve_one(pool, rec["id"], now):
             resolved += 1
     return resolved
