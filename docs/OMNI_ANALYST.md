@@ -71,7 +71,7 @@ containers     omni-v2-api-1        running
                caddy                shared, outside the app compose project
 
 migrations     58  (local tree and live DB agree)
-images         omni-api:d431866 / omni-scheduler:d431866, also :latest
+images         omni-api:6179ae2 / omni-scheduler:6179ae2, also :latest
 rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = 69b73ce
 release        v0.3.0 = dad01c7 -- the deployed image (69b73ce) plus docs only
 host path      /home/user/omni-v2
