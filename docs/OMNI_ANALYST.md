@@ -73,7 +73,7 @@ containers     omni-v2-api-1        running
 migrations     58  (local tree and live DB agree)
 images         omni-api:6179ae2 / omni-scheduler:6179ae2, also :latest
 rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = 69b73ce
-release        v0.3.0 = dad01c7 -- the deployed image (69b73ce) plus docs only
+release        v0.4.0 = 95b6ed0 -- the deployed image (6179ae2) plus docs only
 host path      /home/user/omni-v2
 public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 ```
@@ -81,7 +81,7 @@ public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 Two deploys on 2026-08-13, both with normal builds and a pre-migration dump:
 `c39ea15` carried migration 056 and the P3/P4 API work, `69b73ce` carried
 migration 057, the refusal recording and the portfolio UI. The release tag
-`main` was fast-forwarded and tagged **v0.3.0** (`dad01c7`) afterwards. The tag
+`main` was fast-forwarded and tagged **v0.4.0** (`95b6ed0`) afterwards. The tag
 is ahead of the running image by documentation commits only; no `src/`,
 `migrations/` or `ui/` change sits between them.
 
@@ -395,11 +395,11 @@ Neutron is a sibling checkout. Framework defects go to
 branch            feat/autotrade-phase0
 ahead of main     0 commits
 main ahead        0 commits
-newest tag        v0.3.0 = dad01c7
+newest tag        v0.4.0 = 95b6ed0
 ```
 
 The 202-commit gap is closed: `main` was fast-forwarded on 2026-08-13 and tagged
-`v0.3.0`, and the branch, `main` and the tag agree. **Production still builds
+`v0.4.0`, and the branch, `main` and the tag agree. **Production still builds
 from the feature branch**, so keep merging at the end of each session rather
 than letting the gap grow again — the deploy that closed the 202 was materially
 harder than the two that followed it. Do not squash: the commits carry the
@@ -678,8 +678,8 @@ means the request hit the SPA fallback instead of the API.
 
 Done 2026-08-13. The 202-commit gap is closed, `main` is fast-forwarded, images
 carry their SHA as a tag (`omni-api:69b73ce`), `rollback-prev` points at the
-build being replaced rather than at whatever was tagged days ago, and `v0.3.0`
-covers migrations through 57.
+build being replaced rather than at whatever was tagged days ago, and `v0.4.0`
+covers migrations through 58.
 
 Keep it closed: merge and tag at the end of a session rather than at the start
 of the next one.
@@ -924,20 +924,41 @@ to make a global invocation green.
 
 ## 11. Which document is authoritative for what
 
+**Three files answer almost everything. Read them in this order.**
+
 | File | Authoritative for | Not for |
 |---|---|---|
-| `docs/OMNI_ANALYST.md` (this) | Current state, invariants, deployment, backlog | Detailed evidence |
 | `AGENTS.md` | The rules an agent must follow before editing | State |
+| `docs/OMNI_ANALYST.md` (this) | Current state, invariants, deployment, backlog | Detailed evidence |
+| `docs/NEXT_SESSION.md` | The work that is left, ranked | Current state |
+
+Five more exist because they answer a question these three deliberately do not.
+
+| File | Authoritative for | Not for |
+|---|---|---|
 | `_orchestrator/GATE_A_FINDINGS.md` | Every measurement and defect, numbered, append-only | Plans |
-| `_orchestrator/GOING_LIVE.md` | Operator runbook: key, size, leverage, halts | Why the strategy works |
+| `_orchestrator/GOING_LIVE.md` | Operator runbook for the live book: key, size, leverage, halts | Why the strategy works |
 | `_orchestrator/REMEASURE_RUNBOOK.md` | How to re-run GATE A at depth | Results |
 | `_orchestrator/TRADING_API_CONTRACT.md` | The frozen JSON shape API and UI share | Anything else |
-| `_orchestrator/RESEARCH_AGENDA.md` | Ranked directions, with priors and traps | State |
-| `docs/ETF_PORTFOLIO_EXPERIMENT.md` | The ETF-versus-constituent result | Live allocation |
-| `docs/ETF_ALLOCATION_EXPERIMENT.md` | The allocation-across-ETFs result, and the shadow book it started | Live allocation |
-| `docs/NEXT_SESSION.md` | The brief for the work left: P0 tag, P2, P5 | Current state |
-| `docs/HISTORY.md` | v1 lineage, retired strategies, superseded docs | Anything current |
 | `DEPLOY.md` | Detailed build and configuration reference | Live topology |
+
+And four are standing reference: `_orchestrator/RESEARCH_AGENDA.md` (ranked
+directions with priors), `_orchestrator/FLOW_FAMILY_SCOPE.md` (the one open
+producer family), `docs/ETF_PORTFOLIO_EXPERIMENT.md` and
+`docs/ETF_ALLOCATION_EXPERIMENT.md` (two results, neither decision-grade), and
+`docs/HISTORY.md` (v1 lineage and what was retired).
+
+**Everything else is in `_orchestrator/_superseded/`, and nothing there is
+current.** Sixteen files were moved on 2026-08-14 because four of them each
+opened by calling itself the single source of truth for the project's state,
+written on four different dates, and one — `STATUS.md` — was measurably wrong
+about whether macro data existed at all. A session with no prior context could
+not tell which to believe. `_orchestrator/_superseded/README.md` says what each
+one was and why it stopped being true.
+
+The lesson, since it will recur: **one living document that is edited beats a
+series that is appended to.** When a number here goes stale, correct the number.
+Do not write a new file beside it.
 
 `GATE_A_FINDINGS.md` is append-only. When a finding overturns an earlier one, the
 earlier stays and gets a superseded banner — deleting it would erase the

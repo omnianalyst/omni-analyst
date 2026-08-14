@@ -3,6 +3,18 @@
 Read this before touching anything. If a work order contradicts this file, the
 work order is wrong — say so in your report and change nothing.
 
+**Three documents, in this order, and you have the whole picture:**
+
+1. `AGENTS.md` (this) — the rules. They are invariants, not preferences.
+2. `docs/OMNI_ANALYST.md` — current state, architecture, deployment, backlog.
+3. `docs/NEXT_SESSION.md` — what is actually left, ranked.
+
+Anything in `_orchestrator/_superseded/` is history and **must not be briefed
+off**. Four documents in there each call themselves the single source of truth
+and one of them is measurably wrong; that is why they were moved. If a document
+outside those three tells you the state of this project, check its date against
+`docs/OMNI_ANALYST.md` before believing it.
+
 ## What this is
 
 A **demand-driven coverage network with agentic gap-filling**. Not a dashboard,

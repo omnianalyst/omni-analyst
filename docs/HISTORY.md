@@ -278,15 +278,24 @@ summary, holdings filters, a recorded NAV chart and recent activity.
 
 ## 8. Superseded documents
 
-These were the state of the project when written. They are retained for their
-reasoning, not their facts.
+**All of these now live in `_orchestrator/_superseded/`, moved there on
+2026-08-14.** They were scattered across `_orchestrator/` and `docs/` alongside
+the current documents, and four of them each opened by calling itself the single
+source of truth for the project's state. That directory's `README.md` is the
+index; the table below is why each stopped being true.
+
+They are retained for their reasoning, not their facts.
 
 | Document | Superseded by | Specifically stale |
 |---|---|---|
-| `_orchestrator/STATUS.md` | `docs/OMNI_ANALYST.md` | "No macro data ... none at all" — FRED is ingested, 294,905 rows. Tests 3,791; migrations 049. |
-| `_orchestrator/HANDOFF.md`, `HANDOFF_2026-08-09/10/11.md`, `HANDOFF_2026-08-11_END.md`, `HANDOFF_POLYMARKET_2026-08-11.md` | `docs/OMNI_ANALYST.md` | Five session notes across three days with three different test counts and three different migration counts. `HANDOFF_2026-08-11_END.md` also lists FRED as never ingested. |
-| `_orchestrator/STATE.md` | `docs/OMNI_ANALYST.md` | Superseded by STATUS.md, which is itself now superseded. |
-| `docs/HANDOFF_2026-08-11.md` | `docs/OMNI_ANALYST.md` | Accurate on product and boundaries; its Git and test figures have moved. |
+| `STATUS.md` | `docs/OMNI_ANALYST.md` | "No macro data ... none at all" — FRED is ingested, 294,905 rows. Tests 3,791; migrations 049. |
+| `HANDOFF.md`, `HANDOFF_2026-08-09/10/11.md`, `HANDOFF_2026-08-11_END.md`, `HANDOFF_POLYMARKET_2026-08-11.md`, `docs-HANDOFF_2026-08-11.md` | `docs/NEXT_SESSION.md` | Six session notes across four days with different test counts and different migration counts. `HANDOFF_2026-08-11_END.md` also lists FRED as never ingested. |
+| `STATE.md` | `docs/OMNI_ANALYST.md` | Superseded by STATUS.md, which is itself now superseded. |
+| `COMPLETION_PLAN.md` | `docs/NEXT_SESSION.md` | Its phases are done, retired, or reordered by what was measured since. |
+| `AUTONOMOUS_PLAN.md` | `docs/OMNI_ANALYST.md` §3 | Built on the premise that a calibrated directional engine was the edge. Forty-eight directional hypotheses have since failed. |
+| `MONEY_PLAN.md` | `docs/OMNI_ANALYST.md` §3 | Its conclusion is measured further and stated more carefully there. Still the best account of *how* the carry decision was reached. |
+| `WORLD_COVERAGE_PLAN.md`, `WORLD_COVERAGE_IDEAS.md` | nothing | Never started; unranked against anything measured since. |
+| `TESTING.md` | `docs/OMNI_ANALYST.md` §9 | Fully covered there, including the Neutron editable-path prerequisite. |
 | `../docs/archive/HANDOFF_TODO.md` | `docs/OMNI_ANALYST.md` | Already carries its own superseded banner. Claimed "no `.github/workflows/`" when CI existed, and a work order was briefed to build it twice. |
 | `../docs/planning/IMPLEMENTATION_PLAN.md` | this file, §3 | An eight-phase plan for the v1 FastAPI codebase. |
 | `../docs/planning/KNOWN_ISSUES.md` | nothing | v1 issue log; every item resolved or decided. References folder names that no longer exist. |
@@ -296,8 +305,14 @@ reasoning, not their facts.
 
 **`AUTOTRADE_PLAN.md` is a special case.** Its architecture stands; its
 *sequence* does not, because it assumed the edge would come from directional
-prediction. `MONEY_PLAN.md` supersedes its ordering. Read the architecture there
-and the ordering here.
+prediction. `MONEY_PLAN.md` supersedes its ordering. Both are in
+`_superseded/`; read the architecture there and the ordering in
+`docs/OMNI_ANALYST.md` §3.
+
+**Why the pile formed, since it will try to form again.** A handoff written per
+session accumulates into a set in which the newest is indistinguishable from the
+oldest, and every one of them is confident. One living document that is *edited*
+beats a series that is appended to.
 
 **`GATE_A_FINDINGS.md` is never superseded.** It is append-only. When a finding
 overturns an earlier one, the earlier stays with a banner, because the reasoning
