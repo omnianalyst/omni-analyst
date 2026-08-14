@@ -102,7 +102,14 @@ def price_quality_scores(history: pd.DataFrame) -> pd.Series:
     ).sort_values(ascending=False)
 
 
-def _turnover(current: pd.Series, target: pd.Series) -> float:
+def turnover_between(current: pd.Series, target: pd.Series) -> float:
+    """One-way turnover moving from one weight vector to another.
+
+    Public because the forward shadow book charges the same quantity against
+    the same cost assumption, and two implementations of turnover would let the
+    live record and the backtest disagree about what a rebalance cost while
+    both looked correct.
+    """
     names = current.index.union(target.index)
     current = current.reindex(names, fill_value=0.0)
     target = target.reindex(names, fill_value=0.0)
@@ -112,6 +119,9 @@ def _turnover(current: pd.Series, target: pd.Series) -> float:
     current_cash = max(0.0, 1.0 - float(current.sum()))
     target_cash = max(0.0, 1.0 - float(target.sum()))
     return 0.5 * (float((target - current).abs().sum()) + abs(target_cash - current_cash))
+
+
+_turnover = turnover_between
 
 
 def _simulate(
@@ -336,4 +346,5 @@ __all__ = [
     "StrategyPath",
     "price_quality_scores",
     "run_experiment",
+    "turnover_between",
 ]
