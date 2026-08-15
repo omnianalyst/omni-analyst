@@ -359,9 +359,9 @@ function BlendLegendRow({
       <span class="blend-swatch" style={{ background: REGIME_COLORS[bucketName] }} />
       <strong>{pick.symbol}</strong>
       <span class="muted">{REGIME_LABELS[bucketName] ?? bucketName} · {regimePhrase(bucketName)}</span>
-      <span class="muted mono">{weight.toFixed(0)}%</span>
+      <span class="muted mono">{weight.toFixed(0)}% weight</span>
       <span class={`mono ${tone(pick.median_annual_return)}`}>
-        {percent(pick.median_annual_return)}
+        {percent(pick.median_annual_return)} median yr
       </span>
     </li>
   );
@@ -420,13 +420,14 @@ function ThePortfolio({ data }: { data: ScannerData }) {
           })}
         </div>
         <div class="blend-total">
-          <span class="metric-kicker">Median year</span>
+          <span class="metric-kicker">Median year, equal weight</span>
           <strong class={total > 0 ? "value-positive" : "value-negative"}>
             {total > 0 ? "+" : ""}{total.toFixed(1)}%
           </strong>
           <span class="metric-context">
-            equal-weight average of each holding&apos;s measured median year — a description of
-            the parts, not a backtested return
+            the average of the four holdings&apos; median calendar-year returns, each
+            measured over its own history — a description of the parts, not a backtested
+            portfolio return
           </span>
         </div>
         <ol class="blend-legend">
@@ -438,7 +439,6 @@ function ThePortfolio({ data }: { data: ScannerData }) {
     </section>
   );
 }
-
 // The reassurance: four regimes, each with what it protects against, the pick
 // already in the portfolio, and the strongest alternatives measured in that
 // regime. This is the answer to "am I covered for stagflation?" — visibly.
@@ -468,7 +468,7 @@ function ScenarioCards({ data }: { data: ScannerData }) {
                 <strong>{pick.symbol}</strong>
                 <small>{pick.name}</small>
                 <strong class={`top-pick-return ${tone(pick.median_annual_return)}`}>
-                  {percent(pick.median_annual_return)}
+                  {percent(pick.median_annual_return)} <small class="unit-note">median yr</small>
                 </strong>
               </div>
             ) : (
@@ -483,7 +483,7 @@ function ScenarioCards({ data }: { data: ScannerData }) {
                       <small>{asset.name}</small>
                     </span>
                     <strong class={`top-pick-return ${tone(asset.median_annual_return)}`}>
-                      {percent(asset.median_annual_return)}
+                      {percent(asset.median_annual_return)} <small class="unit-note">median yr</small>
                     </strong>
                   </li>
                 ))}

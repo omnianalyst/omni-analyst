@@ -5247,10 +5247,12 @@ tr.row.tier-unknown td:first-child {
   font-variant-numeric: tabular-nums;
 }
 /* ---------- concise pages: portfolio builder, noteworthy, quiet lines ---------- */
+/* Padding scale for this page family: 20px inside every card, 20px between
+   sections, 12px between a heading and its content. One scale, no stragglers. */
 .builder {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 .top-picks-heading h2 {
   margin: 0;
@@ -5264,12 +5266,12 @@ tr.row.tier-unknown td:first-child {
 .top-picks-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 .top-picks-column {
   display: flex;
   flex-direction: column;
-  padding: 14px 16px;
+  padding: 20px;
   border: 1px solid var(--border);
   border-top: 2px solid var(--border);
   border-radius: var(--r-md);
@@ -5285,7 +5287,7 @@ tr.row.tier-unknown td:first-child {
   text-transform: uppercase;
 }
 .builder-hint {
-  margin: 2px 0 10px;
+  margin: 2px 0 12px;
   color: var(--faint);
   font-size: 10px;
 }
@@ -5466,13 +5468,13 @@ tr.row.tier-unknown td:first-child {
 .scenario-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 .scenario-card {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 14px;
+  padding: 20px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: rgba(11, 17, 26, 0.54);
@@ -5507,7 +5509,7 @@ tr.row.tier-unknown td:first-child {
     "name return";
   align-items: center;
   gap: 2px 10px;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border: 1px solid var(--border-soft);
   border-radius: var(--r-sm);
   background: rgba(16, 26, 43, 0.5);
@@ -5551,11 +5553,23 @@ tr.row.tier-unknown td:first-child {
 .scenario-alternatives .top-pick-return {
   font-size: 11px;
 }
+/* The scanner page tightens the family rhythm: its sections are one answer
+   stack, so 20px between them reads calmer than the 24px document default. */
+.scanner-view.product-page {
+  gap: 20px;
+}
+.unit-note {
+  color: var(--faint);
+  font-family: var(--font, inherit);
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+}
 .blend {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 16px;
+  gap: 14px;
+  padding: 20px;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: rgba(11, 17, 26, 0.54);
