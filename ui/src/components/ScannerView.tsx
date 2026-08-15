@@ -1,17 +1,19 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, request } from "../lib/api";
 import { equalWeightAverage, riskShares } from "../lib/blend";
 import { getRegime, type RegimeResponse } from "../lib/autonomous";
 import { CompaniesPanel } from "./CompaniesPanel";
+import { CustomCompare } from "./CustomCompare";
 import { ErrorState } from "./ErrorState";
 import { Hint } from "./Hint";
+import { LearnWhy } from "./LearnWhy";
 import { Loading } from "./Loading";
 
 type AssetClass = "stocks" | "crypto" | "defensive";
 type RiskTier = "low" | "medium" | "high" | "unrated";
 type MarketBehavior = "risk_on" | "diversifier" | "counterweight" | "unrated";
 
-interface AssetMetric {
+export interface AssetMetric {
   symbol: string;
   name: string;
   area: string;
@@ -67,7 +69,7 @@ interface SectorLeaders {
   leaders: SectorLeader[];
 }
 
-interface PortfolioHistory {
+export interface PortfolioHistory {
   window_start: string;
   window_end: string;
   volatility: number;
@@ -431,37 +433,36 @@ function BlendLegendRow({
 }) {
   const weight = 100 / 4;
   return (
-    <li class="blend-row">
-      <div class="blend-line-1">
-        <span class="blend-swatch" style={{ background: REGIME_COLORS[bucketName] }} />
+    <article class="holding-card" style={{ borderTopColor: REGIME_COLORS[bucketName] }}>
+      <header>
         <strong>{pick.symbol}</strong>
-        <span class="muted">{REGIME_LABELS[bucketName] ?? bucketName} · {regimePhrase(bucketName)}</span>
-        <span class="muted mono">{weight.toFixed(0)}% weight</span>
-        <Hint term="median_year">
-          <span class={`mono ${tone(pick.median_annual_return)}`}>
-            {percent(pick.median_annual_return)} median yr
-          </span>
-        </Hint>
-      </div>
-      <div class="blend-line-2">
-        <Hint term="volatility">
-          <span class="muted mono">{pick.volatility != null ? `${pick.volatility.toFixed(1)}% vol` : "vol —"}</span>
-        </Hint>
-        <Hint term="risk_share">
-          <span class="muted mono">{riskShare > 0 ? `${(riskShare * 100).toFixed(0)}% of risk` : ""}</span>
-        </Hint>
-        <Hint term="max_drawdown">
-          <span class="muted mono">
-            {pick.max_drawdown != null ? `worst fall ${pick.max_drawdown.toFixed(0)}%` : ""}
-          </span>
-        </Hint>
-        <Hint term="positive_year_rate">
-          <span class="muted mono">
-            {pick.positive_year_rate != null ? `up ${Math.round(pick.positive_year_rate)}% of years` : ""}
-          </span>
-        </Hint>
-      </div>
-    </li>
+        <span class="mono">{weight.toFixed(0)}%</span>
+      </header>
+      <p class="holding-role">{REGIME_LABELS[bucketName] ?? bucketName}</p>
+      <p class="holding-phrase muted">{regimePhrase(bucketName)}</p>
+      <dl>
+        <div>
+          <dt><Hint term="median_year">Median yr</Hint></dt>
+          <dd class={tone(pick.median_annual_return)}>{percent(pick.median_annual_return)}</dd>
+        </div>
+        <div>
+          <dt><Hint term="volatility">Vol</Hint></dt>
+          <dd>{pick.volatility != null ? `${pick.volatility.toFixed(1)}%` : "—"}</dd>
+        </div>
+        <div>
+          <dt><Hint term="max_drawdown">Worst fall</Hint></dt>
+          <dd>{pick.max_drawdown != null ? `${pick.max_drawdown.toFixed(0)}%` : "—"}</dd>
+        </div>
+        <div>
+          <dt><Hint term="risk_share">Of risk</Hint></dt>
+          <dd>{riskShare > 0 ? `${(riskShare * 100).toFixed(0)}%` : "—"}</dd>
+        </div>
+        <div>
+          <dt><Hint term="positive_year_rate">Up years</Hint></dt>
+          <dd>{pick.positive_year_rate != null ? `${Math.round(pick.positive_year_rate)}%` : "—"}</dd>
+        </div>
+      </dl>
+    </article>
   );
 }
 
@@ -548,7 +549,7 @@ function ThePortfolio({ data }: { data: ScannerData }) {
             portfolio return
           </span>
         </div>
-        <ol class="blend-legend">
+        <div class="holding-grid">
           {picks.map(({ bucket, pick }, index) => (
             <BlendLegendRow
               key={pick.symbol}
@@ -557,7 +558,7 @@ function ThePortfolio({ data }: { data: ScannerData }) {
               riskShare={shares[index] ?? 0}
             />
           ))}
-        </ol>
+        </div>
         {shares.length === picks.length && shares.some((share) => share > 0) ? (
           <div class="risk-strip">
             <p class="metric-kicker">Where the risk actually sits</p>
@@ -781,16 +782,28 @@ function RankedCategory({
   title,
   description,
   assets,
+  horizon = "long",
 }: {
   title: string;
   description: string;
   assets: AssetMetric[];
+  horizon?: "short" | "long";
 }) {
+  const ranked = [...assets].sort((a, b) => {
+    if (horizon === "short") {
+      return (b.returns?.["365d"] ?? -Infinity) - (a.returns?.["365d"] ?? -Infinity);
+    }
+    const left = a.median_annual_return;
+    const right = b.median_annual_return;
+    if (left == null) return 1;
+    if (right == null) return -1;
+    return right - left;
+  });
   return (
     <section class="rank-category">
       <div class="asset-group-heading">
         <div><h2>{title}</h2><p>{description}</p></div>
-        <span>{assets.length}</span>
+        <span>{ranked.length}</span>
       </div>
       <div class="rank-table-wrap">
         <table class="rank-table">
@@ -799,14 +812,14 @@ function RankedCategory({
               <th>Rank</th>
               <th>Asset</th>
               <th>Score</th>
-              <th>1 year</th>
-              <th>Median year, all measured</th>
+              <th class={horizon === "short" ? "col-active" : ""}>1 year</th>
+              <th class={horizon === "long" ? "col-active" : ""}>Median year, all measured</th>
               <th>Volatility</th>
               <th>Market role</th>
             </tr>
           </thead>
           <tbody>
-            {assets.map((asset, index) => (
+            {ranked.map((asset, index) => (
               <tr key={asset.symbol}>
                 <td><span class="rank-number">{index + 1}</span></td>
                 <td>
@@ -819,8 +832,12 @@ function RankedCategory({
                   </span>
                 </td>
                 <td><strong class="canonical-score">{asset.scores.balanced?.toFixed(0) ?? "—"}</strong></td>
-                <td class={tone(asset.returns?.["365d"])}>{percent(asset.returns?.["365d"])}</td>
-                <td class={tone(asset.median_annual_return)}>{percent(asset.median_annual_return)}</td>
+                <td class={`${tone(asset.returns?.["365d"])} ${horizon === "short" ? "col-active" : ""}`}>
+                  {percent(asset.returns?.["365d"])}
+                </td>
+                <td class={`${tone(asset.median_annual_return)} ${horizon === "long" ? "col-active" : ""}`}>
+                  {percent(asset.median_annual_return)}
+                </td>
                 <td>{percent(asset.volatility)}</td>
                 <td>
                   <span class={`behavior-badge behavior-badge-${asset.market_behavior}`}>
@@ -832,6 +849,55 @@ function RankedCategory({
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+// Section 1: the best of each category, at a glance. Short = the trailing
+// year; long = the median calendar year over everything measured (3-year
+// floor). Top 8 per category; the full tables live behind the disclosure.
+function BestMeasured({ data }: { data: ScannerData }) {
+  const [horizon, setHorizon] = useState<"short" | "long">("long");
+  return (
+    <section class="best-measured" aria-label="Best measured by category">
+      <div class="section-heading-row section-heading-compact">
+        <div>
+          <h2>The best measured, by category</h2>
+          <p>
+            {horizon === "short"
+              ? "Ranked by the trailing year -- who is winning right now."
+              : "Ranked by median calendar year over everything measured (3-year minimum) -- who wins over time."}
+          </p>
+        </div>
+        <div class="view-switch" role="tablist" aria-label="Ranking horizon">
+          <button
+            type="button"
+            class={horizon === "long" ? "active" : ""}
+            onClick={() => setHorizon("long")}
+          >
+            Long term
+          </button>
+          <button
+            type="button"
+            class={horizon === "short" ? "active" : ""}
+            onClick={() => setHorizon("short")}
+          >
+            Short term
+          </button>
+        </div>
+      </div>
+      {CATEGORY_DETAILS.map((category) => (
+        <RankedCategory
+          key={category.key}
+          title={category.title}
+          description={category.description}
+          assets={(data.category_rankings[category.key] ?? []).slice(
+            0,
+            8,
+          )}
+          horizon={horizon}
+        />
+      ))}
     </section>
   );
 }
@@ -931,16 +997,27 @@ export function ScannerView() {
   const companyCount = state.data.sectors.reduce((total, sector) => total + sector.coverage, 0);
   const { coverage } = state.data;
 
+  const universe = useMemo(
+    () =>
+      (Object.values(state.data.category_rankings) as AssetMetric[][]).flat(),
+    [state.data],
+  );
+
   return (
     <div class="scanner-view product-page">
       <header class="discover-page-heading">
-        <div><h1>Discover</h1><p>What to hold, why it is covered, and where to take more or less risk.</p></div>
+        <div><h1>Discover</h1><p>The best of everything measured -- what to hold, and why.</p></div>
         <div class="discover-compact-meta">
+          <LearnWhy />
           <time dateTime={state.data.as_of}>Updated {new Date(state.data.as_of).toLocaleString()}</time>
         </div>
       </header>
 
       <ThePortfolio data={state.data} />
+
+      <CustomCompare universe={universe} />
+
+      <BestMeasured data={state.data} />
 
       <ScenarioCards data={state.data} />
 

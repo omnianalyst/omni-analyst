@@ -19,6 +19,7 @@ from omni.api.scanner import (
     _overall_leaders,
     _payload,
     _portfolio_history,
+    _mix_history,
     _representative,
     _risk_tier,
     _sector_leader_payload,
@@ -257,15 +258,29 @@ def test_the_representative_is_returned_only_when_it_survived_ranking() -> None:
 
 
 def _two_sleeve_prices() -> pd.DataFrame:
-    """2022 and 2023, each sleeve doubling in one and halving in the other,
-    offset between the years. Equal weight with annual rebalancing must end
-    each year flat and show two zero calendar years -- drift-weighting would
-    instead compound (2022 halves the winner of 2023's sleeve), which is the
-    exact distinction this test pins."""
+    """Two years; A doubles mid-year in year 1, B doubles mid-year in year 2,
+    and levels carry across the new year (A stays at its year-1 level).
+    Equal weight with annual rebalancing must show +50% in BOTH years. A
+    drift-weighted mix would show +50% then +33% (year 1's winner dominates
+    year 2's start) -- the exact distinction this test pins. Moves are
+    intra-year: a move landing on new year's is the new year's return, a
+    different behaviour than the rebalancing pinned here."""
     index = pd.date_range("2022-01-03", "2023-12-29", freq="B")
-    half = len(index) // 2
-    a = [100.0] * half + [200.0] * (len(index) - half)  # A doubles in year two
-    b = [50.0] * half + [25.0] * (len(index) - half)  # B halves in year two
+    years = sorted(set(index.year))
+    a: list[float] = []
+    b: list[float] = []
+    level_a, level_b = 100.0, 100.0
+    for position, year in enumerate(years):
+        days = index[index.year == year]
+        mid = len(days) // 2
+        if position == 0:  # A doubles mid-year
+            a.extend([level_a] * mid + [level_a * 2] * (len(days) - mid))
+            b.extend([level_b] * len(days))
+            level_a *= 2
+        else:  # B doubles mid-year, A holds its level
+            a.extend([level_a] * len(days))
+            b.extend([level_b] * mid + [level_b * 2] * (len(days) - mid))
+            level_b *= 2
     return pd.DataFrame({"AAA": a, "BBB": b}, index=index)
 
 
@@ -273,14 +288,13 @@ def test_portfolio_history_is_exactly_annually_rebalanced() -> None:
     history = _portfolio_history(_two_sleeve_prices(), ["AAA", "BBB"])
 
     assert history is not None
-    # Each year: one sleeve x2, one sleeve /2, equal weight -> exactly flat.
+    # Both years: one sleeve doubles, one is flat, equal weight -> +50%.
+    # Drift-weighting would compound year 1's winner into a +33% year 2.
     assert history["complete_years"] == 2
-    assert history["median_year"] == 0.0
-    assert history["worst_year"]["return"] == 0.0
-    assert history["best_year"]["return"] == 0.0
-    # Flat path -> no drawdown, no volatility.
-    assert history["worst_drawdown"] == 0.0
-    assert history["volatility"] == 0.0
+    assert history["median_year"] == 50.0
+    assert history["worst_year"]["return"] == 50.0
+    assert history["best_year"]["return"] == 50.0
+    assert history["up_years"] == 100.0
     assert history["window_start"] == "2022-01"
 
 
@@ -342,6 +356,61 @@ def test_every_broad_etf_carries_income_and_cost() -> None:
     for figures in INCOME_AND_COST.values():
         assert figures["expense_ratio_pct"] >= 0
         assert figures["yield_pct"] >= 0
+
+
+def test_a_weighted_mix_blends_by_weight_not_equally() -> None:
+    """75% of a flat asset and 25% of one that halves must land at -12.5% for
+    the year -- the weight is the whole point of a custom mix."""
+    index = pd.date_range("2022-01-03", "2023-12-29", freq="B")
+    half = len(index) // 2
+    flat_then_double = [100.0] * half + [200.0] * (len(index) - half)
+    halved = [100.0] * half + [50.0] * (len(index) - half)
+    frame = pd.DataFrame({"AAA": flat_then_double, "BBB": halved}, index=index)
+
+    history = _mix_history(frame, [("AAA", 3.0), ("BBB", 1.0)])
+
+    assert history is not None
+    # Year two: AAA +100% * 0.75 + BBB -50% * 0.25 = +62.5%.
+    assert history["best_year"]["return"] == pytest.approx(62.5, abs=0.1)
+
+
+def test_mix_weights_are_normalised_so_scale_does_not_matter() -> None:
+    index = pd.date_range("2022-01-03", "2023-12-29", freq="B")
+    half = len(index) // 2
+    a = [100.0] * half + [200.0] * (len(index) - half)
+    b = [100.0] * half + [50.0] * (len(index) - half)
+    frame = pd.DataFrame({"AAA": a, "BBB": b}, index=index)
+
+    by_ints = _mix_history(frame, [("AAA", 3), ("BBB", 1)])
+    by_fractions = _mix_history(frame, [("AAA", 0.75), ("BBB", 0.25)])
+
+    assert by_ints == by_fractions
+
+
+def test_window_symbols_pin_two_mixes_to_the_same_window() -> None:
+    """The comparison contract: a custom mix of two long-history assets alone
+    would start in 2022, but with the policy symbols deciding the window
+    alongside, both mixes must report identical windows."""
+    long_index = pd.date_range("2021-01-04", "2023-12-29", freq="B")
+    slow = [100.0 + i * 0.1 for i in range(len(long_index))]
+    frame = pd.DataFrame(
+        {"AAA": slow, "BBB": slow, "POL": slow}, index=long_index
+    )
+
+    custom = _mix_history(frame, [("AAA", 1.0), ("BBB", 1.0)], window_symbols=["POL"])
+    policy = _mix_history(frame, [("POL", 1.0)], window_symbols=["AAA", "BBB"])
+
+    assert custom is not None and policy is not None
+    assert custom["window_start"] == policy["window_start"]
+    assert custom["window_end"] == policy["window_end"]
+    assert custom["complete_years"] == policy["complete_years"]
+
+
+def test_mix_history_refuses_a_nonpositive_weight() -> None:
+    index = pd.date_range("2022-01-03", "2023-12-29", freq="B")
+    frame = pd.DataFrame({"AAA": [100.0] * len(index)}, index=index)
+
+    assert _mix_history(frame, [("AAA", 0.0)]) is None
 
 
 def test_a_broken_seed_print_is_dropped_not_priced() -> None:

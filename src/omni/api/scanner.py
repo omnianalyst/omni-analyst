@@ -241,22 +241,42 @@ INCOME_AND_COST_AS_OF = "2026-08"
 
 
 def _portfolio_history(prices: pd.DataFrame, symbols: list[str]) -> dict[str, Any] | None:
-    """The equal-weight mix of the representatives, as it actually measured.
+    """The equal-weight mix of the representatives (see _mix_history)."""
+    return _mix_history(prices, [(symbol, 1.0) for symbol in symbols])
+
+
+def _mix_history(
+    prices: pd.DataFrame,
+    positions: list[tuple[str, float]],
+    window_symbols: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """A weighted mix of assets, as it actually measured.
 
     This is a description of the parts assembled, not a forecast: it is what
-    holding these four at equal weight, rebalanced every January, did over the
-    window where all four have prices. Exact annual rebalancing -- within each
-    calendar year every sleeve is normalised to its first price of that year
-    and averaged, and the years chain. The window starts at the first January
-    after the shortest history begins, so every reported calendar year is
-    whole; a partial year would report a real but incomparable number.
+    holding these at the given weights, rebalanced every January, did over the
+    window where all of them have prices. Exact annual rebalancing -- within
+    each calendar year every asset is normalised to its first price of that
+    year and blended, and the years chain. The window starts at the first
+    January after the shortest history begins, so every reported calendar year
+    is whole; a partial year would report a real but incomparable number.
 
-    ``None`` when any sleeve is missing (a refused feed), so the page shows
-    nothing rather than a mix it cannot stand behind.
+    ``window_symbols`` extends the window determination -- used when two mixes
+    must be compared over exactly the same dates: the union of both mixes'
+    symbols decides the window, and each mix is computed only over its own
+    holdings within it.
+
+    ``None`` when any held symbol is missing, so the page shows nothing rather
+    than a mix it cannot stand behind.
     """
-    if any(symbol not in prices.columns for symbol in symbols):
+    symbols = [symbol for symbol, _ in positions]
+    total_weight = sum(weight for _, weight in positions)
+    if not symbols or total_weight <= 0:
         return None
-    series = prices[symbols].dropna()
+    weights = [weight / total_weight for _, weight in positions]
+    window = list(dict.fromkeys([*symbols, *(window_symbols or [])]))
+    if any(symbol not in prices.columns for symbol in window):
+        return None
+    series = prices[window].dropna()
     if len(series) < 60:
         return None
     # Drop a partial first year so every reported calendar year is whole. A
@@ -268,20 +288,26 @@ def _portfolio_history(prices: pd.DataFrame, symbols: list[str]) -> dict[str, An
         series = series[series.index >= pd.Timestamp(year=first_year + 1, month=1, day=1)]
     if len(series) < 60:
         return None
+    held = prices[symbols].loc[series.index]
 
+    # Each year is measured from the previous year's final close, not the
+    # current year's first print -- a return realized over new year's belongs
+    # to the new year, and normalising to the first print would attribute it
+    # to neither.
     chained: list[float] = []
-    value = 1.0
     year_returns: dict[int, float] = {}
-    for year, year_prices in series.groupby(series.index.year):
-        normalised = year_prices / year_prices.iloc[0]
-        mix = normalised.mean(axis=1)
+    base = held.iloc[0]
+    value = 1.0
+    for year, year_prices in held.groupby(held.index.year):
+        relative = year_prices / base
+        mix = (relative * weights).sum(axis=1)
         end = float(mix.iloc[-1])
+        chained.extend(value * level for level in mix.tolist())
         value *= end
-        chained.extend(value * level / end for level in mix.tolist()[:-1])
-        chained.append(value)
         # Stored as a percent return, not a growth factor -- a flat year is 0,
         # never 100.
         year_returns[year] = (end - 1.0) * 100
+        base = year_prices.iloc[-1]
     path = pd.Series(chained, index=series.index)
 
     daily = path.pct_change().dropna()
@@ -452,6 +478,25 @@ def _fetch_prices() -> pd.DataFrame:
     panel.index = pd.to_datetime(panel.index).tz_localize(None).normalize()
     panel = panel.groupby(level=0).last()
     return panel
+
+
+# The price panel is the expensive fetch (the whole measured universe). It is
+# cached for an hour beside the payload cache so the custom-comparison
+# endpoint does not re-pull 74 tickers per click. An empty panel (provider
+# outage) is never cached.
+_panel_cache: dict[str, Any] = {"ts": 0.0, "prices": None}
+
+
+def _panel() -> pd.DataFrame:
+    now = time.time()
+    cached = _panel_cache["prices"]
+    if cached is not None and now - _panel_cache["ts"] < CACHE_TTL:
+        return cached
+    prices = _fetch_prices()
+    if not prices.empty:
+        _panel_cache["ts"] = now
+        _panel_cache["prices"] = prices
+    return prices
 
 
 def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str, Any]:
@@ -845,7 +890,7 @@ async def _build_scanner(app: App, audience) -> dict:
         item["registered_symbol"]: item
         for item in crypto_census["included"]
     }
-    prices = _fetch_prices()
+    prices = _panel()
     funding = await _funding_rates(app.db.pool, audience)
     sectors = await _sector_leaders(app.db.pool, audience)
 
@@ -1004,6 +1049,74 @@ def build_router(app: App) -> Router:
     async def scanner_market(request: Request) -> dict:
         audience = resolve_audience_from_request(request)
         return await _build_scanner(app, audience)
+
+    @router.post("/scanner/custom-portfolio")
+    async def custom_portfolio(request: Request) -> dict:
+        """Compare a caller-assembled mix against the policy portfolio.
+
+        Both mixes are measured over exactly the same window -- the dates
+        where every symbol in either mix has prices -- so the comparison is
+        apples to apples and the window is named in the response. Refuses a
+        symbol that is not measured or whose feed failed the defect checks,
+        by name, rather than quietly dropping it and comparing a different
+        portfolio than the one asked about.
+        """
+        from neutron.error import bad_request
+
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - a body that is not JSON is a 400, not a 500
+            raise bad_request("request body must be JSON")
+        raw_positions = body.get("positions") if isinstance(body, dict) else None
+        if not isinstance(raw_positions, list) or not 2 <= len(raw_positions) <= 12:
+            raise bad_request("positions must be a list of 2 to 12 {symbol, weight} entries")
+
+        positions: list[tuple[str, float]] = []
+        for entry in raw_positions:
+            if not isinstance(entry, dict):
+                raise bad_request(f"each position must be an object, got {entry!r}")
+            symbol = entry.get("symbol")
+            weight = entry.get("weight", 1.0)
+            if not isinstance(symbol, str) or not symbol:
+                raise bad_request(f"position symbol must be a non-empty string, got {symbol!r}")
+            try:
+                weight = float(weight)
+            except (TypeError, ValueError):
+                raise bad_request(f"weight for {symbol} must be a number")
+            if not weight > 0:
+                raise bad_request(f"weight for {symbol} must be positive")
+            positions.append((symbol, weight))
+
+        prices = _panel()
+        if prices.empty:
+            raise bad_request("the measured price panel is unavailable; try again shortly")
+
+        policy_symbols = [
+            REPRESENTATIVE_ASSETS[bucket]["symbol"] for bucket in REPRESENTATIVE_ASSETS
+        ]
+        for symbol, _ in positions:
+            if symbol not in prices.columns:
+                raise bad_request(f"{symbol} is not in the measured universe")
+            series = prices[symbol].dropna()
+            if len(series) < 60:
+                raise bad_request(f"{symbol} has too little measured history")
+            defects = _feed_defect_reasons(series, census_price=None)
+            if defects:
+                raise bad_request(
+                    f"{symbol}'s price feed failed the defect check: {'; '.join(defects)}"
+                )
+
+        custom = _mix_history(prices, positions, window_symbols=policy_symbols)
+        policy = _mix_history(
+            prices,
+            [(symbol, 1.0) for symbol in policy_symbols],
+            window_symbols=[symbol for symbol, _ in positions],
+        )
+        if custom is None or policy is None:
+            raise bad_request(
+                "the selected assets do not share a measured window with the portfolio"
+            )
+        return {"custom": custom, "policy": policy}
 
     return router
 
