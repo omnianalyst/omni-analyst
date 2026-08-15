@@ -1,5 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, request } from "../lib/api";
+import { equalWeightAverage } from "../lib/blend";
 import { CompaniesPanel } from "./CompaniesPanel";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
@@ -383,13 +384,11 @@ function ThePortfolio({ data }: { data: ScannerData }) {
   }
 
   const weight = 1 / picks.length;
-  const total = picks.reduce(
-    (sum, entry) => sum + (entry.pick.median_annual_return ?? 0) * weight * 100,
-    0,
-  );
-  const positiveTotal = picks.reduce(
-    (sum, entry) => sum + Math.max((entry.pick.median_annual_return ?? 0) * weight * 100, 0),
-    0,
+  // median_annual_return is already in percent units; the equal-weight blend
+  // is their plain average via the tested helper -- no further scaling.
+  const total = equalWeightAverage(picks.map((entry) => entry.pick.median_annual_return ?? null));
+  const positiveTotal = equalWeightAverage(
+    picks.map((entry) => Math.max(entry.pick.median_annual_return ?? 0, 0)),
   );
 
   return (
@@ -399,13 +398,13 @@ function ThePortfolio({ data }: { data: ScannerData }) {
         <p>
           One holding per regime at equal weight, each the best-measured pick under 30%
           volatility. Whatever the market does next, one of these is built for it.
-          Buy and hold; add monthly; check rarely.
+          Add monthly; about once a year, rebalance back to equal weight.
         </p>
       </div>
       <div class="blend">
         <div class="blend-bar" role="img" aria-label={`Equal-weight blend of ${picks.map((p) => p.pick.symbol).join(", ")}`}>
           {picks.map(({ bucket, pick }) => {
-            const contribution = (pick.median_annual_return ?? 0) * weight * 100;
+            const contribution = (pick.median_annual_return ?? 0) * weight;
             if (contribution <= 0) return null;
             return (
               <span

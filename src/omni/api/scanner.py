@@ -99,7 +99,17 @@ ASSETS: dict[str, list[dict[str, str]]] = {
         {"symbol": "XLU", "name": "Utilities Select Sector", "yf": "XLU", "asset_class": "stocks", "area": "Sector"},
         {"symbol": "XLB", "name": "Materials Select Sector", "yf": "XLB", "asset_class": "stocks", "area": "Sector"},
         {"symbol": "XLC", "name": "Communication Services Sector", "yf": "XLC", "asset_class": "stocks", "area": "Sector"},
-        {"symbol": "XLRE", "name": "Real Estate Select Sector", "yf": "XLRE", "asset_class": "stocks", "area": "Sector"},
+        {"symbol": "XLRE", "name": "Real Estate Select Sector", "yf": "XLRE",
+         "asset_class": "stocks", "area": "Sector"},
+        # High-yield credit sits in Growth, not Deflation, on the system's own
+        # measurement: HYG's correlation to SPY is risk_on (>= 0.35), and in the
+        # deflationary recessions the Deflation bucket exists for (2008), credit
+        # spreads widened into a ~35% drawdown -- it behaves like equity risk
+        # with a coupon, not like duration. It still scans, ranks, and appears
+        # in the Defensive tables; it just no longer competes to represent
+        # falling rates.
+        {"symbol": "HYG", "name": "iShares High Yield Corporate Bond", "yf": "HYG",
+         "asset_class": "defensive", "area": "High-yield credit"},
     ],
     "Debasement": [
         {"symbol": "GLD", "name": "SPDR Gold Shares", "yf": "GLD",
@@ -118,7 +128,6 @@ ASSETS: dict[str, list[dict[str, str]]] = {
         {"symbol": "BND", "name": "Vanguard Total Bond Market", "yf": "BND", "asset_class": "defensive", "area": "Broad bonds"},
         {"symbol": "BNDX", "name": "Vanguard Total International Bond", "yf": "BNDX", "asset_class": "defensive", "area": "International bonds"},
         {"symbol": "LQD", "name": "iShares Investment Grade Corporate Bond", "yf": "LQD", "asset_class": "defensive", "area": "Corporate credit"},
-        {"symbol": "HYG", "name": "iShares High Yield Corporate Bond", "yf": "HYG", "asset_class": "defensive", "area": "High-yield credit"},
     ],
     "Safety": [
         {"symbol": "SHV", "name": "iShares Short Treasury", "yf": "SHV",
