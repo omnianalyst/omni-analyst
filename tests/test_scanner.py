@@ -7,6 +7,7 @@ import pandas as pd
 
 from omni.api.scanner import (
     ASSETS,
+    REPRESENTATIVE_ASSETS,
     SECTOR_RETURN_WINDOW,
     _compute_metrics,
     _correlation_to_market,
@@ -15,6 +16,7 @@ from omni.api.scanner import (
     _market_behavior,
     _overall_leaders,
     _payload,
+    _representative,
     _risk_tier,
     _sector_leader_payload,
     _tier_census,
@@ -229,6 +231,26 @@ def test_payload_publishes_a_risk_census_for_every_category() -> None:
     assert set(census) == {"stocks", "defensive", "crypto"}
     for category in census.values():
         assert category["high"] == 0
+
+
+def test_every_regime_bucket_designates_a_representative_that_exists_in_it() -> None:
+    """The portfolio's picks are policy, so each bucket must actually contain
+    its designated sleeve -- a representative pointing outside its bucket is a
+    mis-edited registry, not a judgment call."""
+    for bucket_name, designated in REPRESENTATIVE_ASSETS.items():
+        symbols = {asset["symbol"] for asset in ASSETS[bucket_name]}
+        assert designated["symbol"] in symbols, (
+            f"{bucket_name} designates {designated['symbol']}, which is not in the bucket"
+        )
+        assert designated["reason"], f"{bucket_name} must record why its sleeve is policy"
+
+
+def test_the_representative_is_returned_only_when_it_survived_ranking() -> None:
+    """A refused or unranked representative must yield None so the caller
+    falls back to measurement -- never a name the data cannot stand behind."""
+    assert _representative("Growth", {"VTI", "SPY"}) is not None
+    assert _representative("Growth", {"SPY"}) is None
+    assert _representative("NotABucket", {"VTI"}) is None
 
 
 def test_a_broken_seed_print_is_dropped_not_priced() -> None:

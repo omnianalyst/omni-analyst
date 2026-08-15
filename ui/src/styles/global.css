@@ -5565,6 +5565,32 @@ tr.row.tier-unknown td:first-child {
   font-weight: 400;
   letter-spacing: 0.04em;
 }
+.risk-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.risk-strip .metric-kicker {
+  margin: 0;
+}
+.risk-strip-bar {
+  display: flex;
+  overflow: hidden;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(16, 26, 43, 0.6);
+}
+.risk-segment + .risk-segment {
+  border-left: 1px solid rgba(9, 13, 20, 0.7);
+}
+.risk-note {
+  margin: 0;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1.6;
+}
 .blend {
   display: flex;
   flex-direction: column;

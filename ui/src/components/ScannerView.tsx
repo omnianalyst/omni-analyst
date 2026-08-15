@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, request } from "../lib/api";
-import { equalWeightAverage } from "../lib/blend";
+import { equalWeightAverage, riskShares } from "../lib/blend";
 import { CompaniesPanel } from "./CompaniesPanel";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
@@ -39,6 +39,7 @@ interface AssetMetric {
 interface ScenarioBucket {
   name: string;
   role: string;
+  representative?: { symbol: string; reason: string } | null;
   assets: AssetMetric[];
 }
 
@@ -326,14 +327,17 @@ function regimePhrase(bucketName: string): string {
   }
 }
 
-// The regime pick for THE portfolio: the bucket's top balanced score among
-// assets with a measured median (3+ complete years) and steady-or-balanced
-// risk. A high-volatility asset can top a bucket's score (an exchange token
-// leads Debasement on raw score) and it still shows in that regime's
-// alternatives -- but the portfolio pitched as the safe all-round answer holds
-// the best pick under 30% volatility. The bucket arrives already sorted by the
-// server's canonical score, so the pick is the first qualifying row.
+// The regime pick for THE portfolio: the bucket's designated sleeve when it
+// survived ranking (policy -- the regime's definition, not its recent
+// winner), else the best measured pick under steady/balanced risk. A
+// high-volatility asset can still top a bucket's score and shows in that
+// regime's alternatives; it just cannot become the safe answer.
 function regimePick(bucket: ScenarioBucket): AssetMetric | null {
+  const designated = bucket.representative?.symbol;
+  if (designated) {
+    const asset = bucket.assets.find((entry) => entry.symbol === designated);
+    if (asset) return asset;
+  }
   return (
     bucket.assets.find(
       (asset) =>
@@ -349,9 +353,11 @@ function regimePick(bucket: ScenarioBucket): AssetMetric | null {
 function BlendLegendRow({
   pick,
   bucketName,
+  riskShare,
 }: {
   pick: AssetMetric;
   bucketName: string;
+  riskShare: number;
 }) {
   const weight = 100 / 4;
   return (
@@ -360,6 +366,8 @@ function BlendLegendRow({
       <strong>{pick.symbol}</strong>
       <span class="muted">{REGIME_LABELS[bucketName] ?? bucketName} · {regimePhrase(bucketName)}</span>
       <span class="muted mono">{weight.toFixed(0)}% weight</span>
+      <span class="muted mono">{pick.volatility != null ? `${pick.volatility.toFixed(1)}% vol` : "vol —"}</span>
+      <span class="muted mono">{riskShare > 0 ? `${(riskShare * 100).toFixed(0)}% of risk` : ""}</span>
       <span class={`mono ${tone(pick.median_annual_return)}`}>
         {percent(pick.median_annual_return)} median yr
       </span>
@@ -390,15 +398,20 @@ function ThePortfolio({ data }: { data: ScannerData }) {
   const positiveTotal = equalWeightAverage(
     picks.map((entry) => Math.max(entry.pick.median_annual_return ?? 0, 0)),
   );
+  // Equal capital does not mean equal risk: with a quarter of the money in
+  // each, a sleeve's share of portfolio risk is its volatility over the sum
+  // of the four. Shown rather than hidden -- the growth sleeve dominates and
+  // the reader deserves to see by how much.
+  const shares = riskShares(picks.map((entry) => entry.pick.volatility ?? null));
 
   return (
     <section class="the-portfolio" aria-label="The portfolio">
       <div class="top-picks-heading">
         <h2>The portfolio</h2>
         <p>
-          One holding per regime at equal weight, each the best-measured pick under 30%
-          volatility. Whatever the market does next, one of these is built for it.
-          Add monthly; about once a year, rebalance back to equal weight.
+          One holding per regime at equal weight — each the sleeve that regime is defined
+          by, not last year&apos;s winner. Whatever the market does next, one of these is
+          built for it. Add monthly; about once a year, rebalance back to equal weight.
         </p>
       </div>
       <div class="blend">
@@ -431,10 +444,43 @@ function ThePortfolio({ data }: { data: ScannerData }) {
           </span>
         </div>
         <ol class="blend-legend">
-          {picks.map(({ bucket, pick }) => (
-            <BlendLegendRow key={pick.symbol} pick={pick} bucketName={bucket.name} />
+          {picks.map(({ bucket, pick }, index) => (
+            <BlendLegendRow
+              key={pick.symbol}
+              pick={pick}
+              bucketName={bucket.name}
+              riskShare={shares[index] ?? 0}
+            />
           ))}
         </ol>
+        {shares.length === picks.length && shares.some((share) => share > 0) ? (
+          <div class="risk-strip">
+            <p class="metric-kicker">Where the risk actually sits</p>
+            <div class="risk-strip-bar" aria-hidden="true">
+              {picks.map(({ bucket, pick }, index) => {
+                const share = shares[index] ?? 0;
+                if (share <= 0) return null;
+                return (
+                  <span
+                    key={pick.symbol}
+                    class="risk-segment"
+                    style={{ width: `${share * 100}%`, background: REGIME_COLORS[bucket.name] }}
+                    title={`${pick.symbol}: ${(share * 100).toFixed(0)}% of portfolio risk`}
+                  />
+                );
+              })}
+            </div>
+            <p class="risk-note">
+              Equal money is not equal risk: {picks
+                .map(({ pick }, index) => ({ pick, share: shares[index] ?? 0 }))
+                .filter((entry) => entry.share > 0)
+                .sort((a, b) => b.share - a.share)
+                .map((entry) => `${entry.pick.symbol} ${(entry.share * 100).toFixed(0)}%`)
+                .join(" · ")}{" "}
+              of the portfolio&apos;s swings, from each holding&apos;s measured volatility.
+            </p>
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -466,7 +512,11 @@ function ScenarioCards({ data }: { data: ScannerData }) {
               <div class="scenario-pick">
                 <span class="eyebrow">In the portfolio</span>
                 <strong>{pick.symbol}</strong>
-                <small>{pick.name}</small>
+                <small>
+                  {bucket.representative?.symbol === pick.symbol
+                    ? bucket.representative.reason
+                    : pick.name}
+                </small>
                 <strong class={`top-pick-return ${tone(pick.median_annual_return)}`}>
                   {percent(pick.median_annual_return)} <small class="unit-note">median yr</small>
                 </strong>

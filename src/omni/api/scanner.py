@@ -144,6 +144,50 @@ BUCKET_ROLES = {
     "Safety": "Recession/liquidity — cash and T-bills preserve capital",
 }
 
+# The sleeve each bucket exists to hold, fixed by policy rather than score.
+#
+# Picking each bucket's top scorer instead (XLK led Growth on 2026-08 data) is
+# a momentum bet wearing a score's clothes: over a 9-year sample the winner is
+# mostly whoever had the best recent run, and hand a novice that year's sector
+# leader as "the safe answer" is exactly the behaviour this product exists to
+# prevent. Each choice below is the asset the regime is *defined by* in the
+# literature (Browne's Permanent Portfolio and Dalio's All-Weather hold the
+# same four shapes): the whole market for growth, gold for currency
+# devaluation, the longest Treasuries for falling rates, T-bills for safety.
+# The scored alternatives still display on every scenario card; only the
+# portfolio's pick is policy.
+REPRESENTATIVE_ASSETS: dict[str, dict[str, str]] = {
+    "Growth": {
+        "symbol": "VTI",
+        "reason": "the entire US stock market, not a bet on which sector wins",
+    },
+    "Debasement": {
+        "symbol": "GLD",
+        "reason": "gold, the hard asset held through every currency devaluation",
+    },
+    "Deflation": {
+        "symbol": "TLT",
+        "reason": "20+ year Treasuries, the longest duration and the classic winner of falling rates",
+    },
+    "Safety": {
+        "symbol": "SGOV",
+        "reason": "0-3 month T-bills, cash that pays the policy rate with no duration risk",
+    },
+}
+
+
+def _representative(bucket_name: str, ranked_symbols: set[str]) -> dict[str, str] | None:
+    """The bucket's designated sleeve, when it survived ranking.
+
+    ``None`` when the representative was refused (feed defect) or unranked;
+    the caller falls back to the best measured pick rather than naming an
+    asset it cannot stand behind.
+    """
+    designated = REPRESENTATIVE_ASSETS.get(bucket_name)
+    if designated is None or designated["symbol"] not in ranked_symbols:
+        return None
+    return designated
+
 CRYPTO_ASSETS = {asset["symbol"] for asset in ASSETS["Debasement"] if asset["asset_class"] == "crypto"}
 COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
 
@@ -761,6 +805,9 @@ async def _build_scanner(app: App, audience) -> dict:
         buckets_data.append({
             "name": bucket_name,
             "role": BUCKET_ROLES.get(bucket_name, ""),
+            "representative": _representative(
+                bucket_name, {asset["symbol"] for asset in bucket_assets}
+            ),
             "assets": bucket_assets,
         })
 

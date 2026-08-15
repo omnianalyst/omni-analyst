@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { equalWeightAverage, weightShare } from "./blend";
+import { equalWeightAverage, riskShares, weightShare } from "./blend";
 
 describe("equalWeightAverage", () => {
   it("averages percent-unit values without rescaling them", () => {
@@ -28,5 +28,28 @@ describe("weightShare", () => {
 
   it("refuses a divide-by-zero for an empty portfolio", () => {
     expect(weightShare(0)).toBe(0);
+  });
+});
+
+describe("riskShares", () => {
+  it("splits risk by measured volatility", () => {
+    // Measured 2026-08-14: VTI ~18, GLD ~16, TLT ~14, SGOV ~0.2. Equal
+    // capital means the weight cancels; the growth sleeve still dominates
+    // risk, which is exactly what the strip exists to show.
+    const shares = riskShares([18, 16.2, 14, 0.2]);
+
+    expect(shares[0]).toBeCloseTo(18 / 48.4, 4);
+    expect(shares.reduce((sum, s) => sum + s, 0)).toBeCloseTo(1, 6);
+  });
+
+  it("treats an unmeasured holding as no contribution, not zero-risk", () => {
+    const shares = riskShares([20, null]);
+
+    expect(shares).toHaveLength(2);
+    expect(shares[1]).toBe(0);
+  });
+
+  it("returns empty when nothing is measured", () => {
+    expect(riskShares([null, undefined])).toEqual([]);
   });
 });
