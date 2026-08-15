@@ -86,6 +86,24 @@ export const GLOSSARY: Record<string, string> = {
     "What happened on the last attempt to close a gap: filled, unfillable (the source genuinely has no answer), or an error.",
   engine_status:
     "Read from the data itself rather than from a heartbeat: a loop that is alive writes rows, one that is dead stops.",
+
+  // -- Portfolio vocabulary (Discover) -----------------------------------------
+  median_year:
+    "The middle calendar-year return over everything measured: half the years were better, half worse. Robust to one freak year, unlike an average. Each asset's own history, so lengths differ.",
+  volatility:
+    "How widely returns swing, annualised. Under 10% is steady, 10-30% balanced, 30%+ aggressive. High volatility means bigger gains and bigger falls, not bigger expected returns.",
+  max_drawdown:
+    "The worst peak-to-trough fall in the asset's measured history. What holding it through the bad stretch would have cost. Past worst is not a floor on the future worst.",
+  positive_year_rate:
+    "The share of measured calendar years that ended up. A 78% rate means roughly four good years in five.",
+  rebalance:
+    "Selling what grew and buying what shrank until each holding is back at its target weight. Without it, winners quietly take over the portfolio and the balance erodes. About once a year is enough.",
+  sharpe:
+    "Return earned per unit of risk taken. Above roughly 1 is good over long periods; a negative number means the risk was taken for nothing. Withheld when volatility is too low for the ratio to mean anything.",
+  correlation:
+    "How often two assets move together, from -1 (always opposite) through 0 (unrelated) to 1 (always together). Low or negative correlation is what makes diversification work.",
+  risk_share:
+    "This holding's share of the portfolio's total swinging. Equal money in each does not mean equal risk: the volatile holdings drive the ride.",
 };
 
 export function define(term: string): string | undefined {

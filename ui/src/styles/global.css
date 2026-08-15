@@ -5643,6 +5643,23 @@ tr.row.tier-unknown td:first-child {
   gap: 8px;
   font-size: 12px;
 }
+.blend-legend li.blend-row {
+  flex-wrap: wrap;
+  row-gap: 3px;
+}
+.blend-legend li .blend-line-1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.blend-legend li .blend-line-2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10px;
+}
 .blend-legend .muted {
   flex: 1;
   min-width: 0;

@@ -3,6 +3,7 @@ import { authHeaderIfPresent, describeError, request } from "../lib/api";
 import { equalWeightAverage, riskShares } from "../lib/blend";
 import { CompaniesPanel } from "./CompaniesPanel";
 import { ErrorState } from "./ErrorState";
+import { Hint } from "./Hint";
 import { Loading } from "./Loading";
 
 type AssetClass = "stocks" | "crypto" | "defensive";
@@ -24,6 +25,7 @@ interface AssetMetric {
   cagr_5y?: number | null;
   cagr_10y?: number | null;
   median_annual_return?: number | null;
+  positive_year_rate?: number | null;
   history_years: number;
   complete_years: number;
   market_cap_rank?: number | null;
@@ -204,8 +206,9 @@ function AssetInfo({ asset }: { asset: AssetMetric }) {
         <div><dt>5y / year</dt><dd class={tone(asset.cagr_5y)}>{percent(asset.cagr_5y)}</dd></div>
         <div><dt>10y / year</dt><dd class={tone(asset.cagr_10y)}>{percent(asset.cagr_10y)}</dd></div>
         <div><dt>Median year</dt><dd class={tone(asset.median_annual_return)}>{percent(asset.median_annual_return)}</dd></div>
+        <div><dt>Up years</dt><dd>{asset.positive_year_rate != null ? `${asset.positive_year_rate.toFixed(1)}%` : "—"}</dd></div>
         <div><dt>Correlation to stocks</dt><dd>{asset.correlation_to_spy?.toFixed(2) ?? "—"}</dd></div>
-        <div><dt>Sharpe (return per unit of risk)</dt><dd>{asset.sharpe?.toFixed(2) ?? "withheld below 5% vol"}</dd></div>
+        <div><dt>Sharpe</dt><dd>{asset.sharpe?.toFixed(2) ?? "withheld below 5% vol"}</dd></div>
         <div><dt>Balanced score</dt><dd>{asset.scores.balanced?.toFixed(0) ?? "—"}</dd></div>
       </dl>
     </div>
@@ -361,16 +364,36 @@ function BlendLegendRow({
 }) {
   const weight = 100 / 4;
   return (
-    <li>
-      <span class="blend-swatch" style={{ background: REGIME_COLORS[bucketName] }} />
-      <strong>{pick.symbol}</strong>
-      <span class="muted">{REGIME_LABELS[bucketName] ?? bucketName} · {regimePhrase(bucketName)}</span>
-      <span class="muted mono">{weight.toFixed(0)}% weight</span>
-      <span class="muted mono">{pick.volatility != null ? `${pick.volatility.toFixed(1)}% vol` : "vol —"}</span>
-      <span class="muted mono">{riskShare > 0 ? `${(riskShare * 100).toFixed(0)}% of risk` : ""}</span>
-      <span class={`mono ${tone(pick.median_annual_return)}`}>
-        {percent(pick.median_annual_return)} median yr
-      </span>
+    <li class="blend-row">
+      <div class="blend-line-1">
+        <span class="blend-swatch" style={{ background: REGIME_COLORS[bucketName] }} />
+        <strong>{pick.symbol}</strong>
+        <span class="muted">{REGIME_LABELS[bucketName] ?? bucketName} · {regimePhrase(bucketName)}</span>
+        <span class="muted mono">{weight.toFixed(0)}% weight</span>
+        <Hint term="median_year">
+          <span class={`mono ${tone(pick.median_annual_return)}`}>
+            {percent(pick.median_annual_return)} median yr
+          </span>
+        </Hint>
+      </div>
+      <div class="blend-line-2">
+        <Hint term="volatility">
+          <span class="muted mono">{pick.volatility != null ? `${pick.volatility.toFixed(1)}% vol` : "vol —"}</span>
+        </Hint>
+        <Hint term="risk_share">
+          <span class="muted mono">{riskShare > 0 ? `${(riskShare * 100).toFixed(0)}% of risk` : ""}</span>
+        </Hint>
+        <Hint term="max_drawdown">
+          <span class="muted mono">
+            {pick.max_drawdown != null ? `worst fall ${pick.max_drawdown.toFixed(0)}%` : ""}
+          </span>
+        </Hint>
+        <Hint term="positive_year_rate">
+          <span class="muted mono">
+            {pick.positive_year_rate != null ? `up ${Math.round(pick.positive_year_rate)}% of years` : ""}
+          </span>
+        </Hint>
+      </div>
     </li>
   );
 }
@@ -411,7 +434,8 @@ function ThePortfolio({ data }: { data: ScannerData }) {
         <p>
           One holding per regime at equal weight — each the sleeve that regime is defined
           by, not last year&apos;s winner. Whatever the market does next, one of these is
-          built for it. Add monthly; about once a year, rebalance back to equal weight.
+          built for it. Add monthly; about once a year,{" "}
+          <Hint term="rebalance">rebalance</Hint> back to equal weight.
         </p>
       </div>
       <div class="blend">
@@ -433,7 +457,9 @@ function ThePortfolio({ data }: { data: ScannerData }) {
           })}
         </div>
         <div class="blend-total">
-          <span class="metric-kicker">Median year, equal weight</span>
+          <Hint term="median_year">
+            <span class="metric-kicker">Median year, equal weight</span>
+          </Hint>
           <strong class={total > 0 ? "value-positive" : "value-negative"}>
             {total > 0 ? "+" : ""}{total.toFixed(1)}%
           </strong>
