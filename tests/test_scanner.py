@@ -4,9 +4,11 @@ import math
 from datetime import UTC, datetime, timedelta
 
 import pandas as pd
+import pytest
 
 from omni.api.scanner import (
     ASSETS,
+    INCOME_AND_COST,
     REPRESENTATIVE_ASSETS,
     SECTOR_RETURN_WINDOW,
     _compute_metrics,
@@ -16,6 +18,7 @@ from omni.api.scanner import (
     _market_behavior,
     _overall_leaders,
     _payload,
+    _portfolio_history,
     _representative,
     _risk_tier,
     _sector_leader_payload,
@@ -251,6 +254,94 @@ def test_the_representative_is_returned_only_when_it_survived_ranking() -> None:
     assert _representative("Growth", {"VTI", "SPY"}) is not None
     assert _representative("Growth", {"SPY"}) is None
     assert _representative("NotABucket", {"VTI"}) is None
+
+
+def _two_sleeve_prices() -> pd.DataFrame:
+    """2022 and 2023, each sleeve doubling in one and halving in the other,
+    offset between the years. Equal weight with annual rebalancing must end
+    each year flat and show two zero calendar years -- drift-weighting would
+    instead compound (2022 halves the winner of 2023's sleeve), which is the
+    exact distinction this test pins."""
+    index = pd.date_range("2022-01-03", "2023-12-29", freq="B")
+    half = len(index) // 2
+    a = [100.0] * half + [200.0] * (len(index) - half)  # A doubles in year two
+    b = [50.0] * half + [25.0] * (len(index) - half)  # B halves in year two
+    return pd.DataFrame({"AAA": a, "BBB": b}, index=index)
+
+
+def test_portfolio_history_is_exactly_annually_rebalanced() -> None:
+    history = _portfolio_history(_two_sleeve_prices(), ["AAA", "BBB"])
+
+    assert history is not None
+    # Each year: one sleeve x2, one sleeve /2, equal weight -> exactly flat.
+    assert history["complete_years"] == 2
+    assert history["median_year"] == 0.0
+    assert history["worst_year"]["return"] == 0.0
+    assert history["best_year"]["return"] == 0.0
+    # Flat path -> no drawdown, no volatility.
+    assert history["worst_drawdown"] == 0.0
+    assert history["volatility"] == 0.0
+    assert history["window_start"] == "2022-01"
+
+
+def test_portfolio_history_refuses_a_partial_first_year() -> None:
+    """A series starting mid-year must drop that stub, so every reported
+    calendar year is whole -- a half-year annualised as a year is a number
+    pretending to be comparable."""
+    frame = _two_sleeve_prices()
+    stub = frame.iloc[:20].copy()
+    stub.index = stub.index - pd.Timedelta(days=365)
+    extended = pd.concat([stub, frame])
+
+    history = _portfolio_history(extended, ["AAA", "BBB"])
+
+    assert history is not None
+    assert history["window_start"] == "2022-01"
+    assert history["complete_years"] == 2
+
+
+def test_portfolio_history_is_none_when_a_sleeve_is_missing() -> None:
+    """One refused feed means no mix history at all -- not a three-sleeve
+    approximation wearing the four-sleeve portfolio's name."""
+    frame = _two_sleeve_prices()
+
+    assert _portfolio_history(frame, ["AAA", "MISSING"]) is None
+
+
+def test_a_drawdown_crossing_years_is_measured_through_the_trough() -> None:
+    """Two bad years in a row: the drawdown must span the decline (not reset
+    each January), which is what holding through it actually costs you. The
+    decline is intra-year, like a real market."""
+    index = pd.date_range("2022-01-03", "2023-12-29", freq="B")
+    half = len(index) // 2
+    # Year 1: flat at 100, then declines linearly to 50 across year 2.
+    second = [100.0 - 50.0 * (i + 1) / (len(index) - half) for i in range(len(index) - half)]
+    values = [100.0] * half + second
+    frame = pd.DataFrame({"AAA": values, "BBB": values}, index=index)
+
+    history = _portfolio_history(frame, ["AAA", "BBB"])
+
+    assert history is not None
+    assert history["worst_year"]["return"] == pytest.approx(-50.0, abs=0.2)
+    assert history["worst_drawdown"] == pytest.approx(-50.0, abs=0.2)
+
+
+def test_every_broad_etf_carries_income_and_cost() -> None:
+    """The static table must cover every non-crypto asset in the universe --
+    a missing entry renders as 'unknown' and an unknown cost is the one thing
+    this product refuses to guess."""
+    broad = {
+        asset["symbol"]
+        for assets in ASSETS.values()
+        for asset in assets
+        if asset["asset_class"] != "crypto"
+    }
+
+    missing = broad - set(INCOME_AND_COST)
+    assert not missing, f"assets without income/cost figures: {sorted(missing)}"
+    for figures in INCOME_AND_COST.values():
+        assert figures["expense_ratio_pct"] >= 0
+        assert figures["yield_pct"] >= 0
 
 
 def test_a_broken_seed_print_is_dropped_not_priced() -> None:

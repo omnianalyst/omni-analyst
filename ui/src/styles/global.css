@@ -5591,6 +5591,71 @@ tr.row.tier-unknown td:first-child {
   font-size: 11px;
   line-height: 1.6;
 }
+.history-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.history-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 10px 14px;
+  margin: 0;
+}
+.history-facts div {
+  display: flex;
+  flex-direction: column;
+}
+.history-facts dt {
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.history-facts dd {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.readings-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  background: rgba(11, 17, 26, 0.35);
+}
+.readings-strip .metric-kicker {
+  margin: 0;
+}
+.readings-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+}
+.reading {
+  display: flex;
+  flex-direction: column;
+}
+.reading-label {
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.reading-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.reading-sub {
+  color: var(--faint);
+  font-size: 9px;
+}
 .blend {
   display: flex;
   flex-direction: column;

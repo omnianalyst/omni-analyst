@@ -188,6 +188,119 @@ def _representative(bucket_name: str, ranked_symbols: set[str]) -> dict[str, str
         return None
     return designated
 
+
+# Approximate income and cost figures, from fund sponsors' latest published
+# pages. They drift with rates and distributions, so they carry their date and
+# are labelled approximate wherever shown; a veteran checks the fund page
+# before acting, and a novice should not be shown a number pretending to be
+# exact. Crypto holdings carry no entry: no distribution, no expense ratio --
+# the exchange spread and funding are theirs, and are measured elsewhere.
+INCOME_AND_COST: dict[str, dict[str, float]] = {
+    "VTI": {"yield_pct": 1.3, "expense_ratio_pct": 0.03},
+    "SPY": {"yield_pct": 1.2, "expense_ratio_pct": 0.09},
+    "QQQ": {"yield_pct": 0.6, "expense_ratio_pct": 0.20},
+    "DIA": {"yield_pct": 1.6, "expense_ratio_pct": 0.16},
+    "IWM": {"yield_pct": 1.2, "expense_ratio_pct": 0.19},
+    "VO": {"yield_pct": 1.4, "expense_ratio_pct": 0.04},
+    "VT": {"yield_pct": 1.9, "expense_ratio_pct": 0.07},
+    "VUG": {"yield_pct": 0.7, "expense_ratio_pct": 0.04},
+    "VTV": {"yield_pct": 2.2, "expense_ratio_pct": 0.04},
+    "QUAL": {"yield_pct": 0.7, "expense_ratio_pct": 0.15},
+    "MTUM": {"yield_pct": 0.6, "expense_ratio_pct": 0.15},
+    "USMV": {"yield_pct": 1.7, "expense_ratio_pct": 0.15},
+    "DGRO": {"yield_pct": 1.8, "expense_ratio_pct": 0.08},
+    "VEA": {"yield_pct": 3.0, "expense_ratio_pct": 0.05},
+    "VWO": {"yield_pct": 2.9, "expense_ratio_pct": 0.07},
+    "VXUS": {"yield_pct": 3.0, "expense_ratio_pct": 0.05},
+    "XLK": {"yield_pct": 0.6, "expense_ratio_pct": 0.08},
+    "XLF": {"yield_pct": 1.5, "expense_ratio_pct": 0.08},
+    "XLV": {"yield_pct": 1.5, "expense_ratio_pct": 0.08},
+    "XLI": {"yield_pct": 1.3, "expense_ratio_pct": 0.08},
+    "XLE": {"yield_pct": 3.2, "expense_ratio_pct": 0.08},
+    "XLY": {"yield_pct": 0.8, "expense_ratio_pct": 0.08},
+    "XLP": {"yield_pct": 2.1, "expense_ratio_pct": 0.08},
+    "XLU": {"yield_pct": 2.7, "expense_ratio_pct": 0.08},
+    "XLB": {"yield_pct": 1.9, "expense_ratio_pct": 0.08},
+    "XLC": {"yield_pct": 1.1, "expense_ratio_pct": 0.08},
+    "XLRE": {"yield_pct": 3.5, "expense_ratio_pct": 0.08},
+    "VNQ": {"yield_pct": 3.9, "expense_ratio_pct": 0.12},
+    "GLD": {"yield_pct": 0.0, "expense_ratio_pct": 0.40},
+    "SLV": {"yield_pct": 0.0, "expense_ratio_pct": 0.50},
+    "DBC": {"yield_pct": 0.0, "expense_ratio_pct": 0.87},
+    "TLT": {"yield_pct": 3.9, "expense_ratio_pct": 0.15},
+    "IEF": {"yield_pct": 3.6, "expense_ratio_pct": 0.15},
+    "TIP": {"yield_pct": 3.1, "expense_ratio_pct": 0.19},
+    "BND": {"yield_pct": 4.3, "expense_ratio_pct": 0.03},
+    "BNDX": {"yield_pct": 3.5, "expense_ratio_pct": 0.07},
+    "LQD": {"yield_pct": 4.5, "expense_ratio_pct": 0.14},
+    "HYG": {"yield_pct": 5.9, "expense_ratio_pct": 0.49},
+    "SHV": {"yield_pct": 4.8, "expense_ratio_pct": 0.12},
+    "SGOV": {"yield_pct": 4.9, "expense_ratio_pct": 0.09},
+}
+INCOME_AND_COST_AS_OF = "2026-08"
+
+
+def _portfolio_history(prices: pd.DataFrame, symbols: list[str]) -> dict[str, Any] | None:
+    """The equal-weight mix of the representatives, as it actually measured.
+
+    This is a description of the parts assembled, not a forecast: it is what
+    holding these four at equal weight, rebalanced every January, did over the
+    window where all four have prices. Exact annual rebalancing -- within each
+    calendar year every sleeve is normalised to its first price of that year
+    and averaged, and the years chain. The window starts at the first January
+    after the shortest history begins, so every reported calendar year is
+    whole; a partial year would report a real but incomparable number.
+
+    ``None`` when any sleeve is missing (a refused feed), so the page shows
+    nothing rather than a mix it cannot stand behind.
+    """
+    if any(symbol not in prices.columns for symbol in symbols):
+        return None
+    series = prices[symbols].dropna()
+    if len(series) < 60:
+        return None
+    # Drop a partial first year so every reported calendar year is whole. A
+    # year with under 200 trading days did not span the year (SGOV begins
+    # 2020-05; a 20-day January stub is not a year either), so the window
+    # starts at the first fully-spanned January.
+    first_year = series.index[0].year
+    if int((series.index.year == first_year).sum()) < 200:
+        series = series[series.index >= pd.Timestamp(year=first_year + 1, month=1, day=1)]
+    if len(series) < 60:
+        return None
+
+    chained: list[float] = []
+    value = 1.0
+    year_returns: dict[int, float] = {}
+    for year, year_prices in series.groupby(series.index.year):
+        normalised = year_prices / year_prices.iloc[0]
+        mix = normalised.mean(axis=1)
+        end = float(mix.iloc[-1])
+        value *= end
+        chained.extend(value * level / end for level in mix.tolist()[:-1])
+        chained.append(value)
+        # Stored as a percent return, not a growth factor -- a flat year is 0,
+        # never 100.
+        year_returns[year] = (end - 1.0) * 100
+    path = pd.Series(chained, index=series.index)
+
+    daily = path.pct_change().dropna()
+    returns = pd.Series(year_returns)
+    drawdown = float((path / path.cummax() - 1).min())
+    worst = returns.idxmin()
+    best = returns.idxmax()
+    return {
+        "window_start": series.index[0].strftime("%Y-%m"),
+        "window_end": series.index[-1].strftime("%Y-%m"),
+        "volatility": round(float(daily.std() * np.sqrt(252) * 100), 1),
+        "median_year": round(float(returns.median()), 2),
+        "worst_year": {"year": str(worst), "return": round(float(returns.loc[worst]), 1)},
+        "best_year": {"year": str(best), "return": round(float(returns.loc[best]), 1)},
+        "worst_drawdown": round(drawdown * 100, 1),
+        "up_years": round(float((returns > 0).mean() * 100), 0),
+        "complete_years": len(returns),
+    }
+
 CRYPTO_ASSETS = {asset["symbol"] for asset in ASSETS["Debasement"] if asset["asset_class"] == "crypto"}
 COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
 
@@ -791,6 +904,13 @@ async def _build_scanner(app: App, audience) -> dict:
             if a["asset_class"] == "crypto":
                 entry["market_cap_rank"] = eligible_crypto[symbol].get("rank")
             entry["return_1y"] = metrics.get("returns", {}).get("365d")
+            income = INCOME_AND_COST.get(symbol)
+            if income is not None:
+                entry["income_yield"] = income["yield_pct"]
+                entry["expense_ratio"] = income["expense_ratio_pct"]
+            else:
+                entry["income_yield"] = None
+                entry["expense_ratio"] = None
             if symbol in CRYPTO_ASSETS:
                 entry["funding_apr"] = funding.get(symbol)
             else:
@@ -856,6 +976,20 @@ async def _build_scanner(app: App, audience) -> dict:
         },
     }
     payload = _payload(buckets_data, sectors, coverage)
+    # The assembled mix's own history, shown only when every representative
+    # sleeve is present: one refused feed and the honest answer is nothing.
+    representatives = [
+        designated["symbol"]
+        for designated in REPRESENTATIVE_ASSETS.values()
+        if designated["symbol"] in prices.columns
+    ]
+    history = (
+        _portfolio_history(prices, [REPRESENTATIVE_ASSETS[b]["symbol"] for b in REPRESENTATIVE_ASSETS])
+        if len(representatives) == len(REPRESENTATIVE_ASSETS)
+        else None
+    )
+    payload["portfolio_history"] = history
+    payload["income_as_of"] = INCOME_AND_COST_AS_OF
     # A provider/DNS outage must not pin an empty market to the one-hour cache.
     # The honest empty response can be shown once, then the next request retries.
     if not prices.empty:

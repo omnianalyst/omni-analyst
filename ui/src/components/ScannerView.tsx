@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, request } from "../lib/api";
 import { equalWeightAverage, riskShares } from "../lib/blend";
+import { getRegime, type RegimeResponse } from "../lib/autonomous";
 import { CompaniesPanel } from "./CompaniesPanel";
 import { ErrorState } from "./ErrorState";
 import { Hint } from "./Hint";
@@ -26,6 +27,8 @@ interface AssetMetric {
   cagr_10y?: number | null;
   median_annual_return?: number | null;
   positive_year_rate?: number | null;
+  income_yield?: number | null;
+  expense_ratio?: number | null;
   history_years: number;
   complete_years: number;
   market_cap_rank?: number | null;
@@ -64,8 +67,22 @@ interface SectorLeaders {
   leaders: SectorLeader[];
 }
 
+interface PortfolioHistory {
+  window_start: string;
+  window_end: string;
+  volatility: number;
+  median_year: number;
+  worst_year: { year: string; return: number };
+  best_year: { year: string; return: number };
+  worst_drawdown: number;
+  up_years: number;
+  complete_years: number;
+}
+
 interface ScannerData {
   buckets: ScenarioBucket[];
+  portfolio_history: PortfolioHistory | null;
+  income_as_of?: string;
   category_rankings: Record<AssetClass, AssetMetric[]>;
   sectors: SectorLeaders[];
   overall_leaders: OverallLeader[];
@@ -207,6 +224,8 @@ function AssetInfo({ asset }: { asset: AssetMetric }) {
         <div><dt>10y / year</dt><dd class={tone(asset.cagr_10y)}>{percent(asset.cagr_10y)}</dd></div>
         <div><dt>Median year</dt><dd class={tone(asset.median_annual_return)}>{percent(asset.median_annual_return)}</dd></div>
         <div><dt>Up years</dt><dd>{asset.positive_year_rate != null ? `${asset.positive_year_rate.toFixed(1)}%` : "—"}</dd></div>
+        <div><dt>Income yield</dt><dd>{asset.income_yield != null ? `${asset.income_yield.toFixed(1)}%/yr` : "none"}</dd></div>
+        <div><dt>Fund fee</dt><dd>{asset.expense_ratio != null ? `${asset.expense_ratio.toFixed(2)}%/yr` : "—"}</dd></div>
         <div><dt>Correlation to stocks</dt><dd>{asset.correlation_to_spy?.toFixed(2) ?? "—"}</dd></div>
         <div><dt>Sharpe</dt><dd>{asset.sharpe?.toFixed(2) ?? "withheld below 5% vol"}</dd></div>
         <div><dt>Balanced score</dt><dd>{asset.scores.balanced?.toFixed(0) ?? "—"}</dd></div>
@@ -313,6 +332,54 @@ const REGIME_COLORS: Record<string, string> = {
   Deflation: "var(--tier-fresh)",
   Safety: "var(--border-strong)",
 };
+
+function PortfolioHistoryBlock({ history }: { history: PortfolioHistory }) {
+  return (
+    <div class="history-block">
+      <p class="metric-kicker">
+        The mix, measured · {history.window_start} to {history.window_end} ·{" "}
+        {history.complete_years} complete years, rebalanced every January
+      </p>
+      <dl class="history-facts">
+        <div>
+          <dt><Hint term="median_year">Median year</Hint></dt>
+          <dd class={history.median_year >= 0 ? "value-positive" : "value-negative"}>
+            {history.median_year > 0 ? "+" : ""}{history.median_year.toFixed(1)}%
+          </dd>
+        </div>
+        <div>
+          <dt><Hint term="volatility">Volatility</Hint></dt>
+          <dd>{history.volatility.toFixed(1)}%</dd>
+        </div>
+        <div>
+          <dt><Hint term="max_drawdown">Worst fall</Hint></dt>
+          <dd class="value-negative">{history.worst_drawdown.toFixed(1)}%</dd>
+        </div>
+        <div>
+          <dt>Worst year</dt>
+          <dd class="value-negative">
+            {history.worst_year.return.toFixed(1)}% <small class="unit-note">in {history.worst_year.year}</small>
+          </dd>
+        </div>
+        <div>
+          <dt>Best year</dt>
+          <dd class="value-positive">
+            +{history.best_year.return.toFixed(1)}% <small class="unit-note">in {history.best_year.year}</small>
+          </dd>
+        </div>
+        <div>
+          <dt><Hint term="positive_year_rate">Up years</Hint></dt>
+          <dd>{history.up_years.toFixed(0)}%</dd>
+        </div>
+      </dl>
+      <p class="risk-note">
+        What holding these four at equal weight actually did over the window where all four
+        have prices — history, not a forecast, and the window is short (it starts when the
+        youngest holding began trading).
+      </p>
+    </div>
+  );
+}
 
 // The regime a pick protects, as a phrase a first-time investor can read.
 function regimePhrase(bucketName: string): string {
@@ -426,6 +493,18 @@ function ThePortfolio({ data }: { data: ScannerData }) {
   // of the four. Shown rather than hidden -- the growth sleeve dominates and
   // the reader deserves to see by how much.
   const shares = riskShares(picks.map((entry) => entry.pick.volatility ?? null));
+  // Equal-weight income and cost from the sponsors' published figures. Gold
+  // pays nothing; a missing figure for any sleeve means the line stays hidden
+  // rather than guessing a yield.
+  const yields = picks.map((entry) => entry.pick.income_yield ?? null);
+  const costs = picks.map((entry) => entry.pick.expense_ratio ?? null);
+  const income =
+    yields.every((value) => value != null) && costs.every((value) => value != null)
+      ? {
+          yield: equalWeightAverage(yields),
+          cost: equalWeightAverage(costs),
+        }
+      : null;
 
   return (
     <section class="the-portfolio" aria-label="The portfolio">
@@ -507,10 +586,83 @@ function ThePortfolio({ data }: { data: ScannerData }) {
             </p>
           </div>
         ) : null}
+
+        {income != null ? (
+          <p class="risk-note">
+            Income about {income.yield.toFixed(1)}%/yr, costing {income.cost.toFixed(2)}%/yr in
+            fund fees (equal weight, sponsor figures as of {data.income_as_of ?? "last audit"}).
+          </p>
+        ) : null}
+
+        {data.portfolio_history ? <PortfolioHistoryBlock history={data.portfolio_history} /> : null}
       </div>
     </section>
   );
 }
+// Where the macro readings sit right now -- the same measured indicators the
+// Today page reports, beside the four regimes they describe. Descriptive, not
+// a forecast: it says what the gauges read, never which regime to bet on.
+function CurrentReadings() {
+  const [regime, setRegime] = useState<
+    | { kind: "loading" }
+    | { kind: "ok"; data: RegimeResponse }
+    | { kind: "error"; message: string }
+  >({ kind: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    getRegime()
+      .then((data) => { if (!cancelled) setRegime({ kind: "ok", data }); })
+      .catch((error) => {
+        if (!cancelled) setRegime({ kind: "error", message: describeError(error).message });
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (regime.kind === "loading") return null;
+  if (regime.kind === "error") {
+    return <p class="quiet-line">Current readings unavailable: {regime.message}</p>;
+  }
+  const v = regime.data.value;
+  if (!v || !v.cycle_phase) {
+    return (
+      <p class="quiet-line">
+        Current readings — the system waits for enough macro data before calling one.
+      </p>
+    );
+  }
+
+  const readings: Array<[string, string, string | null]> = [
+    ["Cycle phase", v.cycle_phase, null],
+    ["Risk regime", v.risk_regime.replace("_", " "), null],
+    ["Inflation", v.inflation_regime, `CPI ${v.inflation_yoy.toFixed(1)}% YoY`],
+    [
+      "Yield curve",
+      v.yield_curve_spread != null ? `${v.yield_curve_spread.toFixed(2)}%` : "—",
+      v.yield_curve_inverted ? "inverted" : "normal",
+    ],
+    ["Recession prob", `${(v.recession_probability * 100).toFixed(0)}%`, v.recession_assessment],
+    ["Policy", v.policy_stance, null],
+  ];
+
+  return (
+    <section class="readings-strip" aria-label="Current macro readings">
+      <p class="metric-kicker">
+        Current readings · what the gauges say now · descriptive, not a forecast
+      </p>
+      <div class="readings-row">
+        {readings.map(([label, value, sub]) => (
+          <span class="reading" key={label}>
+            <span class="reading-label">{label}</span>
+            <span class="reading-value">{value}</span>
+            {sub ? <span class="reading-sub">{sub}</span> : null}
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // The reassurance: four regimes, each with what it protects against, the pick
 // already in the portfolio, and the strongest alternatives measured in that
 // regime. This is the answer to "am I covered for stagflation?" — visibly.
@@ -791,6 +943,8 @@ export function ScannerView() {
       <ThePortfolio data={state.data} />
 
       <ScenarioCards data={state.data} />
+
+      <CurrentReadings />
 
       <RiskLadder data={state.data} />
 
