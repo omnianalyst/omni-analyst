@@ -5599,6 +5599,19 @@ tr.row.tier-unknown td:first-child {
   font-size: 11px;
   line-height: 1.6;
 }
+.decision-table-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+.decision-table-wrap .metric-kicker {
+  margin: 0;
+}
+.decision-table-wrap .row-default td {
+  background: rgba(52, 211, 153, 0.05);
+}
 .history-block {
   display: flex;
   flex-direction: column;

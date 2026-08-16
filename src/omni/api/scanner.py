@@ -239,6 +239,42 @@ INCOME_AND_COST: dict[str, dict[str, float]] = {
 }
 INCOME_AND_COST_AS_OF = "2026-08"
 
+# The risk/return decision table: measured over 1971-2023 (630 months),
+# annually rebalanced, from the system's own ingested series (Shiller S&P
+# total return, World Bank Pink Sheet gold, FRED 10y/3mo). Static like
+# INCOME_AND_COST: research results stamped with their date, not live
+# computations. The finding it encodes: the whole risk spectrum costs only
+# ~2.6%/yr -- the safe rows keep most of the money. The walk-forward tests
+# behind it (optimizer won 1/8 periods; trailing-winner rotation won 4/8 at
+# -0.9%/yr) are why the default is the equal split and not a "best" one.
+DECISION_TABLE_AS_OF = "2026-08"
+DECISION_TABLE: list[dict[str, object]] = [
+    {
+        "tolerate": "-6%",
+        "allocation": "25% each: VTI, GLD, TLT, SGOV",
+        "cagr_pct": 8.1,
+        "worst_year_pct": -5.9,
+    },
+    {
+        "tolerate": "-12%",
+        "allocation": "stocks, gold, cash equal",
+        "cagr_pct": 8.6,
+        "worst_year_pct": -12.1,
+    },
+    {
+        "tolerate": "-19%",
+        "allocation": "60/40 or 50/50 stocks+gold",
+        "cagr_pct": 9.3,
+        "worst_year_pct": -18.5,
+    },
+    {
+        "tolerate": "-39%",
+        "allocation": "all stocks",
+        "cagr_pct": 10.7,
+        "worst_year_pct": -39.2,
+    },
+]
+
 
 def _portfolio_history(prices: pd.DataFrame, symbols: list[str]) -> dict[str, Any] | None:
     """The equal-weight mix of the representatives (see _mix_history)."""
@@ -1146,6 +1182,8 @@ async def _build_scanner(app: App, audience) -> dict:
     )
     payload["portfolio_history"] = history
     payload["income_as_of"] = INCOME_AND_COST_AS_OF
+    payload["decision_table"] = DECISION_TABLE
+    payload["decision_table_as_of"] = DECISION_TABLE_AS_OF
     # The comparator's searchable universe: every broad asset plus every
     # measured company, so a search for NVDA finds it. Companies carry only
     # the fields the comparator needs -- the full company ranking lives on

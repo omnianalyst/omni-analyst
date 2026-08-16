@@ -85,6 +85,13 @@ interface ScannerData {
   buckets: ScenarioBucket[];
   portfolio_history: PortfolioHistory | null;
   income_as_of?: string;
+  decision_table?: Array<{
+    tolerate: string;
+    allocation: string;
+    cagr_pct: number;
+    worst_year_pct: number;
+  }>;
+  decision_table_as_of?: string;
   comparator_universe?: Array<{ symbol: string; name: string; kind?: string }>;
   category_rankings: Record<AssetClass, AssetMetric[]>;
   sectors: SectorLeaders[];
@@ -597,8 +604,61 @@ function ThePortfolio({ data }: { data: ScannerData }) {
         ) : null}
 
         {data.portfolio_history ? <PortfolioHistoryBlock history={data.portfolio_history} /> : null}
+
+        {data.decision_table && data.decision_table.length > 0 ? (
+          <DecisionTable rows={data.decision_table} asOf={data.decision_table_as_of} />
+        ) : null}
       </div>
     </section>
+  );
+}
+
+// Constraint in, allocation out: the only honest form of "best". Each row is
+// the highest-returning mix (1971-2023, annually rebalanced, our own ingested
+// series) for a given worst-tolerable-year -- and the whole spectrum costs
+// just 2.6%/yr, which is the strongest evidence for the 25x4 default there is.
+function DecisionTable({
+  rows,
+  asOf,
+}: {
+  rows: NonNullable<ScannerData["decision_table"]>;
+  asOf?: string;
+}) {
+  return (
+    <div class="decision-table-wrap">
+      <p class="metric-kicker">
+        Pick your row · the return you keep for the crash you can sit through
+      </p>
+      <div class="responsive-table">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Worst year you can tolerate</th>
+              <th>The highest-returning mix</th>
+              <th>Paid</th>
+              <th>Worst year</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.tolerate} class={row.tolerate === "-6%" ? "row-default" : undefined}>
+                <td><strong>{row.tolerate}</strong>{row.tolerate === "-6%" ? <small class="unit-note"> the default</small> : null}</td>
+                <td>{row.allocation}</td>
+                <td class="mono value-positive">+{row.cagr_pct.toFixed(1)}%/yr</td>
+                <td class="mono value-negative">{row.worst_year_pct.toFixed(1)}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p class="risk-note">
+        Measured 1971&ndash;2023, annual rebalancing, from the system&apos;s own ingested series
+        (Shiller S&amp;P, World Bank gold, FRED rates){asOf ? ` · table as of ${asOf}` : ""}.
+        History, not a forecast. The full risk spectrum costs only ~2.6%/yr: the safe rows keep
+        most of the money. Tested the other way &mdash; chasing the trailing decade&apos;s winner
+        &mdash; won 4 of 8 periods and returned less than holding the split.
+      </p>
+    </div>
   );
 }
 // Where the macro readings sit right now -- the same measured indicators the
