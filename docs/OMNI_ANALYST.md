@@ -673,6 +673,15 @@ ssh deployment-host "curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: app.omn
 Unauthenticated `/bulletin` and `/wallets` must return **401**, not 200 — a 200
 means the request hit the SPA fallback instead of the API.
 
+### Maintenance notes
+
+- `INCOME_AND_COST` in `src/omni/api/scanner.py` (fund yields and expense
+  ratios, shown on Discover and in mix comparisons) is **static sponsor data
+  stamped `INCOME_AND_COST_AS_OF`** — currently 2026-08. Yields drift with
+  rates and distributions; revisit quarterly or the page shows last summer's
+  income. A completeness test in `tests/test_scanner.py` forces every new
+  broad ETF to carry figures, but nothing forces the figures to stay fresh.
+
 ---
 
 ## 8. Ordered backlog

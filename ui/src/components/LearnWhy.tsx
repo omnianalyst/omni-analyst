@@ -16,9 +16,14 @@ export function LearnWhy() {
     const onClick = (event: MouseEvent) => {
       if (card.current && !card.current.contains(event.target as Node)) setOpen(false);
     };
+    // Lock the page behind the modal: scrolling the background while reading
+    // a dialog is disorienting and loses the reading position on close.
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     document.addEventListener("keydown", onKey);
     document.addEventListener("mousedown", onClick);
     return () => {
+      document.body.style.overflow = previousOverflow;
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("mousedown", onClick);
     };
@@ -47,10 +52,12 @@ export function LearnWhy() {
                 <h3>Everything measurable, one page</h3>
                 <p>
                   This system continuously measures the whole liquid universe it can verify --
-                  broad stock funds, sectors, bonds, gold, commodities, and major digital assets --
-                  and refuses any data feed it can prove is broken. What you see here is not a
-                  curated tip list; it is the measured average of everything, funnelled to the
-                  few decisions that actually matter.
+                  broad stock funds, sectors, bonds, gold, commodities, major digital assets,
+                  and 500 individual companies -- and refuses any data feed it can prove is
+                  broken. When an asset's feed fails, it drops from the rankings and appears
+                  under Coverage in the page footer, with the evidence. What you see here is
+                  not a curated tip list; it is the measured average of everything, funnelled
+                  to the few decisions that actually matter.
                 </p>
               </section>
               <section>

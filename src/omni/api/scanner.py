@@ -290,6 +290,20 @@ def _mix_history(
         return None
     held = prices[symbols].loc[series.index]
 
+    # A gap in any held series splices the path: dropna() removed the missing
+    # dates for everyone, so a crash inside the gap vanishes from the history
+    # and the mix reports a smoother ride than any holder experienced. The
+    # baseline is each symbol's own observed cadence (a crypto panel runs
+    # calendar days, an ETF panel business days) -- not a synthetic calendar,
+    # which would flag every weekend as a hole.
+    for symbol in symbols:
+        observed = prices[symbol].dropna().index
+        if len(observed) < 2:
+            return None
+        gaps = observed.to_series().diff().dt.days.dropna()
+        if (gaps > 15).any():
+            return None
+
     # Each year is measured from the previous year's final close, not the
     # current year's first print -- a return realized over new year's belongs
     # to the new year, and normalising to the first print would attribute it
@@ -499,11 +513,31 @@ def _panel() -> pd.DataFrame:
     return prices
 
 
-async def _company_symbols(pool) -> list[tuple[str, str]]:
+_company_cache: dict[str, dict[str, Any]] = {}
+
+
+async def _company_panel_cached(pool, audience) -> pd.DataFrame:
+    """The audience-scoped company panel, cached for an hour beside the other
+    scanner caches -- the claim scan is a quarter-million rows and must not
+    run per comparator click. An empty result is not cached: it may mean the
+    audience is entitled but unlicensed, and a later license change should be
+    visible immediately rather than pinned to the hour."""
+    key = str(audience) if audience is not None else "anonymous"
+    now = time.time()
+    cached = _company_cache.get(key)
+    if cached is not None and now - cached["ts"] < CACHE_TTL:
+        return cached["panel"]
+    panel = await _company_panel(pool, audience)
+    if not panel.empty:
+        _company_cache[key] = {"panel": panel, "ts": now}
+    return panel
+
+
+async def _company_symbols(pool, audience) -> list[tuple[str, str]]:
     """Symbols and names of every company with measured price history that
     clears the comparator's history floor -- the searchable tail of the mix
     comparator's universe."""
-    panel = await _company_panel(pool)
+    panel = await _company_panel_cached(pool, audience)
     if panel.empty:
         return []
     rows = await pool.fetch(
@@ -542,11 +576,13 @@ def _company_rows_to_series(rows) -> dict[str, dict[pd.Timestamp, float]]:
     return series
 
 
-async def _company_panel(pool) -> pd.DataFrame:
-    """Measured daily closes for the 500 company universe, from the claim
-    store -- the same source the companies scanner reads. Only symbols that
-    clear the comparator's own 200-session history floor are returned, so a
-    company added to a mix arrives with enough history to be measured."""
+async def _company_panel(pool, audience) -> pd.DataFrame:
+    """Measured daily closes for the company universe, from the claim store --
+    the same audience-scoped source the companies scanner reads. Company
+    prices are byo_only Polygon claims, so an anonymous caller is not entitled
+    to them and gets an empty panel (the endpoint layer refuses the request
+    outright). Only symbols that clear the comparator's own 200-session
+    history floor are returned."""
     from omni.coverage.visibility import visible_claims_cte
 
     rows = await pool.fetch(
@@ -558,7 +594,7 @@ async def _company_panel(pool) -> pd.DataFrame:
         WHERE e.kind = 'company' AND v.claim_type = 'price_snapshot'
         ORDER BY e.symbol, v.event_date
         """,
-        None,
+        audience,
     )
     series = _company_rows_to_series(rows)
 
@@ -1114,7 +1150,7 @@ async def _build_scanner(app: App, audience) -> dict:
     # measured company, so a search for NVDA finds it. Companies carry only
     # the fields the comparator needs -- the full company ranking lives on
     # its own endpoint with sector and score detail.
-    company_symbols = await _company_symbols(app.db.pool)
+    company_symbols = await _company_symbols(app.db.pool, audience)
     if company_symbols:
         payload["comparator_universe"] = [
             {"symbol": symbol, "name": name, "kind": "company"}
@@ -1148,7 +1184,14 @@ def build_router(app: App) -> Router:
         by name, rather than quietly dropping it and comparing a different
         portfolio than the one asked about.
         """
-        from neutron.error import bad_request
+        from neutron.error import bad_request, unauthorized
+
+        # A mix may include companies, whose prices are byo_only Polygon
+        # claims -- the same entitlement the companies scanner enforces. An
+        # anonymous caller gets the same 401, not a silently smaller universe.
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
 
         try:
             body = await request.json()
@@ -1177,7 +1220,7 @@ def build_router(app: App) -> Router:
         prices = _panel()
         if prices.empty:
             raise bad_request("the measured price panel is unavailable; try again shortly")
-        companies = await _company_panel(app.db.pool)
+        companies = await _company_panel_cached(app.db.pool, audience)
         if not companies.empty:
             prices = prices.join(companies, how="outer")
 
@@ -1206,7 +1249,35 @@ def build_router(app: App) -> Router:
             raise bad_request(
                 "the selected assets do not share a measured window with the portfolio"
             )
-        return {"custom": custom, "policy": policy}
+
+        # Income and cost for the caller's mix, where every held symbol has a
+        # sponsor figure. Companies and crypto carry none by construction -- a
+        # mix holding any of them reports partial figures with the absent
+        # symbols named, never a guess.
+        total_weight = sum(weight for _, weight in positions)
+        priced = [
+            (symbol, weight / total_weight)
+            for symbol, weight in positions
+            if symbol in INCOME_AND_COST
+        ]
+        unpriced = [symbol for symbol, _ in positions if symbol not in INCOME_AND_COST]
+        income = None
+        if priced:
+            income = {
+                "yield_pct": round(
+                    sum(w * INCOME_AND_COST[s]["yield_pct"] for s, w in priced), 2
+                ),
+                "expense_ratio_pct": round(
+                    sum(w * INCOME_AND_COST[s]["expense_ratio_pct"] for s, w in priced), 3
+                ),
+                "not_covered": unpriced,
+            }
+        return {
+            "custom": custom,
+            "policy": policy,
+            "income": income,
+            "income_as_of": INCOME_AND_COST_AS_OF,
+        }
 
     return router
 

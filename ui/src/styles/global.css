@@ -5840,7 +5840,8 @@ tr.row.tier-unknown td:first-child {
   text-align: left;
   cursor: pointer;
 }
-.compare-suggestions button:hover {
+.compare-suggestions button:hover,
+.compare-suggestions button.suggested {
   background: rgba(92, 197, 255, 0.08);
 }
 .compare-suggestions strong {
@@ -5943,6 +5944,35 @@ tr.row.tier-unknown td:first-child {
 .col-active {
   color: var(--text) !important;
   font-weight: 600;
+}
+@media (max-width: 640px) {
+  .holding-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .compare-positions li {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .compare-positions small {
+    flex-basis: 100%;
+    white-space: normal;
+  }
+  .readings-row {
+    gap: 8px 16px;
+  }
+  .blend-total {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+  .history-facts {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .compare-table td,
+  .compare-table th {
+    padding-left: 6px;
+    padding-right: 6px;
+  }
 }
 .blend {
   display: flex;

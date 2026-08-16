@@ -580,11 +580,11 @@ function ThePortfolio({ data }: { data: ScannerData }) {
             <p class="risk-note">
               Equal money is not equal risk: {picks
                 .map(({ pick }, index) => ({ pick, share: shares[index] ?? 0 }))
-                .filter((entry) => entry.share > 0)
                 .sort((a, b) => b.share - a.share)
                 .map((entry) => `${entry.pick.symbol} ${(entry.share * 100).toFixed(0)}%`)
                 .join(" · ")}{" "}
               of the portfolio&apos;s swings, from each holding&apos;s measured volatility.
+              A 0% holding carries none of the swings -- that is what holding cash is for.
             </p>
           </div>
         ) : null}
@@ -866,7 +866,7 @@ function BestMeasured({ data }: { data: ScannerData }) {
           <h2>The best measured, by category</h2>
           <p>
             {horizon === "short"
-              ? "Ranked by the trailing year -- who is winning right now."
+              ? "Ranked by the trailing year -- who is winning right now. A single year's winner is often an extreme event; ZEC's +1223% was real, and it says nothing about the next year."
               : "Ranked by median calendar year over everything measured (3-year minimum) -- who wins over time."}
           </p>
         </div>

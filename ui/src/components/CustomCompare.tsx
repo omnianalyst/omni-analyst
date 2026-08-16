@@ -1,4 +1,4 @@
-import { useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, sendJson } from "../lib/api";
 import type { PortfolioHistory } from "./ScannerView";
 
@@ -9,9 +9,17 @@ interface UniverseEntry {
   median_annual_return?: number | null;
 }
 
+interface MixIncome {
+  yield_pct: number;
+  expense_ratio_pct: number;
+  not_covered: string[];
+}
+
 interface CompareResponse {
   custom: PortfolioHistory;
   policy: PortfolioHistory;
+  income: MixIncome | null;
+  income_as_of?: string;
 }
 
 interface Position {
@@ -39,7 +47,19 @@ export function CustomCompare({
 }) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(0);
   const [result, setResult] = useState<Result>({ kind: "idle" });
+  const root = useRef<HTMLDivElement>(null);
+
+  // Close the suggestion dropdown on any click outside the picker.
+  useEffect(() => {
+    if (query.trim() === "") return;
+    const onDocClick = (event: MouseEvent) => {
+      if (root.current && !root.current.contains(event.target as Node)) setQuery("");
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [query]);
 
   const searchable = useMemo(() => {
     const seen = new Set<string>();
@@ -75,6 +95,7 @@ export function CustomCompare({
         : [...current, { symbol, weight: 1 }],
     );
     setQuery("");
+    setHighlight(0);
     setResult({ kind: "idle" });
   }
 
@@ -118,22 +139,42 @@ export function CustomCompare({
         </p>
       </div>
 
-      <div class="compare-picker">
+      <div class="compare-picker" ref={root}>
         <input
           type="search"
           placeholder="Add an asset -- try VTI, GLD, NVDA, BTC..."
           value={query}
-          onInput={(event) => setQuery(event.currentTarget.value)}
+          onInput={(event) => {
+            setQuery(event.currentTarget.value);
+            setHighlight(0);
+          }}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && suggestions.length > 0) add(suggestions[0].symbol);
+            if (event.key === "ArrowDown" && suggestions.length > 0) {
+              event.preventDefault();
+              setHighlight((h) => Math.min(h + 1, suggestions.length - 1));
+            } else if (event.key === "ArrowUp" && suggestions.length > 0) {
+              event.preventDefault();
+              setHighlight((h) => Math.max(h - 1, 0));
+            } else if (event.key === "Enter" && suggestions.length > 0) {
+              event.preventDefault();
+              add(suggestions[highlight]?.symbol ?? suggestions[0].symbol);
+            } else if (event.key === "Escape") {
+              setQuery("");
+            }
           }}
           aria-label="Add an asset to your mix"
+          aria-autocomplete="list"
         />
         {suggestions.length > 0 ? (
-          <ul class="compare-suggestions">
-            {suggestions.map((entry) => (
+          <ul class="compare-suggestions" role="listbox">
+            {suggestions.map((entry, index) => (
               <li key={entry.symbol}>
-                <button type="button" onClick={() => add(entry.symbol)}>
+                <button
+                  type="button"
+                  class={index === highlight ? "suggested" : ""}
+                  onMouseEnter={() => setHighlight(index)}
+                  onClick={() => add(entry.symbol)}
+                >
                   <strong>{entry.symbol}</strong>
                   <small>
                     {entry.name}
@@ -194,7 +235,20 @@ export function CustomCompare({
       {result.kind === "error" ? <p class="inline-warning">{result.message}</p> : null}
 
       {result.kind === "ok" ? (
-        <CompareTable custom={result.data.custom} policy={result.data.policy} />
+        <>
+          <CompareTable custom={result.data.custom} policy={result.data.policy} />
+          {result.data.income ? (
+            <p class="risk-note">
+              Income about {result.data.income.yield_pct.toFixed(1)}%/yr, costing{" "}
+              {result.data.income.expense_ratio_pct.toFixed(2)}%/yr in fund fees, over the
+              assets with sponsor figures
+              {result.data.income.not_covered.length > 0
+                ? ` (${result.data.income.not_covered.join(", ")} carry none -- companies and crypto pay no fund yield tracked here)`
+                : ""}
+              , as of {result.data.income_as_of ?? "last audit"}.
+            </p>
+          ) : null}
+        </>
       ) : null}
     </section>
   );

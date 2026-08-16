@@ -302,10 +302,14 @@ def test_portfolio_history_is_exactly_annually_rebalanced() -> None:
 def test_portfolio_history_refuses_a_partial_first_year() -> None:
     """A series starting mid-year must drop that stub, so every reported
     calendar year is whole -- a half-year annualised as a year is a number
-    pretending to be comparable."""
+    pretending to be comparable. The stub sits directly before the real
+    frame: a synthetic year-long jump between the two would be a price gap,
+    which the cadence check correctly refuses."""
     frame = _two_sleeve_prices()
-    stub = frame.iloc[:20].copy()
-    stub.index = stub.index - pd.Timedelta(days=365)
+    stub_index = pd.date_range(
+        frame.index[0] - pd.offsets.BDay(20), periods=20, freq="B"
+    )
+    stub = pd.DataFrame({"AAA": [100.0] * 20, "BBB": [100.0] * 20}, index=stub_index)
     extended = pd.concat([stub, frame])
 
     history = _portfolio_history(extended, ["AAA", "BBB"])
@@ -431,6 +435,33 @@ def test_company_rows_parse_the_ohlcv_snapshot_shape() -> None:
 
     assert set(series) == {"NVDA"}
     assert list(series["NVDA"].values()) == [1.75, 1.8]
+
+
+def test_a_holey_series_refuses_rather_than_splices() -> None:
+    """A month of missing closes in one held symbol removed those dates for
+    every series -- the mix path jumped the gap and any crash inside it
+    vanished. A gap past 15 calendar days in a held symbol refuses the
+    history; the baseline is the symbol's own cadence, so weekends and a
+    market-closed week never count as holes."""
+    index = pd.date_range("2022-01-03", "2023-12-29", freq="B")
+    values = pd.Series(100.0, index=index)
+    holey = values.copy()
+    holey.iloc[100:130] = float("nan")  # 30 business days, ~42 calendar
+    frame = pd.DataFrame({"AAA": holey, "BBB": values})
+
+    assert _mix_history(frame, [("AAA", 1.0), ("BBB", 1.0)]) is None
+
+
+def test_a_long_weekend_of_gaps_is_not_a_hole() -> None:
+    """Holidays and provider off-days leave short gaps; a market-closed week
+    (thanksgiving stretch, exchange outage) must not refuse the history."""
+    index = pd.date_range("2022-01-03", "2023-12-29", freq="B")
+    values = pd.Series(100.0, index=index)
+    sparse = values.copy()
+    sparse.iloc[100:105] = float("nan")  # 5 business days missing
+    frame = pd.DataFrame({"AAA": sparse, "BBB": values})
+
+    assert _mix_history(frame, [("AAA", 1.0), ("BBB", 1.0)]) is not None
 
 
 def test_a_broken_seed_print_is_dropped_not_priced() -> None:
