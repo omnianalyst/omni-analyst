@@ -499,6 +499,73 @@ def _panel() -> pd.DataFrame:
     return prices
 
 
+async def _company_symbols(pool) -> list[tuple[str, str]]:
+    """Symbols and names of every company with measured price history that
+    clears the comparator's history floor -- the searchable tail of the mix
+    comparator's universe."""
+    panel = await _company_panel(pool)
+    if panel.empty:
+        return []
+    rows = await pool.fetch(
+        "SELECT symbol, name FROM entity WHERE kind = 'company' AND symbol = ANY($1)",
+        list(panel.columns),
+    )
+    return sorted((row["symbol"], row["name"]) for row in rows)
+
+
+async def _company_panel(pool) -> pd.DataFrame:
+    """Measured daily closes for the 500 company universe, from the claim
+    store -- the same source the companies scanner reads. Only symbols that
+    clear the comparator's own 200-session history floor are returned, so a
+    company added to a mix arrives with enough history to be measured."""
+    import json as _json
+
+    from omni.coverage.visibility import visible_claims_cte
+
+    rows = await pool.fetch(
+        f"""
+        WITH visible AS ({visible_claims_cte("$1")})
+        SELECT e.symbol, v.value, v.event_date
+        FROM visible v
+        JOIN entity e ON e.id = v.entity_id
+        WHERE e.kind = 'company' AND v.claim_type = 'price_snapshot'
+        ORDER BY e.symbol, v.event_date
+        """,
+        None,
+    )
+    series: dict[str, dict[pd.Timestamp, float]] = {}
+    for row in rows:
+        raw = row["value"]
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except _json.JSONDecodeError:
+                continue
+        if isinstance(raw, dict):
+            raw = raw.get("value")
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(price) or price <= 0:
+            continue
+        stamp = pd.Timestamp(row["event_date"])
+        if stamp.tzinfo is not None:
+            stamp = stamp.tz_convert("UTC")
+        series.setdefault(row["symbol"], {})[stamp.normalize()] = price
+
+    frames = {
+        symbol: pd.Series(points).sort_index()
+        for symbol, points in series.items()
+        if len(points) >= 200
+    }
+    if not frames:
+        return pd.DataFrame()
+    panel = pd.DataFrame(frames)
+    panel.index = pd.to_datetime(panel.index).tz_localize(None).normalize()
+    return panel.groupby(level=0).last()
+
+
 def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str, Any]:
     prices = prices.dropna()
     prices = prices[np.isfinite(prices.astype(float)) & (prices.astype(float) > 0)]
@@ -1035,6 +1102,18 @@ async def _build_scanner(app: App, audience) -> dict:
     )
     payload["portfolio_history"] = history
     payload["income_as_of"] = INCOME_AND_COST_AS_OF
+    # The comparator's searchable universe: every broad asset plus every
+    # measured company, so a search for NVDA finds it. Companies carry only
+    # the fields the comparator needs -- the full company ranking lives on
+    # its own endpoint with sector and score detail.
+    company_symbols = await _company_symbols(app.db.pool)
+    if company_symbols:
+        payload["comparator_universe"] = [
+            {"symbol": symbol, "name": name, "kind": "company"}
+            for symbol, name in company_symbols
+        ]
+    else:
+        payload["comparator_universe"] = []
     # A provider/DNS outage must not pin an empty market to the one-hour cache.
     # The honest empty response can be shown once, then the next request retries.
     if not prices.empty:
@@ -1090,6 +1169,9 @@ def build_router(app: App) -> Router:
         prices = _panel()
         if prices.empty:
             raise bad_request("the measured price panel is unavailable; try again shortly")
+        companies = await _company_panel(app.db.pool)
+        if not companies.empty:
+            prices = prices.join(companies, how="outer")
 
         policy_symbols = [
             REPRESENTATIVE_ASSETS[bucket]["symbol"] for bucket in REPRESENTATIVE_ASSETS

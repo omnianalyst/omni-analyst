@@ -85,6 +85,7 @@ interface ScannerData {
   buckets: ScenarioBucket[];
   portfolio_history: PortfolioHistory | null;
   income_as_of?: string;
+  comparator_universe?: Array<{ symbol: string; name: string; kind?: string }>;
   category_rankings: Record<AssetClass, AssetMetric[]>;
   sectors: SectorLeaders[];
   overall_leaders: OverallLeader[];
@@ -1015,7 +1016,7 @@ export function ScannerView() {
 
       <ThePortfolio data={state.data} />
 
-      <CustomCompare universe={universe} />
+      <CustomCompare universe={universe} companies={state.data.comparator_universe ?? []} />
 
       <BestMeasured data={state.data} />
 

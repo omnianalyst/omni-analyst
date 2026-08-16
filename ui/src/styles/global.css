@@ -5694,7 +5694,7 @@ tr.row.tier-unknown td:first-child {
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
-  padding: 20px 22px 14px;
+  padding: 22px 24px 16px;
   border-bottom: 1px solid var(--border-soft);
 }
 .learn-why-card h2 {
@@ -5717,7 +5717,7 @@ tr.row.tier-unknown td:first-child {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 18px 22px 22px;
+  padding: 20px 24px 24px;
 }
 .learn-why-body h3 {
   margin: 0 0 6px;

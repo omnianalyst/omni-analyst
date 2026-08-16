@@ -1,6 +1,13 @@
 import { useMemo, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, sendJson } from "../lib/api";
-import type { AssetMetric, PortfolioHistory } from "./ScannerView";
+import type { PortfolioHistory } from "./ScannerView";
+
+interface UniverseEntry {
+  symbol: string;
+  name: string;
+  kind?: string;
+  median_annual_return?: number | null;
+}
 
 interface CompareResponse {
   custom: PortfolioHistory;
@@ -18,31 +25,48 @@ type Result =
   | { kind: "error"; message: string }
   | { kind: "ok"; data: CompareResponse };
 
-// Assemble your own mix from anything measured and set it against the policy
-// portfolio over exactly the same window. The arithmetic is the server's --
-// same annual rebalancing, same window rules -- so the comparison is honest
-// by construction: what a different mix would have gained, and what it would
-// have cost in risk.
-export function CustomCompare({ universe }: { universe: AssetMetric[] }) {
+// Assemble your own mix from anything measured -- broad assets or individual
+// companies -- and set it against the policy portfolio over exactly the same
+// window. The arithmetic is the server's -- same annual rebalancing, same
+// window rules -- so the comparison is honest by construction: what a
+// different mix would have gained, and what it would have cost in risk.
+export function CustomCompare({
+  universe,
+  companies,
+}: {
+  universe: UniverseEntry[];
+  companies: UniverseEntry[];
+}) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<Result>({ kind: "idle" });
 
-  const bySymbol = useMemo(
-    () => new Map(universe.map((asset) => [asset.symbol, asset])),
-    [universe],
+  const searchable = useMemo(() => {
+    const seen = new Set<string>();
+    const all: UniverseEntry[] = [];
+    for (const entry of [...universe, ...companies]) {
+      if (seen.has(entry.symbol)) continue;
+      seen.add(entry.symbol);
+      all.push(entry);
+    }
+    return all;
+  }, [universe, companies]);
+  const names = useMemo(
+    () => new Map(searchable.map((entry) => [entry.symbol, entry.name])),
+    [searchable],
   );
+
   const suggestions = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return [];
-    return universe
+    return searchable
       .filter(
-        (asset) =>
-          !positions.some((p) => p.symbol === asset.symbol) &&
-          (asset.symbol.toLowerCase().includes(q) || asset.name.toLowerCase().includes(q)),
+        (entry) =>
+          !positions.some((p) => p.symbol === entry.symbol) &&
+          (entry.symbol.toLowerCase().includes(q) || entry.name.toLowerCase().includes(q)),
       )
-      .slice(0, 6);
-  }, [query, universe, positions]);
+      .slice(0, 8);
+  }, [query, searchable, positions]);
 
   function add(symbol: string) {
     setPositions((current) =>
@@ -88,16 +112,16 @@ export function CustomCompare({ universe }: { universe: AssetMetric[] }) {
       <div class="top-picks-heading">
         <h2>Test your own mix</h2>
         <p>
-          Pick anything measured, set weights, and set it against the portfolio above -- the
-          same window, the same annual rebalancing. See what a different mix would have gained,
-          and what it would have cost in risk.
+          Pick anything measured -- broad assets or individual companies -- set weights, and
+          set it against the portfolio above. Same window, same annual rebalancing: see what
+          a different mix would have gained, and what it would have cost in risk.
         </p>
       </div>
 
       <div class="compare-picker">
         <input
           type="search"
-          placeholder="Add an asset -- try VTI, GLD, QQQ, BTC..."
+          placeholder="Add an asset -- try VTI, GLD, NVDA, BTC..."
           value={query}
           onInput={(event) => setQuery(event.currentTarget.value)}
           onKeyDown={(event) => {
@@ -107,13 +131,18 @@ export function CustomCompare({ universe }: { universe: AssetMetric[] }) {
         />
         {suggestions.length > 0 ? (
           <ul class="compare-suggestions">
-            {suggestions.map((asset) => (
-              <li key={asset.symbol}>
-                <button type="button" onClick={() => add(asset.symbol)}>
-                  <strong>{asset.symbol}</strong>
-                  <small>{asset.name}</small>
+            {suggestions.map((entry) => (
+              <li key={entry.symbol}>
+                <button type="button" onClick={() => add(entry.symbol)}>
+                  <strong>{entry.symbol}</strong>
+                  <small>
+                    {entry.name}
+                    {entry.kind === "company" ? " · company" : ""}
+                  </small>
                   <span class="mono">
-                    {asset.median_annual_return != null ? `${asset.median_annual_return.toFixed(1)}% med` : ""}
+                    {entry.median_annual_return != null
+                      ? `${entry.median_annual_return.toFixed(1)}% med`
+                      : ""}
                   </span>
                 </button>
               </li>
@@ -124,31 +153,28 @@ export function CustomCompare({ universe }: { universe: AssetMetric[] }) {
 
       {positions.length > 0 ? (
         <ul class="compare-positions">
-          {positions.map((position) => {
-            const asset = bySymbol.get(position.symbol);
-            return (
-              <li key={position.symbol}>
-                <strong>{position.symbol}</strong>
-                <small>{asset?.name}</small>
-                <label>
-                  weight
-                  <input
-                    type="number"
-                    min="0.01"
-                    step="0.25"
-                    value={position.weight}
-                    onInput={(event) => setWeight(position.symbol, Number(event.currentTarget.value))}
-                  />
-                </label>
-                <span class="mono">
-                  {((position.weight / totalWeight) * 100).toFixed(0)}%
-                </span>
-                <button type="button" aria-label={`Remove ${position.symbol}`} onClick={() => remove(position.symbol)}>
-                  ×
-                </button>
-              </li>
-            );
-          })}
+          {positions.map((position) => (
+            <li key={position.symbol}>
+              <strong>{position.symbol}</strong>
+              <small>{names.get(position.symbol)}</small>
+              <label>
+                weight
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.25"
+                  value={position.weight}
+                  onInput={(event) => setWeight(position.symbol, Number(event.currentTarget.value))}
+                />
+              </label>
+              <span class="mono">
+                {((position.weight / totalWeight) * 100).toFixed(0)}%
+              </span>
+              <button type="button" aria-label={`Remove ${position.symbol}`} onClick={() => remove(position.symbol)}>
+                ×
+              </button>
+            </li>
+          ))}
         </ul>
       ) : (
         <p class="quiet-line">Nothing added yet. Two or more assets make a mix.</p>
