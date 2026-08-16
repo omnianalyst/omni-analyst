@@ -107,7 +107,7 @@ async def write_claims(
                 json.dumps(draft.value),
                 draft.unit,
                 json.dumps(draft.evidence) if draft.evidence else None,
-                source,
+                draft.source or source,
                 draft.event_date,
                 draft.knowledge_date,
                 draft.confidence,

@@ -33,6 +33,11 @@ class ClaimDraft:
     confidence: float
     unit: str | None = None
     evidence: dict[str, Any] | None = None
+    # Per-draft provenance: an adapter that serves several origins (say a FRED
+    # adapter whose gold rows actually come from the World Bank) stamps the
+    # true origin here. None means "the adapter's own source", which is almost
+    # every draft.
+    source: str | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence <= 1.0:

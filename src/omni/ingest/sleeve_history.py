@@ -66,6 +66,74 @@ SLEEVE_SERIES: dict[str, dict[str, str]] = {
 
 ObsFetcher = Callable[[str], Awaitable[list[dict]]]
 
+# FRED discontinued its LBMA gold series (HTTP 400, series does not exist,
+# measured 2026-08-16). The longest keyless public replacement is the World
+# Bank Pink Sheet: monthly nominal gold in USD/oz from 1960M01, canonical and
+# freely redistributable. Served as XLSX, so gold rows arrive through a
+# different fetcher than the FRED pair and carry source="worldbank" per-draft
+# -- the adapter's own label stays "fred" for the two FRED series.
+PINK_SHEET_URL = (
+    "https://thedocs.worldbank.org/en/doc/"
+    "5d903e848db1d1b83e0ec8f744e55570-0350012021/related/"
+    "CMO-Historical-Data-Monthly.xlsx"
+)
+PINK_GOLD_COLUMN = "Gold"
+PINK_SOURCE = "worldbank"
+
+BytesFetcher = Callable[[], Awaitable[bytes]]
+
+
+def parse_pink_sheet_gold(data: bytes) -> list[ClaimDraft]:
+    """The Pink Sheet's Monthly Prices sheet -> one draft per month.
+
+    Layout (measured 2026-08-16): row 5 holds commodity labels, row 6 units,
+    data from row 7, first column `YYYYMmm`. The `…` marker is the sheet's
+    "not available" and is skipped like ALFRED's `.`.
+    """
+    import io
+
+    import openpyxl
+
+    book = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    sheet = book["Monthly Prices"]
+    rows = list(sheet.iter_rows(values_only=True))
+    book.close()
+
+    header = rows[4]
+    gold_col = next(
+        (i for i, cell in enumerate(header)
+         if isinstance(cell, str) and cell.strip().lower() == PINK_GOLD_COLUMN.lower()),
+        None,
+    )
+    if gold_col is None:
+        raise ValueError("Pink Sheet has no Gold column; layout changed")
+
+    drafts: list[ClaimDraft] = []
+    for row in rows[6:]:
+        period = row[0]
+        raw = row[gold_col] if gold_col < len(row) else None
+        if not isinstance(period, str) or len(period) != 7 or "M" not in period:
+            continue
+        try:
+            year, month = int(period[:4]), int(period[5:7])
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        when = datetime(year, month, 1, tzinfo=UTC)
+        drafts.append(
+            ClaimDraft(
+                claim_type=CLAIM_TYPE,
+                key="sleeve_gold:WORLD_BANK_PINK",
+                value={"value": value, "label": "Gold, World Bank Pink Sheet, monthly"},
+                event_date=when,
+                knowledge_date=when,
+                confidence=1.0,
+                unit="USD/oz",
+                source=PINK_SOURCE,
+            )
+        )
+    return drafts
+
 
 def _month(value: Any) -> datetime | None:
     if not value:
@@ -123,14 +191,26 @@ class SleeveHistoryAdapter:
     source = SOURCE
     provider_key = PROVIDER_KEY
 
-    def __init__(self, *, api_key: str | None, fetch_fn: ObsFetcher | None = None):
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        fetch_fn: ObsFetcher | None = None,
+        pink_fn: BytesFetcher | None = None,
+    ):
         self._api_key = api_key
         self._fetch_fn = fetch_fn
+        self._pink_fn = pink_fn
         self._vintages = False
 
     async def fetch(self, key: str) -> list[ClaimDraft]:
         if key not in SLEEVE_SERIES:
             raise Unavailable(f"{key} is not a sleeve history series")
+
+        if key == "sleeve_gold":
+            data = await self._fetch_pink()
+            return parse_pink_sheet_gold(data)
+
         meta = SLEEVE_SERIES[key]
         series_id = meta["series"]
 
@@ -146,6 +226,19 @@ class SleeveHistoryAdapter:
 
         observations = await fetch_fn(series_id)
         return parse_sleeve_observations(observations or [], sleeve=key)
+
+    async def _fetch_pink(self) -> bytes:
+        if self._pink_fn is not None:
+            return await self._pink_fn()
+        import httpx
+
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            response = await client.get(PINK_SHEET_URL)
+        if response.status_code != 200:
+            raise Unavailable(
+                f"World Bank Pink Sheet returned HTTP {response.status_code}"
+            )
+        return response.content
 
 
 # Standing demand for the sleeve series. The system is demand-driven by

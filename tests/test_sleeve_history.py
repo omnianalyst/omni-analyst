@@ -73,20 +73,105 @@ async def test_adapter_parses_through_the_injected_fetch() -> None:
 
     async def fetch_fn(series_id: str) -> list[dict]:
         calls.append(series_id)
-        return [_obs("1971-08-01", "40.50")]
+        return [_obs("1971-08-01", "0.52")]
 
     adapter = SleeveHistoryAdapter(api_key="k", fetch_fn=fetch_fn)
-    drafts = await adapter.fetch("sleeve_gold")
+    drafts = await adapter.fetch("sleeve_cash")
 
-    assert calls == ["GOLDAMGBD228NLBM"]
+    assert calls == ["TB3MS"]
     assert len(drafts) == 1
-    assert drafts[0].key.startswith("sleeve_gold:")
+    assert drafts[0].key.startswith("sleeve_cash:")
 
 
 async def test_missing_api_key_without_fetch_fn_is_unavailable() -> None:
     adapter = SleeveHistoryAdapter(api_key=None)
     with pytest.raises(Unavailable):
-        await adapter.fetch("sleeve_gold")
+        await adapter.fetch("sleeve_cash")  # pink_fn also unset -> Unavailable
+
+
+def _pink_fixture() -> bytes:
+    """A minimal Pink Sheet: header row 5, units row 6, three data rows,
+    one `…` (not available) and one malformed period -- everything the parser
+    must handle."""
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Monthly Prices"
+    ws.append(["World Bank Commodities Price Data"])
+    ws.append([])
+    ws.append([])
+    ws.append(["Updated 2026-07"])
+    ws.append(["", "Crude oil, avg", "Gold"])
+    ws.append(["", "($/bbl)", "($/oz)"])
+    ws.append(["1960M01", 1.63, 35.27])
+    ws.append(["1960M02", 1.63, "…"])
+    ws.append(["1960M03", 1.63, 35.10])
+    ws.append(["not a period", 1.63, 35.10])
+    ws.append(["1961M01", 1.63, 35.42])
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def test_pink_sheet_gold_parses_with_worldbank_provenance() -> None:
+    from omni.ingest.sleeve_history import parse_pink_sheet_gold
+
+    drafts = parse_pink_sheet_gold(_pink_fixture())
+
+    assert len(drafts) == 3  # the … row and the malformed period are skipped
+    assert drafts[0].key == "sleeve_gold:WORLD_BANK_PINK"
+    assert drafts[0].value["value"] == 35.27
+    assert drafts[0].unit == "USD/oz"
+    assert drafts[0].source == "worldbank"  # per-draft provenance, not "fred"
+    assert drafts[-1].event_date == datetime(1961, 1, 1, tzinfo=UTC)
+
+
+def test_pink_sheet_without_a_gold_column_is_a_named_error() -> None:
+    import io
+
+    import openpyxl
+
+    from omni.ingest.sleeve_history import parse_pink_sheet_gold
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Monthly Prices"
+    ws.append([])
+    ws.append([])
+    ws.append([])
+    ws.append([])
+    ws.append(["", "Crude oil, avg"])
+    out = io.BytesIO()
+    wb.save(out)
+
+    with pytest.raises(ValueError, match="Gold"):
+        parse_pink_sheet_gold(out.getvalue())
+
+
+async def test_gold_fetches_through_the_injected_pink_fn() -> None:
+    async def pink() -> bytes:
+        return _pink_fixture()
+
+    adapter = SleeveHistoryAdapter(api_key=None, pink_fn=pink)
+    drafts = await adapter.fetch("sleeve_gold")
+
+    assert len(drafts) == 3
+    assert all(d.source == "worldbank" for d in drafts)
+
+
+async def test_fred_series_still_flow_through_their_own_fetch() -> None:
+    async def fetch_fn(series_id: str) -> list[dict]:
+        assert series_id == "TB3MS"
+        return [{"date": "1934-01-01", "value": "0.52"}]
+
+    adapter = SleeveHistoryAdapter(api_key="k", fetch_fn=fetch_fn)
+    drafts = await adapter.fetch("sleeve_cash")
+
+    assert len(drafts) == 1
+    assert drafts[0].source is None  # falls through to the adapter's "fred"
 
 
 async def test_ensure_sleeve_demand_places_one_row_per_series(db):
