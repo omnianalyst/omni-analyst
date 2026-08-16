@@ -513,13 +513,40 @@ async def _company_symbols(pool) -> list[tuple[str, str]]:
     return sorted((row["symbol"], row["name"]) for row in rows)
 
 
+def _company_rows_to_series(rows) -> dict[str, dict[pd.Timestamp, float]]:
+    """Claim rows to {symbol: {date: close}}, reading the OHLCV snapshot
+    shape company price claims actually store."""
+    import json as _json
+
+    series: dict[str, dict[pd.Timestamp, float]] = {}
+    for row in rows:
+        raw = row["value"]
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except _json.JSONDecodeError:
+                continue
+        # Price snapshots store the full OHLCV object; the close is the line.
+        if isinstance(raw, dict):
+            raw = raw.get("close")
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(price) or price <= 0:
+            continue
+        stamp = pd.Timestamp(row["event_date"])
+        if stamp.tzinfo is not None:
+            stamp = stamp.tz_convert("UTC")
+        series.setdefault(row["symbol"], {})[stamp.normalize()] = price
+    return series
+
+
 async def _company_panel(pool) -> pd.DataFrame:
     """Measured daily closes for the 500 company universe, from the claim
     store -- the same source the companies scanner reads. Only symbols that
     clear the comparator's own 200-session history floor are returned, so a
     company added to a mix arrives with enough history to be measured."""
-    import json as _json
-
     from omni.coverage.visibility import visible_claims_cte
 
     rows = await pool.fetch(
@@ -533,26 +560,7 @@ async def _company_panel(pool) -> pd.DataFrame:
         """,
         None,
     )
-    series: dict[str, dict[pd.Timestamp, float]] = {}
-    for row in rows:
-        raw = row["value"]
-        if isinstance(raw, str):
-            try:
-                raw = _json.loads(raw)
-            except _json.JSONDecodeError:
-                continue
-        if isinstance(raw, dict):
-            raw = raw.get("value")
-        try:
-            price = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if not np.isfinite(price) or price <= 0:
-            continue
-        stamp = pd.Timestamp(row["event_date"])
-        if stamp.tzinfo is not None:
-            stamp = stamp.tz_convert("UTC")
-        series.setdefault(row["symbol"], {})[stamp.normalize()] = price
+    series = _company_rows_to_series(rows)
 
     frames = {
         symbol: pd.Series(points).sort_index()

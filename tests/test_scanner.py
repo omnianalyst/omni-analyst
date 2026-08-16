@@ -1,5 +1,6 @@
 """Measured rankings used by the Discover market scanner."""
 
+import json
 import math
 from datetime import UTC, datetime, timedelta
 
@@ -411,6 +412,25 @@ def test_mix_history_refuses_a_nonpositive_weight() -> None:
     frame = pd.DataFrame({"AAA": [100.0] * len(index)}, index=index)
 
     assert _mix_history(frame, [("AAA", 0.0)]) is None
+
+
+def test_company_rows_parse_the_ohlcv_snapshot_shape() -> None:
+    """Company price claims store the full OHLCV object; the close is the
+    line the panel must read. The first cut read a bare-number shape and
+    silently produced an empty company panel."""
+    from omni.api.scanner import _company_rows_to_series
+
+    rows = [
+        {"symbol": "NVDA", "value": json.dumps({"low": 1, "high": 2, "open": 1.5, "close": 1.75, "volume": 100}),
+         "event_date": datetime(2024, 1, 2, tzinfo=UTC)},
+        {"symbol": "NVDA", "value": json.dumps({"low": 1, "high": 2, "open": 1.5, "close": 1.8, "volume": 100}),
+         "event_date": datetime(2024, 1, 3, tzinfo=UTC)},
+    ]
+
+    series = _company_rows_to_series(rows)
+
+    assert set(series) == {"NVDA"}
+    assert list(series["NVDA"].values()) == [1.75, 1.8]
 
 
 def test_a_broken_seed_print_is_dropped_not_priced() -> None:
