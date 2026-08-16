@@ -146,3 +146,57 @@ class SleeveHistoryAdapter:
 
         observations = await fetch_fn(series_id)
         return parse_sleeve_observations(observations or [], sleeve=key)
+
+
+# Standing demand for the sleeve series. The system is demand-driven by
+# design: a capability nobody asks for never fills, and a boot that assumes
+# otherwise silently ships a supply with no consumer. This mirrors how the
+# macro loop keeps its FRED series alive: explicit, idempotent demand placed
+# at scheduler boot, so the first fill cycle after deploy begins
+# accumulating the history (1968 gold, 1954 bills, 1962 yields) and the
+# monthly staleness window keeps it fresh thereafter.
+_SLEEVE_STALENESS_DAYS = 32  # monthly series: a month plus publication lag
+
+
+async def ensure_sleeve_demand(pool) -> int:
+    """Idempotently place standing demand for every sleeve series.
+
+    Uses the existing US_MACRO entity the macro loop owns, so sleeve history
+    lives beside the other FRED series on one auditable row. Returns the
+    number of demand rows created (0 once steady-state).
+    """
+    entity_id = await pool.fetchval(
+        "SELECT id FROM entity WHERE symbol = 'US_MACRO' AND kind = 'macro'"
+    )
+    if entity_id is None:
+        # The macro loop's entity should exist; creating it here would fork
+        # the definition. Refuse loudly instead of duplicating it.
+        raise RuntimeError(
+            "US_MACRO entity not found; the sleeve series hang off it and the "
+            "macro loop creates it at first run"
+        )
+
+    created = 0
+    for sleeve in SLEEVE_SERIES:
+        existing = await pool.fetchval(
+            "SELECT 1 FROM demand "
+            "WHERE entity_id = $1 AND claim_type = 'sleeve_history_point' "
+            "AND key = $2 AND active",
+            entity_id,
+            sleeve,
+        )
+        if existing:
+            continue
+        await pool.execute(
+            """
+            INSERT INTO demand (entity_id, claim_type, key, channel,
+                                requested_by, weight, max_staleness)
+            VALUES ($1, 'sleeve_history_point', $2, 'autonomous',
+                    NULL, 1.0, make_interval(days => $3))
+            """,
+            entity_id,
+            sleeve,
+            _SLEEVE_STALENESS_DAYS,
+        )
+        created += 1
+    return created

@@ -41,6 +41,20 @@ async def main() -> None:
     # have nothing to scan without a universe.
     await seed_market_universe(client.pool)
 
+    # Standing demand for the sleeve history series: without it the
+    # registered capability never fills (the system is demand-driven by
+    # design). Idempotent; logs rather than raises on a missing US_MACRO
+    # entity (first-ever boot, macro loop yet to run) -- the next boot picks
+    # it up, and a failed insert must never stop the loops.
+    from omni.ingest.sleeve_history import ensure_sleeve_demand
+
+    try:
+        placed = await ensure_sleeve_demand(client.pool)
+        if placed:
+            logger.info("sleeve history demand placed for %d series", placed)
+    except RuntimeError as exc:
+        logger.warning("sleeve history demand deferred: %s", exc)
+
     # Identifier population is one idempotent HTTP request against SEC's ticker
     # map; running it on every boot is self-healing for entities added since the
     # last boot. `populate_identifiers` contains every SEC failure (no

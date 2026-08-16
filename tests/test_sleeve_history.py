@@ -87,3 +87,88 @@ async def test_missing_api_key_without_fetch_fn_is_unavailable() -> None:
     adapter = SleeveHistoryAdapter(api_key=None)
     with pytest.raises(Unavailable):
         await adapter.fetch("sleeve_gold")
+
+
+async def test_ensure_sleeve_demand_places_one_row_per_series(db):
+    from omni.ingest.sleeve_history import ensure_sleeve_demand
+
+    await db.pool.execute("TRUNCATE demand CASCADE")
+    await db.pool.execute("DELETE FROM entity WHERE kind = 'macro'")
+    macro = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) "
+        "VALUES ('macro','US_MACRO','US Macroeconomy') RETURNING id"
+    )
+    created = await ensure_sleeve_demand(db.pool)
+
+    assert created == 3
+    rows = await db.pool.fetch(
+        "SELECT key FROM demand WHERE entity_id = $1 "
+        "AND claim_type = 'sleeve_history_point' AND active",
+        macro,
+    )
+    assert {r["key"] for r in rows} == set(SLEEVE_SERIES)
+
+
+async def test_ensure_sleeve_demand_is_idempotent(db):
+    from omni.ingest.sleeve_history import ensure_sleeve_demand
+
+    await db.pool.execute("TRUNCATE demand CASCADE")
+    await db.pool.execute("DELETE FROM entity WHERE kind = 'macro'")
+    await db.pool.execute(
+        "INSERT INTO entity (kind, symbol, name) "
+        "VALUES ('macro','US_MACRO','US Macroeconomy')"
+    )
+    first = await ensure_sleeve_demand(db.pool)
+    second = await ensure_sleeve_demand(db.pool)
+
+    assert first == 3
+    assert second == 0
+    count = await db.pool.fetchval(
+        "SELECT count(*) FROM demand WHERE claim_type = 'sleeve_history_point'"
+    )
+    assert count == 3
+
+
+async def test_ensure_sleeve_demand_refuses_without_the_macro_entity(db):
+    from omni.ingest.sleeve_history import ensure_sleeve_demand
+
+    await db.pool.execute("TRUNCATE demand CASCADE")
+    await db.pool.execute("DELETE FROM entity WHERE kind = 'macro'")
+
+    with pytest.raises(RuntimeError, match="US_MACRO"):
+        await ensure_sleeve_demand(db.pool)
+
+
+async def test_sleeve_demand_reopens_monthly_until_filled(db):
+    """The staleness window is the refresh heartbeat: a gap detected on stale
+    demand is the mechanism that keeps 55 years of monthly data current, so
+    it must be on the order of a publication cycle, not a scrape interval."""
+    from datetime import UTC, datetime, timedelta
+
+    from omni.ingest.sleeve_history import ensure_sleeve_demand
+
+    await db.pool.execute("TRUNCATE demand CASCADE")
+    await db.pool.execute("DELETE FROM entity WHERE kind = 'macro'")
+    await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) "
+        "VALUES ('macro','US_MACRO','US Macroeconomy') RETURNING id"
+    )
+    await ensure_sleeve_demand(db.pool)
+    stale_days = int(
+        await db.pool.fetchval(
+            "SELECT extract(days FROM max_staleness) FROM demand "
+            "WHERE claim_type = 'sleeve_history_point' LIMIT 1"
+        )
+    )
+
+    assert 28 <= stale_days <= 40
+    # and the demand is old enough to be stale right now, so a gap exists
+    age = datetime.now(UTC) - timedelta(days=stale_days + 1)
+    await db.pool.execute(
+        "UPDATE demand SET created_at = $1 WHERE claim_type = 'sleeve_history_point'",
+        age,
+    )
+    from omni.coverage.gaps import detect_gaps
+
+    gaps = await detect_gaps(db.pool)
+    assert any(g["claim_type"] == "sleeve_history_point" for g in gaps)
