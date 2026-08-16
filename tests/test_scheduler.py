@@ -180,7 +180,7 @@ class TestDefaultRegistry:
         # above proves everything registered is runnable, and this one exists to
         # make a mass registration or a silent loss fail loudly. Update it
         # deliberately, with the delta accounted for, or not at all.
-        assert len(r) == 142
+        assert len(r) == 143
 
     def test_derived_capabilities_are_reachable_through_default_registry(self):
         # The defect this catches: build_derived_registry() was never merged, so

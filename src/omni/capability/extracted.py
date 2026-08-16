@@ -45,6 +45,9 @@ CLAIM_TYPES = frozenset(
         "fundamental_metric",
         "filing_event",
         "macro_series_point",
+        # 064: long descriptive sleeve series (gold, T-bills, 10y yield) --
+        # current values, never to be mistaken for point-in-time vintages.
+        "sleeve_history_point",
         "news_event",
         "manipulation_signal",
         "perception_news",

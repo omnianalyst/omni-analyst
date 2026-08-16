@@ -176,14 +176,45 @@ async def scorecard(pool, *, audience: UUID | None = None) -> list[dict]:
     """
     rows = await pool.fetch(
         """
-        SELECT method,
-               COALESCE(SUM(surfaced), 0)::bigint AS surfaced,
-               COALESCE(SUM(resolved), 0)::bigint AS resolved,
-               COALESCE(SUM(hits), 0)::bigint AS hits
-        FROM finding_hit_rate
-        WHERE audience_user_id IS NULL OR audience_user_id = $1
-        GROUP BY method
-        ORDER BY surfaced DESC
+        SELECT h.method,
+               COALESCE(SUM(h.surfaced), 0)::bigint AS surfaced,
+               COALESCE(SUM(h.resolved), 0)::bigint AS resolved,
+               COALESCE(SUM(h.hits), 0)::bigint AS hits,
+               -- payoff accounting from the sibling view, same audience scoping
+               CASE WHEN COALESCE(SUM(y.resolved), 0) >= 10
+                    THEN (SELECT avg(r) FROM (
+                              SELECT y2.avg_realized_ratio AS r
+                              FROM finding_payoff y2
+                              WHERE y2.method = h.method
+                                AND (y2.audience_user_id IS NULL OR y2.audience_user_id = $1)
+                          ) ratios WHERE r IS NOT NULL)
+                    ELSE NULL
+               END AS payoff_ratio,
+               CASE WHEN COALESCE(SUM(y.resolved), 0) >= 10
+                    THEN (SELECT avg(g) FROM (
+                              SELECT y3.avg_risk_pct AS g
+                              FROM finding_payoff y3
+                              WHERE y3.method = h.method
+                                AND (y3.audience_user_id IS NULL OR y3.audience_user_id = $1)
+                          ) risks WHERE g IS NOT NULL)
+                    ELSE NULL
+               END AS avg_risk_pct,
+               CASE WHEN COALESCE(SUM(y.resolved), 0) >= 10
+                    THEN (SELECT avg(w) FROM (
+                              SELECT y4.avg_payoff_pct AS w
+                              FROM finding_payoff y4
+                              WHERE y4.method = h.method
+                                AND (y4.audience_user_id IS NULL OR y4.audience_user_id = $1)
+                          ) pays WHERE w IS NOT NULL)
+                    ELSE NULL
+               END AS avg_payoff_pct
+        FROM finding_hit_rate h
+        LEFT JOIN finding_payoff y
+            ON y.method = h.method
+           AND y.audience_user_id IS NOT DISTINCT FROM h.audience_user_id
+        WHERE h.audience_user_id IS NULL OR h.audience_user_id = $1
+        GROUP BY h.method
+        ORDER BY SUM(h.surfaced) DESC
         """,
         audience,
     )
@@ -195,6 +226,15 @@ async def scorecard(pool, *, audience: UUID | None = None) -> list[dict]:
         d["hit_rate"] = (
             d["hits"] / d["resolved"] if d["resolved"] and d["resolved"] >= 10 else None
         )
+        # The payoff triple carries the same floor: a payoff ratio from a
+        # handful of resolutions is a lottery ticket wearing a ratio.
+        if not d["resolved"] or d["resolved"] < 10:
+            d["payoff_ratio"] = None
+            d["avg_risk_pct"] = None
+            d["avg_payoff_pct"] = None
+        else:
+            for key in ("payoff_ratio", "avg_risk_pct", "avg_payoff_pct"):
+                d[key] = round(float(d[key]), 2) if d[key] is not None else None
         out.append(d)
     return out
 
@@ -212,3 +252,23 @@ async def refusal_counts(pool, *, audience: UUID | None = None) -> dict[str, int
         audience,
     )
     return {r["refusal"]: r["n"] for r in rows}
+
+
+async def unproven_count(pool, *, audience: UUID | None = None) -> int:
+    """Surfaced calls whose predictions have not resolved yet.
+
+    Defense made visible: every one of these is still out there, unjudged --
+    the scorecard only counts what has come home, and this is the honest size
+    of the bet still riding. Scoped like everything else.
+    """
+    return await pool.fetchval(
+        """
+        SELECT count(*)
+        FROM finding f
+        JOIN prediction p ON p.id = f.prediction_id
+        WHERE f.status = 'surfaced'
+          AND (f.audience_user_id IS NULL OR f.audience_user_id = $1)
+          AND p.outcome = 'pending'
+        """,
+        audience,
+    )

@@ -175,3 +175,42 @@ export function priceLabel(v: number | null | undefined): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "\u2014";
   return `$${Number(v).toFixed(2)}`;
 }
+
+// -- Payoff asymmetry ----------------------------------------------------------
+
+export interface Asymmetry {
+  riskPct: number;
+  payoffPct: number;
+  ratio: number;
+}
+
+// The distances a call fixed at write time: what being wrong costs (entry to
+// the invalidation barrier) against what being right pays (entry to the
+// target barrier), in percent of entry. Null when either barrier is missing
+// or the geometry is degenerate (invalidation on the wrong side, zero risk) --
+// an unmeasurable trade reports nothing rather than a made-up ratio.
+export function asymmetry(
+  direction: "up" | "down" | null | undefined,
+  entry: number | null | undefined,
+  upper: number | null | undefined,
+  lower: number | null | undefined,
+): Asymmetry | null {
+  if (entry == null || entry <= 0 || upper == null || lower == null) return null;
+  if (direction !== "up" && direction !== "down") return null;
+  // The barriers must agree with the direction: for an up call the target
+  // sits above entry and the invalidation below; a down call mirrors it. A
+  // layout that violates that is a broken barrier set, and its "ratio" would
+  // be a number about nothing.
+  if (direction === "up" && !(upper > entry && lower < entry)) return null;
+  if (direction === "down" && !(lower < entry && upper > entry)) return null;
+  const target = direction === "up" ? upper : lower;
+  const invalidation = direction === "up" ? lower : upper;
+  const risk = Math.abs(entry - invalidation);
+  const payoff = Math.abs(target - entry);
+  if (risk <= 0 || payoff <= 0) return null;
+  return {
+    riskPct: (risk / entry) * 100,
+    payoffPct: (payoff / entry) * 100,
+    ratio: payoff / risk,
+  };
+}

@@ -15,6 +15,7 @@ import {
   getRefusals,
   getScorecard,
   refusalTotal,
+  unprovenCount,
   type BriefingFinding,
   type RefusalCounts,
   type ScorecardRow,
@@ -149,14 +150,24 @@ function RefusalsPanel({ refusals }: { refusals: Async<RefusalCounts> }) {
   }
   const total = refusalTotal(refusals.data);
   const top = topReason(refusals.data);
-  if (total === 0) {
+  const unproven = unprovenCount(refusals.data);
+  if (total === 0 && unproven === null) {
     return <p class="empty">Nothing considered and turned down yet.</p>;
+  }
+  if (total === 0) {
+    return (
+      <div class="refusals-block">
+        <span class="gauge-rate">{unproven}</span>
+        <span class="metric-sub">calls still out, unjudged — the scorecard only counts what has come home</span>
+      </div>
+    );
   }
   return (
     <div class="refusals-block">
       <span class="gauge-rate">{total}</span>
       <span class="metric-sub">
         {top ? `mostly: ${explainRefusal(top.reason)}` : "stayed quiet"}
+        {unproven !== null && unproven > 0 ? ` · ${unproven} still out there` : ""}
       </span>
     </div>
   );

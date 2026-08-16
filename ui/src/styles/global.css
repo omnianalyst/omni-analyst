@@ -1663,6 +1663,14 @@ tr.row.tier-unknown td:first-child {
   font-size: 13px;
   color: var(--muted);
 }
+.claim-payoff {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.claim-payoff .mono {
+  color: var(--text);
+}
 .claim-invalidation strong {
   color: var(--text);
   font-family: var(--mono);

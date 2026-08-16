@@ -112,6 +112,7 @@ def build_builtin_registry(settings=None) -> Registry:
     from omni.ingest.onchain import OnChainAdapter
     from omni.ingest.polygon import PolygonAdapter
     from omni.ingest.positioning import PositioningAdapter
+    from omni.ingest.sleeve_history import SleeveHistoryAdapter
 
     cfg = settings if settings is not None else default_settings
     registry = Registry()
@@ -134,6 +135,19 @@ def build_builtin_registry(settings=None) -> Registry:
             provider_key="fred",
             produces=("perception_macro",),
             factory=MacroPerceptionAdapter,
+            credentials={"api_key": cfg.fred_api_key} if cfg.fred_api_key else None,
+        ),
+        _adapter(
+            "fred.sleeve_history",
+            "Long-history monthly series for the portfolio's sleeves -- LBMA "
+            "gold from 1968, 3-month T-bills from 1954, the 10-year yield from "
+            "1962 -- so the disaster question (what did holding this cost in "
+            "1973, 1987, 2008) can be answered from real published prices. "
+            "Current values, not vintages: the question is descriptive, not "
+            "point-in-time.",
+            provider_key="fred",
+            produces=("sleeve_history_point",),
+            factory=SleeveHistoryAdapter,
             credentials={"api_key": cfg.fred_api_key} if cfg.fred_api_key else None,
         ),
         _adapter(

@@ -104,6 +104,8 @@ export const GLOSSARY: Record<string, string> = {
     "How often two assets move together, from -1 (always opposite) through 0 (unrelated) to 1 (always together). Low or negative correlation is what makes diversification work.",
   risk_share:
     "This holding's share of the portfolio's total swinging. Equal money in each does not mean equal risk: the volatile holdings drive the ride.",
+  payoff_asymmetry:
+    "What the call's own barriers pay: risking the smaller move (to the price that proves it wrong) to make the larger one (the target). A 4:1 call can be wrong most of the time and still compound -- probability is on the hit-rate line, payoff is on this one.",
 };
 
 export function define(term: string): string | undefined {

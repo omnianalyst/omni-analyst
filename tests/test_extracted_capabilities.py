@@ -35,6 +35,7 @@ SCHEMA_CLAIM_TYPES = frozenset(
         "fundamental_metric",
         "filing_event",
         "macro_series_point",
+        "sleeve_history_point",
         "news_event",
         "manipulation_signal",
         "perception_news",

@@ -56,6 +56,9 @@ export interface ScorecardRow {
   resolved: number;
   hits: number;
   hit_rate: number | null;
+  payoff_ratio?: number | null;
+  avg_risk_pct?: number | null;
+  avg_payoff_pct?: number | null;
 }
 
 export type RefusalCounts = Record<string, number>;
@@ -104,7 +107,16 @@ export function explainRefusal(reason: string): string {
 }
 
 export function refusalTotal(counts: RefusalCounts): number {
-  return Object.values(counts).reduce((sum, n) => sum + n, 0);
+  // _unproven rides in the same payload but is not a refusal; summing it
+  // would inflate the denominator it exists to complement.
+  return Object.entries(counts)
+    .filter(([key]) => key !== "_unproven")
+    .reduce((sum, [, n]) => sum + n, 0);
+}
+
+export function unprovenCount(counts: RefusalCounts): number | null {
+  const value = counts["_unproven"];
+  return typeof value === "number" ? value : null;
 }
 
 export function briefingHeading(findings: BriefingFinding[]): string {

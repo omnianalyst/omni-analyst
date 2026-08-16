@@ -26,7 +26,7 @@ from neutron.error import unauthorized
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
-from omni.conviction.publish import briefing, refusal_counts, scorecard
+from omni.conviction.publish import briefing, refusal_counts, scorecard, unproven_count
 
 
 def _audience(request: Request) -> UUID | None:
@@ -136,6 +136,10 @@ def build_router(app: App) -> Router:
         audience = resolve_audience_from_request(request)
         if audience is None:
             raise unauthorized("Authentication required")
-        return await refusal_counts(app.db.pool, audience=audience)
+        counts = await refusal_counts(app.db.pool, audience=audience)
+        # The unproven count rides along: surfaced calls still awaiting their
+        # outcome. The scorecard's unresolved complement, published beside it.
+        counts["_unproven"] = await unproven_count(app.db.pool, audience=audience)
+        return counts
 
     return router

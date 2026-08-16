@@ -6,6 +6,7 @@ import {
 } from "../lib/briefing";
 import { Hint } from "./Hint";
 import {
+  asymmetry,
   chainSteps,
   confidenceWord,
   directionGlyph,
@@ -79,6 +80,15 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
   // to resolve. Absent (an older API) is treated as not searched, which is the
   // claim that cannot be wrong.
   const searched = finding.evidence_searched === true;
+  // What the call's own geometry pays: risking X% to make Y%. Fixed at write
+  // time by the prediction's barriers, so it is as pre-registered as the
+  // invalidation level -- probability on one side, payoff on the other.
+  const payoff = asymmetry(
+    finding.direction,
+    finding.entry_price,
+    finding.upper_barrier,
+    finding.lower_barrier,
+  );
 
   return (
     <li class={`claim-card claim-${dirClass}`} key={finding.id}>
@@ -124,6 +134,17 @@ export function FindingCard({ finding }: { finding: BriefingFinding }) {
           {dir === "up" ? "below" : dir === "down" ? "above" : "at"}{" "}
           <strong>{priceLabel(invalidation)}</strong>
           <span class="muted"> &middot; called at {priceLabel(finding.entry_price)}</span>
+        </p>
+      ) : null}
+
+      {payoff !== null ? (
+        <p class="claim-payoff">
+          <Hint term="payoff_asymmetry">
+            <span class="mono">
+              risking {payoff.riskPct.toFixed(1)}% to make {payoff.payoffPct.toFixed(1)}%
+            </span>
+          </Hint>{" "}
+          <span class="conf-wrong">{"\u00b7"} {payoff.ratio.toFixed(1)}:1</span>
         </p>
       ) : null}
 
