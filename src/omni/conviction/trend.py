@@ -47,6 +47,39 @@ METHOD = "trend.sma"
 # quantity), the codebase idiom.
 _ZERO_VOL_ATOL = 1e-9
 
+# The floor of resolved outcomes before a method's own measured continuation
+# ratio may set its target geometry. Below this the producer uses the
+# conservative default -- mirrors the gate's sample floor: a continuation ratio
+# from a handful of resolutions is a lottery number wearing a ratio's clothes.
+_CONTINUATION_FLOOR = 10
+
+
+async def measured_continuation_ratio(
+    pool, *, method: str = METHOD, audience: UUID | None = None
+) -> float | None:
+    """The method's own realized target-to-stop distance ratio, from the
+    finding_payoff view: avg payoff distance over avg risked distance among
+    resolved calls. This is the only source the target multiple may come from
+    -- never a hand-chosen constant. None below the sample floor.
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT SUM(resolved) AS resolved,
+               SUM(avg_payoff_pct * resolved) / NULLIF(SUM(resolved), 0) AS payoff,
+               SUM(avg_risk_pct * resolved) / NULLIF(SUM(resolved), 0) AS risk
+        FROM finding_payoff
+        WHERE method = $1
+          AND (audience_user_id IS NULL OR audience_user_id IS NOT DISTINCT FROM $2)
+        """,
+        method,
+        audience,
+    )
+    if row is None or not row["resolved"] or row["resolved"] < _CONTINUATION_FLOOR:
+        return None
+    if not row["payoff"] or not row["risk"]:
+        return None
+    return float(row["payoff"] / row["risk"])
+
 
 def _realized_vol(closes: list[float]) -> float:
     """The per-period stdev of log returns, in price units (x entry).
@@ -64,13 +97,30 @@ def _realized_vol(closes: list[float]) -> float:
 
 
 def trend_call(
-    entry: float, sma: float, vol: float, *, target_k: float = 2.0
+    entry: float,
+    sma: float,
+    vol: float,
+    *,
+    target_k: float = 2.0,
+    continuation_ratio: float | None = None,
 ) -> tuple[str, float, float, float] | None:
     """A falsifiable trend call, or ``None`` when none is honest.
 
     Returns ``(direction, upper, lower, confidence)`` where the barriers
     genuinely straddle the entry and ``confidence`` is the driftless
     first-passage probability of hitting the target before the MA invalidates.
+
+    The invalidation barrier is the MA (price crossing the moving average the
+    call was predicated on IS the trend breaking). The target is expressed in
+    the same unit -- a multiple of the stop distance:
+
+    * with a measured ``continuation_ratio`` (the method's realized
+      payoff/risk distance ratio over resolved calls, from finding_payoff),
+      the target is that ratio of the stop distance: the geometry encodes the
+      continuation this method has actually delivered, and the payoff view
+      re-measures it after the fact. A closed loop, no hand-chosen constant.
+    * without one (under the sample floor), the conservative vol-scaled
+      ``target_k`` fallback applies until the ledger can speak.
 
     ``None`` when: vol is non-positive/non-finite (a flat series -- barriers
     would collapse onto the entry), price sits exactly on the MA (no trend to
@@ -80,10 +130,16 @@ def trend_call(
         return None
     if entry == sma:
         return None
+    stop_distance = abs(entry - sma)
+    move = (
+        continuation_ratio * stop_distance
+        if continuation_ratio is not None
+        else target_k * vol
+    )
     if entry > sma:
-        direction, lower, upper = "up", sma, entry + target_k * vol
+        direction, lower, upper = "up", sma, entry + move
     else:
-        direction, upper, lower = "down", sma, entry - target_k * vol
+        direction, upper, lower = "down", sma, entry - move
     if not (upper > entry > lower):
         return None
     confidence = _first_passage_confidence(direction, entry, upper, lower)
@@ -167,7 +223,11 @@ async def produce_trend_prediction_from_coverage(
     entry = closes[-1]
     sma = float(np.mean(closes))
     vol = _realized_vol(closes)
-    call = trend_call(entry, sma, vol, target_k=target_k)
+    # The target multiple comes from the method's own resolved record when it
+    # has one (finding_payoff, above the sample floor); the conservative
+    # vol-scaled default otherwise. Never a hand-chosen constant.
+    ratio = await measured_continuation_ratio(pool, method=METHOD, audience=audience_user_id)
+    call = trend_call(entry, sma, vol, target_k=target_k, continuation_ratio=ratio)
     if call is None:
         return None
     direction, upper, lower, confidence = call
@@ -189,6 +249,7 @@ async def produce_trend_prediction_from_coverage(
             "model": "trend_sma",
             "window": window,
             "target_k": target_k,
+            "continuation_ratio": ratio,
             "sma": sma,
             "realized_vol": vol,
             "confidence_model": "driftless_first_passage",

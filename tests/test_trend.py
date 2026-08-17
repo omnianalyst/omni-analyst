@@ -135,3 +135,47 @@ class TestProduceFromCoverage:
         )
         assert pid is None
         assert await db.pool.fetchval("SELECT count(*) FROM prediction") == 0
+
+
+class TestContinuationGeometry:
+    """The measured-geometry fix: the target is the stop distance scaled by
+    the method's own realized continuation ratio, closing the loop the payoff
+    view opened. These pin the three properties that matter."""
+
+    def test_a_measured_ratio_sets_the_target_from_the_stop_distance(self):
+        # stop = 10 (entry 110, MA 100); ratio 0.6 -> target 6 above entry
+        out = trend_call(entry=110.0, sma=100.0, vol=5.0, continuation_ratio=0.6)
+        assert out is not None
+        direction, upper, lower, _ = out
+        assert direction == "up"
+        assert lower == pytest.approx(100.0)
+        assert upper == pytest.approx(116.0)  # 110 + 0.6*10, NOT 110 + 2*5
+
+    def test_down_call_mirrors_the_ratio_geometry(self):
+        out = trend_call(entry=90.0, sma=100.0, vol=5.0, continuation_ratio=0.6)
+        assert out is not None
+        direction, upper, lower, _ = out
+        assert direction == "down"
+        assert upper == pytest.approx(100.0)
+        assert lower == pytest.approx(84.0)  # 90 - 0.6*10
+
+    def test_without_a_ratio_the_conservative_vol_default_holds(self):
+        # same inputs, no measured ratio: the old target_k*vol geometry
+        out = trend_call(entry=110.0, sma=100.0, vol=5.0)
+        assert out is not None
+        _, upper, _, _ = out
+        assert upper == pytest.approx(120.0)
+
+    def test_the_ratio_actually_changes_the_geometry(self):
+        # discrimination: if ratio and target_k produce identical barriers the
+        # fix is wired to nothing
+        a = trend_call(entry=110.0, sma=100.0, vol=5.0, continuation_ratio=1.5)
+        b = trend_call(entry=110.0, sma=100.0, vol=5.0)
+        assert a is not None and b is not None
+        assert a[1] != pytest.approx(b[1])
+
+    async def test_measured_ratio_refuses_below_the_sample_floor(self, db):
+        from omni.conviction.trend import measured_continuation_ratio
+
+        # no resolved calls at all -> None, so the conservative default holds
+        assert await measured_continuation_ratio(db.pool) is None
