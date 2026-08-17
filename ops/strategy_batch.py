@@ -43,7 +43,7 @@ async def fetch_universe() -> dict[str, np.ndarray]:
         for sym in symbols:
             r = await client.get(
                 "https://fapi.binance.com/fapi/v1/klines",
-                params={"symbol": sym, "interval": "1d", "limit": 1000},
+                params={"symbol": sym, "interval": "1d", "limit": 1500},
             )
             rows = r.json()
             if isinstance(rows, list) and len(rows) >= 400:
@@ -56,7 +56,7 @@ async def fetch_universe() -> dict[str, np.ndarray]:
         "NVDA","AAPL","MSFT","AMZN","GOOGL","META","TSLA","AVGO","JPM","V",
         "XOM","CVX","UNH","JNJ","PG","KO","PEP","COST","WMT","HD",
     ]
-    raw = yf.download(" ".join(equities), start="2019-01-01", interval="1d",
+    raw = yf.download(" ".join(equities), start="2012-01-01", interval="1d",
                       auto_adjust=True, progress=False, group_by="ticker")
     for sym in equities:
         try:

@@ -32,12 +32,18 @@ from asyncpg.exceptions import UniqueViolationError
 
 from omni.config import settings
 from omni.db import connect
-from omni.research.allocation import AllocationRefused, equal_weight, risk_balanced, top_measured
+from omni.research.allocation import (
+    AllocationRefused,
+    equal_weight,
+    risk_balanced,
+    top_measured,
+    tsmom_252,
+)
 from omni.research.shadow_book import ShadowBookRefused, record_decision
 from omni.research.shadow_run import BENCHMARK, COST_BPS, SECTORS, load_panel, next_session
 from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS, record_loop_health
 
-RULES = (equal_weight, top_measured, risk_balanced)
+RULES = (equal_weight, top_measured, risk_balanced, tsmom_252)
 
 
 async def main(argv: list[str] | None = None) -> int:

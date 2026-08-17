@@ -264,3 +264,51 @@ class TestTheNextSessionADecisionCanApplyTo:
         for offset in range(14):
             day = date(2026, 8, 1) + timedelta(days=offset)
             assert next_session(day, today=day).weekday() < 5
+
+
+class TestTsmom252:
+    """The momentum survivor, forced-answer tests in the file's tradition."""
+
+    def _panel(self, trend_up: list[bool]) -> pd.DataFrame:
+        # 260 sessions; names flagged True rise over the last 252, others fall
+        cols = {}
+        for i, up in enumerate(trend_up):
+            drift = 1.001 if up else 0.999
+            cols[f"S{i}"] = [100.0 * drift**d for d in range(260)]
+        return pd.DataFrame(cols, index=pd.bdate_range("2025-01-01", periods=260))
+
+    def test_long_only_names_in_trend_and_cash_implicitly_holds_the_rest(self):
+        from omni.research.allocation import tsmom_252
+
+        alloc = tsmom_252(self._panel([True, True, False, False]), ["S0", "S1", "S2", "S3"], benchmark="SPY")
+
+        assert set(alloc.weights) == {"S0", "S1"}
+        assert sum(alloc.weights.values()) == pytest.approx(1.0)
+        assert alloc.inputs["in_trend"] == ["S0", "S1"]
+
+    def test_all_names_falling_is_all_cash_not_a_refusal(self):
+        from omni.research.allocation import tsmom_252
+
+        alloc = tsmom_252(self._panel([False, False]), ["S0", "S1"], benchmark="SPY")
+
+        assert alloc.weights == {}
+        assert alloc.inputs["in_trend"] == []
+
+    def test_insufficient_history_is_refused(self):
+        from omni.research.allocation import tsmom_252
+
+        short = pd.DataFrame(
+            {"S0": [100.0 * 1.001**d for d in range(200)]},
+            index=pd.bdate_range("2025-01-01", periods=200),
+        )
+        with pytest.raises(AllocationRefused, match="253"):
+            tsmom_252(short, ["S0"], benchmark="SPY")
+
+    def test_the_rule_discriminates_from_equal_weight(self):
+        from omni.research.allocation import tsmom_252
+
+        panel = self._panel([True, False, False, False])
+        alloc = tsmom_252(panel, list(panel.columns), benchmark="SPY")
+        eq = equal_weight(panel, list(panel.columns), benchmark="SPY")
+        # equal weight holds everything; tsmom holds only the name in trend
+        assert set(alloc.weights) != set(eq.weights)

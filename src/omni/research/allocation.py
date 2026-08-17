@@ -231,3 +231,72 @@ __all__ = [
     "risk_balanced",
     "top_measured",
 ]
+
+
+def tsmom_252(
+    panel: pd.DataFrame,
+    universe: list[str],
+    *,
+    benchmark: str,
+    lookback: int = TRADING_DAYS,
+    book: str = "etf_tsmom_252",
+) -> Allocation:
+    """Time-series momentum, the validated survivor of the 2026-08-17 batch.
+
+    Long every ETF above its 252-session-ago close, short none -- long/flat,
+    because the shadow book models no leverage and no borrowing. Weights are
+    equal across the names in trend, cash implicitly holds the remainder (the
+    recorded weights sum below 1.0; that is the flat side).
+
+    Graduated to the shadow book on McNemar-validated discordance (+3.94),
+    replicated equities-only (+3.10) and on the extended 2012 panel. The
+    forward record -- not those statistics -- decides whether it ever speaks.
+    """
+    # The full history, not _eligible's MIN_HISTORY tail: this rule needs 252
+    # sessions of lookback, and the same completeness refusal applies.
+    missing = [s for s in universe if s not in panel.columns]
+    if missing:
+        raise AllocationRefused(
+            f"the panel has no column for {', '.join(sorted(missing))}. The rule "
+            f"was asked to choose from a universe the data does not cover, and "
+            f"allocating over the remainder would silently be a different rule"
+        )
+    history = panel.loc[:, universe].sort_index()
+    if len(history) < lookback + 1:
+        raise AllocationRefused(
+            f"{len(history)} sessions against the {lookback + 1} this rule needs. "
+            f"A momentum call on less than a year of prices is a guess about "
+            f"the lookback, not the market"
+        )
+    window = history.tail(lookback + 1)
+    incomplete = sorted(window.columns[window.isna().any()])
+    if incomplete:
+        raise AllocationRefused(
+            f"incomplete history for {', '.join(incomplete)} over the lookback "
+            f"window. A gap inside the momentum window is a hidden data "
+            f"decision, not a measurement"
+        )
+    in_trend = [
+        symbol for symbol in window.columns
+        if window[symbol].iloc[-1] > window[symbol].iloc[-lookback - 1]
+    ]
+    if not in_trend:
+        # All flat: the honest allocation is all cash, and a book whose first
+        # recorded decision is 'hold cash' is a real answer, not a refusal.
+        return Allocation(
+            book=book,
+            rule_version="tsmom252/v1",
+            universe=list(window.columns),
+            weights={},
+            inputs={"lookback": lookback, "in_trend": []},
+            benchmark=benchmark,
+        )
+    weight = 1.0 / len(in_trend)
+    return Allocation(
+        book=book,
+        rule_version="tsmom252/v1",
+        universe=list(window.columns),
+        weights={symbol: round(weight, 4) for symbol in in_trend},
+        inputs={"lookback": lookback, "in_trend": in_trend},
+        benchmark=benchmark,
+    )
