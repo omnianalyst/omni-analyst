@@ -1,0 +1,241 @@
+/* ============================================================
+   Discover — the bold layer.
+   One chart. Giant numbers. Almost no boxes. The scanner view
+   opts into this language via .scanner-view; the rest of the
+   app is untouched.
+   ============================================================ */
+.scanner-view {
+  --d-bg: #070a12;
+  --d-ink: #eef4fb;
+  --d-dim: #93a7c4;
+  --d-faint: #5a6d89;
+  --d-green: #34d399;
+  --d-gold: #fbbf24;
+  --d-line: rgba(147, 167, 196, 0.16);
+
+  background:
+    radial-gradient(1100px 700px at 75% 12%, #101a30 0%, transparent 60%),
+    var(--d-bg);
+  min-height: 100vh;
+  gap: 0;
+  padding: 0 clamp(20px, 6vw, 88px) 90px;
+  color: var(--d-ink);
+}
+
+/* ---- header: one line, quiet ---- */
+.scanner-view .discover-page-heading h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+  margin: 26px 0 2px;
+}
+.scanner-view .discover-page-heading p {
+  display: none; /* the page IS the explanation; Learn why carries the words */
+}
+.scanner-view .discover-compact-meta {
+  color: var(--d-faint);
+  font-size: 11px;
+  font-family: var(--mono);
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  margin-top: 30px;
+}
+
+/* ---- every sub-card loses its box ---- */
+.scanner-view .surface-card,
+.scanner-view .blend,
+.scanner-view .readings-strip,
+.scanner-view .custom-compare,
+.scanner-view .scenario-card,
+.scanner-view .top-picks-column,
+.scanner-view .builder-angle {
+  background: none !important;
+  border: 0 !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  border-top: none !important;
+}
+.scanner-view .top-picks-column {
+  border-left: 2px solid var(--border) !important;
+  padding-left: 18px !important;
+}
+
+/* ---- hero: the answer, in display type ---- */
+.d-hero {
+  margin: 42px 0 8px;
+}
+.d-hero .d-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+  margin-bottom: 10px;
+}
+.d-hero .d-money {
+  font-size: clamp(56px, 9vw, 118px);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 0.95;
+  color: var(--d-ink);
+  font-variant-numeric: tabular-nums;
+}
+.d-hero .d-sub {
+  margin-top: 10px;
+  font-size: 15px;
+  color: var(--d-dim);
+}
+.d-hero .d-sub b {
+  color: var(--d-ink);
+  font-weight: 600;
+}
+.d-hero .d-worst {
+  margin-top: 6px;
+  font-size: 13.5px;
+  color: #f87171;
+}
+
+/* ---- the chart: full-bleed, the visual anchor ---- */
+.d-chart {
+  margin: 34px 0 10px;
+  position: relative;
+}
+.d-chart svg {
+  width: 100%;
+  height: 340px;
+  display: block;
+}
+.d-chart .d-axis {
+  font: 10px var(--mono);
+  fill: var(--d-faint);
+}
+
+/* ---- section titles: one consistent voice ---- */
+.scanner-view h2 {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--d-dim);
+  margin: 0;
+}
+.scanner-view .section-heading,
+.scanner-view .top-picks-heading {
+  border-top: 1px solid var(--d-line);
+  padding-top: 26px;
+  margin-top: 46px;
+  display: block;
+}
+.scanner-view .top-picks-heading p,
+.scanner-view .section-heading p:not(.eyebrow) {
+  margin: 6px 0 18px;
+  font-size: 13.5px;
+  color: var(--d-dim);
+  max-width: 62ch;
+}
+
+/* ---- holdings: a single row of four, airy ---- */
+.d-holdings {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 28px;
+  margin-top: 18px;
+}
+.d-holding .sym {
+  font: 800 26px var(--mono);
+  letter-spacing: -0.02em;
+}
+.d-holding .role {
+  margin-top: 2px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.d-holding .pct {
+  float: right;
+  font: 700 15px var(--mono);
+  color: var(--d-faint);
+}
+.d-holding dl {
+  display: flex;
+  gap: 18px;
+  margin: 14px 0 0;
+  padding: 0;
+}
+.d-holding dt {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+}
+.d-holding dd {
+  margin: 2px 0 0;
+  font: 600 13.5px var(--mono);
+}
+.d-holding .role-growth { color: #34d399; }
+.d-holding .role-inflation { color: #fbbf24; }
+.d-holding .role-deflation { color: #a5b4fc; }
+.d-holding .role-crisis { color: #f87171; }
+
+/* ---- decision table: big rows, no gridlines ---- */
+.scanner-view .decision-table-wrap {
+  border-top: 0 !important;
+  padding-top: 6px !important;
+}
+.scanner-view .decision-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.scanner-view .decision-table-wrap th {
+  font: 700 10px var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+  text-align: left;
+  padding: 10px 12px 14px 0;
+  border-bottom: 1px solid var(--d-line);
+}
+.scanner-view .decision-table-wrap td {
+  padding: 16px 12px 16px 0;
+  border-bottom: 1px solid var(--d-line);
+  font-size: 14px;
+  vertical-align: baseline;
+}
+.scanner-view .decision-table-wrap tr:last-child td { border-bottom: 0; }
+.scanner-view .decision-table-wrap .row-default td:first-child {
+  box-shadow: inset 3px 0 0 var(--d-green);
+  padding-left: 14px;
+}
+.scanner-view .decision-table-wrap td strong { font-size: 17px; font-weight: 700; }
+.scanner-view .decision-table-wrap .mono { font: 700 15px var(--mono); }
+
+/* ---- quiet the rest ---- */
+.scanner-view .risk-strip,
+.scanner-view .history-block,
+.scanner-view .income-line {
+  border-top: 1px solid var(--d-line) !important;
+  padding-top: 20px !important;
+  margin-top: 26px;
+}
+.scanner-view .disclosure-button {
+  border: 0 !important;
+  border-top: 1px solid var(--d-line) !important;
+  border-radius: 0 !important;
+  background: none !important;
+  padding: 18px 0 !important;
+  color: var(--d-faint) !important;
+  font-size: 12px !important;
+}
+.scanner-view .foot-details summary {
+  color: var(--d-faint);
+}
+
+@media (max-width: 860px) {
+  .d-holdings { grid-template-columns: repeat(2, 1fr); }
+  .d-chart svg { height: 240px; }
+  .d-hero .d-money { font-size: 17vw; }
+}

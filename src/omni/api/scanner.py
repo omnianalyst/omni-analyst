@@ -366,6 +366,12 @@ def _mix_history(
     worst = returns.idxmin()
     best = returns.idxmax()
     return {
+        # The monthly path (index, growth of 100): what the mix's own line
+        # looks like. Carried so the UI can draw the journey, not just the
+        # summary stats -- the summary is the verdict, the path is the story.
+        "path": [
+            [i, round(float(v), 3)] for i, v in enumerate(path.tolist())
+        ],
         "window_start": series.index[0].strftime("%Y-%m"),
         "window_end": series.index[-1].strftime("%Y-%m"),
         "volatility": round(float(daily.std() * np.sqrt(252) * 100), 1),

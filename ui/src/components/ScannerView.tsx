@@ -79,6 +79,7 @@ export interface PortfolioHistory {
   worst_drawdown: number;
   up_years: number;
   complete_years: number;
+  path?: Array<[number, number]>;
 }
 
 interface ScannerData {
@@ -515,102 +516,132 @@ function ThePortfolio({ data }: { data: ScannerData }) {
         }
       : null;
 
+  const h = data.portfolio_history;
+  const startAmount = 10000;
+
   return (
     <section class="the-portfolio" aria-label="The portfolio">
-      <div class="top-picks-heading">
-        <h2>The portfolio</h2>
-        <p>
-          One holding per regime at equal weight — each the sleeve that regime is defined
-          by, not last year&apos;s winner. Whatever the market does next, one of these is
-          built for it. Add monthly; about once a year,{" "}
-          <Hint term="rebalance">rebalance</Hint> back to equal weight.
-        </p>
-      </div>
-      <div class="blend">
-        <div class="blend-bar" role="img" aria-label={`Equal-weight blend of ${picks.map((p) => p.pick.symbol).join(", ")}`}>
-          {picks.map(({ bucket, pick }) => {
-            const contribution = (pick.median_annual_return ?? 0) * weight;
-            if (contribution <= 0) return null;
-            return (
-              <span
-                key={pick.symbol}
-                class="blend-segment"
-                style={{
-                  width: `${Math.max((contribution / positiveTotal) * 100, 3)}%`,
-                  background: REGIME_COLORS[bucket.name],
-                }}
-                title={`${pick.symbol} · ${REGIME_LABELS[bucket.name] ?? bucket.name} · ${(weight * 100).toFixed(0)}% weight`}
-              />
-            );
-          })}
+      <div class="d-hero">
+        <div class="d-kicker">
+          The portfolio · one holding per future · 25% each · rebalanced yearly
         </div>
-        <div class="blend-total">
-          <Hint term="median_year">
-            <span class="metric-kicker">Median year, equal weight</span>
-          </Hint>
-          <strong class={total > 0 ? "value-positive" : "value-negative"}>
-            {total > 0 ? "+" : ""}{total.toFixed(1)}%
-          </strong>
-          <span class="metric-context">
-            the average of the four holdings&apos; median calendar-year returns, each
-            measured over its own history — a description of the parts, not a backtested
-            portfolio return
-          </span>
-        </div>
-        <div class="holding-grid">
-          {picks.map(({ bucket, pick }, index) => (
-            <BlendLegendRow
-              key={pick.symbol}
-              pick={pick}
-              bucketName={bucket.name}
-              riskShare={shares[index] ?? 0}
-            />
-          ))}
-        </div>
-
-        {data.decision_table && data.decision_table.length > 0 ? (
-          <DecisionTable rows={data.decision_table} asOf={data.decision_table_as_of} />
-        ) : null}
-
-        {shares.length === picks.length && shares.some((share) => share > 0) ? (
-          <div class="risk-strip">
-            <p class="metric-kicker">Where the risk actually sits</p>
-            <div class="risk-strip-bar" aria-hidden="true">
-              {picks.map(({ bucket, pick }, index) => {
-                const share = shares[index] ?? 0;
-                if (share <= 0) return null;
-                return (
-                  <span
-                    key={pick.symbol}
-                    class="risk-segment"
-                    style={{ width: `${share * 100}%`, background: REGIME_COLORS[bucket.name] }}
-                    title={`${pick.symbol}: ${(share * 100).toFixed(0)}% of portfolio risk`}
-                  />
-                );
+        {h && (h.path?.length ?? 0) > 0 ? (
+          <>
+            <div class="d-money">
+              {((h.path![h.path!.length - 1][1] / 100) * startAmount).toLocaleString("en-US", {
+                style: "currency",
+                currency: "USD",
+                maximumFractionDigits: 0,
               })}
             </div>
-            <p class="risk-note">
-              Equal money is not equal risk: {picks
-                .map(({ pick }, index) => ({ pick, share: shares[index] ?? 0 }))
-                .sort((a, b) => b.share - a.share)
-                .map((entry) => `${entry.pick.symbol} ${(entry.share * 100).toFixed(0)}%`)
-                .join(" · ")}{" "}
-              of the portfolio&apos;s swings, from each holding&apos;s measured volatility.
-              A 0% holding carries none of the swings -- that is what holding cash is for.
-            </p>
-          </div>
-        ) : null}
-
-        {income != null ? (
-          <p class="risk-note">
-            Income about {income.yield.toFixed(1)}%/yr, costing {income.cost.toFixed(2)}%/yr in
-            fund fees (equal weight, sponsor figures as of {data.income_as_of ?? "last audit"}).
-          </p>
-        ) : null}
-
-        {data.portfolio_history ? <PortfolioHistoryBlock history={data.portfolio_history} /> : null}
+            <div class="d-sub">
+              what <b>{startAmount.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })}</b>{" "}
+              in the four-way became, {h.window_start} → {h.window_end} — median year{" "}
+              <b>+{h.median_year.toFixed(1)}%</b>, up {Math.round(h.up_years)}% of years
+            </div>
+            <div class="d-worst">
+              worst year {h.worst_year.return.toFixed(1)}% ({h.worst_year.year}) · worst fall {h.worst_drawdown.toFixed(1)}%
+            </div>
+          </>
+        ) : (
+          <div class="d-money">{"\u2014"}</div>
+        )}
       </div>
+
+      {h && (h.path?.length ?? 0) > 1 ? <HeroChart history={h} /> : null}
+
+      <div class="top-picks-heading">
+        <h2>What you hold</h2>
+        <p>
+          Each sleeve is the definition of its future — the whole market for growth, gold for
+          inflation, long Treasuries for deflation, T-bills for crisis.{" "}
+          <Hint term="rebalance">Rebalance</Hint> back to a quarter about once a year.
+        </p>
+      </div>
+      <div class="d-holdings">
+        {picks.map(({ bucket, pick }, index) => (
+          <div class="d-holding" key={pick.symbol}>
+            <span class="pct">25%</span>
+            <div class="sym">{pick.symbol}</div>
+            <div class={`role role-${bucket.name.toLowerCase().replace("/", "")}`}>
+              {REGIME_LABELS[bucket.name] ?? bucket.name}
+            </div>
+            <dl>
+              <div><dt>median yr</dt><dd>{percent(pick.median_annual_return)}</dd></div>
+              <div><dt>worst fall</dt><dd>{pick.max_drawdown != null ? `${pick.max_drawdown.toFixed(0)}%` : "—"}</dd></div>
+              <div><dt>of risk</dt><dd>{shares[index] > 0 ? `${Math.round((shares[index] ?? 0) * 100)}%` : "0%"}</dd></div>
+            </dl>
+          </div>
+        ))}
+      </div>
+
+      {data.decision_table && data.decision_table.length > 0 ? (
+        <DecisionTable rows={data.decision_table} asOf={data.decision_table_as_of} />
+      ) : null}
+
+      {income != null ? (
+        <p class="risk-note income-line">
+          Income about {income.yield.toFixed(1)}%/yr, costing {income.cost.toFixed(2)}%/yr in
+          fund fees (equal weight, sponsor figures as of {data.income_as_of ?? "last audit"}).
+        </p>
+      ) : null}
     </section>
+  );
+}
+
+// The journey: monthly path of the mix, growth of $100, log scale, with the
+// worst-stretch trough ringed. Pure SVG -- no chart library, no canvas.
+function HeroChart({ history }: { history: PortfolioHistory }) {
+  const pts = history.path ?? [];
+  if (pts.length < 2) return null;
+  const W = 1000, H = 340;
+  const PAD_L = 0, PAD_R = 0, PAD_T = 14, PAD_B = 26;
+  const maxV = Math.max(...pts.map(([, v]) => v));
+  const logSpan = Math.log(maxV / 100);
+  const x = (i: number) => PAD_L + (i / (pts.length - 1)) * (W - PAD_L - PAD_R);
+  const y = (v: number) => PAD_T + (1 - Math.max(0, Math.min(1.04, Math.log(v / 100) / logSpan))) * (H - PAD_T - PAD_B);
+
+  // worst drawdown trough
+  let peak = pts[0][1], troughI = 0, worstDD = 0;
+  pts.forEach(([i, v]) => {
+    if (v > peak) peak = v;
+    const dd = v / peak - 1;
+    if (dd < worstDD) { worstDD = dd; troughI = i; }
+  });
+  const [ti, tv] = pts[troughI];
+
+  // area fill
+  const line = pts.map(([i, v], k) => `${k ? "L" : "M"} ${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+  const area = `${line} L ${x(pts.length - 1).toFixed(1)} ${H - PAD_B} L ${x(0).toFixed(1)} ${H - PAD_B} Z`;
+
+  // year ticks
+  const months = (history.window_start, history.window_end, 0); // ticks from index
+  const ticks: number[] = [];
+  const perYear = 12;
+  for (let i = 0; i < pts.length; i += perYear) ticks.push(i);
+
+  return (
+    <div class="d-chart">
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="The portfolio's measured monthly path">
+        <defs>
+          <linearGradient id="dArea" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="rgba(52,211,153,0.20)" />
+            <stop offset="100%" stop-color="rgba(52,211,153,0)" />
+          </linearGradient>
+        </defs>
+        {ticks.map((i) => (
+          <text class="d-axis" x={x(i)} y={H - 8} text-anchor="start">
+            {history.window_start.slice(0, 4) ? String(Number(history.window_start.slice(0, 4)) + Math.floor(i / 12)) : ""}
+          </text>
+        ))}
+        <path d={area} fill="url(#dArea)" />
+        <path d={line} fill="none" stroke="#34d399" stroke-width="2.6" stroke-linejoin="round" />
+        <circle cx={x(ti)} cy={y(tv)} r="5.5" fill="none" stroke="#f87171" stroke-width="1.6" stroke-dasharray="3 3" />
+        <text class="d-axis" x={Math.min(x(ti) + 8, W - 120)} y={y(tv) + 22} fill="#f87171">
+          {history.worst_year.year}: {history.worst_year.return.toFixed(1)}%
+        </text>
+      </svg>
+    </div>
   );
 }
 

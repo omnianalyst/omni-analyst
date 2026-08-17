@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { useLocation } from "@neutron-build/core/client";
 import "../styles/global.css";
+import "../styles/discover.css";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "../components/CommandPalette";
 import { HeaderBulletin } from "../components/HeaderBulletin";
 import { StatusRail } from "../components/StatusRail";
