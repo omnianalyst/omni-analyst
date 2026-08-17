@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
-import { authHeaderIfPresent, describeError, request } from "../lib/api";
+import { authHeaderIfPresent, describeError, request, sendJson } from "../lib/api";
 import { equalWeightAverage, riskShares } from "../lib/blend";
 import { getRegime, type RegimeResponse } from "../lib/autonomous";
 import { CompaniesPanel } from "./CompaniesPanel";
@@ -479,6 +479,10 @@ function BlendLegendRow({
 // Four positions cover growth, inflation, deflation, and recession -- whatever
 // the market does next, one of them is built for it. The arithmetic on
 // measured medians is labelled for what it is; it is not a backtest.
+interface LocalCompareResponse {
+  custom: PortfolioHistory;
+}
+
 function ThePortfolio({ data }: { data: ScannerData }) {
   const buckets = REGIME_ORDER
     .map((name) => data.buckets.find((bucket) => bucket.name === name))
@@ -518,6 +522,38 @@ function ThePortfolio({ data }: { data: ScannerData }) {
 
   const h = data.portfolio_history;
   const startAmount = 10000;
+  const [split, setSplit] = useState<Record<string, number>>({ VTI: 25, GLD: 25, TLT: 25, SGOV: 25 });
+  const [splitResult, setSplitResult] = useState<PortfolioHistory | null>(null);
+  const [splitBusy, setSplitBusy] = useState(false);
+  const isDefault =
+    split.VTI === 25 && split.GLD === 25 && split.TLT === 25 && split.SGOV === 25;
+
+  // Debounced compare: drag sliders, the ghost line follows once you pause.
+  // Same endpoint, same window-pinning as the mix comparator -- the ghost is
+  // computed against exactly the hero's dates.
+  useEffect(() => {
+    if (isDefault) {
+      setSplitResult(null);
+      return;
+    }
+    const t = window.setTimeout(() => {
+      setSplitBusy(true);
+      void sendJson<LocalCompareResponse>(
+        "POST",
+        "/scanner/custom-portfolio",
+        {
+          positions: Object.entries(split)
+            .filter(([, w]) => w > 0)
+            .map(([symbol, weight]) => ({ symbol, weight })),
+        },
+        authHeaderIfPresent(),
+      )
+        .then((r) => setSplitResult(r.custom))
+        .catch(() => setSplitResult(null))
+        .finally(() => setSplitBusy(false));
+    }, 350);
+    return () => window.clearTimeout(t);
+  }, [split, isDefault]);
 
   return (
     <section class="the-portfolio" aria-label="The portfolio">
@@ -548,7 +584,20 @@ function ThePortfolio({ data }: { data: ScannerData }) {
         )}
       </div>
 
-      {h && (h.path?.length ?? 0) > 1 ? <HeroChart history={h} /> : null}
+      {h && (h.path?.length ?? 0) > 1 ? (
+        <HeroChart history={h} ghost={splitResult} ghostLabel="your split" />
+      ) : null}
+
+      <SplitTuner
+        split={split}
+        setSplit={setSplit}
+        result={splitResult}
+        busy={splitBusy}
+        isDefault={isDefault}
+        startAmount={startAmount}
+        defaultMedian={h?.median_year ?? null}
+        defaultWorst={h?.worst_year.return ?? null}
+      />
 
       <div class="top-picks-heading">
         <h2>What you hold</h2>
@@ -589,14 +638,119 @@ function ThePortfolio({ data }: { data: ScannerData }) {
   );
 }
 
+// The sliders from the local lab, on production math: drag the four sleeves,
+// your dashed line rides the hero chart, and the delta strip says what the
+// drag bought and cost against the default. Reset is one click back to 25x4.
+function SplitTuner({
+  split,
+  setSplit,
+  result,
+  busy,
+  isDefault,
+  startAmount,
+  defaultMedian,
+  defaultWorst,
+}: {
+  split: Record<string, number>;
+  setSplit: (next: Record<string, number>) => void;
+  result: PortfolioHistory | null;
+  busy: boolean;
+  isDefault: boolean;
+  startAmount: number;
+  defaultMedian: number | null;
+  defaultWorst: number | null;
+}) {
+  const total = Object.values(split).reduce((a, b) => a + b, 0) || 1;
+  const sleeves: Array<[string, string, string]> = [
+    ["VTI", "Stocks", "#34d399"],
+    ["GLD", "Gold", "#fbbf24"],
+    ["TLT", "Bonds", "#a5b4fc"],
+    ["SGOV", "Cash", "#f87171"],
+  ];
+  const money = (growth: number) =>
+    ((growth / 100) * startAmount).toLocaleString("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    });
+  return (
+    <div class="d-tuner">
+      <p class="metric-kicker">
+        Try your own split {busy ? "· measuring…" : "· the dashed line is yours"}
+      </p>
+      <div class="d-sliders">
+        {sleeves.map(([sym, label, color]) => (
+          <div class="d-sl" key={sym}>
+            <label>
+              <span style={{ color }}>{sym}</span>
+              <span class="mono">{Math.round((split[sym] / total) * 100)}%</span>
+            </label>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="5"
+              value={split[sym]}
+              aria-label={`${label} weight`}
+              onInput={(e) => setSplit({ ...split, [sym]: Number(e.currentTarget.value) })}
+            />
+            <small>{label}</small>
+          </div>
+        ))}
+      </div>
+      {!isDefault && result ? (
+        <div class="d-tuner-delta">
+          <span>
+            yours: <b class="mono">{money(result.path?.[result.path.length - 1]?.[1] ?? 100)}</b>
+          </span>
+          <span>
+            median yr <b class="mono">{result.median_year >= 0 ? "+" : ""}{result.median_year.toFixed(1)}%</b>
+            {defaultMedian != null ? (
+              <small> ({result.median_year >= defaultMedian ? "+" : ""}{(result.median_year - defaultMedian).toFixed(1)} vs default)</small>
+            ) : null}
+          </span>
+          <span>
+            worst yr <b class="mono value-negative">{result.worst_year.return.toFixed(1)}%</b>
+            {defaultWorst != null ? (
+              <small> ({defaultWorst !== 0 ? ((result.worst_year.return - defaultWorst)).toFixed(1) : ""} vs default)</small>
+            ) : null}
+          </span>
+          <button
+            type="button"
+            class="d-reset"
+            onClick={() => setSplit({ VTI: 25, GLD: 25, TLT: 25, SGOV: 25 })}
+          >
+            back to 25×4
+          </button>
+        </div>
+      ) : null}
+      {!isDefault && !result && !busy ? (
+        <p class="risk-note">This split could not be measured (a sleeve at 0 leaves the window too short).</p>
+      ) : null}
+    </div>
+  );
+}
+
 // The journey: monthly path of the mix, growth of $100, log scale, with the
-// worst-stretch trough ringed. Pure SVG -- no chart library, no canvas.
-function HeroChart({ history }: { history: PortfolioHistory }) {
+// worst-stretch trough ringed. Pure SVG -- no chart library, no canvas. An
+// optional ghost path (the caller's split) rides behind the hero line on the
+// same axes -- same window, same math, so the comparison is honest by
+// construction.
+function HeroChart({
+  history,
+  ghost,
+  ghostLabel,
+}: {
+  history: PortfolioHistory;
+  ghost?: PortfolioHistory | null;
+  ghostLabel?: string;
+}) {
   const pts = history.path ?? [];
   if (pts.length < 2) return null;
   const W = 1000, H = 340;
   const PAD_L = 0, PAD_R = 0, PAD_T = 14, PAD_B = 26;
-  const maxV = Math.max(...pts.map(([, v]) => v));
+  const ghostPts = ghost?.path ?? [];
+  const maxV = Math.max(...pts.map(([, v]) => v), ...(ghostPts.length ? ghostPts.map(([, v]) => v) : [0]));
   const logSpan = Math.log(maxV / 100);
   const x = (i: number) => PAD_L + (i / (pts.length - 1)) * (W - PAD_L - PAD_R);
   const y = (v: number) => PAD_T + (1 - Math.max(0, Math.min(1.04, Math.log(v / 100) / logSpan))) * (H - PAD_T - PAD_B);
@@ -614,8 +768,14 @@ function HeroChart({ history }: { history: PortfolioHistory }) {
   const line = pts.map(([i, v], k) => `${k ? "L" : "M"} ${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
   const area = `${line} L ${x(pts.length - 1).toFixed(1)} ${H - PAD_B} L ${x(0).toFixed(1)} ${H - PAD_B} Z`;
 
+  // the caller's mix, dashed behind the hero line; the ghost shares the
+  // window (server-pinned) so index i means the same month on both paths
+  const ghostLine = ghostPts.length > 1
+    ? ghostPts.map(([i, v], k) => `${k ? "L" : "M"} ${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ")
+    : null;
+  const ghostLast = ghostPts.length ? ghostPts[ghostPts.length - 1][1] : null;
+
   // year ticks
-  const months = (history.window_start, history.window_end, 0); // ticks from index
   const ticks: number[] = [];
   const perYear = 12;
   for (let i = 0; i < pts.length; i += perYear) ticks.push(i);
@@ -634,8 +794,16 @@ function HeroChart({ history }: { history: PortfolioHistory }) {
             {history.window_start.slice(0, 4) ? String(Number(history.window_start.slice(0, 4)) + Math.floor(i / 12)) : ""}
           </text>
         ))}
+        {ghostLine ? (
+          <path d={ghostLine} fill="none" stroke="#eef4fb" stroke-width="1.4" stroke-dasharray="5 5" opacity="0.7" />
+        ) : null}
         <path d={area} fill="url(#dArea)" />
         <path d={line} fill="none" stroke="#34d399" stroke-width="2.6" stroke-linejoin="round" />
+        {ghostLast !== null ? (
+          <text class="d-axis" x={W - 4} y={y(ghostLast) - 6} text-anchor="end" fill="#eef4fb" opacity="0.85">
+            {ghostLabel ?? "your split"} {((ghostLast / 100) * 10000).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })}
+          </text>
+        ) : null}
         <circle cx={x(ti)} cy={y(tv)} r="5.5" fill="none" stroke="#f87171" stroke-width="1.6" stroke-dasharray="3 3" />
         <text class="d-axis" x={Math.min(x(ti) + 8, W - 120)} y={y(tv) + 22} fill="#f87171">
           {history.worst_year.year}: {history.worst_year.return.toFixed(1)}%

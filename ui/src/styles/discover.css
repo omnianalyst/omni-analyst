@@ -239,3 +239,65 @@
   .d-chart svg { height: 240px; }
   .d-hero .d-money { font-size: 17vw; }
 }
+
+/* ---- split tuner: sliders under the chart ---- */
+.d-tuner {
+  margin-top: 26px;
+  border-top: 1px solid var(--d-line);
+  padding-top: 18px;
+}
+.d-tuner .metric-kicker {
+  margin: 0 0 14px;
+}
+.d-sliders {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 22px;
+}
+.d-sl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.d-sl label {
+  display: flex;
+  justify-content: space-between;
+  font: 700 13px var(--mono);
+}
+.d-sl label .mono { color: var(--d-dim); }
+.d-sl input[type="range"] {
+  width: 100%;
+  accent-color: var(--d-green);
+  height: 22px;
+}
+.d-sl small {
+  color: var(--d-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.d-tuner-delta {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  font-size: 13.5px;
+  color: var(--d-dim);
+}
+.d-tuner-delta b { color: var(--d-ink); font-weight: 700; }
+.d-tuner-delta small { color: var(--d-faint); }
+.d-reset {
+  margin-left: auto;
+  padding: 7px 14px;
+  border: 1px solid var(--d-line);
+  border-radius: 999px;
+  background: none;
+  color: var(--d-dim);
+  font: 600 12px inherit;
+  cursor: pointer;
+}
+.d-reset:hover { color: var(--d-ink); border-color: var(--d-dim); }
+@media (max-width: 860px) {
+  .d-sliders { grid-template-columns: repeat(2, 1fr); }
+}
