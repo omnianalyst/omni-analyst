@@ -567,6 +567,11 @@ function ThePortfolio({ data }: { data: ScannerData }) {
             />
           ))}
         </div>
+
+        {data.decision_table && data.decision_table.length > 0 ? (
+          <DecisionTable rows={data.decision_table} asOf={data.decision_table_as_of} />
+        ) : null}
+
         {shares.length === picks.length && shares.some((share) => share > 0) ? (
           <div class="risk-strip">
             <p class="metric-kicker">Where the risk actually sits</p>
@@ -604,10 +609,6 @@ function ThePortfolio({ data }: { data: ScannerData }) {
         ) : null}
 
         {data.portfolio_history ? <PortfolioHistoryBlock history={data.portfolio_history} /> : null}
-
-        {data.decision_table && data.decision_table.length > 0 ? (
-          <DecisionTable rows={data.decision_table} asOf={data.decision_table_as_of} />
-        ) : null}
       </div>
     </section>
   );
