@@ -25,6 +25,7 @@ EXPECTED_OPERATION_INTERVALS: dict[str, float] = {
     "nav": 86_400.0,
     "shadow_decision": 86_400.0,
     "shadow_scoring": 86_400.0,
+    "shadow_decay": 86_400.0,
     "launch_sweep": 21_600.0,
 }
 

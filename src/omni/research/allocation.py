@@ -214,13 +214,6 @@ def risk_balanced(
     )
 
 
-RULES = {
-    "etf_equal_weight_sectors": equal_weight,
-    "etf_top_measured_sectors": top_measured,
-    "etf_risk_balanced_sectors": risk_balanced,
-}
-
-
 __all__ = [
     "MIN_ANNUAL_VOLATILITY",
     "MIN_HISTORY_SESSIONS",
@@ -300,3 +293,10 @@ def tsmom_252(
         inputs={"lookback": lookback, "in_trend": in_trend},
         benchmark=benchmark,
     )
+
+RULES = {
+    "etf_equal_weight_sectors": equal_weight,
+    "etf_top_measured_sectors": top_measured,
+    "etf_risk_balanced_sectors": risk_balanced,
+    "etf_tsmom_252": tsmom_252,
+}

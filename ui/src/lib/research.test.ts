@@ -113,3 +113,92 @@ describe("describeRecord", () => {
     );
   });
 });
+
+import {
+  describeEdgeMonitor,
+  formatExcessBps,
+  formatP,
+  type EdgeBookState,
+  type EdgeMonitor,
+} from "./research";
+
+function edgeBook(overrides: Partial<EdgeBookState> = {}): EdgeBookState {
+  return {
+    book: "etf_tsmom_252",
+    promoted: true,
+    state: "insufficient",
+    scored_sessions: 0,
+    recent_sessions: 0,
+    mean_session_excess: null,
+    decay_p: null,
+    window_start: null,
+    window_end: null,
+    reason: "0 scored outcome(s) against the 30 this monitor needs",
+    as_of: "2026-08-18",
+    evaluated_at: "2026-08-19T01:30:00+00:00",
+    ...overrides,
+  };
+}
+
+function monitor(overrides: Partial<EdgeMonitor> = {}): EdgeMonitor {
+  return { books: [edgeBook()], alerts: [], ...overrides };
+}
+
+describe("formatExcessBps", () => {
+  it("keeps absent absent rather than printing a zero that was never measured", () => {
+    expect(formatExcessBps(null)).toBe(ABSENT);
+    expect(formatExcessBps(undefined)).toBe(ABSENT);
+    expect(formatExcessBps(Number.NaN)).toBe(ABSENT);
+  });
+
+  it("converts session excess to basis points", () => {
+    expect(formatExcessBps(0.0004)).toBe("4.0 bps");
+    expect(formatExcessBps(-0.0031)).toBe("-31.0 bps");
+  });
+});
+
+describe("formatP", () => {
+  it("keeps an unmeasured p absent", () => {
+    expect(formatP(null)).toBe(ABSENT);
+  });
+
+  it("prints a probability to four places", () => {
+    expect(formatP(0.0005)).toBe("0.0005");
+  });
+});
+
+describe("describeEdgeMonitor", () => {
+  it("says when nothing is being watched yet", () => {
+    expect(describeEdgeMonitor(monitor({ books: [] }))).toBe(
+      "No promoted edge is being watched yet.",
+    );
+  });
+
+  it("reports an accumulating forward record without claiming decay", () => {
+    expect(describeEdgeMonitor(monitor())).toBe(
+      "1 promoted edge watched nightly · none decayed · forward history still accumulating",
+    );
+  });
+
+  it("names a decayed promoted edge", () => {
+    const line = describeEdgeMonitor(
+      monitor({
+        books: [edgeBook({ state: "decayed" })],
+        alerts: ["etf_tsmom_252"],
+      }),
+    );
+    expect(line).toContain("decayed: etf_tsmom_252");
+  });
+
+  it("counts a measuring record separately from an accumulating one", () => {
+    const line = describeEdgeMonitor(
+      monitor({
+        books: [
+          edgeBook({ book: "etf_tsmom_252", state: "holding" }),
+          edgeBook({ book: "etf_other", state: "insufficient" }),
+        ],
+      }),
+    );
+    expect(line).toContain("1 of 2 still accumulating history");
+  });
+});

@@ -36,6 +36,61 @@ export interface ResearchRecord {
 export const getResearchRecord = (): Promise<ResearchRecord> =>
   authedGetJson<ResearchRecord>("/research/hypotheses");
 
+export type EdgeMonitorState = "insufficient" | "holding" | "unconfirmed" | "decayed";
+
+export interface EdgeBookState {
+  book: string;
+  promoted: boolean;
+  state: EdgeMonitorState;
+  scored_sessions: number;
+  recent_sessions: number;
+  mean_session_excess: number | null;
+  decay_p: number | null;
+  window_start: string | null;
+  window_end: string | null;
+  reason: string | null;
+  as_of: string;
+  evaluated_at: string | null;
+}
+
+export interface EdgeMonitor {
+  books: EdgeBookState[];
+  alerts: string[];
+}
+
+export const getEdgeMonitor = (): Promise<EdgeMonitor> =>
+  authedGetJson<EdgeMonitor>("/research/edge-state");
+
+/** Mean session excess in basis points; absent stays absent, never zero. */
+export function formatExcessBps(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return ABSENT;
+  return `${(value * 10_000).toFixed(1)} bps`;
+}
+
+export function formatP(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return ABSENT;
+  return value.toFixed(4);
+}
+
+/** One line stating what the monitor means, without overclaiming direction. */
+export function describeEdgeMonitor(monitor: EdgeMonitor): string {
+  const promoted = monitor.books.filter((b) => b.promoted);
+  const watched = promoted.length;
+  const decayed = monitor.alerts.length;
+  const insufficient = promoted.filter((b) => b.state === "insufficient").length;
+  if (watched === 0) {
+    return "No promoted edge is being watched yet.";
+  }
+  const names = decayed === 0 ? "none decayed" : `decayed: ${monitor.alerts.join(", ")}`;
+  const history =
+    insufficient === watched
+      ? "forward history still accumulating"
+      : insufficient > 0
+        ? `${insufficient} of ${watched} still accumulating history`
+        : "forward history measuring";
+  return `${watched} promoted ${watched === 1 ? "edge" : "edges"} watched nightly · ${names} · ${history}`;
+}
+
 export function isPass(test: HypothesisTest): boolean {
   return test.verdict.toLowerCase() === "pass";
 }

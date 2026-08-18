@@ -32,18 +32,10 @@ from asyncpg.exceptions import UniqueViolationError
 
 from omni.config import settings
 from omni.db import connect
-from omni.research.allocation import (
-    AllocationRefused,
-    equal_weight,
-    risk_balanced,
-    top_measured,
-    tsmom_252,
-)
+from omni.research.allocation import RULES, AllocationRefused
 from omni.research.shadow_book import ShadowBookRefused, record_decision
 from omni.research.shadow_run import BENCHMARK, COST_BPS, SECTORS, load_panel, next_session
 from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS, record_loop_health
-
-RULES = (equal_weight, top_measured, risk_balanced, tsmom_252)
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -74,17 +66,16 @@ async def main(argv: list[str] | None = None) -> int:
         recorded = 0
         already = 0
         refused = 0
-        for rule in RULES:
+        for book, rule in RULES.items():
             try:
                 allocation = rule(panel, SECTORS, benchmark=BENCHMARK)
             except AllocationRefused as exc:
                 refused += 1
-                print(f"{rule.__name__:<16} REFUSED  {exc}")
+                print(f"{book:<28} REFUSED  {exc}")
                 continue
 
             held = {k: round(v, 4) for k, v in sorted(allocation.weights.items())}
-            print(f"{rule.__name__:<16} {allocation.book}")
-            print(f"                 {json.dumps(held)}")
+            print(f"{book:<28} {json.dumps(held)}")
 
             if args.dry_run:
                 continue

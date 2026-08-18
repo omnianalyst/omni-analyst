@@ -9,6 +9,7 @@ result was ever measured under.
 
 import asyncio
 import json
+from decimal import Decimal
 
 import asyncpg
 import pytest
@@ -43,6 +44,7 @@ class _Lifespan:
 async def _clean(db):
     await db.pool.execute("TRUNCATE users CASCADE")
     await db.pool.execute("TRUNCATE hypothesis_test")
+    await db.pool.execute("TRUNCATE shadow_edge_state")
     yield
 
 
@@ -232,3 +234,112 @@ async def test_an_empty_record_reports_the_null_floor_not_a_made_up_bar(db):
     assert summary["fdr_bar"] == 2.5
     assert summary["best_t"] is None
     assert summary["last_recorded_at"] is None
+
+
+async def test_edge_state_requires_authentication(database_url):
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        response = await client.get("/research/edge-state")
+    assert response.status_code == 401
+
+
+async def test_edge_state_refuses_authenticated_member(database_url):
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        operator_headers = await _setup(client)
+        member_headers = await _member_headers(client, operator_headers)
+        response = await client.get("/research/edge-state", headers=member_headers)
+    assert response.status_code == 403
+
+
+async def test_edge_state_serves_the_latest_night_per_book(db, database_url):
+    from datetime import date
+
+    from omni.research.decay import EdgeEvaluation, record_edge_state
+
+    promoted = EdgeEvaluation(
+        book="etf_tsmom_252",
+        as_of=date(2026, 8, 18),
+        promoted=True,
+        state="insufficient",
+        scored_sessions=0,
+        recent_sessions=0,
+        mean_session_excess=None,
+        decay_p=None,
+        window_start=None,
+        window_end=None,
+        reason="0 scored outcome(s) against the 30 this monitor needs",
+    )
+    control = EdgeEvaluation(
+        book="etf_equal_weight_sectors",
+        as_of=date(2026, 8, 18),
+        promoted=False,
+        state="holding",
+        scored_sessions=41,
+        recent_sessions=14,
+        mean_session_excess=Decimal("0.0004"),
+        decay_p=Decimal("0.9"),
+        window_start=date(2026, 8, 4),
+        window_end=date(2026, 8, 17),
+        reason=None,
+    )
+    assert await record_edge_state(db.pool, promoted) is True
+    assert await record_edge_state(db.pool, control) is True
+
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _setup(client)
+        response = await client.get("/research/edge-state", headers=headers)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    by_book = {entry["book"]: entry for entry in body["books"]}
+    assert set(by_book) == {"etf_tsmom_252", "etf_equal_weight_sectors"}
+
+    insufficient = by_book["etf_tsmom_252"]
+    assert insufficient["state"] == "insufficient"
+    assert insufficient["promoted"] is True
+    assert insufficient["mean_session_excess"] is None
+    assert insufficient["decay_p"] is None
+    assert "30" in insufficient["reason"]
+
+    holding = by_book["etf_equal_weight_sectors"]
+    assert holding["state"] == "holding"
+    assert holding["promoted"] is False
+    assert holding["mean_session_excess"] == pytest.approx(0.0004)
+    assert holding["window_start"] == "2026-08-04"
+    assert holding["window_end"] == "2026-08-17"
+
+    assert body["alerts"] == []
+
+
+async def test_edge_state_alert_names_a_decayed_promoted_edge(db, database_url):
+    from datetime import date
+
+    from omni.research.decay import EdgeEvaluation, record_edge_state
+
+    decayed = EdgeEvaluation(
+        book="etf_tsmom_252",
+        as_of=date(2026, 8, 18),
+        promoted=True,
+        state="decayed",
+        scored_sessions=90,
+        recent_sessions=30,
+        mean_session_excess=Decimal("-0.0031"),
+        decay_p=Decimal("0.0005"),
+        window_start=date(2026, 7, 17),
+        window_end=date(2026, 8, 17),
+        reason=None,
+    )
+    await record_edge_state(db.pool, decayed)
+
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _setup(client)
+        response = await client.get("/research/edge-state", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["alerts"] == ["etf_tsmom_252"]
+    assert body["books"][0]["state"] == "decayed"
+    assert body["books"][0]["decay_p"] == pytest.approx(0.0005)

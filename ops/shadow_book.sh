@@ -46,6 +46,20 @@ if (( status == 0 && scoring_status != 0 )); then
   status=$scoring_status
 fi
 
+printf 'shadow_book decay start at %s\n' "$(date -u +%FT%TZ)" >> "$log"
+docker compose -f docker-compose.prod.yml exec -T scheduler \
+  python - < ops/shadow_decay.py >> "$log" 2>&1
+decay_status=$?
+if (( decay_status == 0 )); then
+  printf 'shadow_book decay end exit 0 at %s\n' "$(date -u +%FT%TZ)" >> "$log"
+else
+  printf 'shadow_book decay failure exit %d at %s\n' \
+    "$decay_status" "$(date -u +%FT%TZ)" >> "$log"
+fi
+if (( status == 0 && decay_status != 0 )); then
+  status=$decay_status
+fi
+
 if (( status == 0 )); then
   printf 'shadow_book end exit 0 at %s\n' "$(date -u +%FT%TZ)" >> "$log"
 else

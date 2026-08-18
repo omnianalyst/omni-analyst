@@ -121,7 +121,7 @@ SOL out of six tradeable candidates.
 ```
 17 */6 * * *     ops/launch_sweep.sh
 40 7   * * *     ops/nav_snapshot.sh
-30 18  * * 1-5   ops/shadow_book.sh    after the US close, before the next open
+30 18  * * 1-5   ops/shadow_book.sh    three passes: decide, score, judge decay
 0  21  * * *     ops/carry_cycle.sh    21:00 America/Vancouver = 04:00/05:00 UTC
 ```
 
@@ -484,6 +484,38 @@ Verified end to end on 2026-08-12: 49 entries / 154 statistics mirrored, bar
 3.170 — the bar rose with the two additional cells, which is the behaviour
 `sqrt(2 ln N)` requires and a useful cross-check that the extraction preserved
 the arithmetic.
+
+### The edge decay monitor
+
+Added 2026-08-18 (migration 065). The shadow book records and scores; the
+decay monitor judges. After each night's scoring pass, `ops/shadow_decay.py`
+evaluates every book's forward record and writes one append-only
+`shadow_edge_state` row per book per night (append-only by the same triggers
+as 058; a re-run the same night is a no-op).
+
+The statistic mirrors the research harness on a single series: the most
+recent third of scored outcomes, never the full sample. Mean session excess
+is computed in exact Decimal arithmetic (a float mean of 0.004 is
+0.004000000000000001 — the fabricated-precision trap). The null is a
+sign-flip permutation of the same window, seeded from (book, date) through
+SHA-256 so a night's judgement is reproducible. States: `holding`
+(positive recent mean), `unconfirmed` (non-positive but inconclusive — a
+quiet edge is not a dead edge), `decayed` (significantly negative, p ≤ 0.05
+one-sided), `insufficient` (fewer than 30 scored outcomes; numbers refused,
+reason stated). Alert = promoted book in `decayed`. Promoted books are
+declared in `src/omni/research/decay.py::PROMOTED_BOOKS` — currently
+`etf_tsmom_252`, the McNemar-validated survivor; the three baselines are
+controls.
+
+Surfaced operator-only at `GET /research/edge-state` and on System next to
+the research record. Expect `insufficient` for months: the forward record
+cannot be backfilled, which is the point.
+
+The recorder/scorer drift is also fixed: `ops/shadow_book_record.py` had its
+own four-rule list while the scorer iterated `allocation.RULES` (three) —
+`etf_tsmom_252` was recording decisions nothing would ever have scored. Both
+now import the single `RULES` dict (which gained the tsmom entry), and a
+drift test pins the two sets equal.
 
 ### ETF versus constituent experiment
 

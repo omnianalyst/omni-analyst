@@ -13,11 +13,16 @@ import {
 } from "../lib/system";
 import { errorMessage, lastOkAt, refresh, state, status } from "../lib/systemStore";
 import {
+  describeEdgeMonitor,
   describeRecord,
+  formatExcessBps,
+  formatP,
   formatT,
+  getEdgeMonitor,
   getResearchRecord,
   isPass,
   shareOfBar,
+  type EdgeMonitor,
   type ResearchRecord,
 } from "../lib/research";
 import {
@@ -193,6 +198,113 @@ function ResearchSection({
   );
 }
 
+// The edge decay monitor: the forward verdict on every promoted rule, one
+// row per shadow book, refreshed nightly after the scoring pass. It sits next
+// to the research record because the two answer one question from opposite
+// ends -- what justified the promotion, and whether it still holds.
+function EdgeSection({
+  monitor,
+}: {
+  monitor:
+    | { kind: "loading" }
+    | { kind: "ok"; data: EdgeMonitor }
+    | { kind: "error"; message: string; detail?: string };
+}) {
+  if (monitor.kind === "loading") {
+    return (
+      <section class="surface-card research-record">
+        <Loading label="Loading the edge decay monitor…" />
+      </section>
+    );
+  }
+  if (monitor.kind === "error") {
+    return (
+      <section class="surface-card research-record">
+        <div class="section-heading">
+          <div><p class="eyebrow">Edge decay</p><h2>Edge monitor unavailable</h2></div>
+        </div>
+        <ErrorState message={monitor.message} detail={monitor.detail} />
+      </section>
+    );
+  }
+  const { books, alerts } = monitor.data;
+  if (books.length === 0) {
+    return (
+      <section class="surface-card research-record">
+        <p class="research-one-line">
+          Edge decay · no shadow book has a recorded state yet. The monitor writes its
+          first row the night after the scoring pass runs.
+        </p>
+      </section>
+    );
+  }
+
+  const stateTone: Record<string, string> = {
+    holding: "fresh",
+    unconfirmed: "stale",
+    decayed: "dead",
+    insufficient: "quiet",
+  };
+  return (
+    <section class={`surface-card research-record${alerts.length > 0 ? " attention-card" : ""}`}>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Edge decay</p>
+          <h2>{alerts.length > 0 ? "A promoted edge has decayed" : "Promoted edges"}</h2>
+        </div>
+        {alerts.length > 0 ? (
+          <span class="count-badge count-warning">{alerts.length}</span>
+        ) : null}
+      </div>
+      <p class="research-one-line">{describeEdgeMonitor(monitor.data)}</p>
+      <div class="responsive-table">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Book</th>
+              <th>Role</th>
+              <th>State</th>
+              <th>Mean session excess</th>
+              <th>Decay p</th>
+              <th>Recent window</th>
+            </tr>
+          </thead>
+          <tbody>
+            {books.map((book) => (
+              <tr key={book.book}>
+                <td><strong>{book.book}</strong></td>
+                <td>{book.promoted ? "promoted edge" : "control"}</td>
+                <td>
+                  <span class={`status-dot-simple tone-${stateTone[book.state] ?? "quiet"}`} />
+                  {book.state === "insufficient" ? "insufficient history" : book.state}
+                </td>
+                <td>
+                  {book.state === "insufficient"
+                    ? book.reason ?? "—"
+                    : formatExcessBps(book.mean_session_excess)}
+                </td>
+                <td>{formatP(book.decay_p)}</td>
+                <td>
+                  {book.window_start === null || book.window_end === null
+                    ? "—"
+                    : `${book.window_start} to ${book.window_end}`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p class="research-note">
+        Each night the scoring pass measures every shadow book against its benchmark; this
+        monitor judges the most recent third of that forward record. Significantly negative
+        excess is decayed — the promoted claim reversed. Non-positive but inconclusive is
+        unconfirmed, not dead: a quiet edge is not a dead edge. History cannot be backfilled,
+        so an insufficient row is the monitor confirming it looked.
+      </p>
+    </section>
+  );
+}
+
 export function SystemView() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [reconciliation, setReconciliation] = useState<
@@ -203,6 +315,11 @@ export function SystemView() {
   const [research, setResearch] = useState<
     | { kind: "loading" }
     | { kind: "ok"; data: ResearchRecord }
+    | { kind: "error"; message: string; detail?: string }
+  >({ kind: "loading" });
+  const [edges, setEdges] = useState<
+    | { kind: "loading" }
+    | { kind: "ok"; data: EdgeMonitor }
     | { kind: "error"; message: string; detail?: string }
   >({ kind: "loading" });
 
@@ -218,6 +335,12 @@ export function SystemView() {
 
   useEffect(() => {
     loadResearch();
+    void getEdgeMonitor()
+      .then((data) => setEdges({ kind: "ok", data }))
+      .catch((error) => {
+        const { message, detail } = describeError(error);
+        setEdges({ kind: "error", message, detail });
+      });
     void refresh();
     void getReconciliation()
       .then((data) => setReconciliation({ kind: "ok", data }))
@@ -310,6 +433,7 @@ export function SystemView() {
       )}
 
       <ResearchSection research={research} onRetry={loadResearch} />
+      <EdgeSection monitor={edges} />
 
       <button
         type="button"

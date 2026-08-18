@@ -147,24 +147,96 @@ async def test_production_main_loads_prices_and_invokes_every_book(monkeypatch):
         "pool",
         loop_name="shadow_scoring",
         ok=True,
-        result="scored 3, pending 0, across 3 books",
+        result=f"scored 4, pending 0, across {len(shadow_book_score.RULES)} books",
         expected_interval_seconds=86_400.0,
     )
     client.close.assert_awaited_once()
 
 
-def _run_wrapper(tmp_path: Path, *, decision_exit: int, scoring_exit: int):
+def test_the_scorer_covers_every_book_the_recorder_writes():
+    record_spec = importlib.util.spec_from_file_location(
+        "shadow_book_record_ops", ROOT / "ops" / "shadow_book_record.py"
+    )
+    assert record_spec is not None and record_spec.loader is not None
+    shadow_book_record = importlib.util.module_from_spec(record_spec)
+    sys.modules[record_spec.name] = shadow_book_record
+    record_spec.loader.exec_module(shadow_book_record)
+
+    assert set(shadow_book_score.RULES) == set(shadow_book_record.RULES)
+    assert "etf_tsmom_252" in shadow_book_score.RULES
+
+
+_decay_spec = importlib.util.spec_from_file_location(
+    "shadow_decay_ops", ROOT / "ops" / "shadow_decay.py"
+)
+assert _decay_spec is not None and _decay_spec.loader is not None
+shadow_decay = importlib.util.module_from_spec(_decay_spec)
+sys.modules[_decay_spec.name] = shadow_decay
+_decay_spec.loader.exec_module(shadow_decay)
+
+
+async def test_the_decay_pass_judges_every_book_and_records_health(monkeypatch):
+    from omni.research.decay import EdgeEvaluation
+
+    def _evaluation(book):
+        return EdgeEvaluation(
+            book=book,
+            as_of=date(2026, 8, 18),
+            promoted=book == "etf_tsmom_252",
+            state="insufficient",
+            scored_sessions=0,
+            recent_sessions=0,
+            mean_session_excess=None,
+            decay_p=None,
+            window_start=None,
+            window_end=None,
+            reason="not enough scored outcomes yet",
+        )
+
+    client = SimpleNamespace(pool="pool", close=AsyncMock())
+    connect = AsyncMock(return_value=client)
+    outcomes_for = AsyncMock(return_value=[])
+    evaluate_edge = Mock(side_effect=lambda book, as_of, rows: _evaluation(book))
+    record_edge_state = AsyncMock(return_value=True)
+    latest = AsyncMock(return_value=[])
+    record_health = AsyncMock(return_value=0)
+    monkeypatch.setattr(shadow_decay, "connect", connect)
+    monkeypatch.setattr(shadow_decay, "outcomes_for", outcomes_for)
+    monkeypatch.setattr(shadow_decay, "evaluate_edge", evaluate_edge)
+    monkeypatch.setattr(shadow_decay, "record_edge_state", record_edge_state)
+    monkeypatch.setattr(shadow_decay, "latest_edge_states", latest)
+    monkeypatch.setattr(shadow_decay, "record_loop_health", record_health)
+
+    assert await shadow_decay.main() == 0
+
+    assert [c.args[1] for c in outcomes_for.await_args_list] == list(shadow_decay.RULES)
+    assert record_edge_state.await_count == len(shadow_decay.RULES)
+    record_health.assert_awaited_once_with(
+        "pool",
+        loop_name="shadow_decay",
+        ok=True,
+        result=(
+            f"evaluated {len(shadow_decay.RULES)} books, 0 promoted edge(s) decayed"
+        ),
+        expected_interval_seconds=86_400.0,
+    )
+    client.close.assert_awaited_once()
+
+
+def _run_wrapper(tmp_path: Path, *, decision_exit: int, scoring_exit: int, decay_exit: int = 0):
     ops = tmp_path / "ops"
     ops.mkdir()
     (ops / "shadow_book_record.py").write_text("decision\n")
     (ops / "shadow_book_score.py").write_text("scoring\n")
+    (ops / "shadow_decay.py").write_text("decay\n")
     docker = tmp_path / "docker"
     docker.write_text(
         "#!/usr/bin/env bash\n"
         "read -r pass\n"
         "echo \"$pass ran\"\n"
         "if [[ $pass == decision ]]; then exit \"$DECISION_EXIT\"; fi\n"
-        "exit \"$SCORING_EXIT\"\n"
+        "if [[ $pass == scoring ]]; then exit \"$SCORING_EXIT\"; fi\n"
+        "exit \"$DECAY_EXIT\"\n"
     )
     docker.chmod(0o755)
     env = {
@@ -173,6 +245,7 @@ def _run_wrapper(tmp_path: Path, *, decision_exit: int, scoring_exit: int):
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "DECISION_EXIT": str(decision_exit),
         "SCORING_EXIT": str(scoring_exit),
+        "DECAY_EXIT": str(decay_exit),
     }
     result = subprocess.run(
         ["bash", str(ROOT / "ops" / "shadow_book.sh")],
@@ -189,30 +262,41 @@ def test_production_wrapper_runs_decision_then_scoring(tmp_path):
 
     assert result.returncode == 0
     assert log.index("decision ran") < log.index("scoring ran")
+    assert log.index("scoring ran") < log.index("decay ran")
     assert "shadow_book start at " in log
     assert "shadow_book decision start at " in log
     assert "shadow_book decision end exit 0 at " in log
     assert "shadow_book scoring start at " in log
     assert "shadow_book scoring end exit 0 at " in log
+    assert "shadow_book decay start at " in log
+    assert "shadow_book decay end exit 0 at " in log
     assert "shadow_book end exit 0 at " in log
     assert "failure" not in log
 
 
 @pytest.mark.parametrize(
-    ("decision_exit", "scoring_exit", "expected"),
-    [(11, 0, 11), (0, 23, 23), (11, 23, 11)],
+    ("decision_exit", "scoring_exit", "decay_exit", "expected"),
+    [(11, 0, 0, 11), (0, 23, 0, 23), (0, 0, 7, 7), (11, 23, 7, 11)],
 )
 def test_production_wrapper_attempts_both_passes_and_exposes_failure(
-    tmp_path, decision_exit, scoring_exit, expected
+    tmp_path, decision_exit, scoring_exit, decay_exit, expected
 ):
     result, log = _run_wrapper(
-        tmp_path, decision_exit=decision_exit, scoring_exit=scoring_exit
+        tmp_path,
+        decision_exit=decision_exit,
+        scoring_exit=scoring_exit,
+        decay_exit=decay_exit,
     )
 
     assert result.returncode == expected
     assert "decision ran" in log
     assert "scoring ran" in log
-    for name, command_exit in (("decision", decision_exit), ("scoring", scoring_exit)):
+    assert "decay ran" in log
+    for name, command_exit in (
+        ("decision", decision_exit),
+        ("scoring", scoring_exit),
+        ("decay", decay_exit),
+    ):
         if command_exit == 0:
             assert f"shadow_book {name} end exit 0" in log
         else:
