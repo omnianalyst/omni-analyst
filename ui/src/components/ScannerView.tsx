@@ -1154,7 +1154,7 @@ function BestMeasured({ data }: { data: ScannerData }) {
           description={category.description}
           assets={(data.category_rankings[category.key] ?? []).slice(
             0,
-            8,
+            5,
           )}
           horizon={horizon}
         />
@@ -1237,6 +1237,7 @@ export function ScannerView() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [rankingsOpen, setRankingsOpen] = useState(false);
   const [companiesOpen, setCompaniesOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1280,48 +1281,60 @@ export function ScannerView() {
 
       <BestMeasured data={state.data} />
 
-      <ScenarioCards data={state.data} />
-
-      <CurrentReadings />
-
-      <RiskLadder data={state.data} />
-
       <button
         type="button"
         class="disclosure-button"
-        aria-expanded={rankingsOpen}
-        onClick={() => setRankingsOpen((open) => !open)}
+        aria-expanded={moreOpen}
+        onClick={() => setMoreOpen((open) => !open)}
       >
-        <span>{rankingsOpen ? "Hide every measured asset" : `Every measured asset · ${assetCount} ranked`}</span>
-        <span aria-hidden="true">{rankingsOpen ? "−" : "+"}</span>
+        <span>{moreOpen ? "Hide the deep detail" : "Coverage, regimes, gauges, every asset · the deep detail"}</span>
+        <span aria-hidden="true">{moreOpen ? "−" : "+"}</span>
       </button>
-      {rankingsOpen ? (
-        <div class="detail-drawer">
-          {CATEGORY_DETAILS.map((category) => (
-            <RankedCategory
-              key={category.key}
-              title={category.title}
-              description={category.description}
-              assets={state.data.category_rankings[category.key] ?? []}
-            />
-          ))}
-        </div>
-      ) : null}
-
-      <button
-        type="button"
-        class="disclosure-button"
-        aria-expanded={companiesOpen}
-        onClick={() => setCompaniesOpen((open) => !open)}
-      >
-        <span>{companiesOpen ? "Hide individual companies" : `Individual companies · ${companyCount} ranked`}</span>
-        <span aria-hidden="true">{companiesOpen ? "−" : "+"}</span>
-      </button>
-      {companiesOpen ? (
+      {moreOpen ? (
         <div class="detail-drawer">
           <div class="detail-block">
-            <SectorLeadership data={state.data} />
-            <CompaniesPanel />
+            <ScenarioCards data={state.data} />
+            <CurrentReadings />
+            <RiskLadder data={state.data} />
+            <button
+              type="button"
+              class="disclosure-button"
+              aria-expanded={rankingsOpen}
+              onClick={() => setRankingsOpen((open) => !open)}
+            >
+              <span>{rankingsOpen ? "Hide every measured asset" : `Every measured asset · ${assetCount} ranked`}</span>
+              <span aria-hidden="true">{rankingsOpen ? "−" : "+"}</span>
+            </button>
+            {rankingsOpen ? (
+              <div class="detail-drawer">
+                {CATEGORY_DETAILS.map((category) => (
+                  <RankedCategory
+                    key={category.key}
+                    title={category.title}
+                    description={category.description}
+                    assets={state.data.category_rankings[category.key] ?? []}
+                  />
+                ))}
+              </div>
+            ) : null}
+
+            <button
+              type="button"
+              class="disclosure-button"
+              aria-expanded={companiesOpen}
+              onClick={() => setCompaniesOpen((open) => !open)}
+            >
+              <span>{companiesOpen ? "Hide individual companies" : `Individual companies · ${companyCount} ranked`}</span>
+              <span aria-hidden="true">{companiesOpen ? "−" : "+"}</span>
+            </button>
+            {companiesOpen ? (
+              <div class="detail-drawer">
+                <div class="detail-block">
+                  <SectorLeadership data={state.data} />
+                  <CompaniesPanel />
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}
