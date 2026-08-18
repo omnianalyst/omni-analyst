@@ -362,19 +362,23 @@ unavailable/retry state instead of an empty result.
 
 #### OA-018 - Backup executable is not source-controlled
 
-**Status: repo FIXED 2026-08-14; host residue open 2026-08-18.** `ops/backup.sh`
-is now the versioned, installed-by-name script: `install_cron` writes cron that
-invokes the repo path directly (`:218-241`), `validate_rsync_target` refuses
-empty/local/localhost targets (`:37-68`), replication propagates failure
-(`:140-146`), and the script carries `pg_restore --list` validation plus a
-restore-drill mode with a migration floor (`:70-216`); 10 tests in
-`tests/test_backup_ops.py` pin all of it, including that cron must not name
-`/opt/omni-backup.sh`. **Host, measured 2026-08-18:** root cron still runs
-`/opt/omni-backup.sh`, which is the 2026-08-12 installed snapshot of the
-versioned script (custom-format, `set -euo pipefail` — safe, but predating
-`install_cron`/`validate_rsync_target`), and `OMNI_RSYNC_TARGET` is unset, so
-dumps remain local-only. Remaining: adopt the current script on the host, choose
-and set an off-box target, and repeat the disposable restore on a post-064 dump.
+**Status: repo FIXED 2026-08-14; replication DEFERRED by operator 2026-08-18;
+restore drill PASSED post-064.** `ops/backup.sh` is the versioned script with
+`install_cron` writing cron that invokes the repo path directly (`:218-241`),
+`validate_rsync_target` refusing empty/local/localhost targets (`:37-68`),
+replication propagating failure (`:140-146`), `pg_restore --list` validation
+(`:70-103`), and a `drill` subcommand with a migration floor (`:186-216`); 10
+tests in `tests/test_backup_ops.py` pin all of it. **Host, measured and acted
+on 2026-08-18:** the versioned script deliberately refuses to run without
+`OMNI_RSYNC_TARGET`, and the operator chose local-only for now — so the host
+intentionally remains on the 2026-08-12 `/opt/omni-backup.sh` snapshot (which
+backs up locally and warns), root cron unchanged, and the versioned script
+stays un-installed until a target is picked. Reconcile later by setting
+`OMNI_RSYNC_TARGET` in `/etc/omni-backup.env` and running
+`ops/backup.sh install`. The restore drill was repeated 2026-08-18 on the
+post-064 dump `omni_v2-20260818T100001Z.dump` (394 MB): restored in 2m25s,
+migration 64 verified, disposable database dropped, services healthy
+throughout.
 
 `ops/backup.sh` says it is the installed script, while the operating document
 says production runs a different unversioned `/opt/omni-backup.sh` with
@@ -895,10 +899,13 @@ stop writers (`api`, `scheduler`) rather than the database container.
    regression test (landed with the fixes in `48a5f3c`), and the fresh isolated
    compose boot is now a CI gate step (`ci/production_smoke.sh`) rather than a
    manual pass.
-2. **OPEN — the one real residue.** Adopt the current versioned backup script
-   on the host (root cron still invokes the 2026-08-12 `/opt/omni-backup.sh`
-   snapshot), choose and set `OMNI_RSYNC_TARGET` against an independent host,
-   and repeat the disposable restore with a dump taken after migration 064.
+2. **Replication decision deferred 2026-08-18; drill done.** The restore
+   drill passed on the post-064 dump (2m25s, disposable dropped). Off-box
+   replication was declined for now — the versioned script refuses local-only
+   by design, so the host stays on the 2026-08-12 local-only snapshot. When
+   that changes: pick a target, set `OMNI_RSYNC_TARGET` in
+   `/etc/omni-backup.env`, run `ops/backup.sh install`, and confirm one
+   replicated dump arrives.
 3. Questrade read-only and token-rotation paths may be validated with an
    operator-owned practice token; IBKR needs a paper-first Gateway vertical
    slice before its surface returns (removed under OA-007).
