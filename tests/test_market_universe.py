@@ -38,8 +38,41 @@ def test_census_classifies_registered_excluded_and_unmapped_assets() -> None:
 def test_registry_contains_previously_missed_large_assets() -> None:
     symbols = {metadata["symbol"] for metadata in CRYPTO_REGISTRY.values()}
 
-    assert {"XMR", "TRX", "ZEC", "XLM", "HBAR", "SUI", "UNI", "AAVE"} <= symbols
+    assert {"XMR", "TRX", "ZEC", "HBAR", "SUI", "UNI", "AAVE"} <= symbols
     assert MIN_CRYPTO_OBSERVATIONS == 365
+
+
+class TestOperatorPolicyCuts:
+    """The 2026-08-18 trim: BNB, LINK, XLM, ALGO left the governed universe.
+
+    The rotation research had just closed with every ordering cell dead and
+    per-tier alpha at zero, so the crypto section keeps one name per distinct
+    user-facing role instead of breadth. The cut must stay visible in the
+    census as a dated policy exclusion -- retiring it silently would turn a
+    decision into a coverage gap, which is exactly what the unmapped list is
+    reserved for.
+    """
+
+    def test_cut_symbols_are_absent_from_the_registry(self) -> None:
+        symbols = {metadata["symbol"] for metadata in CRYPTO_REGISTRY.values()}
+        assert not ({"BNB", "LINK", "XLM", "ALGO"} & symbols)
+
+    def test_cut_ids_are_excluded_with_dated_operator_reasons(self) -> None:
+        for coin_id in ("binancecoin", "chainlink", "stellar", "algorand"):
+            assert coin_id in EXCLUDED_CRYPTO_IDS
+            assert "operator policy 2026-08-18" in EXCLUDED_CRYPTO_IDS[coin_id]
+
+    def test_the_census_reports_a_cut_as_excluded_not_unmapped(self) -> None:
+        report = evaluate_crypto_census([
+            _coin(1, "bitcoin", "btc", "Bitcoin"),
+            _coin(8, "stellar", "xlm", "Stellar"),
+        ])
+
+        assert [item["registered_symbol"] for item in report["included"]] == ["BTC"]
+        (item,) = report["excluded"]
+        assert item["symbol"] == "XLM"
+        assert "redundant with XRP" in item["reason"]
+        assert report["unmapped"] == []
 
 
 class TestUnmappedAssetsCarryWhatWasMeasured:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-POLICY_VERSION = "2026-08-13.1"
+POLICY_VERSION = "2026-08-18.1"
 CRYPTO_MARKET_CAP_LIMIT = 60
 MIN_CRYPTO_OBSERVATIONS = 365
 
@@ -19,7 +19,6 @@ MIN_CRYPTO_OBSERVATIONS = 365
 CRYPTO_REGISTRY: dict[str, dict[str, str]] = {
     "bitcoin": {"symbol": "BTC", "name": "Bitcoin", "yf": "BTC-USD"},
     "ethereum": {"symbol": "ETH", "name": "Ethereum", "yf": "ETH-USD"},
-    "binancecoin": {"symbol": "BNB", "name": "BNB", "yf": "BNB-USD"},
     "ripple": {"symbol": "XRP", "name": "XRP", "yf": "XRP-USD"},
     "solana": {"symbol": "SOL", "name": "Solana", "yf": "SOL-USD"},
     "tron": {"symbol": "TRX", "name": "TRON", "yf": "TRX-USD"},
@@ -29,9 +28,7 @@ CRYPTO_REGISTRY: dict[str, dict[str, str]] = {
     "zcash": {"symbol": "ZEC", "name": "Zcash", "yf": "ZEC-USD"},
     "monero": {"symbol": "XMR", "name": "Monero", "yf": "XMR-USD"},
     "cardano": {"symbol": "ADA", "name": "Cardano", "yf": "ADA-USD"},
-    "chainlink": {"symbol": "LINK", "name": "Chainlink", "yf": "LINK-USD"},
     "whitebit": {"symbol": "WBT", "name": "WhiteBIT Coin", "yf": "WBT-USD"},
-    "stellar": {"symbol": "XLM", "name": "Stellar", "yf": "XLM-USD"},
     "bitcoin-cash": {"symbol": "BCH", "name": "Bitcoin Cash", "yf": "BCH-USD"},
     "the-open-network": {"symbol": "TON", "name": "Toncoin", "yf": "TON-USD"},
     "litecoin": {"symbol": "LTC", "name": "Litecoin", "yf": "LTC-USD"},
@@ -73,6 +70,28 @@ EXCLUDED_CRYPTO_IDS: dict[str, str] = {
     "ondo-us-dollar-yield": "tokenized cash",
     "tether-gold": "tokenized gold; gold is represented separately",
     "pax-gold": "tokenized gold; gold is represented separately",
+    # Operator policy 2026-08-18, after the rotation research closed: the
+    # measured crypto section is one factor at different amplitudes, so
+    # membership follows distinct user-facing roles, not breadth. These four
+    # carried either a redundant role or none. Dated and revisable by a later
+    # policy version, unlike the asset-class exclusions above.
+    "binancecoin": (
+        "operator policy 2026-08-18: exchange-token role carries no distinct "
+        "choice for a user; redundant beta"
+    ),
+    "chainlink": (
+        "operator policy 2026-08-18: comparative underperformance since 2021 "
+        "and no distinct role on the ladder"
+    ),
+    "stellar": (
+        "operator policy 2026-08-18: redundant with XRP -- same payments "
+        "role, shallower history"
+    ),
+    "algorand": (
+        "operator policy 2026-08-18: weakest name of the 2026-08-18 rotation "
+        "batch; never registered, excluded so a future top-60 entry cannot "
+        "surface it silently"
+    ),
 }
 
 # Live census members that cannot be mapped safely, with what was measured.
