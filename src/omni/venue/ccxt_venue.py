@@ -946,7 +946,94 @@ class CCXTVenue:
             _translate(exc, self.name, intent.symbol)
             raise
 
-        return self._fill_from_order(order, intent, submitted=amount)
+        try:
+            return self._fill_from_order(order, intent, submitted=amount)
+        except VenueUnavailable:
+            return await self._reconcile_terse_submit(order, intent, submitted=amount)
+
+    async def _reconcile_terse_submit(
+        self, order: Any, intent: TradeIntent, *, submitted: Decimal
+    ) -> Fill:
+        """A submit that came back with an id and no description: read it back.
+
+        Hyperliquid's create-order response is terse. Recorded live on the
+        2026-08-19 wind-down, twice in a row (external ids 520000168079,
+        520001506296): `filled=None, status=None` while both orders existed on
+        the book -- one later canceled itself, one rested open despite an
+        aggressive price. Refusing an undescribed response is the right
+        instinct applied at the wrong trigger: the order EXISTS, the terse
+        response carries its id, and the venue exposes fetch_order. So the
+        honest next step is to ask the venue, by that id. Placement is never
+        retried -- the same rule `_resolve_placement` holds for lost
+        responses, for the same reason: a blind retry is how one intent
+        becomes two positions.
+
+        A read-back that shows the order RESTING is cancelled before
+        returning. This adapter sends market intents as aggressive limits
+        (reference +/- 5%), and an aggressive limit that has not crossed is
+        either a stale reference or a venue behaviour nobody chose -- either
+        way it is not an order to leave live on the book. The cancel races a
+        possible fill, so the state is read once more afterwards and a fill
+        that landed wins. The raw read-back state rides on an empty fill so
+        an operator sees exactly what the venue said.
+        """
+        key = intent.idempotency_key
+        external_id = (
+            _text(order.get("id")) or _text(order.get("clientOrderId"))
+            if isinstance(order, dict)
+            else None
+        )
+        fetch_order = getattr(self._exchange, "fetch_order", None)
+        if (
+            external_id is None
+            or fetch_order is None
+            or not (getattr(self._exchange, "has", None) or {}).get("fetchOrder")
+        ):
+            raise VenueUnavailable(
+                f"{self.name} accepted the {intent.symbol} order (client order "
+                f"id {key}) but described it too poorly to read and carried no "
+                f"usable order id to ask about. Nothing was retried. A "
+                f"resubmission must reuse idempotency key {key}"
+            )
+
+        try:
+            fetched = await fetch_order(external_id, intent.symbol)
+        except Exception as probe:
+            raise VenueUnavailable(
+                f"{self.name} accepted the {intent.symbol} order as "
+                f"{external_id} (client order id {key}) but could not be asked "
+                f"what became of it: {probe}. Nothing was retried. A "
+                f"resubmission must reuse idempotency key {key}"
+            ) from probe
+
+        fill = self._fill_from_order(
+            fetched, intent, submitted=submitted, recovered_from="terse submit response"
+        )
+        if not fill.is_empty:
+            return fill
+
+        cancel_failed: str | None = None
+        try:
+            await self._exchange.cancel_order(external_id, intent.symbol)
+        except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
+            cancel_failed = str(exc)
+        try:
+            final = await fetch_order(external_id, intent.symbol)
+        except Exception:  # noqa: BLE001 - the cancel already decided
+            final = None
+        if final is not None:
+            confirmed = self._fill_from_order(
+                final, intent, submitted=submitted,
+                recovered_from="terse submit response",
+            )
+            if not confirmed.is_empty:
+                return confirmed
+
+        fill.raw["resting_order_cancelled"] = external_id
+        if cancel_failed is not None:
+            fill.raw["cancel_failed"] = cancel_failed
+        fill.raw["venue_state"] = fetched
+        return fill
 
     async def _resolve_placement(
         self, intent: TradeIntent, submitted: Decimal, cause: BaseException

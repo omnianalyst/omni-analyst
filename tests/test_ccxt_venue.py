@@ -185,6 +185,10 @@ class FakeExchange:
         self.fetched.append({"id": id, "symbol": symbol, "params": dict(params or {})})
         if self._fetch_error is not None:
             raise self._fetch_error
+        if isinstance(self._fetched_order, list):
+            if not self._fetched_order:
+                raise AssertionError("fetch_order sequence exhausted")
+            return self._fetched_order.pop(0)
         if self._fetched_order is None:
             raise AssertionError("fetch_order called with no response configured")
         return self._fetched_order
@@ -557,7 +561,12 @@ class TestNeverFabricateAFill:
     """A fill invented from the intent writes a position that does not exist."""
 
     async def test_an_unreadable_filled_quantity_raises(self):
-        exchange = FakeExchange(order=_order(filled=None))
+        # The read-back is given the same garbage: even after asking, the
+        # venue declined to describe the order, and that is the refusal.
+        exchange = FakeExchange(
+            order=_order(filled=None),
+            fetched_order=_order(filled=None),
+        )
 
         with pytest.raises(VenueUnavailable, match="filled"):
             await _live(exchange).execute(_intent())
@@ -568,14 +577,18 @@ class TestNeverFabricateAFill:
         It is 'the venue did not say', and the two have opposite consequences
         for a caller deciding whether to send the order again.
         """
-        exchange = FakeExchange(order=_order(filled=0.0, status=None))
+        exchange = FakeExchange(
+            order=_order(filled=0.0, status=None),
+            fetched_order=_order(filled=0.0, status=None),
+        )
 
         with pytest.raises(VenueUnavailable, match="nothing filled"):
             await _live(exchange).execute(_intent())
 
     async def test_an_execution_with_no_usable_price_raises(self):
         exchange = FakeExchange(
-            order=_order(filled=0.001, average=None, cost=None, price=None)
+            order=_order(filled=0.001, average=None, cost=None, price=None),
+            fetched_order=_order(filled=0.001, average=None, cost=None, price=None),
         )
 
         with pytest.raises(VenueUnavailable, match="usable price"):
@@ -1120,3 +1133,96 @@ class TestConnectDoesNotLeakTheSessionItOpened:
             await CCXTVenue.connect(venue="unpriced")
 
         assert closed == [True], "connect left the exchange session open"
+
+
+class TestTerseSubmitResponse:
+    """Hyperliquid's create-order answer: an id, and no description of it.
+
+    Recorded live on the 2026-08-19 wind-down, twice (external ids
+    520000168079 / 520001506296): `filled=None, status=None` on the submit
+    response while both orders existed on the book -- one later canceled
+    itself, one rested open despite an aggressive price. The refusal was the
+    right instinct at the wrong trigger: the order exists, so the honest
+    next step is to read it back by the id the terse response carried.
+    """
+
+    async def test_a_terse_response_is_reconciled_by_reading_the_order_back(self):
+        intent = _intent()
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="520001506296"),
+            fetched_order=_order(filled=0.001, average=10_050.0,
+                                 status="closed", order_id="520001506296"),
+        )
+
+        fill = await _live(exchange).execute(intent)
+
+        assert len(exchange.created) == 1, "a placement is never retried"
+        assert fill.filled_quantity == Decimal("0.001")
+        assert fill.average_price == Decimal(10050)
+        assert fill.raw["recovered_from"] == "terse submit response"
+
+    async def test_a_terse_response_that_rests_is_cancelled_not_left_live(self):
+        intent = _intent()
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="520001506296"),
+            fetched_order=[
+                _order(filled=0.0, average=None, status="open",
+                       order_id="520001506296"),
+                _order(filled=0.0, average=None, status="canceled",
+                       order_id="520001506296"),
+            ],
+        )
+
+        fill = await _live(exchange).execute(intent)
+
+        assert fill.is_empty
+        assert ("520001506296", intent.symbol) in exchange.cancelled
+        assert fill.raw["resting_order_cancelled"] == "520001506296"
+        assert fill.raw["venue_state"]["status"] == "open"
+
+    async def test_a_fill_that_lands_during_the_cancel_race_is_returned(self):
+        ccxt = pytest.importorskip("ccxt")
+        intent = _intent()
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="520001506296"),
+            fetched_order=[
+                _order(filled=0.0, average=None, status="open",
+                       order_id="520001506296"),
+                _order(filled=0.001, average=10_050.0, status="closed",
+                       order_id="520001506296"),
+            ],
+            cancel_error=ccxt.OrderNotFound("order already filled"),
+        )
+
+        fill = await _live(exchange).execute(intent)
+
+        assert fill.filled_quantity == Decimal("0.001")
+        assert len(exchange.cancelled) == 1
+
+    async def test_a_terse_response_with_no_id_still_refuses(self):
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="", client_order_id=None),
+        )
+
+        with pytest.raises(VenueUnavailable, match="idempotency"):
+            await _live(exchange).execute(_intent())
+
+        assert exchange.fetched == []
+
+    async def test_a_read_back_the_venue_cannot_answer_names_the_key(self):
+        ccxt = pytest.importorskip("ccxt")
+        intent = _intent()
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="520001506296"),
+            fetch_error=ccxt.NetworkError("connection reset"),
+        )
+
+        with pytest.raises(VenueUnavailable, match=intent.idempotency_key):
+            await _live(exchange).execute(intent)
+
+        assert len(exchange.created) == 1
