@@ -412,7 +412,10 @@ experiment and the bulletin.
 
 ### Discover and market-universe governance
 
-28 broad stock/ETF assets, 12 defensive/real assets, 34 ranked crypto assets, all
+28 broad stock/ETF assets, 12 defensive/real assets, the seven-name crypto
+ladder (BTC, ETH, XRP, SOL, DOGE, XMR, HBAR — policy 2026-08-18.2, one name
+per distinct role; off-ladder assets keep ingesting in the background and
+show as dated policy exclusions in the census), all
 11 GICS sectors, top 15 measured companies per sector. Each carries risk tier,
 volatility, drawdown, correlation/market role, trailing one-year return,
 annualised five- and ten-year results where history permits, median complete
@@ -423,7 +426,8 @@ The balanced score is category-relative: 35% durable growth, 25% consistency,
 reweighted when history is shorter. **It is a measurement, not a recommendation.**
 
 Last live signed-in audit: 11/11 sectors, 463 companies qualifying, 74/74 broad
-assets ranked, 34 crypto ranked. The Monero omission is resolved — XMR ranked
+assets ranked, the seven ladder names ranked. The Monero omission is
+resolved — XMR is on the ladder
 11th in crypto at the time of audit. Rankings are time-varying; never hardcode a
 position.
 

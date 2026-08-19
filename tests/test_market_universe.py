@@ -35,11 +35,49 @@ def test_census_classifies_registered_excluded_and_unmapped_assets() -> None:
     assert all(item["symbol"] != "OUT" for item in report["unmapped"])
 
 
-def test_registry_contains_previously_missed_large_assets() -> None:
+def test_the_display_ladder_is_the_operators_seven_names() -> None:
+    """One name per distinct user-facing role, per policy 2026-08-18.2.
+
+    XMR stays deliberately: the privacy role, and the omission that once
+    hid it is the documented lesson this census exists to prevent.
+    """
     symbols = {metadata["symbol"] for metadata in CRYPTO_REGISTRY.values()}
 
-    assert {"XMR", "TRX", "ZEC", "HBAR", "SUI", "UNI", "AAVE"} <= symbols
+    assert symbols == {"BTC", "ETH", "XRP", "SOL", "DOGE", "XMR", "HBAR"}
     assert MIN_CRYPTO_OBSERVATIONS == 365
+
+
+def test_off_ladder_assets_are_excluded_not_silently_dropped() -> None:
+    """Display removal is not coverage removal, and the census says so.
+
+    Every id that left the registry carries the dated ladder reason so the
+    coverage audit shows a deliberate policy where a silent disappearance
+    would read as a gap.
+    """
+    off_ladder = [
+        "tron", "hyperliquid", "leo-token", "zcash", "cardano", "whitebit",
+        "bitcoin-cash", "the-open-network", "litecoin", "sui", "avalanche-2",
+        "shiba-inu", "uniswap", "crypto-com-chain", "near", "okb",
+        "bittensor", "htx-dao", "ondo-finance", "mantle", "aave",
+        "polkadot", "internet-computer", "worldcoin-wld",
+    ]
+    for coin_id in off_ladder:
+        assert coin_id in EXCLUDED_CRYPTO_IDS, coin_id
+        assert "still ingested in the background" in EXCLUDED_CRYPTO_IDS[coin_id]
+        assert coin_id not in CRYPTO_REGISTRY
+
+
+def test_a_census_entry_off_the_ladder_reports_excluded_not_unmapped() -> None:
+    report = evaluate_crypto_census([
+        _coin(1, "bitcoin", "btc", "Bitcoin"),
+        _coin(9, "cardano", "ada", "Cardano"),
+    ])
+
+    assert [item["registered_symbol"] for item in report["included"]] == ["BTC"]
+    (item,) = report["excluded"]
+    assert item["symbol"] == "ADA"
+    assert "seven-name display ladder" in item["reason"]
+    assert report["unmapped"] == []
 
 
 class TestOperatorPolicyCuts:

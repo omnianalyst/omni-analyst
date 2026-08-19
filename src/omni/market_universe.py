@@ -10,45 +10,38 @@ from __future__ import annotations
 
 from typing import Any
 
-POLICY_VERSION = "2026-08-18.1"
+POLICY_VERSION = "2026-08-18.2"
 CRYPTO_MARKET_CAP_LIMIT = 60
 MIN_CRYPTO_OBSERVATIONS = 365
 
 # CoinGecko id -> display metadata. Yahoo symbols with numeric suffixes avoid
 # known ticker collisions (for example SUI and TAO).
+#
+# The 2026-08-18.2 ladder: the operator's seven names, one per distinct
+# user-facing role -- BTC (core), ETH (smart-contract platform), SOL (top
+# alt platform, also a carry-book name), XRP (payments), DOGE (meme), XMR
+# (privacy), HBAR (enterprise L1, the ladder's highest-vol rung). Chosen the
+# day the rotation research closed: with per-tier alpha measured at zero,
+# breadth implies a choice precision that does not exist. Everything removed
+# from this registry keeps ingesting in the background through the entity
+# seeds; it stops being *ranked* on Discover, which is a display decision,
+# not a coverage decision.
 CRYPTO_REGISTRY: dict[str, dict[str, str]] = {
     "bitcoin": {"symbol": "BTC", "name": "Bitcoin", "yf": "BTC-USD"},
     "ethereum": {"symbol": "ETH", "name": "Ethereum", "yf": "ETH-USD"},
     "ripple": {"symbol": "XRP", "name": "XRP", "yf": "XRP-USD"},
     "solana": {"symbol": "SOL", "name": "Solana", "yf": "SOL-USD"},
-    "tron": {"symbol": "TRX", "name": "TRON", "yf": "TRX-USD"},
-    "hyperliquid": {"symbol": "HYPE", "name": "Hyperliquid", "yf": "HYPE32196-USD"},
     "dogecoin": {"symbol": "DOGE", "name": "Dogecoin", "yf": "DOGE-USD"},
-    "leo-token": {"symbol": "LEO", "name": "LEO Token", "yf": "LEO-USD"},
-    "zcash": {"symbol": "ZEC", "name": "Zcash", "yf": "ZEC-USD"},
     "monero": {"symbol": "XMR", "name": "Monero", "yf": "XMR-USD"},
-    "cardano": {"symbol": "ADA", "name": "Cardano", "yf": "ADA-USD"},
-    "whitebit": {"symbol": "WBT", "name": "WhiteBIT Coin", "yf": "WBT-USD"},
-    "bitcoin-cash": {"symbol": "BCH", "name": "Bitcoin Cash", "yf": "BCH-USD"},
-    "the-open-network": {"symbol": "TON", "name": "Toncoin", "yf": "TON-USD"},
-    "litecoin": {"symbol": "LTC", "name": "Litecoin", "yf": "LTC-USD"},
     "hedera-hashgraph": {"symbol": "HBAR", "name": "Hedera", "yf": "HBAR-USD"},
-    "sui": {"symbol": "SUI", "name": "Sui", "yf": "SUI20947-USD"},
-    "avalanche-2": {"symbol": "AVAX", "name": "Avalanche", "yf": "AVAX-USD"},
-    "shiba-inu": {"symbol": "SHIB", "name": "Shiba Inu", "yf": "SHIB-USD"},
-    "uniswap": {"symbol": "UNI", "name": "Uniswap", "yf": "UNI7083-USD"},
-    "crypto-com-chain": {"symbol": "CRO", "name": "Cronos", "yf": "CRO-USD"},
-    "near": {"symbol": "NEAR", "name": "NEAR Protocol", "yf": "NEAR-USD"},
-    "okb": {"symbol": "OKB", "name": "OKB", "yf": "OKB-USD"},
-    "bittensor": {"symbol": "TAO", "name": "Bittensor", "yf": "TAO22974-USD"},
-    "htx-dao": {"symbol": "HTX", "name": "HTX DAO", "yf": "HTX-USD"},
-    "ondo-finance": {"symbol": "ONDO", "name": "Ondo", "yf": "ONDO-USD"},
-    "mantle": {"symbol": "MNT", "name": "Mantle", "yf": "MNT27075-USD"},
-    "aave": {"symbol": "AAVE", "name": "Aave", "yf": "AAVE-USD"},
-    "polkadot": {"symbol": "DOT", "name": "Polkadot", "yf": "DOT-USD"},
-    "internet-computer": {"symbol": "ICP", "name": "Internet Computer", "yf": "ICP-USD"},
-    "worldcoin-wld": {"symbol": "WLD", "name": "Worldcoin", "yf": "WLD-USD"},
 }
+
+# The reason every off-ladder id carries: display removal, not coverage
+# removal. Stated once so no entry implies its data stopped flowing.
+_OFF_LADDER = (
+    "operator policy 2026-08-18.2: not on the seven-name display ladder; "
+    "still ingested in the background, not ranked on Discover"
+)
 
 EXCLUDED_CRYPTO_IDS: dict[str, str] = {
     "tether": "stablecoin",
@@ -92,6 +85,35 @@ EXCLUDED_CRYPTO_IDS: dict[str, str] = {
         "batch; never registered, excluded so a future top-60 entry cannot "
         "surface it silently"
     ),
+    # Operator policy 2026-08-18.2, the seven-name ladder: everything not on
+    # the ladder leaves the DISPLAY universe, not the ingestion universe.
+    # Entity seeds keep these ingesting in the background; a later policy
+    # version can restore any of them to ranking by moving the id back into
+    # CRYPTO_REGISTRY, which is the only place display membership lives.
+    "tron": _OFF_LADDER,
+    "hyperliquid": _OFF_LADDER,
+    "leo-token": _OFF_LADDER,
+    "zcash": _OFF_LADDER,
+    "cardano": _OFF_LADDER,
+    "whitebit": _OFF_LADDER,
+    "bitcoin-cash": _OFF_LADDER,
+    "the-open-network": _OFF_LADDER,
+    "litecoin": _OFF_LADDER,
+    "sui": _OFF_LADDER,
+    "avalanche-2": _OFF_LADDER,
+    "shiba-inu": _OFF_LADDER,
+    "uniswap": _OFF_LADDER,
+    "crypto-com-chain": _OFF_LADDER,
+    "near": _OFF_LADDER,
+    "okb": _OFF_LADDER,
+    "bittensor": _OFF_LADDER,
+    "htx-dao": _OFF_LADDER,
+    "ondo-finance": _OFF_LADDER,
+    "mantle": _OFF_LADDER,
+    "aave": _OFF_LADDER,
+    "polkadot": _OFF_LADDER,
+    "internet-computer": _OFF_LADDER,
+    "worldcoin-wld": _OFF_LADDER,
 }
 
 # Live census members that cannot be mapped safely, with what was measured.
