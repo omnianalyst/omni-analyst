@@ -17,8 +17,14 @@ because a default would have been wrong:
                            round trip was almost entirely fee (4 legs x 7 bps).
                            Zero is the permissive value and hands the strategy
                            the spread for free.
-  reconciliation_tol 0.01  tight. A tolerance wide enough to swallow a real
-                           divergence is a check that always passes.
+  reconciliation_tol 1.00  measured 2026-08-19: the venue's USDC balance
+                           carries the perp's unrealized PnL, which moves with
+                           the mark continuously -- 2.8c inside one minute on
+                           a $70 book (halt run 4), so 0.01 could never pass
+                           on a live short. The real divergences this check
+                           exists for are a lost or doubled fill: one leg is
+                           ~$70. 1.00 stays 70x tighter than the smallest
+                           divergence class while clearing the mark wiggle.
 
 `inception` is the portfolio's own creation instant. The book has held nothing
 since, so no settlement is skipped or re-walked by that choice, and it is a fact
@@ -73,7 +79,7 @@ async def main() -> int:
             notional_per_pair=Decimal(70),
             funding_venue="hyperliquid",
             spread_bps=Decimal(5),
-            reconciliation_tolerance=Decimal("0.01"),
+            reconciliation_tolerance=Decimal("1.00"),
             risk_policy=CarryRiskPolicy(
                 max_gross_notional=Decimal(280),
                 daily_loss_limit_pct_nav=Decimal("0.02"),
