@@ -41,6 +41,7 @@ export interface SystemStatus {
   loops: LoopStatus[];
   health: SystemHealth;
   demand: { active: number; total: number };
+  claims: { total: number; last_24h: number };
   fill_last_hour: Record<string, number>;
   production_24h: { predictions: number; findings: number };
 }

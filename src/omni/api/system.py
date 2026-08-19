@@ -114,6 +114,19 @@ def build_router(app: App) -> Router:
             """
         )
 
+        # Claim-store throughput: the volume of data under management and the
+        # rate it is arriving. The board answers "what is being processed";
+        # a store that stops growing while demand stays active is a provider
+        # outage wearing a healthy face.
+        claims = await pool.fetchrow(
+            """
+            SELECT
+              count(*) AS total,
+              count(*) FILTER (WHERE observed_at > now() - interval '24 hours') AS recent
+            FROM claim
+            """
+        )
+
         # Process health per loop, from the state rows the scheduler writes each
         # iteration. Complements the effect-derived `loops` above: this is where
         # a chronically-failing or never-yet-succeeded loop becomes visible, and
@@ -207,6 +220,10 @@ def build_router(app: App) -> Router:
             "demand": {
                 "active": demand["active_demand"],
                 "total": demand["total_demand"],
+            },
+            "claims": {
+                "total": claims["total"],
+                "last_24h": claims["recent"],
             },
             "fill_last_hour": fill_recent,
             "production_24h": {

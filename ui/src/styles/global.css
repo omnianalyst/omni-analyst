@@ -6160,3 +6160,42 @@ tr.row.tier-unknown td:first-child {
   background: rgba(16, 26, 43, 0.5);
   border-radius: var(--r-sm);
 }
+
+/* The live process board on System: one chip per background process, a dot,
+   a name, a state word and how long ago it was last heard from. */
+.process-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+.process-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.16));
+  border-radius: var(--r-sm);
+  background: rgba(148, 163, 184, 0.04);
+  min-width: 0;
+}
+.process-chip div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.process-chip strong {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.process-chip small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.process-age {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}

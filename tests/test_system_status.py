@@ -269,3 +269,22 @@ async def test_health_marks_a_loop_that_only_ever_failed_as_failing(db, database
     by_loop = {h["loop"]: h for h in r.json()["health"]["loops"]}
     assert by_loop["resolve"]["state"] == "failing"
     assert r.json()["health"]["overall"] == "failing"
+
+
+async def test_status_reports_claim_store_volume_and_daily_arrival(
+    db, database_url
+):
+    """The board's data-throughput tiles: total under management and the
+    last-24h arrival rate, so a store that stops growing while demand is
+    active becomes visible on the same page as the loops that fill it."""
+
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_token(client)
+        response = await client.get(
+            "/system/status", headers={"authorization": f"Bearer {token}"}
+        )
+
+    body = response.json()
+    assert body["claims"]["total"] >= 0
+    assert body["claims"]["last_24h"] >= 0

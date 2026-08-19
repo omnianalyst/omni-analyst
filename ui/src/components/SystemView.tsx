@@ -305,6 +305,62 @@ function EdgeSection({
   );
 }
 
+// The live process board: every scheduled unit with a dot and a last-heard
+// age. This is the "what is running right now" view -- deliberately compact,
+// one row per process, no tables. The full result/error detail stays in the
+// technical drawer below; a board that showed everything would be a log, not
+// a board.
+function ProcessBoard({
+  loops,
+}: {
+  loops: import("../lib/system").LoopHealthEntry[];
+}) {
+  const tone: Record<string, string> = {
+    ok: "fresh",
+    stale: "stale",
+    failing: "dead",
+    never_run: "quiet",
+  };
+  const word: Record<string, string> = {
+    ok: "healthy",
+    stale: "late",
+    failing: "failing",
+    never_run: "never run",
+  };
+  return (
+    <section class="surface-card process-board" aria-label="Background processes">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Background processes</p>
+          <h2>Currently monitored</h2>
+        </div>
+        <span class="count-badge">{loops.length}</span>
+      </div>
+      <div class="process-grid">
+        {loops.map((loop) => (
+          <div class={`process-chip tone-${tone[loop.state] ?? "quiet"}`} key={loop.loop}>
+            <span class={`status-dot-simple tone-${tone[loop.state] ?? "quiet"}`} aria-hidden="true" />
+            <div>
+              <strong>{loop.loop}</strong>
+              <small>{word[loop.state] ?? loop.state}</small>
+            </div>
+            <span class="process-age">
+              {loop.last_success_at ?? loop.last_failure_at
+                ? formatAge(
+                    (Date.now() -
+                      Date.parse(
+                        (loop.last_success_at ?? loop.last_failure_at) as string,
+                      )) / 1000,
+                  )
+                : "—"}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export function SystemView() {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [reconciliation, setReconciliation] = useState<
@@ -407,6 +463,18 @@ export function SystemView() {
           <span class="metric-context">scheduled jobs reporting normally</span>
         </article>
         <article class="primary-metric">
+          <span class="metric-kicker">Claim store</span>
+          <strong>{snapshot.claims.total.toLocaleString()}</strong>
+          <span class="metric-context">
+            +{snapshot.claims.last_24h.toLocaleString()} observations in the last day
+          </span>
+        </article>
+        <article class="primary-metric">
+          <span class="metric-kicker">Demand</span>
+          <strong>{snapshot.demand.active}</strong>
+          <span class="metric-context">active coverage requests being worked</span>
+        </article>
+        <article class="primary-metric">
           <span class="metric-kicker">Last 24 hours</span>
           <strong>{snapshot.production_24h.findings}</strong>
           <span class="metric-context">calls surfaced from {snapshot.production_24h.predictions} predictions</span>
@@ -432,8 +500,9 @@ export function SystemView() {
         </section>
       )}
 
-      <ResearchSection research={research} onRetry={loadResearch} />
+      <ProcessBoard loops={snapshot.health.loops} />
       <EdgeSection monitor={edges} />
+      <ResearchSection research={research} onRetry={loadResearch} />
 
       <button
         type="button"

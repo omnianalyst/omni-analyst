@@ -27,6 +27,7 @@ const OK = {
   loops: [],
   health: { overall: null, loops: [] },
   demand: { active: 0, total: 0 },
+  claims: { total: 0, last_24h: 0 },
   fill_last_hour: {},
   production_24h: { predictions: 0, findings: 0 },
 };
