@@ -120,13 +120,15 @@ class FakeExchange:
         create_error: BaseException | None = None,
         fetched_order: dict | None = None,
         fetch_error: BaseException | None = None,
-        ticker: dict | None = None,
-        order_book: dict | None = None,
-        balance: dict | None = None,
-        positions: list | None = None,
-        cancel_result: dict | None = None,
-        cancel_error: BaseException | None = None,
-    ) -> None:
+            ticker: dict | None = None,
+            order_book: dict | None = None,
+            balance: dict | None = None,
+            positions: list | None = None,
+            cancel_result: dict | None = None,
+            cancel_error: BaseException | None = None,
+            my_trades: list | None = None,
+            open_orders: list | None = None,
+        ) -> None:
         self.markets = MARKETS if markets is None else markets
         self.has = HAS if has is None else has
         self.fees = FEES if fees is None else fees
@@ -140,6 +142,8 @@ class FakeExchange:
         self._positions = positions
         self._cancel_result = cancel_result
         self._cancel_error = cancel_error
+        self._my_trades = my_trades
+        self._open_orders = open_orders
 
         self.created: list[dict] = []
         self.fetched: list[dict] = []
@@ -203,6 +207,16 @@ class FakeExchange:
         if self._ticker is None:
             raise AssertionError("fetch_ticker called with no ticker configured")
         return self._ticker
+
+    async def fetch_my_trades(self, symbol, since=None, limit=None) -> list:
+        if self._my_trades is None:
+            return []
+        return [t for t in self._my_trades if t.get("symbol") == symbol]
+
+    async def fetch_open_orders(self, symbol) -> list:
+        if self._open_orders is None:
+            return []
+        return [o for o in self._open_orders if o.get("symbol") == symbol]
 
     async def fetch_order_book(self, symbol, limit=None) -> dict:
         # Empty unless a test configures one: the adapter falls back here when a
@@ -1220,6 +1234,144 @@ class TestTerseSubmitResponse:
             order=_order(filled=None, average=None, status=None,
                          order_id="520001506296"),
             fetch_error=ccxt.NetworkError("connection reset"),
+        )
+
+        with pytest.raises(VenueUnavailable, match=intent.idempotency_key):
+            await _live(exchange).execute(intent)
+
+        assert len(exchange.created) == 1
+
+
+class TestLiveAnchor:
+    """The 2026-08-19 wind-down lesson: a cached reference is not a market.
+
+    The claim-store reference was ~8% stale while ETH rallied past it, so
+    reduce-only closes -- bounded to reference +/- 5% -- rested below the
+    market for hours (oid 520013570942, limit 2012.3 against a 2072 tape).
+    A close anchors to the venue's own touch; an open keeps the reference
+    bound, tightened by the touch when one is readable.
+    """
+
+    async def test_a_reduce_only_close_anchors_to_the_live_ask_not_a_stale_reference(self):
+        intent = _intent(
+            symbol="BTC/USDT:USDT", reference_price="10000", reduce_only=True,
+            market_type=MarketType.PERPETUAL, quantity="0.01",
+        )
+        exchange = FakeExchange(
+            ticker={"ask": 10800.0, "bid": 10799.0, "last": 10800.0},
+            order={"id": "t1", "status": "closed", "filled": 0.01,
+                   "average": 10800.0},
+        )
+
+        await _live(exchange).execute(intent)
+
+        sent = exchange.created[0]
+        assert sent["price"] == pytest.approx(10800.0 * 1.005, abs=1.0)
+        assert sent["price"] > 10000 * 1.05, "the stale reference must not cap a close"
+
+    async def test_an_open_keeps_the_reference_bound_tightened_by_the_touch(self):
+        intent = _intent(reference_price="10000")
+        exchange = FakeExchange(
+            ticker={"ask": 10010.0, "bid": 10009.0, "last": 10010.0},
+            order={"id": "t2", "status": "closed", "filled": 0.001,
+                   "average": 10010.0},
+        )
+
+        await _live(exchange).execute(intent)
+
+        sent = exchange.created[0]
+        assert sent["price"] == pytest.approx(10010.0 * 1.005, abs=1.0)
+
+    async def test_an_open_above_a_rallied_market_still_bounds_at_reference_slippage(self):
+        """The touch tightens the bound; it never widens it past reference+5%."""
+        intent = _intent(reference_price="10000")
+        exchange = FakeExchange(
+            ticker={"ask": 9500.0, "bid": 9499.0, "last": 9500.0},
+            order={"id": "t3", "status": "closed", "filled": 0.001,
+                   "average": 9500.0},
+        )
+
+        await _live(exchange).execute(intent)
+
+        sent = exchange.created[0]
+        assert sent["price"] == pytest.approx(9500.0 * 1.005, abs=1.0)
+        assert sent["price"] < 10000 * 1.05
+
+    async def test_no_readable_ticker_falls_back_to_the_reference_bound(self):
+        """A ticker that cannot be read is not silently a price."""
+        intent = _intent(reference_price="10000")
+        exchange = FakeExchange(
+            ticker={"ask": None, "bid": None, "last": None},
+            order={"id": "t4", "status": "closed", "filled": 0.001,
+                   "average": 10000.0},
+        )
+
+        await _live(exchange).execute(intent)
+
+        sent = exchange.created[0]
+        assert sent["price"] == pytest.approx(10500.0, abs=1.0)
+
+
+class TestTradeTapeRecovery:
+    """Hyperliquid's by-oid query answered unknownOid for an order its own
+    open-orders endpoint listed (live 2026-08-19, oid 520013570942). The
+    read-back enumerates before it concludes."""
+
+    async def test_a_fill_found_on_the_tape_is_returned_when_by_oid_is_deaf(self):
+        ccxt = pytest.importorskip("ccxt")
+        intent = _intent()
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="520001506296"),
+            fetch_error=ccxt.OrderNotFound("unknownOid"),
+            my_trades=[
+                {
+                    "symbol": intent.symbol, "order": "520001506296",
+                    "amount": 0.0007, "price": 10040.0,
+                    "timestamp": TS, "fee": {"cost": 0.001, "currency": "USDT"},
+                },
+                {
+                    "symbol": intent.symbol, "order": "520001506296",
+                    "amount": 0.0003, "price": 10060.0,
+                    "timestamp": TS, "fee": {"cost": 0.001, "currency": "USDT"},
+                },
+            ],
+        )
+
+        fill = await _live(exchange).execute(intent)
+
+        assert fill.filled_quantity == Decimal("0.001")
+        assert fill.average_price == Decimal(10046)
+        assert fill.fee_paid == Decimal("0.002")
+        assert "unknownOid" in fill.raw["recovered_from"]
+        assert exchange.cancelled == [], "a filled order is never cancelled"
+
+    async def test_a_resting_order_found_in_the_open_list_is_cancelled(self):
+        ccxt = pytest.importorskip("ccxt")
+        intent = _intent()
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="520013570942"),
+            fetch_error=ccxt.OrderNotFound("unknownOid"),
+            open_orders=[
+                {"id": "520013570942", "symbol": intent.symbol,
+                 "status": "open", "filled": 0.0},
+            ],
+        )
+
+        fill = await _live(exchange).execute(intent)
+
+        assert fill.is_empty
+        assert ("520013570942", intent.symbol) in exchange.cancelled
+        assert fill.raw["resting_order_cancelled"] == "520013570942"
+
+    async def test_an_order_no_path_can_find_still_refuses_naming_the_key(self):
+        ccxt = pytest.importorskip("ccxt")
+        intent = _intent()
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="520013570942"),
+            fetch_error=ccxt.OrderNotFound("unknownOid"),
         )
 
         with pytest.raises(VenueUnavailable, match=intent.idempotency_key):

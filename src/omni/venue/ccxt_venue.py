@@ -703,6 +703,104 @@ class CCXTVenue:
         """
         return _limit(self._market(symbol), "cost")
 
+    async def _live_anchor(self, symbol: str, side: Side) -> Decimal | None:
+        """The venue's own touch for this side, best-effort.
+
+        The ask for a buy, the bid for a sell, `last` when the touch is
+        unreadable, None when nothing about the live book can be read -- in
+        which case the caller falls back to the reference-bound behaviour
+        rather than trading blind. A ticker that cannot be read is never
+        silently treated as a price.
+        """
+        try:
+            ticker = await self._exchange.fetch_ticker(symbol)
+        except Exception:  # noqa: BLE001 - anchor is best-effort by contract
+            return None
+        if not isinstance(ticker, dict):
+            return None
+        touch = ticker.get("ask") if side is Side.BUY else ticker.get("bid")
+        if isinstance(touch, (list, tuple)) and touch:
+            touch = touch[0]
+        value = _decimal(touch)
+        if value is None or value <= 0:
+            value = _decimal(ticker.get("last"))
+        if value is None or value <= 0:
+            return None
+        return value
+
+    def _fill_from_trades(
+        self,
+        trades: list[Any],
+        intent: TradeIntent,
+        *,
+        submitted: Decimal,
+        recovered_from: str | None = None,
+    ) -> Fill:
+        """Build a Fill from the venue's own trade records for one order.
+
+        Reached when the by-oid order query cannot answer but the trade tape
+        can: each trade carries amount, price and fee, and their sum over one
+        order is exactly what a Fill asserts. A trade set totalling nothing
+        is refused rather than reported as an empty fill -- an empty fill
+        claims the venue declined, and a zero-size trade record is instead
+        the venue declining to be read.
+        """
+        amount = Decimal(0)
+        cost = Decimal(0)
+        fee = Decimal(0)
+        at: datetime | None = None
+        for trade in trades:
+            t_amount = _decimal(trade.get("amount"))
+            t_price = _decimal(trade.get("price"))
+            if t_amount is None or t_amount <= 0 or t_price is None or t_price <= 0:
+                raise VenueUnavailable(
+                    f"{self.name} recorded a trade for {intent.symbol} "
+                    f"(order {trade.get('order')}) with amount="
+                    f"{trade.get('amount')!r} price={trade.get('price')!r}; "
+                    f"a trade that cannot be read cannot be reported"
+                )
+            fee_part = _decimal(
+                (trade.get("fee") or {}).get("cost")
+                if isinstance(trade.get("fee"), dict)
+                else None
+            )
+            fee_currency = (
+                (trade.get("fee") or {}).get("currency")
+                if isinstance(trade.get("fee"), dict)
+                else None
+            )
+            if fee_part is not None and fee_currency not in (None, "USDC", "USDT"):
+                fee_part = None
+            amount += t_amount
+            cost += t_amount * t_price
+            fee += fee_part or Decimal(0)
+            stamped = _moment(trade.get("timestamp"))
+            if stamped is not None and (at is None or stamped > at):
+                at = stamped
+        if amount <= 0:
+            raise VenueUnavailable(
+                f"{self.name} recorded no readable trades for {intent.symbol} "
+                f"(client order id {intent.idempotency_key}); refusing to "
+                f"report a fill the tape did not describe"
+            )
+        return Fill(
+            intent_id=intent.idempotency_key,
+            venue=self.name,
+            symbol=intent.symbol,
+            side=intent.side,
+            filled_quantity=amount,
+            average_price=cost / amount,
+            fee_paid=fee,
+            filled_at=at or datetime.now(UTC),
+            external_id=str(trades[0].get("order") or "") or None,
+            raw={
+                "recovered_from": recovered_from,
+                "requested_quantity": str(intent.quantity),
+                "submitted_quantity": str(submitted),
+                "trades": len(trades),
+            },
+        )
+
     def _market(self, symbol: str) -> dict[str, Any]:
         market = self._markets.get(symbol)
         if not isinstance(market, dict):
@@ -902,13 +1000,31 @@ class CCXTVenue:
             # orders require price to calculate the max slippage price" and
             # ignores both the defaultSlippage option and an explicit price on
             # the market path. Its LIMIT path works. So a market intent becomes
-            # an aggressive LIMIT at reference +/- 5% (the venue's own default
-            # slippage): it crosses the book and fills like a market order, on
-            # the working limit path, with a hard worst-price bound. The
-            # pair-integrity guard still catches any pathological fill.
+            # an aggressive LIMIT, on the working limit path, with a hard
+            # worst-price bound. The pair-integrity guard still catches any
+            # pathological fill.
+            #
+            # The anchor depends on what the order is FOR. An OPEN is bounded
+            # by reference +/- 5% (the venue's own default slippage), tightened
+            # to the live book when one is readable. A CLOSE (reduce_only) is
+            # anchored to the LIVE BOOK alone: the reference is a cached claim
+            # and can be arbitrarily stale, and on the 2026-08-19 wind-down an
+            # 8%-stale reference left reduce-only closes resting below a market
+            # that had rallied past them -- an exit must not be held hostage to
+            # a cache. Reduce-only is itself the protection here: it cannot
+            # increase exposure, so the worst case is the spread plus the
+            # tight bound.
             slippage = Decimal("0.05")
+            tight = Decimal("0.005")
             ref = intent.reference_price
-            raw = ref * (Decimal(1) + slippage) if intent.side is Side.BUY else ref * (Decimal(1) - slippage)
+            live = await self._live_anchor(intent.symbol, intent.side)
+            if intent.reduce_only and live is not None:
+                raw = live * (Decimal(1) + tight) if intent.side is Side.BUY else live * (Decimal(1) - tight)
+            else:
+                raw = ref * (Decimal(1) + slippage) if intent.side is Side.BUY else ref * (Decimal(1) - slippage)
+                if live is not None:
+                    bound = live * (Decimal(1) + tight) if intent.side is Side.BUY else live * (Decimal(1) - tight)
+                    raw = min(raw, bound) if intent.side is Side.BUY else max(raw, bound)
             price = self._rounded_price(intent.symbol, raw)
             eff_kind = OrderKind.LIMIT.value
 
@@ -999,12 +1115,44 @@ class CCXTVenue:
         try:
             fetched = await fetch_order(external_id, intent.symbol)
         except Exception as probe:
-            raise VenueUnavailable(
-                f"{self.name} accepted the {intent.symbol} order as "
-                f"{external_id} (client order id {key}) but could not be asked "
-                f"what became of it: {probe}. Nothing was retried. A "
-                f"resubmission must reuse idempotency key {key}"
-            ) from probe
+            # Hyperliquid's by-oid order query has been observed answering
+            # unknownOid for an order the open-orders endpoint lists (live
+            # 2026-08-19, oid 520013570942): one read path lagging another.
+            # Before concluding anything, ask the two paths that enumerate:
+            # recent trades for this symbol (a fill answers conclusively)
+            # and the open-orders list (a resting order answers, and is
+            # then cancelled).
+            try:
+                trades = await self._exchange.fetch_my_trades(intent.symbol, limit=20)
+            except Exception:  # noqa: BLE001 - enumeration is best-effort
+                trades = []
+            ours = [
+                t for t in (trades or [])
+                if isinstance(t, dict) and str(t.get("order", "")) == str(external_id)
+            ]
+            if ours:
+                return self._fill_from_trades(
+                    ours, intent, submitted=submitted,
+                    recovered_from=f"terse submit response ({probe})",
+                )
+            try:
+                resting = await self._exchange.fetch_open_orders(intent.symbol)
+            except Exception:  # noqa: BLE001 - enumeration is best-effort
+                resting = []
+            listed = [
+                o for o in (resting or [])
+                if isinstance(o, dict) and str(o.get("id", "")) == str(external_id)
+            ]
+            if listed:
+                fetched = listed[0]
+            else:
+                raise VenueUnavailable(
+                    f"{self.name} accepted the {intent.symbol} order as "
+                    f"{external_id} (client order id {key}) but no read path "
+                    f"could find it -- by-oid: {probe}; no matching trade; not "
+                    f"resting. Nothing was retried. A resubmission must reuse "
+                    f"idempotency key {key}"
+                ) from probe
 
         fill = self._fill_from_order(
             fetched, intent, submitted=submitted, recovered_from="terse submit response"
