@@ -80,7 +80,7 @@ async def _correct_spot_rows(pool, venue) -> None:
         await pool.execute(
             "UPDATE trade_order SET quantity = $2, filled_quantity = $2 "
             "WHERE portfolio_id = $1 AND symbol = $3 AND market_type = 'spot' "
-            "AND side = 'buy'",
+            "AND side = 'buy' AND status = 'filled'",
             PORTFOLIO, opening, symbol,
         )
         await pool.execute(

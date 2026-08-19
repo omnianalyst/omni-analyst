@@ -192,6 +192,7 @@ class CarryRefusal(str, Enum):
     NO_MARK = "no_visible_mark_to_value_the_settlement"
     PAIR_DID_NOT_BALANCE = "the_two_legs_did_not_fill_as_one_unit"
     OUTSIDE_UNIVERSE = "a_held_pair_is_not_in_the_universe_this_cycle_was_given"
+    DUST_BELOW_VENUE_MINIMUM = "a_single_leg_below_the_venues_minimum_order_size"
 
 
 _PAIR_DUST_FRACTION = Decimal("0.005")
@@ -994,9 +995,10 @@ class _Cycle:
             and (
                 spot.filled_quantity == perp.filled_quantity
                 if leg_quantities is None
-                else (
-                    spot.filled_quantity == leg_quantities[MarketType.SPOT]
-                    and perp.filled_quantity == leg_quantities[MarketType.PERPETUAL]
+                else all(
+                    abs(fill.filled_quantity - leg_quantities[market_type])
+                    <= _PAIR_DUST_FRACTION * abs(leg_quantities[market_type])
+                    for market_type, fill in filled.items()
                 )
             )
         )
@@ -1510,7 +1512,7 @@ async def wind_down_book(
             and minimum is not None
             and notional < minimum
         ):
-            cycle.refuse(CarryRefusal.UNRESOLVED_PAIR)
+            cycle.refuse(CarryRefusal.DUST_BELOW_VENUE_MINIMUM)
             continue
         tradeable_unpaired.append(symbol)
     if tradeable_unpaired:
