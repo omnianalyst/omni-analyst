@@ -371,3 +371,22 @@ class TestVenueProtocol:
             async def cancel(self, external_id): ...
 
         assert not isinstance(NoResolver(), Venue)
+
+
+class TestHeldSymbolAliases:
+    """The declared native spellings, pinned so a typo cannot reach the live
+    pairing path. Measured 2026-08-19 from the Hyperliquid ledger: spot fills
+    report the wrapped coin names while orders use the unified symbols."""
+
+    def test_hyperliquid_wrapped_spot_names_map_to_their_unified_symbols(self):
+        from omni.venue.ccxt_venue import _HELD_SYMBOL_ALIASES
+
+        assert _HELD_SYMBOL_ALIASES["ETH/USDC"] == ("UETH/USDC",)
+        assert _HELD_SYMBOL_ALIASES["SOL/USDC"] == ("USOL/USDC",)
+        for unified, aliases in _HELD_SYMBOL_ALIASES.items():
+            base, _, quote = unified.partition("/")
+            for alias in aliases:
+                assert alias != unified
+                assert alias.endswith(f"/{quote}"), (
+                    f"{alias} must be a {quote}-quoted spelling of {base}"
+                )

@@ -81,6 +81,15 @@ from omni.venue.protocol import (
 
 BPS = Decimal(10_000)
 
+# Tradable symbol -> the native spellings the venue's own records use for a
+# held position in it. Measured 2026-08-19 against the live Hyperliquid
+# ledger: spot fills on ETH/USDC and SOL/USDC report as the wrapped coin
+# names UETH/USDC and USOL/USDC in userFills. Extend only from a measurement.
+_HELD_SYMBOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "ETH/USDC": ("UETH/USDC",),
+    "SOL/USDC": ("USOL/USDC",),
+}
+
 # ccxt's unified key for a caller-supplied order id. Binance's
 # `create_order_request` reads it (alongside `newClientOrderId`) and sends it as
 # `newClientOrderId`; other venues map it to their own field. Sending the
@@ -627,25 +636,27 @@ class CCXTVenue:
     def held_symbol_aliases(
         self, asset: str, market_type: MarketType
     ) -> tuple[str, ...]:
-        """The venue's raw id for the resolved market, when it differs.
+        """Spellings under which a HELD position in this leg may be recorded.
 
-        ccxt addresses orders by unified symbol, but the venue's own fills
-        and balances speak its raw market id, and a position acquired through
-        a venue-side record (a fill replay, a repair from `userFills`) is
-        keyed by that raw spelling. Measured on Hyperliquid: the ETH spot
-        market trades as `ETH/USDC` and reports as `UETH/USDC`, and a book
-        holding the wrapped spelling against the native perpetual read as
-        four unpaired legs (carry halt 2026-08-19). Both spellings name one
-        market; only the reading differs.
+        ccxt addresses orders by unified symbol, but a venue's own fills and
+        balances can speak a native name for the same market. On Hyperliquid
+        the wrapped spot tokens report under their wrapped coin name -- a fill
+        on ETH/USDC reports as `UETH/USDC` in `userFills` -- and a book whose
+        ledger was rebuilt from venue-side fills (the 2026-08-18 repair) keys
+        the spot leg by that spelling. A pairing map that recognises only the
+        tradable spelling reads the hedged book as unpaired legs and halts on
+        it (carry halt 2026-08-19).
+
+        These are DECLARED per symbol rather than derived: ccxt normalises the
+        wrapped name out of its market metadata entirely (baseId is a numeric
+        token id), and a `U{base}` template would be a guess wearing the
+        uniform of a derivation -- Hyperliquid also lists unwrapped spot
+        names, so the prefix is not a rule. Each entry is a measured mapping.
         """
         resolved = self.symbol_for(asset, market_type)
         if resolved is None:
             return ()
-        market = self._markets.get(resolved)
-        raw_id = market.get("id") if isinstance(market, dict) else None
-        if not isinstance(raw_id, str) or not raw_id or raw_id == resolved:
-            return ()
-        return (raw_id,)
+        return _HELD_SYMBOL_ALIASES.get(resolved, ())
 
     @staticmethod
     def _is_market_type(market: dict[str, Any], market_type: MarketType) -> bool:
