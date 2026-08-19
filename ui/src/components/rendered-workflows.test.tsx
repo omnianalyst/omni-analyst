@@ -321,17 +321,18 @@ describe("rendered failure and empty states", () => {
           security: { read_only: true, stores_private_keys: false, stores_seed_phrases: false },
         });
       }
-      if (path === "/trading/portfolio") {
-        return json({ detail: "No portfolio for this account" }, 404);
+      if (path === "/holdings") {
+        return json({ holdings: [], summary: { positions: 0, priced: 0, total_value: null, total_pnl: null } });
       }
       return json({ detail: "No portfolio for this account" }, 404);
     }));
     const container = root();
     render(<PortfolioView />, container);
-    await waitFor(() => expect(container.textContent).toContain("No managed portfolio"));
+    // The personal tracker is the primary surface with no managed book.
+    await waitFor(() => expect(container.textContent).toContain("Track what you hold"));
     await waitFor(() => expect(container.textContent).toContain("No external wallets tracked"));
 
-    expect(container.textContent).toContain("No managed portfolio");
+    expect(container.textContent).toContain("Your positions");
     expect(container.textContent).toContain("Wallet balances");
     expect(container.textContent).toContain("No external wallets tracked");
   });
@@ -417,3 +418,54 @@ describe("rendered failure and empty states", () => {
     expect(container.textContent).toContain("Every day");
   });
 });
+
+  it("adds a manual holding, shows it valued, and keeps unpriced honest", async () => {
+    let holdings: unknown[] = [];
+    let nextId = 1;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const path = url.pathname;
+      const method = init?.method ?? "GET";
+      if (path === "/holdings" && method === "GET") {
+        return json({
+          holdings,
+          summary: {
+            positions: holdings.length,
+            priced: holdings.length,
+            total_value: holdings.length ? 1000 : null,
+            total_pnl: null,
+          },
+        });
+      }
+      if (path === "/holdings" && method === "POST") {
+        const body = JSON.parse(String(init?.body));
+        holdings = [...holdings, { id: `h${nextId++}`, symbol: body.symbol, quantity: Number(body.quantity), cost_basis: null, currency: "USD", note: null, created_at: "2026-08-19T00:00:00Z", updated_at: "2026-08-19T00:00:00Z", last_price: 100, price_as_of: "2026-08-19T00:00:00Z", value: Number(body.quantity) * 100, unrealized_pnl: null, valuation: "priced" }];
+        return json(holdings[holdings.length - 1], 201);
+      }
+      if (path === "/trading/portfolio") {
+        return json({ detail: "No portfolio for this account" }, 404);
+      }
+      return json({ detail: "not found" }, 404);
+    }));
+    const container = root();
+    render(<PortfolioView />, container);
+
+    await waitFor(() => expect(container.textContent).toContain("Track what you hold"));
+    await waitFor(() =>
+      expect(container.querySelector<HTMLInputElement>("input[placeholder='BTC, ETH, SPY…']")).not.toBeNull());
+
+    const symbolInput = container.querySelector<HTMLInputElement>("input[placeholder='BTC, ETH, SPY…']");
+    const quantityInput = container.querySelector<HTMLInputElement>("input[placeholder='0.5']");
+    expect(symbolInput).not.toBeNull();
+    expect(quantityInput).not.toBeNull();
+    await act(() => {
+      setInput(symbolInput!, "BTC");
+      setInput(quantityInput!, "10");
+    });
+    await act(() => {
+      container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    await waitFor(() => expect(container.textContent).toContain("BTC"));
+    expect(container.textContent).toContain("1,000");
+  });

@@ -30,6 +30,7 @@ import { directionGlyph, directionWord, hitRateFelt } from "../lib/explain";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 import { WalletAccounts } from "./WalletAccounts";
+import { ManualHoldings } from "./ManualHoldings";
 
 type Resource<T> =
   | { kind: "ok"; data: T }
@@ -363,14 +364,11 @@ export function PortfolioView() {
             <span class="health-orb" aria-hidden="true" />
             <div>
               <h1>Portfolio</h1>
-              <p>No managed portfolio, positions, or recorded trading NAV for this account.</p>
+              <p>Track what you hold. The system values it from its own price coverage.</p>
             </div>
           </div>
         </header>
-        <div class="surface-card clean-empty">
-          <strong>No managed portfolio</strong>
-          <span>This system has not opened a managed trading book for this account.</span>
-        </div>
+        <ManualHoldings />
         <details class="external-wallets" open>
           <summary>External wallets · watched, never traded</summary>
           <WalletAccounts />
@@ -428,7 +426,14 @@ export function PortfolioView() {
 
       <NoteworthyBand findings={state.noteworthy} />
 
-      <section class="primary-metrics" aria-label="Portfolio summary">
+      <ManualHoldings />
+
+      <details class="managed-book">
+        <summary>
+          Managed trading book · last valued {formatTimestamp(portfolio.as_of)}
+        </summary>
+
+      <section class="primary-metrics" aria-label="Managed book summary">
         <article class="primary-metric primary-metric-featured">
           <span class="metric-kicker">Trading NAV</span>
           <strong>{formatMoney(portfolio.nav)}</strong>
@@ -545,6 +550,7 @@ export function PortfolioView() {
       ) : (
         <p class="inline-warning">Schedule unavailable: {state.schedule.message}</p>
       )}
+      </details>
 
       <details class="external-wallets">
         <summary>

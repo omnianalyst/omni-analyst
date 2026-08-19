@@ -36,6 +36,7 @@
 		/autonomous /autonomous/* /briefing /briefing/* /bulletin /bulletin/* \
 		/capabilities /capabilities/* /coverage /coverage/* \
 		/entities /entities/* /exposure /exposure/* /gaps /gaps/* \
+		/holdings /holdings/* \
 		/mcp /mcp/* \
 		/objective/* /watchlists /watchlists/* \
 		/portfolio /portfolio/* /research/* /scanner/* \

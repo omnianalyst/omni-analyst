@@ -6199,3 +6199,42 @@ tr.row.tier-unknown td:first-child {
   font-size: 11px;
   white-space: nowrap;
 }
+
+/* The manual holdings add-form: inline row, labels above inputs. */
+.holding-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin: 12px 0 16px;
+}
+.holding-add label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+  flex: 1 1 130px;
+  min-width: 110px;
+}
+.holding-add input {
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
+  background: var(--surface-raised, rgba(15, 23, 42, 0.5));
+  color: inherit;
+  font-size: 13px;
+}
+.holding-add .inline-warning {
+  flex-basis: 100%;
+  margin: 0;
+}
+.holding-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.holding-actions .inline-warning {
+  margin: 0;
+}
