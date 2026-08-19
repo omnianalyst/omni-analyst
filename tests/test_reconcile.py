@@ -89,13 +89,16 @@ class FakeVenue:
         """Quoted in USD, and nothing unlisted.
 
         Part of the Venue protocol since M11: a strategy holds assets and a
-        venue trades pairs, and the loop passing a bare ticker through is what
-        had fills settling in an asset called `MKR` (Finding 21). Reconciliation
+        venue trades pairs, and the loop passing a bare ticker through is what        had fills settling in an asset called `MKR` (Finding 21). Reconciliation
         never calls it -- it compares what is already held -- but a fake that
         does not satisfy the protocol is a fake that stops proving the real
         adapter could stand in for it.
         """
         return asset if "/" in asset else f"{asset}/USD"
+
+    def held_symbol_aliases(self, asset: str, market_type) -> tuple[str, ...]:
+        """One spelling per market here; nothing to alias."""
+        return ()
 
     async def quote(self, intent):  # pragma: no cover - not exercised here
         raise NotImplementedError
