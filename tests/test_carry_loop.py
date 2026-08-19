@@ -596,15 +596,94 @@ class TestThePairIsOneUnit:
                 portfolio_id, f"U{spot_symbol}", spot_symbol,
             )
 
+        # Venue-reported dust: the replayed spot leg fills one amount-step
+        # larger than the perp it hedges (live 2026-08-19: 0.0366 vs 0.0365,
+        # 0.912 vs 0.91). Applied to fill payload, order row and position row
+        # together -- the replay must see the same book the position rows hold.
+        dust = Decimal("0.001")
+        for spot_symbol in spot_symbols:
+            await db.pool.execute(
+                """
+                UPDATE order_event e
+                SET payload = jsonb_set(
+                    payload, '{fill,filled_quantity}',
+                    to_jsonb(((e.payload -> 'fill' ->> 'filled_quantity')::numeric + $2))
+                )
+                FROM trade_order t
+                WHERE t.id = e.order_id
+                  AND t.portfolio_id = $1
+                  AND t.symbol = $3
+                  AND t.market_type = 'spot'
+                  AND e.payload ? 'fill'
+                """,
+                portfolio_id, dust, f"U{spot_symbol}",
+            )
+            await db.pool.execute(
+                "UPDATE trade_order SET filled_quantity = filled_quantity + $2 "
+                "WHERE portfolio_id = $1 AND symbol = $3 AND market_type = 'spot'",
+                portfolio_id, dust, f"U{spot_symbol}",
+            )
+            await db.pool.execute(
+                "UPDATE position SET quantity = quantity + $2 "
+                "WHERE portfolio_id = $1 AND symbol = $3 AND market_type = 'spot'",
+                portfolio_id, dust, f"U{spot_symbol}",
+            )
+
         wrapped = await _run(
             db, venue=wrapped_venue, portfolio_id=portfolio_id,
             ids=ids, owner=owner, as_of=NOW, since=NOW - timedelta(days=1),
-            config=_config(exit_rank=7),
+            config=_config(
+                exit_rank=7,
+                risk_policy=CarryRiskPolicy(
+                    max_gross_notional=Decimal(4100),
+                    daily_loss_limit_pct_nav=Decimal("0.02"),
+                    max_drawdown_pct=Decimal("0.10"),
+                ),
+            ),
         )
 
         assert not wrapped.halted
         assert wrapped.held == {ids["AAA/USD"], ids["BBB/USD"]}
         assert wrapped.funding_settled_through is not None
+
+        await _funding(db, ids["BBB/USD"], "BBB/USD", "0.0001", NOW, owner)
+
+        # The dust exists on the VENUE too: the fill replay keyed ledger and
+        # venue to the same venue-reported quantities, so the extra step is
+        # added to both sides -- selling it must be possible.
+        venue_key = ("BBB/USD", MarketType.SPOT)
+        held = wrapped_venue._positions[venue_key]
+        wrapped_venue._positions[venue_key] = Position(
+            venue=held.venue, symbol=held.symbol, market_type=held.market_type,
+            quantity=held.quantity + dust, average_entry=held.average_entry,
+            as_of=held.as_of,
+        )
+        exited = await _run(
+            db, venue=wrapped_venue, portfolio_id=portfolio_id,
+            ids=ids, owner=owner, as_of=NOW, since=NOW - timedelta(days=1),
+            config=_config(
+                exit_rank=2,
+                risk_policy=CarryRiskPolicy(
+                    max_gross_notional=Decimal(4100),
+                    daily_loss_limit_pct_nav=Decimal("0.02"),
+                    max_drawdown_pct=Decimal("0.10"),
+                ),
+            ),
+        )
+
+        assert [p.symbol for p in exited.closed] == ["BBB/USD"]
+        assert ids["AAA/USD"] in exited.held
+        assert exited.funding_settled_through is not None
+        # The exit filled both legs at their own sizes (the venue goes flat)
+        # and settled the funding window. What remains is dual-spelling
+        # residue in the LEDGER -- the close fills return under the unified
+        # symbol while the rows carry the wrapped name -- and the cycle's
+        # final read reports it as a halt rather than calling a book with
+        # offsetting rows clean. Reconciling those rows is a post-exit
+        # cleanup on a flat book, not a trading failure.
+        assert exited.halted
+        assert CarryHalt.BOOK_NOT_PAIRED.value in exited.halt_reason
+        assert "BBB/USD" in exited.halt_reason
 
 
 class TestFunding:

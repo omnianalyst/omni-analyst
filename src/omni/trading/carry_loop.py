@@ -194,6 +194,9 @@ class CarryRefusal(str, Enum):
     OUTSIDE_UNIVERSE = "a_held_pair_is_not_in_the_universe_this_cycle_was_given"
 
 
+_PAIR_DUST_FRACTION = Decimal("0.005")
+
+
 class CarryHalt(str, Enum):
     """Why the cycle stopped rather than refusing one name."""
 
@@ -321,12 +324,20 @@ class PairExecution:
     second reading of the same fact rather than the check itself -- but they are
     the fact the whole strategy rests on, and a result object that can hold an
     unbalanced pair is a result object an operator can be misled by.
+
+    `closed_at_own_size` is the close path for a pair the venue holds at
+    slightly unequal sizes (fill-replay dust): each leg closed exactly the
+    quantity it held, which is what makes the book flat -- the equal-quantity
+    invariant is the OPEN's statement about a pair born this cycle, and
+    demanding it on close would refuse to finish unwinding the dust it exists
+    to remove.
     """
 
     entity_id: UUID
     symbol: str
     spot: Fill
     perp: Fill
+    closed_at_own_size: bool = False
 
     def __post_init__(self) -> None:
         if self.spot.side is self.perp.side:
@@ -335,7 +346,10 @@ class PairExecution:
                 f"legs point the same way is a doubled directional position, not a "
                 f"delta-neutral one"
             )
-        if self.spot.filled_quantity != self.perp.filled_quantity:
+        if (
+            not self.closed_at_own_size
+            and self.spot.filled_quantity != self.perp.filled_quantity
+        ):
             raise ValueError(
                 f"{self.symbol} filled {self.spot.filled_quantity} spot against "
                 f"{self.perp.filled_quantity} perp; the residual is naked exposure"
@@ -634,7 +648,19 @@ class _Legs:
     def is_pair(self) -> bool:
         # Decimal addition is exact, so an intact pair lands on exactly zero
         # rather than near it; the float tolerance rule does not apply here.
-        return self.spot > 0 and self.perp < 0 and self.spot + self.perp == 0
+        # The one exception is measured dust: a book whose legs came back from
+        # a venue-side fill replay can differ by the venue's own amount step
+        # (live 2026-08-19: spot 0.912 against perp -0.91 -- 0.22%), and an
+        # exact-zero rule would refuse to exit a hedged book over the
+        # remainder, stranding it forever. The bound is relative and small:
+        # half a percent of the larger leg. A naked leg (one side zero) is a
+        # 100% residual and stays unpaired; wrong-sign legs stay unpaired.
+        if self.spot <= 0 or self.perp >= 0:
+            return False
+        residual = abs(self.spot + self.perp)
+        return residual == 0 or residual <= _PAIR_DUST_FRACTION * max(
+            self.spot, -self.perp
+        )
 
 
 def _legs_by_asset(
@@ -893,6 +919,7 @@ class _Cycle:
         reference_price: Decimal,
         as_of: datetime,
         opening: bool,
+        leg_quantities: dict[MarketType, Decimal] | None = None,
     ) -> tuple[PairExecution | None, str | None]:
         """Send both legs of one pair. Returns the pair, or the halt it caused.
 
@@ -901,6 +928,11 @@ class _Cycle:
         economic units and one venue rejection says nothing about the next name.
         Only an unwind that fails halts, and it halts because at that point the
         book is holding an exposure nothing else can see.
+
+        `leg_quantities` is the close path only, for a pair the venue holds at
+        slightly unequal sizes (measured fill-replay dust): each leg is sent at
+        ITS OWN held quantity, so closing leaves both legs exactly flat rather
+        than buying back more perp than was short and minting a new residual.
         """
         # `symbols` rather than one string: on a real venue the two legs are
         # different instruments with different names, and sending the spot
@@ -920,8 +952,12 @@ class _Cycle:
         # The second leg is sized at the first leg's fill quantity, not the raw
         # quantity, so both legs fill the same amount even when the two markets
         # have different amount precisions (SOL perp = 0.01 vs spot = 0.001).
+        # With per-leg quantities every leg carries its own size and no leg is
+        # resized off another's fill.
         send_qty = quantity
         for market_type in order:
+            if leg_quantities is not None:
+                send_qty = leg_quantities[market_type]
             fill = await self.send(
                 _leg_intent(
                     portfolio_id=self.portfolio_id,
@@ -942,24 +978,36 @@ class _Cycle:
                     filled[market_type] = fill
                 break
             filled[market_type] = fill
-            send_qty = fill.filled_quantity
+            if leg_quantities is None:
+                send_qty = fill.filled_quantity
 
         spot = filled.get(MarketType.SPOT)
         perp = filled.get(MarketType.PERPETUAL)
         # Stated across the two legs, not per leg. A per-leg check ("did this leg
-        # fill what it was asked for") passes cleanly on a pair sized wrong in the
-        # first place, which is the same naked residual arriving by a different
-        # route and with nothing left to notice it.
+        # fill what it was asked for") passes cleanly on a pair sized wrong in
+        # the first place, which is the same naked residual arriving by a
+        # different route and with nothing left to notice it.
         neutral = (
             spot is not None
             and perp is not None
             and spot.side is not perp.side
-            and spot.filled_quantity == perp.filled_quantity
+            and (
+                spot.filled_quantity == perp.filled_quantity
+                if leg_quantities is None
+                else (
+                    spot.filled_quantity == leg_quantities[MarketType.SPOT]
+                    and perp.filled_quantity == leg_quantities[MarketType.PERPETUAL]
+                )
+            )
         )
         if balanced and neutral:
             return (
                 PairExecution(
-                    entity_id=entity_id, symbol=symbols.asset, spot=spot, perp=perp
+                    entity_id=entity_id,
+                    symbol=symbols.asset,
+                    spot=spot,
+                    perp=perp,
+                    closed_at_own_size=leg_quantities is not None,
                 ),
                 None,
             )
@@ -1285,6 +1333,14 @@ async def run_carry_cycle(
             reference_price=price,
             as_of=as_of,
             opening=False,
+            # Each leg closes at its own held size: a fill-replay book can
+            # carry the venue's rounding difference between the legs, and
+            # closing both at one quantity would buy back more perpetual than
+            # was short, minting a fresh residual instead of leaving flat.
+            leg_quantities={
+                MarketType.SPOT: legs[symbols.asset].spot,
+                MarketType.PERPETUAL: -legs[symbols.asset].perp,
+            },
         )
         if pair is not None:
             closed.append(pair)
