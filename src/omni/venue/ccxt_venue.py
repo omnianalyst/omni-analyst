@@ -624,6 +624,29 @@ class CCXTVenue:
         # one would have the book holding one market today and another tomorrow.
         return matches[0] if matches else None
 
+    def held_symbol_aliases(
+        self, asset: str, market_type: MarketType
+    ) -> tuple[str, ...]:
+        """The venue's raw id for the resolved market, when it differs.
+
+        ccxt addresses orders by unified symbol, but the venue's own fills
+        and balances speak its raw market id, and a position acquired through
+        a venue-side record (a fill replay, a repair from `userFills`) is
+        keyed by that raw spelling. Measured on Hyperliquid: the ETH spot
+        market trades as `ETH/USDC` and reports as `UETH/USDC`, and a book
+        holding the wrapped spelling against the native perpetual read as
+        four unpaired legs (carry halt 2026-08-19). Both spellings name one
+        market; only the reading differs.
+        """
+        resolved = self.symbol_for(asset, market_type)
+        if resolved is None:
+            return ()
+        market = self._markets.get(resolved)
+        raw_id = market.get("id") if isinstance(market, dict) else None
+        if not isinstance(raw_id, str) or not raw_id or raw_id == resolved:
+            return ()
+        return (raw_id,)
+
     @staticmethod
     def _is_market_type(market: dict[str, Any], market_type: MarketType) -> bool:
         """Whether a ccxt market IS the requested instrument.

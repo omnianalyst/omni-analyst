@@ -503,6 +503,109 @@ class TestThePairIsOneUnit:
         assert result.opened == () and result.closed == ()
         assert venue.fills == []
 
+    async def test_a_wrapped_spot_held_against_a_native_perp_is_a_pair_not_a_halt(
+        self, db, owner, portfolio_id, venue
+    ):
+        """The Hyperliquid shape, measured live 2026-08-19.
+
+        The venue's spot fills report under its raw market id (`UETH/USDC`)
+        while the tradable symbol is `ETH/USDC` -- one market, two spellings.
+        A repair replaying venue fills keys the spot leg by the raw spelling,
+        and a pairing map that recognises only the tradable one then reads a
+        perfectly hedged book as unpaired legs and halts on it, which
+        stranded the real wind-down: the cycle refused to exit positions it
+        existed to exit.
+
+        The held book is built the way the real one was: opened through the
+        ledger with fills, then the spot leg's rows renamed to the wrapped
+        spelling -- what a fill-replay repair leaves behind. Discrimination
+        is the first half: the same wrapped book against a plain venue halts
+        BOOK_NOT_PAIRED; against the aliasing venue it pairs and settles.
+        """
+        ids = await _world(db, owner)
+
+        class _WrappingVenue(type(venue)):  # type: ignore[type-arg]
+            """A venue whose spot records are keyed by the raw market id.
+
+            Reports wrapped spellings for spot the way a raw-id adapter does
+            (Hyperliquid's balances and fills speak `UETH/USDC` while orders
+            are addressed as `ETH/USDC`), and answers `held_symbol_aliases`
+            so the pairing map can read both spellings as one market.
+            """
+
+            def held_symbol_aliases(self, asset, market_type):
+                if market_type is MarketType.SPOT:
+                    return (f"U{asset}",)
+                return ()
+
+            async def positions(self):
+                reported = await super().positions()
+                return [
+                    p if p.market_type is not MarketType.SPOT
+                    else Position(
+                        venue=p.venue, symbol=f"U{p.symbol}",
+                        market_type=p.market_type, quantity=p.quantity,
+                        average_entry=p.average_entry, as_of=p.as_of,
+                    )
+                    for p in reported
+                ]
+
+        wrapped_venue = _WrappingVenue(
+            venue._market, venue.capabilities, name=VENUE,
+            spread_bps=SPREAD_BPS,
+            starting_balances={"USD": Decimal(100000)},
+        )
+
+        opened = await _run(
+            db, venue=wrapped_venue, portfolio_id=portfolio_id,
+            ids=ids, owner=owner, as_of=NOW, since=NOW - timedelta(days=1),
+        )
+        assert not opened.halted
+        spot_symbols = [
+            row["symbol"]
+            for row in await db.pool.fetch(
+                "SELECT DISTINCT symbol FROM trade_order WHERE portfolio_id = $1 "
+                "AND market_type = 'spot' AND side = 'buy'",
+                portfolio_id,
+            )
+        ]
+        assert spot_symbols
+
+        for spot_symbol in spot_symbols:
+            await db.pool.execute(
+                """
+                UPDATE order_event e
+                SET payload = jsonb_set(payload, '{fill,symbol}', to_jsonb($2::text))
+                FROM trade_order t
+                WHERE t.id = e.order_id
+                  AND t.portfolio_id = $1
+                  AND t.symbol = $3
+                  AND t.market_type = 'spot'
+                  AND e.payload -> 'fill' ->> 'symbol' = $3
+                """,
+                portfolio_id, f"U{spot_symbol}", spot_symbol,
+            )
+            await db.pool.execute(
+                "UPDATE trade_order SET symbol = $2 WHERE portfolio_id = $1 "
+                "AND symbol = $3 AND market_type = 'spot'",
+                portfolio_id, f"U{spot_symbol}", spot_symbol,
+            )
+            await db.pool.execute(
+                "UPDATE position SET symbol = $2 WHERE portfolio_id = $1 "
+                "AND symbol = $3 AND market_type = 'spot'",
+                portfolio_id, f"U{spot_symbol}", spot_symbol,
+            )
+
+        wrapped = await _run(
+            db, venue=wrapped_venue, portfolio_id=portfolio_id,
+            ids=ids, owner=owner, as_of=NOW, since=NOW - timedelta(days=1),
+            config=_config(exit_rank=7),
+        )
+
+        assert not wrapped.halted
+        assert wrapped.held == {ids["AAA/USD"], ids["BBB/USD"]}
+        assert wrapped.funding_settled_through is not None
+
 
 class TestFunding:
     async def test_the_short_perp_receives_a_positive_rate(
@@ -1333,3 +1436,51 @@ class TestTheMarkComesFromTheVenueTheBookTrades:
 
         assert result.refused.get(CarryRefusal.NO_REFERENCE_PRICE.value) == 1
         assert all(pair.symbol != "AAA/USD" for pair in result.opened)
+
+
+class TestThePairingMap:
+    def test_a_venue_without_aliases_reads_only_tradable_spellings(self):
+        from omni.trading.carry_loop import _pairing_map, _PairSymbols
+
+        class _Plain:
+            name = "paper"
+
+        pair = {uuid4(): _PairSymbols(asset="ETH", spot="ETH/USDC", perp="ETH/USDC:USDC")}
+        assert _pairing_map(pair, _Plain()) == {
+            "ETH/USDC": "ETH",
+            "ETH/USDC:USDC": "ETH",
+        }
+
+    def test_held_aliases_map_the_raw_spelling_to_the_same_asset(self):
+        from omni.trading.carry_loop import _pairing_map, _PairSymbols
+
+        class _Wrapping:
+            name = "paper"
+
+            def held_symbol_aliases(self, asset, market_type):
+                if market_type is MarketType.SPOT:
+                    return (f"U{asset}/USDC",)
+                return ()
+
+        pair = {uuid4(): _PairSymbols(asset="ETH", spot="ETH/USDC", perp="ETH/USDC:USDC")}
+        assert _pairing_map(pair, _Wrapping())["UETH/USDC"] == "ETH"
+
+    def test_an_alias_colliding_with_another_asset_is_refused(self):
+        from omni.trading.carry_loop import _pairing_map, _PairSymbols
+
+        class _Colliding:
+            name = "paper"
+
+            def held_symbol_aliases(self, asset, market_type):
+                # The raw id of ETH's spot market spells exactly like another
+                # asset's tradable symbol: reading it would net two books.
+                if asset == "ETH" and market_type is MarketType.SPOT:
+                    return ("BTC/USDC",)
+                return ()
+
+        pairs = {
+            uuid4(): _PairSymbols(asset="ETH", spot="ETH/USDC", perp="ETH/USDC:USDC"),
+            uuid4(): _PairSymbols(asset="BTC", spot="BTC/USDC", perp="BTC/USDC:USDC"),
+        }
+        with pytest.raises(ValueError, match="resolves to both"):
+            _pairing_map(pairs, _Colliding())

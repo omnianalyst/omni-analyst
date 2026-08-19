@@ -415,6 +415,22 @@ class Venue(Protocol):
 
     def symbol_for(self, asset: str, market_type: MarketType) -> str | None: ...
 
+    def held_symbol_aliases(
+        self, asset: str, market_type: MarketType
+    ) -> tuple[str, ...]:
+        """Extra spellings under which a HELD position in this leg may be
+        recorded. Orders are addressed by `symbol_for`; positions and fills
+        can arrive under the venue's raw market id instead (Hyperliquid's
+        spot fills carry `UETH/USDC` while the tradable symbol is
+        `ETH/USDC` -- the same market, two spellings). A reader that maps
+        only the tradable spelling will read a hedged book as four unpaired
+        legs and refuse to touch it.
+
+        Empty by default: most venues use one spelling per market, and a
+        venue with no recorded divergence has nothing to add.
+        """
+        return ()
+
     async def quote(self, intent: TradeIntent) -> Quote: ...
 
     async def execute(self, intent: TradeIntent) -> Fill: ...

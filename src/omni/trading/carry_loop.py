@@ -485,6 +485,46 @@ async def _symbols(
     return by_entity
 
 
+def _pairing_map(by_entity: Mapping[UUID, _PairSymbols], venue: Venue) -> dict[str, str]:
+    """Every leg symbol -> its asset, including held spellings.
+
+    `held_symbol_aliases` adds the venue's raw market ids beside the tradable
+    symbols: a position recorded through a venue-side fill (the wrapped
+    `UETH/USDC` spelling on Hyperliquid) is the same market as the tradable
+    `ETH/USDC`, and a pairing map that recognises only the tradable spelling
+    reads a hedged wrapped book as unpaired legs and halts on it. An alias
+    colliding with another asset's symbol is the same netting hazard as a
+    symbol collision and is refused here rather than read ambiguously.
+    """
+    asset_of: dict[str, str] = {}
+    # Structural default: a venue that has not measured any raw/tradable
+    # divergence answers nothing, which reads the book exactly as before.
+    aliases = getattr(venue, "held_symbol_aliases", None)
+    for pair in by_entity.values():
+        for symbol, market_type in (
+            (pair.spot, MarketType.SPOT),
+            (pair.perp, MarketType.PERPETUAL),
+        ):
+            if symbol in asset_of and asset_of[symbol] != pair.asset:
+                raise ValueError(
+                    f"symbol {symbol!r} resolves to both {asset_of[symbol]!r} "
+                    f"and {pair.asset!r}; one leg symbol must name one asset"
+                )
+            asset_of[symbol] = pair.asset
+            if aliases is None:
+                continue
+            for alias in aliases(pair.asset, market_type):
+                if alias in asset_of and asset_of[alias] != pair.asset:
+                    raise ValueError(
+                        f"held alias {alias!r} resolves to both "
+                        f"{asset_of[alias]!r} and {pair.asset!r}; one leg "
+                        f"symbol must name one asset"
+                    )
+                asset_of[alias] = pair.asset
+    return asset_of
+
+
+
 async def _price_at(
     pool,
     *,
@@ -1022,11 +1062,7 @@ async def run_carry_cycle(
     # Asset -> entity, and every leg symbol -> asset. Two maps because the pair
     # is identified by its asset and addressed by two symbols.
     by_asset = {pair.asset: entity_id for entity_id, pair in by_entity.items()}
-    asset_of = {
-        symbol: pair.asset
-        for pair in by_entity.values()
-        for symbol in (pair.spot, pair.perp)
-    }
+    asset_of = _pairing_map(by_entity, venue)
 
     book = await state.load(pool, portfolio_id)
     legs = _legs_by_asset(book, venue_name=venue.name, asset_of=asset_of)

@@ -304,6 +304,13 @@ class PaperVenue:
         self._fills.append(fill)
         return fill
 
+    def held_symbol_aliases(
+        self, asset: str, market_type: MarketType
+    ) -> tuple[str, ...]:
+        """One spelling per market here: positions are keyed by the same
+        symbol orders are addressed by, so there is no raw id to map."""
+        return ()
+
     def symbol_for(self, asset: str, market_type: MarketType) -> str | None:
         """The tradable symbol for an asset here, or `None` if it is not listed.
 
