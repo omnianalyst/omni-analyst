@@ -431,6 +431,18 @@ class Venue(Protocol):
         """
         return ()
 
+    def spot_holding_asset(self, symbol_or_asset: str) -> str | None:
+        """The asset a HELD spot quantity under this name is a holding of.
+
+        Venues that report wrapped spot tokens as plain balances name them by
+        the token (Hyperliquid's balance sheet says `ETH 0.0365` while the
+        position/market is `UETH/USDC`): this answers what asset such a
+        balance holds, so a reconciler can compare it against the wrapped
+        position row it hedges. `None` means "not a spot holding this venue
+        can name" -- treat as unmatchable rather than guessing.
+        """
+        return None
+
     async def quote(self, intent: TradeIntent) -> Quote: ...
 
     async def execute(self, intent: TradeIntent) -> Fill: ...

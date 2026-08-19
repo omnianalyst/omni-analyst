@@ -100,6 +100,10 @@ class FakeVenue:
         """One spelling per market here; nothing to alias."""
         return ()
 
+    def spot_holding_asset(self, symbol_or_asset: str) -> str | None:
+        """No token balances here; every spot holding is a position."""
+        return None
+
     async def quote(self, intent):  # pragma: no cover - not exercised here
         raise NotImplementedError
 
@@ -1034,3 +1038,96 @@ class TestOneBookAcrossSeveralVenues:
         assert Divergence.POSITION_QUANTITY in _kinds(result)
         # And it is OUR venue's symbol that is named, not the other one's.
         assert [d.symbol for d in result.discrepancies] == ["BTC/USD"]
+
+
+class TestSpotTokenNamespace:
+    """The Hyperliquid shape, live 2026-08-19: wrapped spot as a local
+    position row (`UETH/USDC`) against the venue's plain token balance
+    (`ETH 0.0365`). Before this space existed, one hedged holding read as
+    two divergences -- a position the venue "lacks" and a balance row we
+    "lack" -- and the carry cycle refused to touch a book it existed to
+    wind down."""
+
+    def _wrapped_venue(self, **kwargs):
+        venue = FakeVenue(**kwargs)
+
+        class Wrapped(FakeVenue):
+            def spot_holding_asset(self, symbol_or_asset: str) -> str | None:
+                if symbol_or_asset.startswith("U") and symbol_or_asset.endswith("/USDC"):
+                    return symbol_or_asset[1:].partition("/")[0]
+                return None
+
+        wrapped = Wrapped(**kwargs)
+        wrapped.calls = venue.calls
+        return wrapped
+
+    async def test_a_wrapped_position_meets_its_token_balance_as_one_comparison(self):
+        venue = self._wrapped_venue(
+            positions=(),
+            balances=(_balance("ETH", "0.0365"), _balance("USDC", "70.81")),
+        )
+        result = await reconcile(
+            [_position("UETH/USDC", "0.0366")],
+            [_local_cash("USDC", "70.81")],
+            venue,
+            tolerance=Decimal("0.01"),
+            now=NOW,
+        )
+
+        assert result.reconciled, [d.detail for d in result.discrepancies]
+
+    async def test_a_missing_token_balance_is_named_as_one_gap_not_two(self):
+        venue = self._wrapped_venue(
+            positions=(),
+            balances=(_balance("USDC", "70.81"),),
+        )
+        result = await reconcile(
+            [_position("UETH/USDC", "0.0366")],
+            [_local_cash("USDC", "70.81")],
+            venue,
+            tolerance=Decimal("0.01"),
+            now=NOW,
+        )
+
+        # No venue ETH balance exists to promote against, so the holding is
+        # reported where it lives -- as a position the venue does not report.
+        # One divergence naming the wrapped spelling, not one per namespace.
+        assert not result.reconciled
+        assert len(result.discrepancies) == 1
+        assert "we hold 0.0366" in result.discrepancies[0].detail
+        assert "UETH/USDC" in result.discrepancies[0].detail
+
+    async def test_a_token_balance_we_do_not_hold_stays_a_cash_divergence(self):
+        venue = self._wrapped_venue(
+            positions=(),
+            balances=(_balance("ETH", "0.0365"), _balance("USDC", "70.81")),
+        )
+        result = await reconcile(
+            [],
+            [_local_cash("USDC", "70.81")],
+            venue,
+            tolerance=Decimal("0.01"),
+            now=NOW,
+        )
+
+        assert not result.reconciled
+        assert any(
+            "the venue holds 0.0365 and we carry no balance row" in d.detail
+            for d in result.discrepancies
+        )
+
+    async def test_a_quantity_gap_beyond_tolerance_is_reported_in_the_holding_space(self):
+        venue = self._wrapped_venue(
+            positions=(),
+            balances=(_balance("ETH", "0.01"), _balance("USDC", "70.81")),
+        )
+        result = await reconcile(
+            [_position("UETH/USDC", "0.0366")],
+            [_local_cash("USDC", "70.81")],
+            venue,
+            tolerance=Decimal("0.01"),
+            now=NOW,
+        )
+
+        assert not result.reconciled
+        assert any("(spot holding)" in d.detail for d in result.discrepancies)

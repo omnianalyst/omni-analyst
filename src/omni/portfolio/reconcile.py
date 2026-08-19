@@ -290,6 +290,67 @@ def _position_discrepancies(
     return found
 
 
+def _spot_holding_discrepancies(
+    local: dict[str, Decimal],
+    remote: dict[str, Decimal],
+    *,
+    venue: str,
+    tolerance: Decimal,
+) -> list[Discrepancy]:
+    """Compare spot holdings across the position/balance namespace seam.
+
+    One comparison per asset: the wrapped spot the local book holds as a
+    position row against the token balance the venue reports. A divergence
+    here is the same fact as a position divergence -- a holding one side has
+    and the other does not -- and is named with both spellings so an operator
+    reads one item, not two half-items.
+    """
+    found: list[Discrepancy] = []
+    for asset in sorted(set(local) | set(remote)):
+        local_qty = local.get(asset)
+        remote_qty = remote.get(asset)
+        if (
+            _usable(local_qty)
+            and _usable(remote_qty)
+            and _within(local_qty, remote_qty, tolerance)
+        ):
+            continue
+        if not _usable(local_qty) or not _usable(remote_qty):
+            detail = (
+                f"{asset} (spot holding) at {venue}: local={local_qty} "
+                f"remote={remote_qty}; a non-finite quantity cannot be shown "
+                f"to be within tolerance"
+            )
+        elif local_qty is None:
+            detail = (
+                f"{asset} (spot holding) at {venue}: the venue reports "
+                f"{remote_qty} and we hold no spot position for it"
+            )
+        elif remote_qty is None:
+            detail = (
+                f"{asset} (spot holding) at {venue}: we hold {local_qty} and "
+                f"the venue reports no such token balance"
+            )
+        else:
+            detail = (
+                f"{asset} (spot holding) at {venue}: we hold {local_qty}, the "
+                f"venue reports {remote_qty}, a difference of "
+                f"{abs(local_qty - remote_qty)} against a tolerance of "
+                f"{tolerance}"
+            )
+        found.append(
+            Discrepancy(
+                kind=Divergence.POSITION_QUANTITY,
+                venue=venue,
+                symbol=asset,
+                local=local_qty,
+                remote=remote_qty,
+                detail=detail,
+            )
+        )
+    return found
+
+
 def _balance_discrepancies(
     local_book: dict[str, tuple[Decimal, Decimal]],
     remote_book: dict[str, tuple[Decimal, Decimal]],
@@ -444,14 +505,50 @@ async def reconcile(
     mine = [p for p in local_positions if p.venue == name]
     my_cash = [b for b in local_balances if b.venue == name]
 
-    local_book = _index_positions(mine, venue=name, source="locally", unknown=unknown)
+    # The spot-token namespace. Some venues do not report wrapped spot as a
+    # position at all -- Hyperliquid reports it as a plain token BALANCE
+    # (`ETH 0.0365`) while the local book holds it as a position row under
+    # the market's held spelling (`UETH/USDC`). Compared in the position and
+    # cash spaces separately, one hedged holding reads as two divergences
+    # (live carry halt 2026-08-19). Normalised here into its own space: a
+    # local spot position whose held spelling the venue can name as an asset,
+    # and the venue balance for that same asset, meet as one comparison. The
+    # venue's own balance sheet decides the namespace -- a spot position is
+    # promoted only when the venue actually reports that asset as a balance,
+    # and a consumed balance leaves the cash comparison, so neither side can
+    # silently disappear from every check.
+    spot_asset_of = getattr(venue, "spot_holding_asset", None)
+    remote_assets = {b.asset for b in remote_balances if b.asset.strip()}
+    local_holdings: dict[str, Decimal] = {}
+    as_positions: list[Position] = []
+    for p in mine:
+        canonical = (
+            spot_asset_of(p.symbol)
+            if spot_asset_of is not None and p.market_type is MarketType.SPOT
+            else None
+        )
+        if canonical is not None and canonical in remote_assets:
+            local_holdings[canonical] = (
+                local_holdings.get(canonical, ZERO) + p.quantity
+            )
+        else:
+            as_positions.append(p)
+
+    remote_holdings: dict[str, Decimal] = {}
+    as_cash: list[Balance] = []
+    held_assets = set(local_holdings)
+    for b in remote_balances:
+        if b.asset in held_assets:
+            remote_holdings[b.asset] = remote_holdings.get(b.asset, ZERO) + b.free
+        else:
+            as_cash.append(b)
+
+    local_book = _index_positions(as_positions, venue=name, source="locally", unknown=unknown)
     remote_book = _index_positions(
         remote_positions, venue=name, source="by the venue", unknown=unknown
     )
     local_cash = _index_balances(my_cash, venue=name, source="locally", unknown=unknown)
-    remote_cash = _index_balances(
-        remote_balances, venue=name, source="by the venue", unknown=unknown
-    )
+    remote_cash = _index_balances(as_cash, venue=name, source="by the venue", unknown=unknown)
 
     discrepancies = [
         *unknown,
@@ -460,6 +557,9 @@ async def reconcile(
         ),
         *_balance_discrepancies(
             local_cash, remote_cash, venue=name, tolerance=tolerance
+        ),
+        *_spot_holding_discrepancies(
+            local_holdings, remote_holdings, venue=name, tolerance=tolerance
         ),
     ]
 

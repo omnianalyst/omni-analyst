@@ -658,6 +658,29 @@ class CCXTVenue:
             return ()
         return _HELD_SYMBOL_ALIASES.get(resolved, ())
 
+    def spot_holding_asset(self, symbol_or_asset: str) -> str | None:
+        """Reverse of the alias map, plus the bare-asset case.
+
+        A venue balance named `ETH` is a holding of ETH; a wrapped position
+        row named `UETH/USDC` is a holding of ETH because the declared alias
+        table says that spelling is ETH/USDC's held name. Everything else --
+        perpetual spellings, unknown symbols -- is None: not a spot holding
+        this venue can name. Like the alias table, derived only from declared,
+        measured entries.
+        """
+        stripped = symbol_or_asset.strip()
+        if not stripped:
+            return None
+        if "/" not in stripped:
+            return stripped
+        for unified, aliases in _HELD_SYMBOL_ALIASES.items():
+            if stripped in aliases:
+                return unified.partition("/")[0]
+        market = self._markets.get(stripped)
+        if isinstance(market, dict) and market.get("spot"):
+            return market.get("base")
+        return None
+
     @staticmethod
     def _is_market_type(market: dict[str, Any], market_type: MarketType) -> bool:
         """Whether a ccxt market IS the requested instrument.
