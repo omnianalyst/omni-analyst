@@ -1411,3 +1411,200 @@ async def run_carry_cycle(
         # or not the trading that followed it halted.
         settled=funding_complete,
     )
+
+
+async def wind_down_book(
+    pool,
+    *,
+    venue: Venue,
+    portfolio_id: UUID,
+    config: CarryConfig,
+    entity_ids: Sequence[UUID],
+    audience_user_id: UUID | None,
+    as_of: datetime,
+    funding_since: datetime,
+    ownership: object | None = None,
+) -> CarryCycleResult:
+    """Close every held pair. The terminal action; no selector, no entries.
+
+    The cycle is a rebalancer -- `run_carry_cycle` always moves the book
+    toward the basket the selector names, so it cannot express "hold
+    nothing": exiting through it just re-enters the top-ranked names. A wind-
+    down is a different statement, and it gets its own entry point with the
+    same load-bearing preamble rather than a flag that disables half a cycle:
+
+    - Pair integrity first, exactly as the cycle does. A book that cannot be
+      read as pairs is a book whose closes cannot be sized.
+    - Funding settles for `(funding_since, as_of]` before any close, because
+      the accrual is owed whether or not the book keeps running, and a close
+      without settlement silently forfeits it.
+    - Each pair closes at its OWN leg quantities, so fill-replay dust goes
+      with the close instead of surviving as a fresh residual.
+    - Sub-minimum single legs are left in place and named in the result's
+      refusals: dust below the venue's own minimum order size cannot be
+      traded at all, and zeroing it here would fabricate a price nobody paid.
+
+    Deliberately absent, with reasons: the window and hold guards (a wind-
+    down is the named operational override those exist to gate -- running it
+    outside the quiet hour once, to stop holding risk, is the judgement the
+    `ignore_*` flags formalise for the cycle) and the risk policy (its limits
+    bound what the strategy may PUT ON; refusing an exit because the day's
+    loss is large is how a drawdown becomes a trap).
+    """
+    if as_of.tzinfo is None:
+        raise ValueError(
+            f"as_of is naive ({as_of}); every stamp this path writes is UTC"
+        )
+    if ownership is None:
+        raise ValueError(
+            "wind_down_book requires active carry ownership; acquire "
+            "carry_cycle_ownership (carry_runner) before any venue call"
+        )
+    if (
+        not getattr(ownership, "active", False)
+        or ownership.venue != venue.name
+        or ownership.proof is None
+    ):
+        raise ValueError(
+            f"carry ownership is not active for {venue.name}; venue calls require "
+            f"the matching database lock"
+        )
+
+    cycle = _Cycle(pool, venue=venue, portfolio_id=portfolio_id, config=config)
+    by_entity = await _symbols(pool, entity_ids, venue)
+    by_asset = {pair.asset: entity_id for entity_id, pair in by_entity.items()}
+    asset_of = _pairing_map(by_entity, venue)
+
+    book = await state.load(pool, portfolio_id)
+    legs = _legs_by_asset(book, venue_name=venue.name, asset_of=asset_of)
+    unpaired = _unpaired(legs)
+    held_ids = frozenset(
+        by_asset[symbol]
+        for symbol, held in legs.items()
+        if held.is_pair and symbol in by_asset
+    )
+
+    # Dust naming, not dust trading: a single leg below the venue's minimum
+    # order size can never be closed there, and the honest result reports it
+    # as a refusal with the number rather than quietly leaving a row.
+    tradeable_unpaired: list[str] = []
+    for symbol in unpaired:
+        entity_id = by_asset.get(symbol)
+        symbols = by_entity.get(entity_id) if entity_id is not None else None
+        price = None
+        minimum = None
+        if symbols is not None:
+            price = await _price_at(
+                pool,
+                entity_id=entity_id,
+                audience=audience_user_id,
+                at=as_of,
+                venue=venue.name,
+            )
+            minimum = venue.min_notional_for(symbols.spot)
+        held = legs[symbol]
+        quantity = held.spot if held.spot != 0 else held.perp
+        notional = abs(quantity) * price if price is not None else None
+        if (
+            notional is not None
+            and minimum is not None
+            and notional < minimum
+        ):
+            cycle.refuse(CarryRefusal.UNRESOLVED_PAIR)
+            continue
+        tradeable_unpaired.append(symbol)
+    if tradeable_unpaired:
+        return _result(
+            as_of=as_of,
+            held=held_ids,
+            cycle=cycle,
+            halt_reason=(
+                f"{CarryHalt.BOOK_NOT_PAIRED.value}: "
+                + "; ".join(
+                    f"{symbol} holds {legs[symbol].spot} spot against "
+                    f"{legs[symbol].perp} perp"
+                    for symbol in tradeable_unpaired
+                )
+            ),
+        )
+
+    settlements = await _settlements(
+        pool,
+        entity_ids=sorted(held_ids, key=str),
+        audience=audience_user_id,
+        funding_venue=config.funding_venue,
+        since=funding_since,
+        until=as_of,
+    )
+    funding: list[FundingAccrual] = []
+    funding_complete = True
+    for funding_time, entity_id, rate in settlements:
+        mark = await _price_at(
+            pool,
+            entity_id=entity_id,
+            audience=audience_user_id,
+            at=funding_time,
+            venue=venue.name,
+        )
+        if mark is None:
+            cycle.refuse(CarryRefusal.NO_MARK)
+            funding_complete = False
+            continue
+        accrual = await state.apply_funding(
+            pool,
+            portfolio_id,
+            venue=venue.name,
+            symbol=by_entity[entity_id].perp,
+            funding_time=funding_time,
+            funding_rate=rate,
+            mark=mark,
+        )
+        funding.append(accrual)
+        credit = getattr(venue, "credit_funding", None)
+        if credit is not None and accrual.outcome is FundingOutcome.ACCRUED:
+            credit(by_entity[entity_id].perp, accrual.amount)
+
+    closed: list[PairExecution] = []
+    halt_reason: str | None = None
+    for entity_id in sorted(held_ids, key=str):
+        symbols = by_entity.get(entity_id)
+        if symbols is None:
+            cycle.refuse(CarryRefusal.NO_SYMBOL)
+            continue
+        price = await _price_at(
+            pool,
+            entity_id=entity_id,
+            audience=audience_user_id,
+            at=as_of,
+            venue=venue.name,
+        )
+        if price is None:
+            cycle.refuse(CarryRefusal.NO_REFERENCE_PRICE)
+            continue
+        held = legs[symbols.asset]
+        pair, halt_reason = await cycle.trade_pair(
+            symbols=symbols,
+            entity_id=entity_id,
+            quantity=held.spot,
+            reference_price=price,
+            as_of=as_of,
+            opening=False,
+            leg_quantities={
+                MarketType.SPOT: held.spot,
+                MarketType.PERPETUAL: -held.perp,
+            },
+        )
+        if pair is not None:
+            closed.append(pair)
+        if halt_reason is not None:
+            break
+
+    return _result(
+        as_of=as_of,
+        held=held_ids,
+        cycle=cycle,
+        closed=closed,
+        funding=funding,
+        halt_reason=halt_reason,
+        settled=funding_complete,
+    )

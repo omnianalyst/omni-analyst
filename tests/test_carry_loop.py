@@ -1563,3 +1563,84 @@ class TestThePairingMap:
         }
         with pytest.raises(ValueError, match="resolves to both"):
             _pairing_map(pairs, _Colliding())
+
+
+class TestWindDown:
+    async def test_wind_down_closes_every_held_pair_and_names_the_dust(
+        self, db, owner, portfolio_id, venue
+    ):
+        """The terminal action: close-only, no selector, no entries.
+
+        Discrimination matters here: `run_carry_cycle` cannot express 'hold
+        nothing' (it re-enters the top-ranked names), so the wind-down must
+        close what is held without opening anything -- asserted by counting
+        opens on a book whose funding ranks would select two names.
+        """
+        from types import SimpleNamespace
+
+        from omni.trading.carry_loop import wind_down_book
+
+        ids = await _world(db, owner)
+
+        class _WrappingVenue(type(venue)):  # type: ignore[type-arg]
+            def held_symbol_aliases(self, asset, market_type):
+                if market_type is MarketType.SPOT:
+                    return (f"U{asset}",)
+                return ()
+
+        wrapped_venue = _WrappingVenue(
+            venue._market, venue.capabilities, name=VENUE,
+            spread_bps=SPREAD_BPS,
+            starting_balances={"USD": Decimal(100000)},
+        )
+        opened = await _run(
+            db, venue=wrapped_venue, portfolio_id=portfolio_id,
+            ids=ids, owner=owner, as_of=NOW, since=NOW - timedelta(days=1),
+        )
+        assert not opened.halted
+        assert len(opened.opened) == 2
+
+        lease = SimpleNamespace(active=True, venue=VENUE, proof=object())
+        result = await wind_down_book(
+            db.pool,
+            venue=wrapped_venue,
+            portfolio_id=portfolio_id,
+            config=_config(),
+            entity_ids=list(ids.values()),
+            audience_user_id=owner,
+            as_of=NOW,
+            funding_since=NOW - timedelta(days=1),
+            ownership=lease,
+        )
+
+        assert not result.halted, result.halt_reason
+        assert len(result.closed) == 2
+        assert result.opened == ()
+        assert result.funding_settled_through == NOW
+        book = await load(db.pool, portfolio_id)
+        remaining = [
+            p for p in book.positions
+            if p.venue == VENUE and p.quantity != 0
+        ]
+        # Only the untradeable single-leg dust remains, below the venue's
+        # own minimum order size, and it was named rather than hidden.
+        assert all(
+            abs(p.quantity) * PRICE < wrapped_venue.capabilities.min_notional
+            for p in remaining
+        )
+
+    async def test_wind_down_refuses_without_active_ownership(self, db, owner):
+        from omni.trading.carry_loop import wind_down_book
+
+        with pytest.raises(ValueError, match="ownership"):
+            await wind_down_book(
+                db.pool,
+                venue=None,
+                portfolio_id=uuid4(),
+                config=_config(),
+                entity_ids=[],
+                audience_user_id=owner,
+                as_of=NOW,
+                funding_since=NOW - timedelta(days=1),
+                ownership=None,
+            )
