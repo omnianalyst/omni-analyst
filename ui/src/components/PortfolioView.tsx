@@ -28,8 +28,8 @@ import {
 import { directionGlyph, directionWord, hitRateFelt } from "../lib/explain";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
-import { WalletAccounts } from "./WalletAccounts";
 import { ManualHoldings } from "./ManualHoldings";
+import { WalletsModal } from "./WalletsModal";
 
 type Resource<T> =
   | { kind: "ok"; data: T }
@@ -323,10 +323,7 @@ export function PortfolioView() {
           </div>
         </header>
         <ManualHoldings />
-        <details class="external-wallets" open>
-          <summary>External wallets · watched, never traded</summary>
-          <WalletAccounts />
-        </details>
+        <WalletsModal />
       </div>
     );
   }
@@ -511,19 +508,9 @@ export function PortfolioView() {
         <p class="inline-warning">Schedule unavailable: {state.schedule.message}</p>
       )}
       </details>
-      ) : (
-        <p class="quiet-line">
-          Managed trading book: closed August 2026, flat, no open positions.
-          Its full record lives in the backend.
-        </p>
-      )}
+      ) : null}
 
-      <details class="external-wallets" open>
-        <summary>
-          External wallets · watched, never traded
-        </summary>
-        <WalletAccounts />
-      </details>
+      <WalletsModal />
     </div>
   );
 }

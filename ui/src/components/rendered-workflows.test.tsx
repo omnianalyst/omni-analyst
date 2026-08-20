@@ -330,11 +330,15 @@ describe("rendered failure and empty states", () => {
     render(<PortfolioView />, container);
     // The personal tracker is the primary surface with no managed book.
     await waitFor(() => expect(container.textContent).toContain("Track what you hold"));
-    await waitFor(() => expect(container.textContent).toContain("No external wallets tracked"));
 
-    expect(container.textContent).toContain("Your positions");
+    // Wallets live behind the trigger now: closed by default, full surface
+    // on click. The empty-state text only exists inside the modal.
+    const trigger = container.querySelector<HTMLButtonElement>(".wallets-trigger");
+    expect(trigger).not.toBeNull();
+    expect(container.textContent).not.toContain("No external wallets tracked");
+    await act(() => trigger!.click());
+    await waitFor(() => expect(container.textContent).toContain("No external wallets tracked"));
     expect(container.textContent).toContain("Wallet balances");
-    expect(container.textContent).toContain("No external wallets tracked");
   });
 
   it("renders a named research failure with retry instead of hiding the section", async () => {

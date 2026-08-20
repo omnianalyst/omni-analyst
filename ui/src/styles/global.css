@@ -6238,3 +6238,16 @@ tr.row.tier-unknown td:first-child {
 .holding-actions .inline-warning {
   margin: 0;
 }
+
+/* The wallets modal: the full wallet surface hosted in the shared overlay. */
+.wallets-trigger {
+  margin: 4px 0 8px;
+}
+.wallets-card-body {
+  padding: 18px 24px 24px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.wallets-card-body .inline-warning:first-child {
+  display: none; /* the in-component banner duplicates the header line */
+}
