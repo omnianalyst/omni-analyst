@@ -39,7 +39,7 @@
   font-size: 11px;
   font-family: var(--mono);
   display: flex;
-  gap: 18px;
+  gap: var(--s-5);
   align-items: center;
   margin-top: 30px;
 }
@@ -142,7 +142,7 @@
 .d-holdings {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 28px;
+  gap: var(--s-7);
   margin-top: 18px;
 }
 .d-holding .sym {
@@ -162,7 +162,7 @@
 }
 .d-holding dl {
   display: flex;
-  gap: 18px;
+  gap: var(--s-5);
   margin: 14px 0 0;
   padding: 0;
 }
@@ -252,7 +252,7 @@
 .d-sliders {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 22px;
+  gap: var(--s-5);
 }
 .d-sl {
   display: flex;
@@ -279,7 +279,7 @@
 .d-tuner-delta {
   display: flex;
   align-items: center;
-  gap: 26px;
+  gap: var(--s-6);
   flex-wrap: wrap;
   margin-top: 16px;
   font-size: 13.5px;
