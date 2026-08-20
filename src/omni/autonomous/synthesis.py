@@ -22,6 +22,13 @@ class SynthesisReport:
     findings_skipped: int = 0
 
 
+_NEWEST_CLAIM_EVIDENCE = """
+SELECT max(knowledge_date) FROM claim
+WHERE claim_type IN ('sector_score', 'regime_assessment')
+"""
+
+_NEWEST_SECTOR_EDGE = "SELECT max(created_at) FROM entity_edge"
+
 _FINDINGS_TO_ENRICH = """
 SELECT f.id, f.prediction_id, f.entity_id, f.audience_user_id,
        f.created_at, p.direction, p.confidence, p.method,
@@ -36,6 +43,20 @@ LEFT JOIN LATERAL (
 ) revision ON true
 WHERE f.status = 'surfaced'
   AND f.created_at <= $1
+  AND NOT EXISTS (
+    SELECT 1 FROM finding_enrichment_revision r
+    WHERE r.finding_id = f.id AND r.evidence_as_of >= $2
+  )
+"""
+
+_COVERED_FINDINGS = """
+SELECT count(*) FROM finding f
+WHERE f.status = 'surfaced'
+  AND f.created_at <= $1
+  AND EXISTS (
+    SELECT 1 FROM finding_enrichment_revision r
+    WHERE r.finding_id = f.id AND r.evidence_as_of >= $2
+  )
 """
 
 _SECTOR_OF_COMPANY = """
@@ -102,9 +123,28 @@ def _evidence(row) -> dict:
 async def enrich_findings(pool, *, as_of: datetime | None = None) -> SynthesisReport:
     """Append point-in-time deduction-chain revisions for surfaced findings."""
     evidence_as_of = as_of or await pool.fetchval("SELECT now()")
-    findings = await pool.fetch(_FINDINGS_TO_ENRICH, evidence_as_of)
+
+    # A revision whose evidence_as_of is newer than every piece of evidence it
+    # could read already captures the identical chain this run would build --
+    # the content compare below would skip it anyway, but only after re-reading
+    # sector score and regime claims for every finding ever surfaced, which on
+    # a grown store is hundreds of thousands of reads every cycle. The
+    # evidence horizon includes entity_edge.created_at because a sector
+    # reclassification changes the sector layer without writing any new claim.
+    # A NULL horizon (no evidence at all yet) skips nothing, which preserves
+    # the stock-only-chain behaviour on a fresh system.
+    horizons = [
+        await pool.fetchval(_NEWEST_CLAIM_EVIDENCE),
+        await pool.fetchval(_NEWEST_SECTOR_EDGE),
+    ]
+    horizon = max((h for h in horizons if h is not None), default=None)
+    covered = 0
+    if horizon is not None:
+        covered = await pool.fetchval(_COVERED_FINDINGS, evidence_as_of, horizon)
+
+    findings = await pool.fetch(_FINDINGS_TO_ENRICH, evidence_as_of, horizon)
     if not findings:
-        return SynthesisReport()
+        return SynthesisReport(findings_skipped=covered)
 
     enriched = 0
     skipped = 0
@@ -189,4 +229,6 @@ async def enrich_findings(pool, *, as_of: datetime | None = None) -> SynthesisRe
 
     if enriched:
         logger.info("synthesis enriched %d findings", enriched)
-    return SynthesisReport(findings_enriched=enriched, findings_skipped=skipped)
+    return SynthesisReport(
+        findings_enriched=enriched, findings_skipped=skipped + covered
+    )

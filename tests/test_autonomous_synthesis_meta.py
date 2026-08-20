@@ -343,6 +343,105 @@ class TestSynthesis:
         )) == finding_before
         assert (await briefing(db.pool))[0]["deduction_chain"] == revisions[1]["deduction_chain"]
 
+    async def test_covered_findings_are_not_re_read(self, db):
+        # A revision whose evidence_as_of is newer than all existing evidence
+        # already holds the chain this run would build. Re-deriving it re-reads
+        # sector/regime claims for every surfaced finding on every cycle --
+        # hundreds of thousands of reads on a grown store -- to produce a
+        # result the content compare then discards. The covered path must skip
+        # without issuing a single per-finding query (fetch/fetchrow); the
+        # counting proxy fails the test if the skip is only content-deep.
+        from datetime import UTC as _UTC
+
+        class CountingPool:
+            def __init__(self, pool):
+                self._pool = pool
+                self.list_reads = 0
+                self.row_reads = 0
+
+            def __getattr__(self, name):
+                attr = getattr(self._pool, name)
+                if name == "fetchrow":
+                    async def counted_row(*args, **kwargs):
+                        self.row_reads += 1
+                        return await attr(*args, **kwargs)
+                    return counted_row
+                if name == "fetch":
+                    async def counted_list(*args, **kwargs):
+                        self.list_reads += 1
+                        return await attr(*args, **kwargs)
+                    return counted_list
+                return attr
+
+        company = await _seed_entity(db, "company", "AAPL")
+        macro = await _seed_entity(db, "macro", "US_MACRO")
+        base = datetime.now(_UTC)
+        await _seed_claim(
+            db, entity_id=macro, claim_type="regime_assessment",
+            value={"cycle_phase": "expansion", "risk_regime": "risk_on"},
+            key="us_macro", event_date=base - timedelta(days=2),
+            knowledge_date=base - timedelta(days=1),
+        )
+        pid = await _seed_prediction(db, entity_id=company)
+        finding_id = await _seed_finding(db, entity_id=company, prediction_id=pid)
+
+        # Comfortably after seeding: the finding's created_at comes from the
+        # DB clock, which can sit a few ms ahead of the app clock.
+        first = datetime.now(_UTC) + timedelta(seconds=5)
+        await enrich_findings(db.pool, as_of=first)
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM finding_enrichment_revision WHERE finding_id = $1",
+            finding_id,
+        ) == 1
+
+        # No new evidence arrived: first revision's evidence_as_of covers the
+        # horizon, so the second run must not touch the finding tables again.
+        proxy = CountingPool(db.pool)
+        report = await enrich_findings(proxy, as_of=first + timedelta(minutes=5))
+        assert report.findings_enriched == 0
+        assert report.findings_skipped == 1
+        assert proxy.list_reads == 1  # the to-enrich select, returning empty
+        assert proxy.row_reads == 0   # zero per-finding claim reads
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM finding_enrichment_revision WHERE finding_id = $1",
+            finding_id,
+        ) == 1
+
+    async def test_new_evidence_uncovers_the_finding(self, db):
+        # The covered skip must yield the moment new evidence lands: a later
+        # regime claim re-opens the finding and writes the updated chain.
+        from datetime import UTC as _UTC
+
+        company = await _seed_entity(db, "company", "AAPL")
+        macro = await _seed_entity(db, "macro", "US_MACRO")
+        base = datetime.now(_UTC)
+        await _seed_claim(
+            db, entity_id=macro, claim_type="regime_assessment",
+            value={"risk_regime": "risk_on"}, key="r1",
+            event_date=base - timedelta(days=3),
+            knowledge_date=base - timedelta(days=2),
+        )
+        pid = await _seed_prediction(db, entity_id=company)
+        finding_id = await _seed_finding(db, entity_id=company, prediction_id=pid)
+
+        first = base + timedelta(hours=1)
+        await enrich_findings(db.pool, as_of=first)
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM finding_enrichment_revision WHERE finding_id = $1",
+            finding_id,
+        ) == 1
+
+        await _seed_claim(
+            db, entity_id=macro, claim_type="regime_assessment",
+            value={"risk_regime": "risk_off"}, key="r2",
+            event_date=base + timedelta(hours=2),
+            knowledge_date=base + timedelta(hours=3),
+        )
+        report = await enrich_findings(db.pool, as_of=base + timedelta(hours=4))
+        assert report.findings_enriched == 1
+        chain = await _latest_chain(db, finding_id)
+        assert chain[0]["risk_regime"] == "risk_off"
+
     async def test_finding_and_enrichment_revisions_refuse_mutation(self, db):
         company = await _seed_entity(db, "company", "AAPL")
         pid = await _seed_prediction(db, entity_id=company)
