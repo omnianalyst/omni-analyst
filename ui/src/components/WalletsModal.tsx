@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { WalletAccounts } from "./WalletAccounts";
 
-// The wallets surface collapsed to one button. The full component (connect
-// buttons, manual add, balances, remove) renders inside the modal unchanged
-// -- this is presentation, not a rewrite. Escape and overlay-click close;
-// focus returns to the trigger on close.
+// The wallets surface as one button + modal overlay. The full component
+// (connect buttons, manual add, balances, remove) renders inside unchanged.
+// The page composes the button wherever it wants; the modal is self-managed.
 export function WalletsModal() {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement | null>(null);
@@ -12,7 +11,7 @@ export function WalletsModal() {
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") close();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -27,7 +26,7 @@ export function WalletsModal() {
     <>
       <button
         type="button"
-        class="btn-secondary wallets-trigger"
+        class="btn-secondary compact-button"
         ref={trigger}
         onClick={() => setOpen(true)}
       >

@@ -1,3 +1,4 @@
+import type * as preact from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { describeError } from "../lib/api";
 import {
@@ -202,38 +203,30 @@ function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => 
   );
 }
 
-export function ManualHoldings() {
+// The table half: fetches holdings, renders summary and rows. `refreshKey`
+// lets the page force a reload after the add-modal writes one.
+export function HoldingsTable({ refreshKey }: { refreshKey: number }) {
   const [state, setState] = useState<
     { kind: "loading" } | { kind: "ok"; data: HoldingsRecord } | { kind: "error"; message: string }
   >({ kind: "loading" });
-  const [addOpen, setAddOpen] = useState(false);
-  const trigger = useRef<HTMLButtonElement | null>(null);
-
-  function load() {
-    setState({ kind: "loading" });
-    void getHoldings()
-      .then((data) => setState({ kind: "ok", data }))
-      .catch((cause) => setState({ kind: "error", message: describeError(cause).message }));
-  }
-
-  useEffect(load, []);
 
   useEffect(() => {
-    if (!addOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setAddOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [addOpen]);
-
-  function closeAdd() {
-    setAddOpen(false);
-    requestAnimationFrame(() => trigger.current?.focus());
-  }
+    let cancelled = false;
+    setState({ kind: "loading" });
+    void getHoldings()
+      .then((data) => { if (!cancelled) setState({ kind: "ok", data }); })
+      .catch((cause) => {
+        if (!cancelled) setState({ kind: "error", message: describeError(cause).message });
+      });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
 
   if (state.kind === "loading") {
-    return <Loading label="Loading your positions…" />;
+    return (
+      <section class="surface-card holdings-card">
+        <Loading label="Loading your positions…" />
+      </section>
+    );
   }
   if (state.kind === "error") {
     return (
@@ -246,6 +239,13 @@ export function ManualHoldings() {
     );
   }
 
+  function reload() {
+    setState({ kind: "loading" });
+    void getHoldings()
+      .then((data) => setState({ kind: "ok", data }))
+      .catch((cause) => setState({ kind: "error", message: describeError(cause).message }));
+  }
+
   const { holdings, summary } = state.data;
   return (
     <section class="surface-card holdings-card" aria-label="Your positions">
@@ -254,50 +254,10 @@ export function ManualHoldings() {
           <p class="eyebrow">Your positions</p>
           <h2>{summary.total_value === null ? (holdings.length ? "Tracking" : "Nothing tracked yet") : money(summary.total_value)}</h2>
         </div>
-        <div class="holding-heading-actions">
-          {summary.total_pnl !== null ? (
-            <span class={pnlClass(summary.total_pnl)}>{money(summary.total_pnl)} all-time</span>
-          ) : null}
-          <button
-            type="button"
-            class="btn-secondary"
-            ref={trigger}
-            onClick={() => setAddOpen(true)}
-          >
-            Add position
-          </button>
-        </div>
+        {summary.total_pnl !== null ? (
+          <span class={pnlClass(summary.total_pnl)}>{money(summary.total_pnl)} all-time</span>
+        ) : null}
       </div>
-
-      {addOpen ? (
-        <div
-          class="learn-why-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Add a position"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) closeAdd();
-          }}
-        >
-          <div class="learn-why-card holdings-add-card">
-            <header>
-              <div>
-                <h2>Track a position</h2>
-                <p class="muted">
-                  Symbol and quantity. Optional total cost basis enables P&amp;L.
-                  Priced from the system's own coverage, never estimated.
-                </p>
-              </div>
-              <button type="button" class="learn-why-close" onClick={closeAdd} aria-label="Close">
-                ×
-              </button>
-            </header>
-            <div class="wallets-card-body">
-              <AddForm onAdded={load} />
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       <p class="quiet-line">{describeHoldings(summary)}</p>
 
@@ -316,12 +276,77 @@ export function ManualHoldings() {
             </thead>
             <tbody>
               {holdings.map((holding) => (
-                <Row key={holding.id} holding={holding} onChanged={load} />
+                <Row key={holding.id} holding={holding} onChanged={reload} />
               ))}
             </tbody>
           </table>
         </div>
       ) : null}
     </section>
+  );
+}
+
+// The modal half: the page owns open state and the trigger button; this is
+// the overlay itself. Escape and overlay-click close; focus returns to the
+// trigger element the page passes.
+export function AddPositionModal({
+  open,
+  onClose,
+  onAdded,
+  triggerRef,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onAdded: () => void;
+  triggerRef: preact.RefObject<HTMLButtonElement | null>;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  function close() {
+    onClose();
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+
+  if (!open) return null;
+  return (
+    <div
+      class="learn-why-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Add a position"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) close();
+      }}
+    >
+      <div class="learn-why-card holdings-add-card">
+        <header>
+          <div>
+            <h2>Track a position</h2>
+            <p class="muted">
+              Symbol and quantity. Optional total cost basis enables P&amp;L.
+              Priced from the system's own coverage, never estimated.
+            </p>
+          </div>
+          <button type="button" class="learn-why-close" onClick={close} aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div class="wallets-card-body">
+          <AddForm
+            onAdded={() => {
+              onAdded();
+              close();
+            }}
+          />
+        </div>
+      </div>
+    </div>
   );
 }

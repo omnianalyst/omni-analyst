@@ -331,12 +331,13 @@ describe("rendered failure and empty states", () => {
     // The personal tracker is the primary surface with no managed book.
     await waitFor(() => expect(container.textContent).toContain("Track what you hold"));
 
-    // Wallets live behind the trigger now: closed by default, full surface
+    // Wallets live behind the header button: closed by default, full surface
     // on click. The empty-state text only exists inside the modal.
-    const trigger = container.querySelector<HTMLButtonElement>(".wallets-trigger");
-    expect(trigger).not.toBeNull();
+    const trigger = Array.from(container.querySelectorAll("button"))
+      .find((b) => b.textContent?.trim() === "Add wallet")!;
+    expect(trigger).toBeDefined();
     expect(container.textContent).not.toContain("No external wallets tracked");
-    await act(() => trigger!.click());
+    await act(() => trigger.click());
     await waitFor(() => expect(container.textContent).toContain("No external wallets tracked"));
     expect(container.textContent).toContain("Wallet balances");
   });

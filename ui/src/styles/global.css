@@ -6257,3 +6257,63 @@ tr.row.tier-unknown td:first-child {
   align-items: center;
   gap: 12px;
 }
+
+/* ---------- shared button classes ---------- */
+/* Several components referenced btn-primary/btn-secondary before any
+   stylesheet defined them, so they rendered as bare white UA buttons
+   wherever a parent rule did not happen to style them. Defined once here. */
+.btn-primary,
+a.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm, 8px);
+  background: var(--accent, #5cc5ff);
+  color: #04121f;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn-secondary,
+a.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-strong, #2a3a52);
+  border-radius: var(--r-sm, 8px);
+  background: transparent;
+  color: var(--text, #e6edf6);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn-secondary:hover {
+  border-color: var(--accent, #5cc5ff);
+  color: var(--accent, #5cc5ff);
+}
+.btn-secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* The portfolio page header actions: both buttons on the heading's right. */
+.portfolio-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}

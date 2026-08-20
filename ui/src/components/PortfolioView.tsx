@@ -1,303 +1,29 @@
-import { useEffect, useState } from "preact/hooks";
-import { ApiHttpError, describeError } from "../lib/api";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { AuthRequiredError } from "../lib/auth";
-import {
-  classificationIndex,
-  formatMoney,
-  getCarryCycles,
-  getCarrySchedule,
-  getClassification,
-  getNavHistory,
-  groupPositions,
-  navChange,
-  portfolioHealth,
-  recordedCarry,
-  type CarryCycle,
-  type CarrySchedule,
-  type ClassificationResponse,
-  type NavPoint,
-  type VenueSchedule,
-} from "../lib/portfolio";
-import {
-  formatTimestamp,
-  getPortfolio,
-  getReconciliation,
-  type Portfolio,
-  type ReconciliationReport,
-} from "../lib/trading";
-import { directionGlyph, directionWord, hitRateFelt } from "../lib/explain";
-import { ErrorState } from "./ErrorState";
-import { Loading } from "./Loading";
-import { ManualHoldings } from "./ManualHoldings";
+import { getHoldings } from "../lib/holdings";
+import { AddPositionModal, HoldingsTable } from "./ManualHoldings";
 import { WalletsModal } from "./WalletsModal";
 
-type Resource<T> =
-  | { kind: "ok"; data: T }
-  | { kind: "error"; message: string };
-
-type State =
-  | { kind: "loading" }
-  | { kind: "auth" }
-  | { kind: "empty" }
-  | { kind: "error"; message: string; detail?: string }
-  | {
-      kind: "ok";
-      portfolio: Portfolio;
-      cycles: Resource<CarryCycle[]>;
-      history: Resource<NavPoint[]>;
-      reconciliation: Resource<ReconciliationReport>;
-      classification: Resource<ClassificationResponse>;
-      schedule: Resource<CarrySchedule>;
-    };
-
-type PositionFilter = "all" | string;
-type ChartRange = "1m" | "3m" | "1y" | "all";
-
-// Display names for the backend's own class vocabulary. A class with no entry
-// renders under its backend name rather than being relabelled or hidden, so a
-// class added on the server appears here without this file being edited.
-const CLASS_LABELS: Record<string, string> = {
-  stocks: "Stocks & ETFs",
-  defensive: "Gold, bonds & defensive",
-  crypto: "Crypto",
-  unclassified: "Unclassified",
-};
-
-const SCHEDULE_TONE: Record<VenueSchedule["state"], string> = {
-  never_run: "quiet",
-  no_completed_cycle: "attention",
-  holding: "healthy",
-  due: "attention",
-};
-
-const SCHEDULE_LABEL: Record<VenueSchedule["state"], string> = {
-  never_run: "No cycle recorded",
-  no_completed_cycle: "No completed cycle",
-  holding: "Holding",
-  due: "Rebalance due",
-};
-
-function NavChart({ points }: { points: NavPoint[] }) {
-  const measured = points
-    .map((point) => ({ time: new Date(point.taken_at).getTime(), value: Number(point.nav) }))
-    .filter((point) => Number.isFinite(point.time) && Number.isFinite(point.value))
-    .sort((a, b) => a.time - b.time);
-  if (measured.length < 2) return <div class="clean-empty"><strong>Chart is building</strong><span>Two recorded valuations are needed.</span></div>;
-  const times = measured.map((point) => point.time);
-  const values = measured.map((point) => point.value);
-  const minTime = Math.min(...times);
-  const maxTime = Math.max(...times);
-  const minValue = Math.min(...values);
-  const maxValue = Math.max(...values);
-  const x = (time: number) => 12 + ((time - minTime) / Math.max(maxTime - minTime, 1)) * 576;
-  const y = (value: number) => 148 - ((value - minValue) / Math.max(maxValue - minValue, 1)) * 124;
-  const gaps = measured.slice(1).map((point, index) => point.time - measured[index].time).sort((a, b) => a - b);
-  const typicalGap = gaps.length > 1 ? gaps[Math.floor(gaps.length / 2)] : 86_400_000;
-  const paths: string[] = [];
-  let path = "";
-  measured.forEach((point, index) => {
-    const beginsSegment = index === 0 || point.time - measured[index - 1].time > typicalGap * 2.5;
-    if (beginsSegment && path) paths.push(path);
-    path = `${beginsSegment ? "M" : `${path} L`} ${x(point.time).toFixed(1)} ${y(point.value).toFixed(1)}`;
-  });
-  if (path) paths.push(path);
-  return (
-    <div class="nav-chart-wrap">
-      <svg class="nav-chart" viewBox="0 0 600 170" role="img" aria-label="Recorded portfolio value over time">
-        <line x1="12" y1="148" x2="588" y2="148" class="nav-chart-axis" />
-        {paths.map((segment) => <path d={segment} class="nav-chart-line" fill="none" />)}
-      </svg>
-      <div class="nav-chart-scale"><span>{formatMoney(String(minValue))}</span><span>{formatMoney(String(maxValue))}</span></div>
-    </div>
-  );
-}
-
-function resource<T>(result: PromiseSettledResult<T>): Resource<T> {
-  if (result.status === "fulfilled") return { kind: "ok", data: result.value };
-  return { kind: "error", message: describeError(result.reason).message };
-}
-
-function signedPercent(value: number | null): string {
-  if (value === null) return "—";
-  return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
-}
-
-function signedMoney(value: number | null): string {
-  if (value === null) return "—";
-  const absolute = formatMoney(String(Math.abs(value)));
-  return `${value > 0 ? "+" : value < 0 ? "−" : ""}${absolute}`;
-}
-
-// The cadence the machine trades on, compressed to one line. The full venue
-// detail and last refusal live behind the disclosure; a healthy holding period
-// is not information the page needs to lead with.
-function scheduleOneLine(schedule: CarrySchedule): string {
-  const dueDays = schedule.venues
-    .map((venue) => venue.days_until_due)
-    .filter((days): days is number => days !== null);
-  const soonest = dueDays.length > 0 ? Math.min(...dueDays) : null;
-  const window = schedule.in_rebalance_window ? "window open" : "window closed";
-  const next = soonest !== null ? ` · next due in ${soonest} day${soonest === 1 ? "" : "s"}` : "";
-  return `Rebalance every ${schedule.rebalance_period_days} days · ${window}${next}`;
-}
-
-function ScheduleDetail({
-  schedule,
-  latestCycle,
-  cyclesError,
-}: {
-  schedule: CarrySchedule;
-  latestCycle: CarryCycle | null;
-  cyclesError: string | null;
-}) {
-  return (
-    <div class="detail-drawer">
-      <section class="detail-block schedule-card">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Next</p>
-            <h2>Rebalance schedule</h2>
-          </div>
-          <span class={`window-pill ${schedule.in_rebalance_window ? "open" : "shut"}`}>
-            {schedule.in_rebalance_window ? "Window open" : "Window closed"}
-          </span>
-        </div>
-
-        {schedule.venues.length === 0 ? (
-          <div class="clean-empty">
-            <strong>No venue has a schedule yet</strong>
-            <span>A venue appears here once it records a cycle or holds a position.</span>
-          </div>
-        ) : (
-          <div class="schedule-stack">
-            {schedule.venues.map((venue) => (
-              <article class={`schedule-row tone-${SCHEDULE_TONE[venue.state]}`} key={venue.venue}>
-                <div class="schedule-identity">
-                  <strong>{venue.venue}</strong>
-                  {/* A state added on the server renders under its own name
-                      rather than as "undefined", which reads as a bug in the
-                      page instead of a vocabulary the page has not learned. */}
-                  <span>{SCHEDULE_LABEL[venue.state] ?? venue.state}</span>
-                </div>
-                <div class="schedule-countdown">
-                  {venue.days_until_due === null ? (
-                    <span class="schedule-nodate">—</span>
-                  ) : (
-                    <>
-                      <strong>{venue.days_until_due}</strong>
-                      <span>{venue.days_until_due === 1 ? "day left" : "days left"}</span>
-                    </>
-                  )}
-                </div>
-                <p class="schedule-detail">{venue.detail}</p>
-              </article>
-            ))}
-          </div>
-        )}
-
-        <div class="schedule-refusal">
-          <p class="eyebrow">Last refusal</p>
-          {schedule.last_refusal ? (
-            <>
-              <p class="schedule-refusal-reason">{schedule.last_refusal.reason}</p>
-              <p class="schedule-refusal-meta">
-                {schedule.last_refusal.venue} · {schedule.last_refusal.guard} ·{" "}
-                {formatTimestamp(schedule.last_refusal.attempted_at)}
-              </p>
-            </>
-          ) : (
-            <p class="schedule-refusal-reason">{schedule.last_refusal_unavailable}</p>
-          )}
-        </div>
-      </section>
-
-      <section class="detail-block activity-card">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Latest activity</p>
-            <h2>{latestCycle ? (latestCycle.halted ? "Cycle halted" : "Cycle completed") : "No cycle recorded"}</h2>
-          </div>
-        </div>
-        {latestCycle ? (
-          <>
-            <p class="activity-summary">
-              {latestCycle.halted
-                ? latestCycle.halt_reason || "The cycle stopped before changing the book."
-                : latestCycle.abstention
-                  ? latestCycle.abstention
-                  : `${latestCycle.pairs_held} pair${latestCycle.pairs_held === 1 ? "" : "s"} held after the run.`}
-            </p>
-            <dl class="activity-facts">
-              <div><dt>Venue</dt><dd>{latestCycle.venue}</dd></div>
-              <div><dt>Funding</dt><dd>{formatMoney(latestCycle.funding_collected)}</dd></div>
-              <div><dt>Fees</dt><dd>{formatMoney(latestCycle.fees_paid)}</dd></div>
-              <div><dt>Run</dt><dd>{formatTimestamp(latestCycle.as_of)}</dd></div>
-            </dl>
-          </>
-        ) : (
-          <p class="activity-summary">Activity will appear after the first recorded carry cycle.</p>
-        )}
-        {cyclesError ? <p class="inline-warning">Cycle history unavailable: {cyclesError}</p> : null}
-      </section>
-    </div>
-  );
-}
-
+// The page is two surfaces: your manually tracked positions (valued from
+// the system's own coverage) and read-only external wallets. Both actions
+// open modals from the header; nothing renders until asked for.
 export function PortfolioView() {
-  const [state, setState] = useState<State>({ kind: "loading" });
-  const [positionFilter, setPositionFilter] = useState<PositionFilter>("all");
-  const [chartRange, setChartRange] = useState<ChartRange>("1y");
-  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [auth, setAuth] = useState<"checking" | "required">("checking");
+  const [addOpen, setAddOpen] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const addTrigger = useRef<HTMLButtonElement | null>(null);
 
+  // An auth probe only: the holdings fetch itself lives in the table
+  // component, which owns its own loading and error states.
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
-      const [portfolio, cycles, history, reconciliation, classification, schedule] =
-        await Promise.allSettled([
-          getPortfolio(),
-          getCarryCycles(),
-          getNavHistory(),
-          getReconciliation(),
-          getClassification(),
-          getCarrySchedule(),
-        ]);
-      if (cancelled) return;
-      if (portfolio.status === "rejected") {
-        if (portfolio.reason instanceof AuthRequiredError) {
-          setState({ kind: "auth" });
-          return;
-        }
-        if (portfolio.reason instanceof ApiHttpError && portfolio.reason.status === 404) {
-          setState({ kind: "empty" });
-          return;
-        }
-        const error = describeError(portfolio.reason);
-        setState({ kind: "error", message: error.message, detail: error.detail });
-        return;
-      }
-      setState({
-        kind: "ok",
-        portfolio: portfolio.value,
-        cycles:
-          cycles.status === "fulfilled"
-            ? { kind: "ok", data: cycles.value.cycles }
-            : resource(cycles),
-        history:
-          history.status === "fulfilled"
-            ? { kind: "ok", data: history.value.points }
-            : resource(history),
-        reconciliation: resource(reconciliation),
-        classification: resource(classification),
-        schedule: resource(schedule),
-      });
-    })();
-    return () => {
-      cancelled = true;
-    };
+    void getHoldings().catch((cause) => {
+      if (!cancelled && cause instanceof AuthRequiredError) setAuth("required");
+    });
+    return () => { cancelled = true; };
   }, []);
 
-  if (state.kind === "loading") return <Loading label="Loading your portfolio…" />;
-  if (state.kind === "auth") {
+  if (auth === "required") {
     return (
       <section class="quiet-state">
         <p class="eyebrow">Private portfolio</p>
@@ -307,59 +33,6 @@ export function PortfolioView() {
       </section>
     );
   }
-  if (state.kind === "error") {
-    return <ErrorState message={state.message} detail={state.detail} />;
-  }
-  if (state.kind === "empty") {
-    return (
-      <div class="portfolio-view product-page">
-        <header class="compact-status-heading health-quiet">
-          <div class="health-title-row">
-            <span class="health-orb" aria-hidden="true" />
-            <div>
-              <h1>Portfolio</h1>
-              <p>Track what you hold. The system values it from its own price coverage.</p>
-            </div>
-          </div>
-        </header>
-        <ManualHoldings />
-        <WalletsModal />
-      </div>
-    );
-  }
-
-  const { portfolio } = state;
-  const cycles = state.cycles.kind === "ok" ? state.cycles.data : [];
-  const history = state.history.kind === "ok" ? state.history.data : [];
-  const reconciliation =
-    state.reconciliation.kind === "ok" ? state.reconciliation.data : null;
-  const latestCycle = cycles[0] ?? null;
-  const health = portfolioHealth(portfolio.positions, latestCycle, reconciliation);
-  const classification =
-    state.classification.kind === "ok" ? state.classification.data : null;
-  const groups = groupPositions(
-    portfolio.positions,
-    classificationIndex(classification),
-  );
-  // The filter offers what the backend universe actually holds, plus a bucket
-  // for held symbols it does not classify. The set this replaces was two
-  // hardcoded lists in the browser, which could disagree with Discover about
-  // what an asset is and filed anything unrecognised as a stock.
-  const presentClasses = [
-    ...new Set(groups.map((group) => group.assetClass).filter((c): c is string => c !== null)),
-  ].sort();
-  const hasUnclassified = groups.some((group) => group.assetClass === null);
-  const filteredGroups =
-    positionFilter === "all"
-      ? groups
-      : positionFilter === "unclassified"
-        ? groups.filter((group) => group.assetClass === null)
-        : groups.filter((group) => group.assetClass === positionFilter);
-  const carry = state.cycles.kind === "ok" ? recordedCarry(cycles) : null;
-  const change = state.history.kind === "ok" ? navChange(history) : null;
-  const rangeDays = { "1m": 31, "3m": 93, "1y": 366, all: Infinity }[chartRange];
-  const newestTime = history.length ? new Date(history[history.length - 1].taken_at).getTime() : 0;
-  const chartHistory = history.filter((point) => newestTime - new Date(point.taken_at).getTime() <= rangeDays * 86_400_000);
 
   return (
     <div class="portfolio-view product-page">
@@ -373,10 +46,26 @@ export function PortfolioView() {
             </div>
           </div>
         </div>
+        <div class="portfolio-header-actions">
+          <button
+            type="button"
+            class="btn-secondary compact-button"
+            ref={addTrigger}
+            onClick={() => setAddOpen(true)}
+          >
+            Add position
+          </button>
+          <WalletsModal />
+        </div>
       </header>
 
-      <ManualHoldings />
-      <WalletsModal />
+      <AddPositionModal
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        onAdded={() => setRefreshKey((key) => key + 1)}
+        triggerRef={addTrigger}
+      />
+      <HoldingsTable refreshKey={refreshKey} />
     </div>
   );
 }
