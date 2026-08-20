@@ -42,3 +42,34 @@ def test_target_hit_rate_rejects_invalid_environment_values(
 
     assert exc_info.value.errors()[0]["loc"] == ("target_hit_rate",)
     assert exc_info.value.errors()[0]["type"] == error_type
+
+
+def test_profile_defaults_to_solo_depth(monkeypatch):
+    monkeypatch.delenv("OMNI_PROFILE", raising=False)
+
+    profile = Settings(_env_file=None)
+
+    assert profile.omni_profile == "solo"
+    assert profile.backfill_lookback_days == 365
+    assert profile.polygon_history_days == 365
+    assert profile.autonomous_top_sectors == 4
+
+
+def test_full_profile_is_the_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("OMNI_PROFILE", "full")
+
+    profile = Settings(_env_file=None)
+
+    assert profile.omni_profile == "full"
+    assert profile.backfill_lookback_days == 730
+    assert profile.polygon_history_days == 730
+    assert profile.autonomous_top_sectors == 11
+
+
+def test_profile_rejects_unknown_values(monkeypatch):
+    monkeypatch.setenv("OMNI_PROFILE", "enterprise")
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None)
+
+    assert exc_info.value.errors()[0]["loc"] == ("omni_profile",)

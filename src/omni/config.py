@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -7,6 +9,16 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql://postgres:postgres@localhost:5434/omni_v2"
     debug: bool = False
+
+    # Deployment profile. "solo" (the default) sizes collection for a
+    # self-hosted 2-4GB box: one year of price history and standing demand on
+    # the strongest sectors only. "full" is the explicit opt-in for operators
+    # who want the whole cross-section: two years of depth and demand across
+    # all eleven sectors. The trade-off is honest and one-directional --
+    # shallower history means noisier calibration buckets, so the conviction
+    # gate refuses to surface more findings. That refusal is correct
+    # behaviour, not breakage; README.md states it so it does not read as one.
+    omni_profile: Literal["solo", "full"] = "solo"
 
     # Ingestion credentials, supplied by the operator of this deployment.
     # Which of these are set decides what the background can actually fetch;
@@ -84,6 +96,18 @@ class Settings(BaseSettings):
             p.strip() for p in self.licensed_redistribution_providers.split(",")
             if p.strip()
         )
+
+    @property
+    def backfill_lookback_days(self) -> int:
+        return 730 if self.omni_profile == "full" else 365
+
+    @property
+    def polygon_history_days(self) -> int:
+        return 730 if self.omni_profile == "full" else 365
+
+    @property
+    def autonomous_top_sectors(self) -> int:
+        return 11 if self.omni_profile == "full" else 4
 
 
 settings = Settings()

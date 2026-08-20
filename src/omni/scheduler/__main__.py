@@ -81,7 +81,15 @@ async def main() -> None:
     )
     await scheduler.start()
 
-    autonomous = AutonomousRunner(client.pool)
+    from omni.autonomous.runner import AutonomousConfig
+
+    autonomous = AutonomousRunner(
+        client.pool,
+        config=AutonomousConfig(
+            backfill_lookback_days=settings.backfill_lookback_days,
+            demand_top_sectors=settings.autonomous_top_sectors,
+        ),
+    )
     await autonomous.start()
 
     # Venue connections are reconciled here rather than only when a Settings

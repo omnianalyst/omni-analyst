@@ -40,6 +40,11 @@ class AutonomousConfig:
     meta_interval: float = 86_400.0           # daily
     backfill_lookback_days: int = 730
     backfill_enabled: bool = True             # set False to skip backfill
+    # Sectors whose constituents get standing autonomous demand. 11 is every
+    # GICS sector (the full comparative cross-section); the solo profile
+    # narrows this via the scheduler wiring. Kept as a field so the narrowing
+    # is a config decision, not a code path someone has to find.
+    demand_top_sectors: int = 11
 
 
 class AutonomousRunner:
@@ -233,7 +238,8 @@ class AutonomousRunner:
                 self._pool, operator_user_id=self._operator_user_id),
                 self._config.sector_interval),
             ("demand", lambda: create_autonomous_demand(
-                self._pool, operator_user_id=self._operator_user_id),
+                self._pool, operator_user_id=self._operator_user_id,
+                top_n=self._config.demand_top_sectors),
                 self._config.demand_interval),
             (
                 "synthesis",

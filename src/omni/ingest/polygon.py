@@ -189,13 +189,17 @@ async def _fetch_aggregates(
 ) -> dict[str, Any]:
     import httpx
 
-    # Default to a trailing 2-year window when the caller specifies no range.
-    # The fill pipeline constructs the adapter with an API key but no dates
-    # (it is not a backfill); a live first-time ingest wants available history,
-    # and 2 years is the free-tier depth. Explicit dates (backfills, tests)
-    # override this.
+    # Ingest depth follows the deployment profile when the caller specifies no
+    # range: solo fetches one year, full two. The fill pipeline constructs the
+    # adapter with an API key but no dates (it is not a backfill); a live
+    # first-time ingest wants available history at the profile's depth, which
+    # is also the free-tier cap. Explicit dates (backfills, tests) override.
     if not from_date:
-        from_date = (datetime.now(UTC) - timedelta(days=730)).strftime("%Y-%m-%d")
+        from omni.config import settings
+
+        from_date = (
+            datetime.now(UTC) - timedelta(days=settings.polygon_history_days)
+        ).strftime("%Y-%m-%d")
     if not to_date:
         to_date = datetime.now(UTC).strftime("%Y-%m-%d")
     url = AGGREGATES_URL.format(
