@@ -4,12 +4,9 @@ import { formatAge } from "../lib/age";
 import {
   engineStatusWord,
   fillOutcomeClass,
-  loopAgeLabel,
   loopCadence,
-  scheduledLoopTier,
   unhealthyLoops,
   worstScheduledTier,
-  type LoopStatus,
 } from "../lib/system";
 import { errorMessage, lastOkAt, refresh, state, status } from "../lib/systemStore";
 import {
@@ -48,18 +45,7 @@ function interval(seconds: number | null): string {
   return `Every ${seconds / 86400} days`;
 }
 
-function LoopRow({ loop }: { loop: LoopStatus }) {
-  const cadence = loopCadence(loop.loop);
-  const tier = scheduledLoopTier(loop.age_seconds, loop.never_run);
-  return (
-    <tr>
-      <td><strong>{loop.loop}</strong></td>
-      <td><span class={`status-dot-simple tone-${cadence === "scheduled" ? tier : "quiet"}`} />{cadence === "scheduled" ? "Scheduled" : "On demand"}</td>
-      <td>{timestamp(loop.last_activity)}</td>
-      <td>{loopAgeLabel(loop)}</td>
-    </tr>
-  );
-}
+
 
 // The strategy research record, compressed to the one line an operator needs
 // unless they ask for more: how much has been tested and how much of it held
@@ -210,6 +196,8 @@ function EdgeSection({
     | { kind: "ok"; data: EdgeMonitor }
     | { kind: "error"; message: string; detail?: string };
 }) {
+  const [noteOpen, setNoteOpen] = useState(false);
+
   if (monitor.kind === "loading") {
     return (
       <section class="surface-card research-record">
@@ -294,13 +282,24 @@ function EdgeSection({
           </tbody>
         </table>
       </div>
-      <p class="research-note">
-        Each night the scoring pass measures every shadow book against its benchmark; this
-        monitor judges the most recent third of that forward record. Significantly negative
-        excess is decayed — the promoted claim reversed. Non-positive but inconclusive is
-        unconfirmed, not dead: a quiet edge is not a dead edge. History cannot be backfilled,
-        so an insufficient row is the monitor confirming it looked.
-      </p>
+      <button
+        type="button"
+        class="disclosure-button edge-note-disclosure"
+        aria-expanded={noteOpen}
+        onClick={() => setNoteOpen((value) => !value)}
+      >
+        <span>{noteOpen ? "Hide how the verdict is measured" : "How the verdict is measured"}</span>
+        <span aria-hidden="true">{noteOpen ? "−" : "+"}</span>
+      </button>
+      {noteOpen ? (
+        <p class="research-note">
+          Each night the scoring pass measures every shadow book against its benchmark; this
+          monitor judges the most recent third of that forward record. Significantly negative
+          excess is decayed — the promoted claim reversed. Non-positive but inconclusive is
+          unconfirmed, not dead: a quiet edge is not a dead edge. History cannot be backfilled,
+          so an insufficient row is the monitor confirming it looked.
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -332,30 +331,33 @@ function ProcessBoard({
       <div class="section-heading">
         <div>
           <p class="eyebrow">Background processes</p>
-          <h2>Currently monitored</h2>
         </div>
-        <span class="count-badge">{loops.length}</span>
       </div>
       <div class="process-grid">
-        {loops.map((loop) => (
-          <div class={`process-chip tone-${tone[loop.state] ?? "quiet"}`} key={loop.loop}>
-            <span class={`status-dot-simple tone-${tone[loop.state] ?? "quiet"}`} aria-hidden="true" />
-            <div>
-              <strong>{loop.loop}</strong>
-              <small>{word[loop.state] ?? loop.state}</small>
+        {loops.map((loop) => {
+          const cadence = loopCadence(loop.loop);
+          return (
+            <div class={`process-chip tone-${tone[loop.state] ?? "quiet"}`} key={loop.loop}>
+              <span class={`status-dot-simple tone-${tone[loop.state] ?? "quiet"}`} aria-hidden="true" />
+              <div>
+                <strong>{loop.loop}</strong>
+                <small>
+                  {word[loop.state] ?? loop.state} · {cadence === "scheduled" ? "scheduled" : "on demand"}
+                </small>
+              </div>
+              <span class="process-age">
+                {loop.last_success_at ?? loop.last_failure_at
+                  ? formatAge(
+                      (Date.now() -
+                        Date.parse(
+                          (loop.last_success_at ?? loop.last_failure_at) as string,
+                        )) / 1000,
+                    )
+                  : "—"}
+              </span>
             </div>
-            <span class="process-age">
-              {loop.last_success_at ?? loop.last_failure_at
-                ? formatAge(
-                    (Date.now() -
-                      Date.parse(
-                        (loop.last_success_at ?? loop.last_failure_at) as string,
-                      )) / 1000,
-                  )
-                : "—"}
-            </span>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -419,7 +421,6 @@ export function SystemView() {
   const worst = worstScheduledTier(snapshot.loops);
   const word = engineStatusWord(worst);
   const unhealthy = unhealthyLoops(snapshot.health);
-  const healthyScheduled = snapshot.health.loops.filter((loop) => loop.state === "ok").length;
   const fillEntries = Object.entries(snapshot.fill_last_hour).sort((a, b) => b[1] - a[1]);
   const disconnected = storeState === "error";
   const critical = word === "inactive" || word === "stalled";
@@ -456,34 +457,7 @@ export function SystemView() {
         </p>
       ) : null}
 
-      <section class="primary-metrics system-metrics" aria-label="System summary">
-        <article class="primary-metric">
-          <span class="metric-kicker">Automation</span>
-          <strong>{healthyScheduled}/{snapshot.health.loops.length}</strong>
-          <span class="metric-context">scheduled jobs reporting normally</span>
-        </article>
-        <article class="primary-metric">
-          <span class="metric-kicker">Claim store</span>
-          <strong>{snapshot.claims.total.toLocaleString()}</strong>
-          <span class="metric-context">
-            +{snapshot.claims.last_24h.toLocaleString()} observations in the last day
-          </span>
-        </article>
-        <article class="primary-metric">
-          <span class="metric-kicker">Demand</span>
-          <strong>{snapshot.demand.active}</strong>
-          <span class="metric-context">active coverage requests being worked</span>
-        </article>
-        <article class="primary-metric">
-          <span class="metric-kicker">Last 24 hours</span>
-          <strong>{snapshot.production_24h.findings}</strong>
-          <span class="metric-context">calls surfaced from {snapshot.production_24h.predictions} predictions</span>
-        </article>
-      </section>
-
-      {unhealthy.length === 0 ? (
-        <p class="quiet-line">No active system issues. Quiet on-demand jobs are normal.</p>
-      ) : (
+      {unhealthy.length > 0 ? (
         <section class="surface-card attention-card">
           <div class="section-heading">
             <div><p class="eyebrow">Attention</p><h2>Review these jobs</h2></div>
@@ -498,7 +472,7 @@ export function SystemView() {
             ))}
           </div>
         </section>
-      )}
+      ) : null}
 
       <ProcessBoard loops={snapshot.health.loops} />
       <EdgeSection monitor={edges} />
@@ -566,15 +540,6 @@ export function SystemView() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            </div>
-          </section>
-          <section class="detail-block">
-            <div class="section-heading"><div><p class="eyebrow">Background jobs</p><h2>Activity by loop</h2></div><small>Assessed {timestamp(snapshot.now)}</small></div>
-            <div class="responsive-table">
-              <table class="data-table">
-                <thead><tr><th>Job</th><th>Mode</th><th>Last activity</th><th>Age</th></tr></thead>
-                <tbody>{snapshot.loops.map((loop) => <LoopRow key={loop.loop} loop={loop} />)}</tbody>
               </table>
             </div>
           </section>
