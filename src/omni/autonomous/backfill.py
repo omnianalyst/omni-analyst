@@ -141,9 +141,25 @@ async def backfill_trend_predictions(
     written = 0
     skipped = 0
 
+    # The skip marker must compare against the earliest timestamp the
+    # producer could ever have fired, not the cutoff itself. A prediction
+    # needs `window` sessions of prior price history, so the first producible
+    # timestamp is at least window-sessions after data begins -- and with a
+    # 730-day lookback against Polygon's 2-year data cap, data begins AT the
+    # cutoff, making `oldest <= cutoff` permanently false. The first version
+    # of this check re-walked all ~500 entities on every scheduler restart
+    # (measured 2026-08-20: 41k duplicate predictions per boot, a sustained
+    # full-table burn after every deploy). The margin covers the window in
+    # calendar days plus one interval step; a listing newer than that still
+    # tops up correctly because its oldest prediction is later still.
+    margin_days = int(window * 7 / 5) + interval_days + 1
+    skip_threshold = now - timedelta(
+        days=lookback_days - margin_days
+    )
+
     for entity_id in entity_ids:
         oldest = await pool.fetchval(_OLDEST_PREDICTION, entity_id, method)
-        if oldest is not None and oldest <= cutoff:
+        if oldest is not None and oldest <= skip_threshold:
             skipped += 1
             continue
 

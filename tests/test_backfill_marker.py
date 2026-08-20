@@ -253,3 +253,44 @@ class TestCalibrationStillCounts:
             method,
         )
         assert bucketed == resolved
+
+
+async def test_a_completed_backfill_is_skipped_when_data_begins_at_the_cutoff(
+    db,
+):
+    """The Polygon-cap case: 730-day lookback against 2 years of data.
+
+    Data begins at the cutoff, so the first producible prediction sits a
+    window's worth of sessions AFTER it -- `oldest <= cutoff` was permanently
+    false and every scheduler restart re-walked every entity (41k duplicate
+    predictions per boot, measured 2026-08-20). With the window margin, an
+    entity whose history reaches back to the earliest producible timestamp
+    is skipped.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    entity_id = await _entity(db)
+    method = "trend.sma.m" + uuid4().hex[:8]
+    cutoff = datetime.now(UTC) - timedelta(days=730)
+    # Data begins at the cutoff (Polygon 2y cap): first producible timestamp
+    # is window=20 sessions (~28 calendar days) later. Seed the marker's
+    # oldest-prediction read directly -- the producer itself would abstain
+    # without price history, and the claim under test is the skip arithmetic.
+    for offset in (28, 35, 42, 49):
+        await db.pool.execute(
+            "INSERT INTO prediction (entity_id, method, direction, confidence, "
+            "entry_price, upper_barrier, lower_barrier, horizon_ends_at, "
+            "provenance, created_at) "
+            "VALUES ($1,$2,'up',0.6,100.0,110.0,90.0,$3,'{}'::jsonb,$4)",
+            entity_id, method,
+            cutoff + timedelta(days=offset + 7),
+            cutoff + timedelta(days=offset),
+        )
+
+    report = await backfill_trend_predictions(
+        db.pool, lookback_days=730, method_suffix=method.removeprefix("trend.sma"),
+        entity_ids=[entity_id],
+    )
+
+    assert report.entities_skipped == 1
+    assert report.predictions_written == 0
