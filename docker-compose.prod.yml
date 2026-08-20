@@ -76,6 +76,9 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      # Deployment profile: solo (default) or full -- see README.md. Passed
+      # through explicitly so the host .env controls it; unset means solo.
+      OMNI_PROFILE: ${OMNI_PROFILE:-solo}
       # The app default points at the dev compose port (localhost:5434); in a
       # container that is the container itself, so override it explicitly.
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omni_v2}
@@ -128,6 +131,7 @@ services:
       api:
         condition: service_healthy
     environment:
+      OMNI_PROFILE: ${OMNI_PROFILE:-solo}
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omni_v2}
       DEBUG: ${DEBUG:-false}
       OMNI_JWT_SECRET: ${OMNI_JWT_SECRET:?OMNI_JWT_SECRET is required}
