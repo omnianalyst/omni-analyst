@@ -456,6 +456,16 @@ describe("rendered failure and empty states", () => {
 
     await waitFor(() => expect(container.textContent).toContain("Track what you hold"));
     await waitFor(() =>
+      expect(Array.from(container.querySelectorAll("button"))
+        .find((b) => b.textContent?.trim() === "Add position")).toBeDefined());
+
+    // The add form lives behind the Add position button now: closed by
+    // default, form present on click.
+    expect(container.querySelector("input[placeholder='BTC, ETH, SPY…']")).toBeNull();
+    const addTrigger = Array.from(container.querySelectorAll("button"))
+      .find((b) => b.textContent?.trim() === "Add position")!;
+    await act(() => addTrigger.click());
+    await waitFor(() =>
       expect(container.querySelector<HTMLInputElement>("input[placeholder='BTC, ETH, SPY…']")).not.toBeNull());
 
     const symbolInput = container.querySelector<HTMLInputElement>("input[placeholder='BTC, ETH, SPY…']");

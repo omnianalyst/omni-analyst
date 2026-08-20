@@ -6251,3 +6251,9 @@ tr.row.tier-unknown td:first-child {
 .wallets-card-body .inline-warning:first-child {
   display: none; /* the in-component banner duplicates the header line */
 }
+
+.holding-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

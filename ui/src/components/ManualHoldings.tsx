@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { describeError } from "../lib/api";
 import {
   addHolding,
@@ -206,6 +206,8 @@ export function ManualHoldings() {
   const [state, setState] = useState<
     { kind: "loading" } | { kind: "ok"; data: HoldingsRecord } | { kind: "error"; message: string }
   >({ kind: "loading" });
+  const [addOpen, setAddOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement | null>(null);
 
   function load() {
     setState({ kind: "loading" });
@@ -216,12 +218,22 @@ export function ManualHoldings() {
 
   useEffect(load, []);
 
+  useEffect(() => {
+    if (!addOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAddOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [addOpen]);
+
+  function closeAdd() {
+    setAddOpen(false);
+    requestAnimationFrame(() => trigger.current?.focus());
+  }
+
   if (state.kind === "loading") {
-    return (
-      <section class="surface-card holdings-card">
-        <Loading label="Loading your positions…" />
-      </section>
-    );
+    return <Loading label="Loading your positions…" />;
   }
   if (state.kind === "error") {
     return (
@@ -240,14 +252,55 @@ export function ManualHoldings() {
       <div class="section-heading">
         <div>
           <p class="eyebrow">Your positions</p>
-          <h2>{summary.total_value === null ? "Tracking" : money(summary.total_value)}</h2>
+          <h2>{summary.total_value === null ? (holdings.length ? "Tracking" : "Nothing tracked yet") : money(summary.total_value)}</h2>
         </div>
-        {summary.total_pnl !== null ? (
-          <span class={pnlClass(summary.total_pnl)}>{money(summary.total_pnl)} all-time</span>
-        ) : null}
+        <div class="holding-heading-actions">
+          {summary.total_pnl !== null ? (
+            <span class={pnlClass(summary.total_pnl)}>{money(summary.total_pnl)} all-time</span>
+          ) : null}
+          <button
+            type="button"
+            class="btn-secondary"
+            ref={trigger}
+            onClick={() => setAddOpen(true)}
+          >
+            Add position
+          </button>
+        </div>
       </div>
+
+      {addOpen ? (
+        <div
+          class="learn-why-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Add a position"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) closeAdd();
+          }}
+        >
+          <div class="learn-why-card holdings-add-card">
+            <header>
+              <div>
+                <h2>Track a position</h2>
+                <p class="muted">
+                  Symbol and quantity. Optional total cost basis enables P&amp;L.
+                  Priced from the system's own coverage, never estimated.
+                </p>
+              </div>
+              <button type="button" class="learn-why-close" onClick={closeAdd} aria-label="Close">
+                ×
+              </button>
+            </header>
+            <div class="wallets-card-body">
+              <AddForm onAdded={load} />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <p class="quiet-line">{describeHoldings(summary)}</p>
-      <AddForm onAdded={load} />
+
       {holdings.length > 0 ? (
         <div class="responsive-table">
           <table class="data-table">
