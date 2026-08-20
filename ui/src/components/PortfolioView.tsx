@@ -25,7 +25,6 @@ import {
   type Portfolio,
   type ReconciliationReport,
 } from "../lib/trading";
-import { getBriefing, type BriefingFinding } from "../lib/briefing";
 import { directionGlyph, directionWord, hitRateFelt } from "../lib/explain";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
@@ -49,17 +48,10 @@ type State =
       reconciliation: Resource<ReconciliationReport>;
       classification: Resource<ClassificationResponse>;
       schedule: Resource<CarrySchedule>;
-      noteworthy: BriefingFinding[];
     };
 
 type PositionFilter = "all" | string;
 type ChartRange = "1m" | "3m" | "1y" | "all";
-
-// The bar a surfaced call must clear to interrupt the portfolio page at all.
-// The feed is not this page's job; only an extremely confident standing call
-// earns a line here, and anything less renders nothing.
-const NOTEWORTHY_CONFIDENCE = 0.9;
-const NOTEWORTHY_MAX = 2;
 
 // Display names for the backend's own class vocabulary. A class with no entry
 // renders under its backend name rather than being relabelled or hidden, so a
@@ -84,34 +76,6 @@ const SCHEDULE_LABEL: Record<VenueSchedule["state"], string> = {
   holding: "Holding",
   due: "Rebalance due",
 };
-
-function NoteworthyBand({ findings }: { findings: BriefingFinding[] }) {
-  if (findings.length === 0) return null;
-  return (
-    <section class="noteworthy-band" aria-label="Noteworthy">
-      <span class="eyebrow">Noteworthy</span>
-      <ul>
-        {findings.map((finding) => {
-          const dir = finding.direction === "up" ? "up" : finding.direction === "down" ? "down" : "flat";
-          return (
-            <li key={finding.id} class={`noteworthy-row noteworthy-${dir}`}>
-              <span class={`claim-dir claim-dir-${dir}`}>
-                <span class="claim-glyph" aria-hidden="true">{directionGlyph(finding.direction)}</span>
-                {directionWord(finding.direction)}
-              </span>
-              <strong class="claim-ticker">{finding.entity.symbol ?? "\u2014"}</strong>
-              <span class="muted">{finding.entity.name}</span>
-              <span class="mono">{finding.confidence.toFixed(2)}</span>
-              {finding.calibrated_hit_rate !== null ? (
-                <span class="muted mono">{hitRateFelt(finding.calibrated_hit_rate)}</span>
-              ) : null}
-            </li>
-          );
-        })}
-      </ul>
-    </section>
-  );
-}
 
 function NavChart({ points }: { points: NavPoint[] }) {
   const measured = points
@@ -288,7 +252,7 @@ export function PortfolioView() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [portfolio, cycles, history, reconciliation, classification, schedule, briefing] =
+      const [portfolio, cycles, history, reconciliation, classification, schedule] =
         await Promise.allSettled([
           getPortfolio(),
           getCarryCycles(),
@@ -296,7 +260,6 @@ export function PortfolioView() {
           getReconciliation(),
           getClassification(),
           getCarrySchedule(),
-          getBriefing(),
         ]);
       if (cancelled) return;
       if (portfolio.status === "rejected") {
@@ -326,15 +289,6 @@ export function PortfolioView() {
         reconciliation: resource(reconciliation),
         classification: resource(classification),
         schedule: resource(schedule),
-        // The band is supplementary to this page: only findings that clear the
-        // bar render, and a failed feed fetch renders nothing rather than an
-        // error -- the page makes no claim to carry the feed.
-        noteworthy:
-          briefing.status === "fulfilled"
-            ? briefing.value
-                .filter((finding) => finding.confidence >= NOTEWORTHY_CONFIDENCE)
-                .slice(0, NOTEWORTHY_MAX)
-            : [],
       });
     })();
     return () => {
@@ -410,24 +364,30 @@ export function PortfolioView() {
   const newestTime = history.length ? new Date(history[history.length - 1].taken_at).getTime() : 0;
   const chartHistory = history.filter((point) => newestTime - new Date(point.taken_at).getTime() <= rangeDays * 86_400_000);
 
+  // A flat book is a closed experiment: the trading dashboard (NAV chart,
+  // cycle schedule, position groups) is machinery for a LIVE book, and
+  // rendering it beside the personal tracker was two portfolios arguing on
+  // one page. The record stays in the backend; the page shows one quiet
+  // line. A future book with open positions restores the full dashboard.
+  const bookOpen = groups.length > 0;
+
   return (
     <div class="portfolio-view product-page">
-      <header class={`compact-status-heading health-${health.tone}`}>
+      <header class="compact-status-heading health-quiet">
         <div class="portfolio-hero-copy">
           <div class="health-title-row">
             <span class="health-orb" aria-hidden="true" />
             <div>
               <h1>Portfolio</h1>
-              <p>{health.headline} · last valued {formatTimestamp(portfolio.as_of)}</p>
+              <p>Track what you hold. The system values it from its own price coverage.</p>
             </div>
           </div>
         </div>
       </header>
 
-      <NoteworthyBand findings={state.noteworthy} />
-
       <ManualHoldings />
 
+      {bookOpen ? (
       <details class="managed-book">
         <summary>
           Managed trading book · last valued {formatTimestamp(portfolio.as_of)}
@@ -551,10 +511,16 @@ export function PortfolioView() {
         <p class="inline-warning">Schedule unavailable: {state.schedule.message}</p>
       )}
       </details>
+      ) : (
+        <p class="quiet-line">
+          Managed trading book: closed August 2026, flat, no open positions.
+          Its full record lives in the backend.
+        </p>
+      )}
 
-      <details class="external-wallets">
+      <details class="external-wallets" open>
         <summary>
-          External wallets · watched, never traded · not part of the {formatMoney(portfolio.nav)} NAV
+          External wallets · watched, never traded
         </summary>
         <WalletAccounts />
       </details>
