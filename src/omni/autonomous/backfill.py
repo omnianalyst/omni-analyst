@@ -198,6 +198,13 @@ async def backfill_trend_predictions(
 
     resolved = await resolve_due_predictions(pool)
 
+    # A backfill resolves in bulk; force the statistics refresh rather than
+    # waiting out the throttle, so the buckets reflect the new history
+    # immediately.
+    from omni.conviction.stats_refresh import refresh_statistics
+
+    await refresh_statistics(pool)
+
     logger.info(
         "backfill [%s]: %d entities, %d predictions, %d resolved, %d skipped",
         method, processed, written, resolved, skipped,

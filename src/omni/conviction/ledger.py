@@ -435,9 +435,11 @@ async def resolve_due_predictions(
             resolved += 1
     if resolved:
         # The materialized statistics views only change when outcomes do, and
-        # this pass is the only writer of outcomes. Refreshing here bounds
-        # their staleness at one resolve interval for every reader.
-        from omni.conviction.stats_refresh import refresh_statistics
+        # this pass is the only writer of outcomes. Refresh is a full
+        # aggregate of the prediction table, so it is throttled -- a bucket
+        # moves by a fraction of a resolution and the scheduler resolves a
+        # few predictions a minute.
+        from omni.conviction.stats_refresh import refresh_statistics_if_due
 
-        await refresh_statistics(pool)
+        await refresh_statistics_if_due(pool)
     return resolved
