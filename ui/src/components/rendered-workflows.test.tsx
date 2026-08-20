@@ -283,11 +283,12 @@ describe("rendered alerts", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     hydrate(<DiscoverView />, container);
-    await waitFor(() => expect(button(container, "Alerts").getAttribute("aria-selected")).toBe("true"));
+    // The tab bar is gone: a ?tab=alerts deep link opens the Alerts overlay
+    // after hydration, and the URL is cleaned so a refresh lands on the page.
     await waitFor(() => expect(container.textContent).toContain("No alerts set."));
+    await waitFor(() => expect(window.location.search).toBe(""));
 
-    expect(button(container, "Alerts").getAttribute("aria-selected")).toBe("true");
-    expect(container.textContent).toContain("No alerts set.");
+    expect(container.textContent).toContain("Saved");
     expect(consoleError).not.toHaveBeenCalled();
   });
 });

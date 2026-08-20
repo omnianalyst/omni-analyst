@@ -156,7 +156,7 @@ export function EntityView() {
 
   return (
     <div class="entity-view product-page">
-      <a class="entity-back-link" href="/search?tab=search">← Back to search</a>
+      <a class="entity-back-link" href="/search">← Back to search</a>
 
       <header class="entity-page-heading">
         <div>

@@ -205,8 +205,8 @@ test("Settings renders user-managed and scheduler-managed venue truth", async ({
 
 test("wallet API failure stays distinct from an empty wallet list", async ({ page }) => {
   await mockApi(page, (path) => {
-    if (path === "/trading/portfolio") {
-      return { status: 404, body: { detail: "No portfolio for this account" } };
+    if (path === "/holdings") {
+      return { status: 200, body: { holdings: [], summary: { positions: 0, priced: 0, total_value: null, total_pnl: null } } };
     }
     if (path === "/wallets") {
       return { status: 503, body: { detail: "wallet service offline" } };
@@ -216,9 +216,11 @@ test("wallet API failure stays distinct from an empty wallet list", async ({ pag
 
   await openAuthenticated(page, "/");
 
-  await expect(page.getByText("No managed portfolio", { exact: true })).toBeVisible();
+  // Wallets live behind the header button; opening it surfaces the named
+  // failure rather than an empty list.
+  await page.getByRole("button", { name: "Add wallet" }).click();
   await expect(page.getByText("Wallet accounts unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByText("No external wallets tracked", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("No external wallets tracked")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
 });
 
@@ -237,7 +239,7 @@ test("keyboard shortcuts open the palette and navigate without a pointer", async
   await page.keyboard.press("2");
 
   await expect(page).toHaveURL("/search");
-  await expect(page.getByRole("tab", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Saved" })).toBeVisible();
 });
 
 test("alerts hydration emits no mismatch or uncaught browser error", async ({ page }) => {
@@ -258,7 +260,8 @@ test("alerts hydration emits no mismatch or uncaught browser error", async ({ pa
   );
 
   await page.goto("/search?tab=alerts");
-  await expect(page.getByRole("tab", { name: "Alerts" })).toHaveAttribute("aria-selected", "true");
+  // The tab bar is gone: the deep link opens the Alerts overlay after
+  // hydration without a divergent initial tree.
   await expect(page.getByText("No alerts set.", { exact: false })).toBeVisible();
 
   expect(browserFailures).toEqual([]);

@@ -16,16 +16,15 @@ type State =
   | { kind: "empty"; q: string }
   | { kind: "error"; message: string; detail?: string };
 
-export function SearchView() {
-  const [input, setInput] = useState("");
-  const [state, setState] = useState<State>({ kind: "idle" });
+export function SearchView({ initialQuery }: { initialQuery?: string }) {
+  const [input, setInput] = useState(initialQuery ?? "");
+  const [state, setState] = useState<State>(
+    initialQuery && initialQuery.trim() ? { kind: "loading", q: initialQuery } : { kind: "idle" },
+  );
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const q = params.get("q");
-    if (q && q.trim()) {
-      setInput(q);
-      void runSearch(q);
+    if (initialQuery && initialQuery.trim()) {
+      void runSearch(initialQuery);
     }
     // runSearch is stable enough for mount-only; disabling exhaustive-deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps

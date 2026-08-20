@@ -6317,3 +6317,19 @@ a.btn-secondary {
   gap: 8px;
   align-items: center;
 }
+
+/* The Discover overlay bar: quiet line left, Saved/Alerts right. */
+.discover-overlay-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 2px 0;
+  flex-wrap: wrap;
+}
+.discover-overlay-bar .quiet-line {
+  margin: 0;
+}
+.discover-overlay-card header {
+  padding: 22px 24px 12px;
+}
