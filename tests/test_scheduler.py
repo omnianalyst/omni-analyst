@@ -282,6 +282,11 @@ async def _seed_resolved(db, entity_id, *, n, outcome, confidence=0.7):
             "now(), '{}'::jsonb, now() - interval '30 days')",
             entity_id, confidence, outcome, SURFACE_METHOD,
         )
+    # The buckets are materialized and refresh at resolve boundaries; a
+    # direct resolved-row write is such a boundary, stated by hand.
+    from omni.conviction.stats_refresh import refresh_statistics
+
+    await refresh_statistics(db.pool)
 
 
 async def _seed_price_history(db, entity_id, *, days=60, flat=False):

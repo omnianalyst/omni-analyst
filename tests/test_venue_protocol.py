@@ -348,6 +348,11 @@ class TestVenueProtocol:
             # honest answer for a venue with one spelling per market.
             def held_symbol_aliases(self, asset, market_type): return ()
 
+            # Raw spellings a held position may carry beside the tradable
+            # symbol, and the asset a venue token balance holds. Both empty:
+            # the honest answer for a venue with one spelling per market.
+            def spot_holding_asset(self, symbol_or_asset): return None
+
             async def quote(self, intent): ...
             async def execute(self, intent): ...
             async def positions(self): ...

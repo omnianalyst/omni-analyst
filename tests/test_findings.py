@@ -56,6 +56,10 @@ async def _prediction(db, entity_id, *, direction="up", outcome=None):
             "UPDATE prediction SET outcome=$1::prediction_outcome, resolved_at=now() "
             "WHERE id=$2", outcome, pid,
         )
+        # Resolved rows are a refresh boundary for the materialized buckets.
+        from omni.conviction.stats_refresh import refresh_statistics
+
+        await refresh_statistics(db.pool)
     return pid
 
 

@@ -27,6 +27,24 @@ services:
   postgres:
     image: timescale/timescaledb:2.17.2-pg17
     container_name: omni_postgres
+    # Sized for a SHARED box, not a dedicated DB server. The image default
+    # takes 25% of host RAM for shared_buffers (3GB of this 12GB host) and
+    # 1.5GB maintenance_work_mem -- tuned for hardware this is not. Omni's
+    # working set (hot indexes plus a resolve-interval of writes) fits in
+    # well under 1GB; the rest was page-cache ballast billed to this
+    # container. Measured 2026-08-19: RAM 3.1GB -> ~1GB, no plan regression
+    # (effective_cache_size lowered with it so the planner stays
+    # index-friendly). max_connections 30 covers ~2x the apps' pools.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=768MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - max_connections=30
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-omni_v2}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

@@ -55,6 +55,12 @@ async def _insert_claim(db, entity_id, **overrides):
 @pytest.fixture(autouse=True)
 async def _clean(db):
     await db.pool.execute("TRUNCATE entity, demand CASCADE")
+    # The statistics views are materialized: a TRUNCATE leaves them holding
+    # the previous test's rows. Refresh so each test starts from the store's
+    # actual (empty) state.
+    from omni.conviction.stats_refresh import refresh_statistics
+
+    await refresh_statistics(db.pool)
     yield
 
 
@@ -273,6 +279,11 @@ class TestPrediction:
         await db.pool.execute(
             "UPDATE prediction SET outcome = 'upper', resolved_at = now()"
         )
+        # The buckets are materialized and refresh at resolve boundaries; a
+        # raw outcome write is exactly such a boundary, stated by hand.
+        from omni.conviction.stats_refresh import refresh_statistics
+
+        await refresh_statistics(db.pool)
         row = await db.pool.fetchrow("SELECT * FROM calibration_bucket")
         assert row["n"] == 1
         assert row["hits"] == 1
@@ -284,6 +295,9 @@ class TestPrediction:
         await db.pool.execute(
             "UPDATE prediction SET outcome = 'upper', resolved_at = now()"
         )
+        from omni.conviction.stats_refresh import refresh_statistics
+
+        await refresh_statistics(db.pool)
         row = await db.pool.fetchrow("SELECT n, hits FROM calibration_bucket")
         assert row["n"] == 1
         assert row["hits"] == 0

@@ -311,6 +311,11 @@ class PaperVenue:
         symbol orders are addressed by, so there is no raw id to map."""
         return ()
 
+    def spot_holding_asset(self, symbol_or_asset: str) -> str | None:
+        """No token balances here: every spot holding is a position, so no
+        balance needs naming as one."""
+        return None
+
     def symbol_for(self, asset: str, market_type: MarketType) -> str | None:
         """The tradable symbol for an asset here, or `None` if it is not listed.
 
