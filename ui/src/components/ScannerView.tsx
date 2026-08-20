@@ -154,7 +154,7 @@ const CATEGORY_DETAILS: Array<{
   {
     key: "crypto",
     title: "Crypto",
-    description: "Major digital assets ranked on the same measured framework.",
+    description: "The seven-name ladder -- one name per role, ranked on the same measured framework.",
   },
 ];
 
@@ -1238,6 +1238,7 @@ export function ScannerView() {
   const [rankingsOpen, setRankingsOpen] = useState(false);
   const [companiesOpen, setCompaniesOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [answerOpen, setAnswerOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1268,18 +1269,32 @@ export function ScannerView() {
   return (
     <div class="scanner-view product-page">
       <header class="discover-page-heading">
-        <div><h1>Discover</h1><p>The best of everything measured -- what to hold, and why.</p></div>
+        <div><h1>Discover</h1><p>What's worth tracking -- ranked on everything measured.</p></div>
         <div class="discover-compact-meta">
           <LearnWhy />
           <time dateTime={state.data.as_of}>Updated {new Date(state.data.as_of).toLocaleString()}</time>
         </div>
       </header>
 
-      <ThePortfolio data={state.data} />
-
-      <CustomCompare universe={universe} companies={state.data.comparator_universe ?? []} />
-
       <BestMeasured data={state.data} />
+
+      <button
+        type="button"
+        class="disclosure-button"
+        aria-expanded={answerOpen}
+        onClick={() => setAnswerOpen((open) => !open)}
+      >
+        <span>{answerOpen ? "Hide the allocation answer" : "The allocation answer · what to hold at each risk tolerance"}</span>
+        <span aria-hidden="true">{answerOpen ? "−" : "+"}</span>
+      </button>
+      {answerOpen ? (
+        <div class="detail-drawer">
+          <div class="detail-block">
+            <ThePortfolio data={state.data} />
+            <CustomCompare universe={universe} companies={state.data.comparator_universe ?? []} />
+          </div>
+        </div>
+      ) : null}
 
       <button
         type="button"
