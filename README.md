@@ -89,3 +89,9 @@ Built on [Neutron](https://github.com/neutron-build/neutron) (Python tier)
 against the PostgreSQL wire protocol. `AGENTS.md` states the invariants;
 `docs/OMNI_ANALYST.md` the current architecture; `docs/NEXT_SESSION.md` the
 working state.
+
+## License
+
+GNU AGPL-3.0-or-later. A network deployment of a modified version must offer
+its source to its users — the honest-systems stance applied to the code
+itself. See `LICENSE`.
