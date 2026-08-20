@@ -39,7 +39,6 @@ export function PortfolioView() {
       <header class="compact-status-heading health-quiet">
         <div class="portfolio-hero-copy">
           <div class="health-title-row">
-            <span class="health-orb" aria-hidden="true" />
             <div>
               <h1>Portfolio</h1>
               <p>Track what you hold. The system values it from its own price coverage.</p>
