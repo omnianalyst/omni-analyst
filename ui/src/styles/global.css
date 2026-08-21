@@ -6475,9 +6475,17 @@ a.btn-secondary {
    2. A content floor keeps short loading states from collapsing the page
       height, so the sticky header's content below never jumps. */
 html {
-  scrollbar-gutter: stable;
   background-color: var(--bg);
   view-transition-name: none;
+}
+
+/* Gutter reservation is a classic-scrollbar (desktop) concern; phone
+   browsers all use overlay scrollbars, and reserving a gutter there eats
+   15px of a 390px layout (caught by the 390px e2e). */
+@media (min-width: 520px) {
+  html {
+    scrollbar-gutter: stable;
+  }
 }
 
 main:not(main main) {
