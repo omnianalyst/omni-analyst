@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import { describeError, searchEntities, type Entity } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
+import { getProfile } from "../lib/profile";
 import {
   buildCondition,
   CONDITION_KINDS,
@@ -26,6 +27,13 @@ type CreateState =
   | { kind: "creating" }
   | { kind: "error"; message: string; detail?: string };
 
+// The measured context for the chosen subject: what its latest covered
+// price is, so a threshold is set against reality rather than remembered.
+type PriceContext =
+  | { kind: "loading" }
+  | { kind: "none" }
+  | { kind: "ok"; latest: number; asOf: string | null; symbol: string };
+
 const fieldStyle = { display: "grid", gap: "4px" } as const;
 const linkBtnStyle = {
   background: "transparent",
@@ -50,6 +58,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
   const [claimType, setClaimType] = useState("");
   const [form, setForm] = useState<ConditionFormState>(defaultConditionForm());
   const [create, setCreate] = useState<CreateState>({ kind: "idle" });
+  const [priceContext, setPriceContext] = useState<PriceContext>({ kind: "none" });
 
   function patchForm(patch: Partial<ConditionFormState>) {
     setForm((prev) => ({ ...prev, ...patch }));
@@ -83,6 +92,22 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
     );
     setSearch({ kind: "idle" });
     setEntityQuery("");
+    // Fetch the latest covered price so the threshold field carries context.
+    // No coverage is an honest state too: the context line simply stays away
+    // rather than implying a level the system cannot see.
+    setPriceContext({ kind: "loading" });
+    void getProfile(ent.id)
+      .then((p) => {
+        if (p.price.latest === null) setPriceContext({ kind: "none" });
+        else
+          setPriceContext({
+            kind: "ok",
+            latest: p.price.latest,
+            asOf: p.price.as_of,
+            symbol: ent.symbol ?? ent.name ?? "it",
+          });
+      })
+      .catch(() => setPriceContext({ kind: "none" }));
   }
 
   async function onSubmit(e: Event) {
@@ -118,6 +143,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
       setCreate({ kind: "idle" });
       setEntityId(null);
       setEntityLabel("");
+      setPriceContext({ kind: "none" });
       setClaimType("");
       setForm(defaultConditionForm());
       onCreated();
@@ -158,6 +184,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
               onClick={() => {
                 setEntityId(null);
                 setEntityLabel("");
+                setPriceContext({ kind: "none" });
               }}
             >
               Change
@@ -288,6 +315,20 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
               placeholder="e.g. 100"
               aria-label="The level"
             />
+            {priceContext.kind === "ok" ? (
+              <span class="field-help">
+                {priceContext.symbol} last covered at $
+                {priceContext.latest.toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                })}
+                {priceContext.asOf
+                  ? ` (close of ${priceContext.asOf.slice(0, 10)})`
+                  : ""}
+                .
+              </span>
+            ) : priceContext.kind === "loading" ? (
+              <span class="field-help">Reading latest coverage…</span>
+            ) : null}
           </label>
           <label style={fieldStyle}>
             <span class="field-label">Which number to compare (optional)</span>

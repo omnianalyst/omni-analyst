@@ -14,6 +14,8 @@ vi.mock("@neutron-build/core/client", () => ({
 }));
 
 import { AlertsView } from "./AlertsView";
+import { CreateAlertForm } from "./CreateAlertForm";
+import { TrackButton } from "./TrackButton";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "./CommandPalette";
 import { DiscoverView } from "./DiscoverView";
 import { LoginView } from "./LoginView";
@@ -485,3 +487,76 @@ describe("rendered failure and empty states", () => {
     await waitFor(() => expect(container.textContent).toContain("BTC"));
     expect(container.textContent).toContain("1,000");
   });
+
+describe("the alert form gives price context for the chosen subject", () => {
+  it("shows the latest covered price beside the threshold field", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      const method = init?.method ?? "GET";
+      if (path === "/entities" && method === "GET") {
+        return json({ query: "AAPL", entities: [
+          { id: "e-1", kind: "company", symbol: "AAPL", name: "Apple Inc." },
+        ]});
+      }
+      if (path === "/entities/e-1/profile") {
+        return json({
+          entity: { id: "e-1", kind: "company", symbol: "AAPL", name: "Apple Inc." },
+          price: { latest: 207.14, as_of: "2026-08-20T00:00:00Z", returns: {} },
+          risk: { risk_tier: "unrated", volatility: null },
+          derived: [], fundamentals: [],
+        });
+      }
+      return json({ detail: "not found" }, 404);
+    }));
+    localStorage.setItem(AUTH_TOKEN_KEY, "token");
+    const container = root();
+    render(<CreateAlertForm onCreated={() => {}} />, container);
+
+    const query = container.querySelector<HTMLInputElement>("input[placeholder='e.g. AAPL']")!;
+    await act(() => setInput(query, "AAPL"));
+    await act(() => button(container, "Search").click());
+    await waitFor(() =>
+      expect(container.querySelector(".entity-list button")).not.toBeNull());
+    await act(() => (container.querySelector(".entity-list button") as HTMLButtonElement).click());
+
+    // The threshold context appears once a subject is chosen and priced.
+    await waitFor(() =>
+      expect(container.textContent).toContain("AAPL last covered at $207.14"));
+    expect(container.textContent).toContain("close of 2026-08-20");
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+  });
+});
+
+describe("the entity page's Track button", () => {
+  it("creates a watchlist on first track and adds the entity", async () => {
+    let watchlists: unknown[] = [];
+    let added: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const path = url.pathname;
+      const method = init?.method ?? "GET";
+      if (path === "/watchlists" && method === "GET") {
+        return json({ watchlists });
+      }
+      if (path === "/watchlists" && method === "POST") {
+        const created = { id: "wl-1", name: "Watchlist", created_at: "2026-08-21T00:00:00Z" };
+        watchlists = [created];
+        return json(created, 201);
+      }
+      if (path === "/watchlists/wl-1/entries" && method === "POST") {
+        added.push(String(JSON.parse(String(init?.body)).entity_id));
+        return json({ watchlist_id: "wl-1", entity_id: "e-9", added_at: "2026-08-21T00:00:00Z" }, 201);
+      }
+      return json({ detail: "not found" }, 404);
+    }));
+    localStorage.setItem(AUTH_TOKEN_KEY, "token");
+    const container = root();
+    render(<TrackButton entityId="e-9" />, container);
+
+    await act(() => button(container, "Track").click());
+    await waitFor(() =>
+      expect(container.textContent).toContain("Tracking · updates to Watchlist"));
+    expect(added).toEqual(["e-9"]);
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+  });
+});

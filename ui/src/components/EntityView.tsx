@@ -22,6 +22,7 @@ import { ClaimsTable } from "./ClaimsTable";
 import { GapsList } from "./GapsList";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
+import { TrackButton } from "./TrackButton";
 
 type Async<T> =
   | { kind: "idle" }
@@ -169,14 +170,17 @@ export function EntityView() {
           </div>
           <p>{entity.name}</p>
         </div>
-        <div class="entity-price-block">
-          <strong>
-            {price.latest === null ? ABSENT : `$${price.latest.toFixed(2)}`}
-          </strong>
-          <span class={`entity-price-change value-${toneFor(price.returns["30d"])}`}>
-            {formatPercent(price.returns["30d"])} over 30 days
-          </span>
-          {price.as_of ? <small>Close of {price.as_of}</small> : null}
+        <div class="entity-heading-actions">
+          <TrackButton entityId={entity.id} />
+          <div class="entity-price-block">
+            <strong>
+              {price.latest === null ? ABSENT : `$${price.latest.toFixed(2)}`}
+            </strong>
+            <span class={`entity-price-change value-${toneFor(price.returns["30d"])}`}>
+              {formatPercent(price.returns["30d"])} over 30 days
+            </span>
+            {price.as_of ? <small>Close of {price.as_of}</small> : null}
+          </div>
         </div>
       </header>
 
