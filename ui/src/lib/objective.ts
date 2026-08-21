@@ -1,5 +1,5 @@
 import { API_BASE_URL } from "../config";
-import { ApiHttpError, ApiUnavailableError } from "./api";
+import { ApiHttpError, ApiUnavailableError, authHeaderIfPresent } from "./api";
 
 export interface ObjectiveStep {
   capability: string;
@@ -99,6 +99,10 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
       headers: {
         "content-type": "application/json",
         accept: "application/json",
+        // /objective/run is auth-gated: without the token the run 401s while
+        // the (anonymous) plan beside it succeeded -- exactly the "You are
+        // not signed in" contradiction observed live 2026-08-21.
+        ...authHeaderIfPresent(),
       },
       body: JSON.stringify(body),
     });
