@@ -48,17 +48,23 @@ function isPublicPath(pathname: string): boolean {
 const NAV = [
   { href: "/", label: "Portfolio" },
   { href: "/search", label: "Discover" },
+  { href: "/objective", label: "Ask" },
   { href: "/system", label: "System" },
 ];
 
 // The command palette jumps from the same set of destinations as the topbar,
 // with the first nine carrying a digit hotkey hint. Derived, not duplicated, so
-// adding a route to NAV is the only change needed.
-const COMMANDS: CommandItem[] = NAV.map((item, i) => ({
-  href: item.href,
-  label: item.label,
-  hint: i < 9 ? String(i + 1) : undefined,
-}));
+// adding a route to NAV is the only change needed. The record page rides the
+// palette without a topbar slot: it is a receipts destination, linked from
+// wherever accuracy is mentioned, not a daily stop.
+const COMMANDS: CommandItem[] = [
+  ...NAV.map((item, i) => ({
+    href: item.href,
+    label: item.label,
+    hint: i < 9 ? String(i + 1) : undefined,
+  })),
+  { href: "/record", label: "Track record", hint: undefined },
+];
 
 // Routes that render for an unauthenticated visitor. Everything else requires
 // a token; the guard below redirects signed-out users away before the page can

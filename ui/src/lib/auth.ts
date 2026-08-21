@@ -56,6 +56,17 @@ export const register = (email: string, password: string): Promise<AuthUser> =>
 export const login = (email: string, password: string): Promise<LoginResponse> =>
   sendJson<LoginResponse>("POST", "/auth/login", { email, password });
 
+// Requires the current password; a wrong one renders identically to a wrong
+// login so the endpoint cannot confirm guesses. 204 on success.
+export const changePassword = (
+  oldPassword: string,
+  newPassword: string,
+): Promise<void> =>
+  authedSendJson<void>("POST", "/auth/change-password", {
+    old_password: oldPassword,
+    new_password: newPassword,
+  });
+
 export interface SetupStatus {
   setup_required: boolean;
 }

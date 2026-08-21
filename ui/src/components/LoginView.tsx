@@ -78,7 +78,7 @@ export function LoginView() {
           <div style={{ padding: "18px" }}>
             <p>You are signed in. Private coverage and watchlists are now reachable.</p>
             <div style={{ marginTop: "14px", display: "flex", gap: "12px" }}>
-              <a class="search-btn" href="/watchlist" style={{ textDecoration: "none" }}>
+              <a class="search-btn" href="/search?tab=watchlist" style={{ textDecoration: "none" }}>
                 Watchlists
               </a>
               <button class="search-btn" type="button" onClick={signOut}>
@@ -107,7 +107,7 @@ export function LoginView() {
                 class="search-input"
                 type="password"
                 required
-                minlength={8}
+                minlength={12}
                 autocomplete="current-password"
                 value={password}
                 onInput={(e) => setPassword((e.target as HTMLInputElement).value)}

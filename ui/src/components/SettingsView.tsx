@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError } from "../lib/api";
-import { AuthRequiredError } from "../lib/auth";
+import { AuthRequiredError, changePassword } from "../lib/auth";
 import {
   getSettings,
   getVenueStatus,
@@ -12,6 +12,12 @@ import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 import { VenueCard } from "./VenueCard";
 
+type PwState =
+  | { kind: "idle" }
+  | { kind: "busy" }
+  | { kind: "done" }
+  | { kind: "error"; message: string };
+
 type State =
   | { kind: "loading" }
   | { kind: "auth" }
@@ -20,6 +26,24 @@ type State =
 
 export function SettingsView() {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [oldPw, setOldPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [pw, setPw] = useState<PwState>({ kind: "idle" });
+
+  async function onPasswordChange(e: Event) {
+    e.preventDefault();
+    if (pw.kind === "busy") return;
+    setPw({ kind: "busy" });
+    try {
+      await changePassword(oldPw, newPw);
+      setOldPw("");
+      setNewPw("");
+      setPw({ kind: "done" });
+    } catch (err) {
+      const described = describeError(err);
+      setPw({ kind: "error", message: described.message });
+    }
+  }
 
   const load = useCallback(() => {
     if (!authHeaderIfPresent().authorization) {
@@ -84,6 +108,47 @@ export function SettingsView() {
             />
           ))}
         </div>
+      </section>
+
+      <section class="settings-section">
+        <div class="section-heading settings-section-heading">
+          <div><p class="eyebrow">Account</p><h2>Password</h2></div>
+        </div>
+        <form class="auth-form password-form" onSubmit={onPasswordChange}>
+          <label>
+            <span class="auth-label">Current password</span>
+            <input
+              class="search-input"
+              type="password"
+              required
+              autocomplete="current-password"
+              value={oldPw}
+              onInput={(e) => setOldPw((e.target as HTMLInputElement).value)}
+            />
+          </label>
+          <label>
+            <span class="auth-label">New password</span>
+            <input
+              class="search-input"
+              type="password"
+              required
+              minlength={12}
+              autocomplete="new-password"
+              value={newPw}
+              onInput={(e) => setNewPw((e.target as HTMLInputElement).value)}
+            />
+            <span class="field-help">At least 12 characters.</span>
+          </label>
+          <button class="search-btn" type="submit" disabled={pw.kind === "busy"}>
+            {pw.kind === "busy" ? "Changing…" : "Change password"}
+          </button>
+          {pw.kind === "done" ? (
+            <p class="alert-feedback">Password changed.</p>
+          ) : null}
+          {pw.kind === "error" ? (
+            <p class="auth-error">{pw.message}</p>
+          ) : null}
+        </form>
       </section>
 
       <section class="settings-section surface-card provider-settings">

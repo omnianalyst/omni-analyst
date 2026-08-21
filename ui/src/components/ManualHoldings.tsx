@@ -31,6 +31,7 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
   const [symbol, setSymbol] = useState("");
   const [quantity, setQuantity] = useState("");
   const [basis, setBasis] = useState("");
+  const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -47,10 +48,12 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
         symbol: symbol.trim().toUpperCase(),
         quantity: quantity.trim(),
         cost_basis: basis.trim() === "" ? undefined : basis.trim(),
+        note: note.trim() === "" ? undefined : note.trim(),
       });
       setSymbol("");
       setQuantity("");
       setBasis("");
+      setNote("");
       onAdded();
     } catch (cause) {
       const described = describeError(cause);
@@ -91,6 +94,15 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
           inputMode="decimal"
         />
       </label>
+      <label>
+        Note (optional)
+        <input
+          value={note}
+          onInput={(e) => setNote((e.target as HTMLInputElement).value)}
+          placeholder="Why you hold it"
+          maxlength={200}
+        />
+      </label>
       <button type="submit" class="btn-secondary" disabled={busy}>
         {busy ? "Adding…" : "Track position"}
       </button>
@@ -105,6 +117,7 @@ function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => 
   const [basis, setBasis] = useState(
     holding.cost_basis === null ? "" : String(holding.cost_basis),
   );
+  const [note, setNote] = useState(holding.note ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -115,6 +128,7 @@ function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => 
       await editHolding(holding.id, {
         quantity: quantity.trim(),
         cost_basis: basis.trim() === "" ? undefined : basis.trim(),
+        note: note.trim() === "" ? undefined : note.trim(),
       });
       setEditing(false);
       onChanged();
@@ -139,8 +153,20 @@ function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => 
   return (
     <tr>
       <td>
-        <strong>{holding.symbol}</strong>
-        {holding.note ? <small> {holding.note}</small> : null}
+        {editing ? (
+          <input
+            value={note}
+            onInput={(e) => setNote((e.target as HTMLInputElement).value)}
+            placeholder="Note"
+            maxlength={200}
+            aria-label={`Note for ${holding.symbol}`}
+          />
+        ) : (
+          <>
+            <strong>{holding.symbol}</strong>
+            {holding.note ? <small> {holding.note}</small> : null}
+          </>
+        )}
       </td>
       <td>
         {editing ? (
@@ -187,6 +213,7 @@ function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => 
               onClick={() => {
                 setQuantity(String(holding.quantity));
                 setBasis(holding.cost_basis === null ? "" : String(holding.cost_basis));
+                setNote(holding.note ?? "");
                 setEditing(true);
               }}
             >

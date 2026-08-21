@@ -96,7 +96,7 @@ export function RecordView() {
       <section class="panel">
         <h2 class="panel-title">
           Open calls
-          <a class="panel-clear" href="/">today&apos;s read</a>
+          <a class="panel-clear" href="/">portfolio</a>
         </h2>
         <p class="panel-sub muted">
           Every call currently standing, with the evidence and the price that
