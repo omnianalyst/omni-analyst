@@ -32,7 +32,7 @@ from uuid import UUID
 from omni.portfolio import state
 from omni.portfolio.state import UnmarkedPosition
 from omni.trading.carry_loop import _price_at, _symbols
-from omni.venue.protocol import Venue
+from omni.venue.protocol import MarketType, Venue
 
 logger = logging.getLogger("omni.portfolio.nav")
 
@@ -71,11 +71,34 @@ async def snapshot(
         )
 
     by_entity = await _symbols(pool, entity_ids, venue)
-    entity_of = {
-        symbol: entity_id
-        for entity_id, pair in by_entity.items()
-        for symbol in (pair.spot, pair.perp)
-    }
+    entity_of: dict[str, UUID] = {}
+    seen: dict[str, UUID] = {}
+
+    def _claim(symbol: str | None, entity_id: UUID) -> None:
+        if symbol is None:
+            return
+        owner = seen.get(symbol)
+        if owner is not None and owner != entity_id:
+            # Same rule _symbols holds for tradable spellings: two entities
+            # sharing one held name cannot both be this position, and marking
+            # the first silently would price the book off the wrong asset.
+            raise ValueError(
+                f"entities {owner} and {entity_id} both hold as {symbol!r}"
+            )
+        seen[symbol] = entity_id
+        entity_of[symbol] = entity_id
+
+    for entity_id, pair in by_entity.items():
+        # The tradable spellings, plus the held spellings the venue may report
+        # the same market under (Hyperliquid's spot fills and positions carry
+        # UETH/USDC while orders are addressed to ETH/USDC). A wrapped holding
+        # is a holding of the same asset and prices as its canonical leg;
+        # mapping only the tradable spelling reads a hedged book as unmappable
+        # and leaves the NAV curve with a hole no later point can fill.
+        for market_type in (MarketType.SPOT, MarketType.PERPETUAL):
+            _claim(venue.symbol_for(pair.asset, market_type), entity_id)
+            for alias in venue.held_symbol_aliases(pair.asset, market_type):
+                _claim(alias, entity_id)
 
     book = await state.load(pool, portfolio_id)
     marks: dict[tuple[str, str], Decimal] = {}

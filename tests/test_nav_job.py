@@ -16,7 +16,7 @@ import pytest
 from omni.portfolio.state import create_portfolio
 from omni.trading.nav_job import Unmarkable, snapshot
 from omni.venue.paper_venue import Bar, PaperVenue, RecordedBars
-from omni.venue.protocol import Capabilities
+from omni.venue.protocol import Capabilities, MarketType
 
 NOW = datetime(2026, 3, 1, 5, 0, tzinfo=UTC)
 VENUE = "paper"
@@ -153,6 +153,65 @@ class TestAPartialNavIsNeverWritten:
         with pytest.raises(Unmarkable, match="no entity"):
             await snapshot(
                 db.pool, venue=venue, portfolio_id=portfolio_id,
+                entity_ids=list(ids.values()), audience_user_id=owner, at=NOW,
+            )
+
+        assert await _rows(db, portfolio_id) == []
+
+
+class TestAHeldSpellingIsNotAnUnknownPosition:
+    """The seam the 2026-08 wind-down exposed on production.
+
+    Hyperliquid reports the wrapped spot holding as UETH/USDC while orders are
+    addressed to ETH/USDC. The NAV job mapped only the tradable spellings, so
+    a hedged carry pair read as one unmappable position and the snapshot
+    refused nightly -- a hole in a curve that cannot be backfilled. A wrapped
+    holding is a holding of the same asset and must price as its canonical leg.
+    """
+
+    async def test_a_held_alias_marks_as_its_canonical_entity(
+        self, db, owner, portfolio_id, venue
+    ):
+        class WrappedVenue(PaperVenue):
+            def held_symbol_aliases(self, asset, market_type):
+                if market_type is MarketType.SPOT and asset == "AAA/USD":
+                    return ("WRAPPED/AAA",)
+                return ()
+
+        ids = await _world(db, owner)
+        wrapped = WrappedVenue(venue._market, CAPABILITIES, name=VENUE,
+                               spread_bps=Decimal(4),
+                               starting_balances={"USD": Decimal(100000)})
+        await _position(db, portfolio_id, "WRAPPED/AAA", Decimal(3))
+
+        nav = await snapshot(
+            db.pool, venue=wrapped, portfolio_id=portfolio_id,
+            entity_ids=list(ids.values()), audience_user_id=owner, at=NOW,
+        )
+
+        # 3 wrapped AAA priced as AAA at 100, plus the 1000 opening cash.
+        assert nav == Decimal(1300)
+        (row,) = await _rows(db, portfolio_id)
+        assert row["gross_exposure"] == Decimal(300)
+
+    async def test_a_colliding_alias_refuses_rather_than_pricing_off_the_wrong_asset(
+        self, db, owner, portfolio_id, venue
+    ):
+        class CollidingVenue(PaperVenue):
+            def held_symbol_aliases(self, asset, market_type):
+                if market_type is MarketType.SPOT:
+                    return ("SHARED/HELD",)
+                return ()
+
+        ids = await _world(db, owner)
+        colliding = CollidingVenue(venue._market, CAPABILITIES, name=VENUE,
+                                   spread_bps=Decimal(4),
+                                   starting_balances={"USD": Decimal(100000)})
+        await _position(db, portfolio_id, "SHARED/HELD", Decimal(1))
+
+        with pytest.raises(ValueError, match="both hold as"):
+            await snapshot(
+                db.pool, venue=colliding, portfolio_id=portfolio_id,
                 entity_ids=list(ids.values()), audience_user_id=owner, at=NOW,
             )
 
