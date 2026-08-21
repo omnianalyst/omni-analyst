@@ -13,7 +13,6 @@ import {
   describeEdgeMonitor,
   describeRecord,
   formatExcessBps,
-  formatP,
   formatT,
   getEdgeMonitor,
   getResearchRecord,
@@ -233,12 +232,21 @@ function EdgeSection({
     decayed: "dead",
     insufficient: "quiet",
   };
+  // Plain words for the nightly verdict. The statistical vocabulary
+  // (holding/unconfirmed/decayed/insufficient) lives behind the disclosure;
+  // what an operator needs first is "does the rule still work or not".
+  const stateWord: Record<string, string> = {
+    holding: "still working",
+    unconfirmed: "unclear",
+    decayed: "stopped working",
+    insufficient: "too new to judge",
+  };
   return (
     <section class={`surface-card research-record${alerts.length > 0 ? " attention-card" : ""}`}>
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Edge decay</p>
-          <h2>{alerts.length > 0 ? "A promoted edge has decayed" : "Promoted edges"}</h2>
+          <p class="eyebrow">Edge watch</p>
+          <h2>{alerts.length > 0 ? "A live rule has stopped working" : "Do the live rules still work?"}</h2>
         </div>
         {alerts.length > 0 ? (
           <span class="count-badge count-warning">{alerts.length}</span>
@@ -249,29 +257,27 @@ function EdgeSection({
         <table class="data-table">
           <thead>
             <tr>
-              <th>Book</th>
+              <th>Rule</th>
               <th>Role</th>
-              <th>State</th>
-              <th>Mean session excess</th>
-              <th>Decay p</th>
-              <th>Recent window</th>
+              <th>Verdict</th>
+              <th>vs benchmark</th>
+              <th>Measured over</th>
             </tr>
           </thead>
           <tbody>
             {books.map((book) => (
               <tr key={book.book}>
                 <td><strong>{book.book}</strong></td>
-                <td>{book.promoted ? "promoted edge" : "control"}</td>
+                <td>{book.promoted ? "live rule" : "baseline"}</td>
                 <td>
                   <span class={`status-dot-simple tone-${stateTone[book.state] ?? "quiet"}`} />
-                  {book.state === "insufficient" ? "insufficient history" : book.state}
+                  {stateWord[book.state] ?? book.state}
                 </td>
                 <td>
                   {book.state === "insufficient"
                     ? book.reason ?? "—"
                     : formatExcessBps(book.mean_session_excess)}
                 </td>
-                <td>{formatP(book.decay_p)}</td>
                 <td>
                   {book.window_start === null || book.window_end === null
                     ? "—"
@@ -294,10 +300,14 @@ function EdgeSection({
       {noteOpen ? (
         <p class="research-note">
           Each night the scoring pass measures every shadow book against its benchmark; this
-          monitor judges the most recent third of that forward record. Significantly negative
-          excess is decayed — the promoted claim reversed. Non-positive but inconclusive is
-          unconfirmed, not dead: a quiet edge is not a dead edge. History cannot be backfilled,
-          so an insufficient row is the monitor confirming it looked.
+          monitor judges the most recent third of that forward record. A rule the evidence
+          turned against is <strong>stopped working</strong> (statistically: decayed — the
+          promoted claim reversed). <strong>Unclear</strong> means non-positive but
+          inconclusive: a quiet edge is not a dead edge. <strong>Too new to judge</strong>
+          means the forward history has not accrued yet, and history cannot be backfilled —
+          such a row is the monitor confirming it looked. A <strong>baseline</strong> book
+          trades the same universe without the rule, so the comparison isolates the rule's
+          own contribution.
         </p>
       ) : null}
     </section>
