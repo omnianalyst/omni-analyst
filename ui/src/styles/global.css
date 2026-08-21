@@ -6456,3 +6456,50 @@ a.btn-secondary {
   font-variant-numeric: tabular-nums;
   margin-left: auto;
 }
+
+/* SPA view transitions. The framework's <ViewTransitions /> component ships
+   its CSS as an inline <style> and its flag as an inline <script> — the
+   script only executes when server-rendered into the document; in a static
+   SPA deployment scripts inserted at runtime never run, so the flag was
+   never set and navigations hard-swapped. The CSS lives here (always
+   loaded) and the flag is set in _layout's mount effect (see ADOPTION_FINDINGS).
+   Shape: only main crossfades; the header swaps instantly because the old
+   root snapshot is hidden and static chrome is pixel-identical. */
+@view-transition {
+  navigation: auto;
+}
+
+html {
+  background-color: var(--bg);
+  view-transition-name: none;
+}
+
+main:not(main main) {
+  view-transition-name: neutron-main;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+  height: 100%;
+}
+::view-transition-old(root) {
+  opacity: 0;
+}
+::view-transition-group(root) {
+  animation: none;
+  isolation: auto;
+}
+::view-transition-image-pair(root) {
+  isolation: auto;
+}
+::view-transition-group(neutron-main) {
+  animation: none;
+}
+::view-transition-old(neutron-main) {
+  animation: 120ms ease-out both;
+}
+::view-transition-new(neutron-main) {
+  animation: 120ms ease-in 60ms both;
+}

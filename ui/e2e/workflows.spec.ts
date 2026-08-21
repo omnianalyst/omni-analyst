@@ -95,11 +95,11 @@ test("login enters the private shell and header logout clears it", async ({ page
   await page.goto("/login");
   await waitForClient(page);
   await page.getByLabel("Email").fill("operator@example.com");
-  await page.getByLabel("Password").fill("password123");
+  await page.getByLabel("Password").fill("password-1234");
   await page.getByRole("button", { name: "Sign in" }).click();
 
   await expect(page).toHaveURL("/");
-  expect(submitted).toEqual({ email: "operator@example.com", password: "password123" });
+  expect(submitted).toEqual({ email: "operator@example.com", password: "password-1234" });
   await page.getByTitle("Settings").click();
   await page.getByRole("button", { name: "Sign out" }).click();
 

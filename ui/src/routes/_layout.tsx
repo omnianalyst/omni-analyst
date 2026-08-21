@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { useLocation, ViewTransitions } from "@neutron-build/core/client";
+import { useLocation } from "@neutron-build/core/client";
 import "../styles/global.css";
 import "../styles/discover.css";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "../components/CommandPalette";
@@ -150,6 +150,17 @@ export default function Layout({
 
   const [menuOpen, setMenuOpen] = useState(false);
 
+  // Enable SPA view transitions: the framework's navigate() wraps DOM swaps
+  // in startViewTransition only when this flag is set, and its own bootstrap
+  // script never executes in a static SPA build (runtime-inserted scripts do
+  // not run). The transition CSS is in global.css; this just turns it on.
+  // Also retire the boot skeleton -- hydration has painted real chrome.
+  useEffect(() => {
+    (window as unknown as { __NEUTRON_VIEW_TRANSITIONS__?: boolean })
+      .__NEUTRON_VIEW_TRANSITIONS__ = true;
+    document.getElementById("boot-skeleton")?.remove();
+  }, []);
+
   function signOut() {
     setAllowed(false);
     clearAuthToken();
@@ -176,7 +187,6 @@ export default function Layout({
   if (isPublic) {
     return (
       <div class="app-shell">
-        <ViewTransitions />
         <main class="content content-centered">{children}</main>
       </div>
     );

@@ -5,8 +5,42 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Omni Analyst</title>
+    <style>
+      /* The boot skeleton: what the document paints before the app bundle
+         runs. Without it the shell is a blank page and the first paint of
+         the real UI reads as the whole site flashing in; with it the load
+         is a dark page with a quiet pulse, and the app replacing the pulse
+         is one calm change. Colors are literals of the app's --bg tokens
+         because this paints before any stylesheet link resolves.
+         Removed by the app on mount (see _layout.tsx). */
+      #boot-skeleton {
+        position: fixed;
+        inset: 0;
+        background: #05070a;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        color: #e6edf6;
+        font: 500 13px/1 system-ui, sans-serif;
+        letter-spacing: 0.14em;
+      }
+      #boot-skeleton::after {
+        content: "";
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: 2px solid #2a3a52;
+        border-top-color: #e6edf6;
+        animation: boot-spin 0.9s linear infinite;
+      }
+      @keyframes boot-spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
   </head>
   <body>
+    <div id="boot-skeleton">OMNI ANALYST</div>
     <div id="app"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
