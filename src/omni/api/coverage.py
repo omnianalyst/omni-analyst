@@ -313,18 +313,29 @@ def build_router(app: App) -> Router:
             )
         name = (body.name or "").strip() or symbol
 
+        # The fill pipeline resolves a provider's lookup key from
+        # `entity.identifiers` (resolve.key_for): equity and ETF prices come from
+        # Polygon by ticker, so a user-created company/ETF carries that mapping
+        # from birth -- without it the price gap routes to a capability that can
+        # only refuse. A crypto asset is left empty deliberately: the coingecko
+        # id is a curated slug, not derivable from a symbol, and a guessed
+        # identifier would attribute one asset's data to another.
+        identifiers = (
+            {"polygon": symbol} if body.kind in ("company", "etf") else {}
+        )
+
         from omni.demand.ledger import direct_attention
         from omni.watchlist.lists import claim_types_for_kind
 
         async with app.db.pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
                 """
-                INSERT INTO entity (kind, symbol, name)
-                VALUES ($1, $2, $3)
+                INSERT INTO entity (kind, symbol, name, identifiers)
+                VALUES ($1, $2, $3, $4::jsonb)
                 ON CONFLICT (kind, symbol) DO UPDATE SET name = entity.name
                 RETURNING id, kind, symbol, name, created_at
                 """,
-                body.kind, symbol, name,
+                body.kind, symbol, name, json.dumps(identifiers),
             )
             # Demand is raised on every call only when this user has no active
             # row for it -- two users tracking the same name are two rows (the

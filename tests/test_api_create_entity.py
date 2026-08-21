@@ -47,6 +47,16 @@ async def test_creation_mints_the_entity_and_its_kinds_demand(
     assert body["symbol"] == "BOTZ"
     assert body["name"] == "Global X Robotics"
 
+    # The polygon identifier is written at birth: without it the price gap
+    # routes to a capability that can only refuse (observed live on
+    # 2026-08-21: BOTZ's first fill attempt went to coingecko).
+    import json as _json
+
+    raw_identifiers = await db.pool.fetchval(
+        "SELECT identifiers FROM entity WHERE id = $1", body["id"],
+    )
+    assert _json.loads(raw_identifiers) == {"polygon": "BOTZ"}
+
     rows = await db.pool.fetch(
         "SELECT claim_type::text AS t FROM demand "
         "WHERE entity_id = $1 AND channel = 'direct' AND active",
