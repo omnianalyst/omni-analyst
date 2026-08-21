@@ -210,7 +210,13 @@ async def remove_entity(
 
 
 async def entries(pool, *, watchlist_id: UUID, user_id: UUID) -> list | None:
-    """The entities on a watchlist, or ``None`` if not owned by ``user_id``."""
+    """The entities on a watchlist, or ``None`` if not owned by ``user_id``.
+
+    Each entry carries its latest owner-visible price and the price ~30 days
+    back, so the list can show what a watchlist is for: where things stand.
+    Audience-scoped like every claim read -- a watchlist entry's price must
+    respect the same byo_only visibility a detail page would.
+    """
     owned = await pool.fetchval(
         "SELECT 1 FROM watchlist WHERE id = $1 AND user_id = $2",
         watchlist_id,
@@ -219,11 +225,45 @@ async def entries(pool, *, watchlist_id: UUID, user_id: UUID) -> list | None:
     if owned is None:
         return None
     return await pool.fetch(
-        "SELECT e.entity_id, en.kind, en.symbol, en.name, "
-        "e.added_at, e.demand_id "
-        "FROM watchlist_entry e "
-        "JOIN entity en ON en.id = e.entity_id "
-        "WHERE e.watchlist_id = $1 "
-        "ORDER BY e.added_at",
+        """
+        SELECT e.entity_id, en.kind, en.symbol, en.name,
+               e.added_at, e.demand_id,
+               latest.value AS latest_value,
+               latest.event_date AS latest_as_of,
+               month_ago.value AS month_ago_value
+        FROM watchlist_entry e
+        JOIN entity en ON en.id = e.entity_id
+        LEFT JOIN LATERAL (
+            SELECT (c.value->>'value')::numeric AS value,
+                   c.event_date
+            FROM claim c
+            WHERE c.entity_id = e.entity_id
+              AND c.claim_type = 'price_snapshot'
+              AND c.knowledge_date <= now()
+              AND (
+                (c.audience_user_id IS NULL AND c.redistributable = 'allowed')
+                OR c.audience_user_id = $2
+              )
+            ORDER BY c.event_date DESC
+            LIMIT 1
+        ) latest ON true
+        LEFT JOIN LATERAL (
+            SELECT (c.value->>'value')::numeric AS value
+            FROM claim c
+            WHERE c.entity_id = e.entity_id
+              AND c.claim_type = 'price_snapshot'
+              AND c.knowledge_date <= now()
+              AND c.event_date <= now() - interval '30 days'
+              AND (
+                (c.audience_user_id IS NULL AND c.redistributable = 'allowed')
+                OR c.audience_user_id = $2
+              )
+            ORDER BY c.event_date DESC
+            LIMIT 1
+        ) month_ago ON true
+        WHERE e.watchlist_id = $1
+        ORDER BY e.added_at
+        """,
         watchlist_id,
+        user_id,
     )

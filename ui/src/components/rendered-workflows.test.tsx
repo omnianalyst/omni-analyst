@@ -531,6 +531,7 @@ describe("the entity page's Track button", () => {
   it("creates a watchlist on first track and adds the entity", async () => {
     let watchlists: unknown[] = [];
     let added: string[] = [];
+    let removed: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       const path = url.pathname;
@@ -547,16 +548,36 @@ describe("the entity page's Track button", () => {
         added.push(String(JSON.parse(String(init?.body)).entity_id));
         return json({ watchlist_id: "wl-1", entity_id: "e-9", added_at: "2026-08-21T00:00:00Z" }, 201);
       }
+      if (path === "/watchlists/wl-1/entries" && method === "GET") {
+        return json({ entries: added.map((id) => ({
+          entity_id: id, kind: "etf", symbol: "BOTZ", name: "BOTZ", added_at: "2026-08-21T00:00:00Z",
+        })) });
+      }
+      if (path === "/watchlists/wl-1/entries/e-9" && method === "DELETE") {
+        removed.push("e-9");
+        added = added.filter((id) => id !== "e-9");
+        return json({ removed: true });
+      }
       return json({ detail: "not found" }, 404);
     }));
     localStorage.setItem(AUTH_TOKEN_KEY, "token");
     const container = root();
     render(<TrackButton entityId="e-9" />, container);
 
+    // The button checks tracked state first; wait for the check to land.
+    await waitFor(() => expect(button(container, "Track")).toBeDefined());
     await act(() => button(container, "Track").click());
-    await waitFor(() =>
-      expect(container.textContent).toContain("Tracking · updates to Watchlist"));
+    await waitFor(() => {
+      const b = button(container, "Tracking");
+      expect(b).toBeDefined();
+      expect(b.disabled).toBe(false);
+    });
     expect(added).toEqual(["e-9"]);
+
+    // Un-track: the same button removes and withdraws demand.
+    await act(() => button(container, "Tracking").click());
+    await waitFor(() => expect(button(container, "Track")).toBeDefined());
+    expect(removed).toEqual(["e-9"]);
     localStorage.removeItem(AUTH_TOKEN_KEY);
   });
 });

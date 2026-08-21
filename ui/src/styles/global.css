@@ -6397,3 +6397,62 @@ a.btn-secondary {
   margin-left: 10px;
   vertical-align: middle;
 }
+
+/* Entity chart: range selector + hover crosshair/tooltip. */
+.chart-range-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.chart-range-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.chart-range-btn.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.chart-canvas {
+  position: relative;
+}
+.chart-crosshair {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+.chart-tooltip {
+  position: absolute;
+  top: 6px;
+  transform: translateX(-50%);
+  display: grid;
+  gap: 1px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  pointer-events: none;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.chart-tooltip span {
+  color: var(--muted);
+}
+.chart-bound {
+  font-variant-numeric: tabular-nums;
+}
+
+.watch-price-cell {
+  display: grid;
+  gap: 1px;
+  justify-items: end;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}

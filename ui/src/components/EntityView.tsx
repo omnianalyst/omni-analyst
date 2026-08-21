@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { useParams, useSearchParams } from "@neutron-build/core/client";
 import {
   describeError,
@@ -46,8 +46,34 @@ function Metric(
   );
 }
 
+const RANGES = [
+  { label: "1M", days: 31 },
+  { label: "3M", days: 92 },
+  { label: "6M", days: 183 },
+  { label: "1Y", days: 365 },
+  { label: "All", days: 0 },
+] as const;
+
+type Hover = { x: number; pointIndex: number } | null;
+
 function PriceChart({ profile }: { profile: EntityProfile }) {
-  const path = sparklinePath(profile.price.series, SPARK_WIDTH, SPARK_HEIGHT);
+  const [rangeIdx, setRangeIdx] = useState(RANGES.length - 1);
+  const [hover, setHover] = useState<Hover>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+
+  const full = profile.price.series;
+  const range = RANGES[rangeIdx];
+  const cutoffDate = range.days
+    ? new Date(full[full.length - 1].date).getTime() - range.days * 86400_000
+    : Number.NEGATIVE_INFINITY;
+  const series = range.days
+    ? full.filter((p) => new Date(p.date).getTime() >= cutoffDate)
+    : full;
+  // A window that clips everything (e.g. 1M on a series updated monthly)
+  // falls back to the newest points rather than an empty chart.
+  const shown = series.length >= 2 ? series : full.slice(-2);
+
+  const path = sparklinePath(shown, SPARK_WIDTH, SPARK_HEIGHT);
   if (path === null) {
     return (
       <p class="clean-empty">
@@ -55,21 +81,87 @@ function PriceChart({ profile }: { profile: EntityProfile }) {
       </p>
     );
   }
-  const first = profile.price.series[0];
-  const last = profile.price.series[profile.price.series.length - 1];
+  const first = shown[0];
+  const last = shown[shown.length - 1];
   const rising = last.close >= first.close;
+  const values = shown.map((p) => p.close);
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+
+  function onMove(e: MouseEvent) {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    setHover({
+      x: frac * SPARK_WIDTH,
+      pointIndex: Math.round(frac * (shown.length - 1)),
+    });
+  }
+
+  const hoveredPoint = hover ? shown[hover.pointIndex] : null;
+
   return (
     <figure class="entity-chart">
-      <svg
-        viewBox={`0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}`}
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={`${profile.entity.symbol} close from ${first.date} to ${last.date}`}
-      >
-        <path d={path} class={rising ? "spark-rising" : "spark-falling"} />
-      </svg>
+      <div class="chart-range-row" role="tablist" aria-label="Chart range">
+        {RANGES.map((r, i) => (
+          <button
+            key={r.label}
+            type="button"
+            class={`chart-range-btn${i === rangeIdx ? " is-active" : ""}`}
+            aria-selected={i === rangeIdx}
+            onClick={() => {
+              setRangeIdx(i);
+              setHover(null);
+            }}
+          >
+            {r.label}
+          </button>
+        ))}
+      </div>
+      <div class="chart-canvas">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}`}
+          preserveAspectRatio="none"
+          role="img"
+          aria-label={`${profile.entity.symbol} close from ${first.date} to ${last.date}`}
+          onMouseMove={onMove}
+          onMouseLeave={() => setHover(null)}
+        >
+          <path d={path} class={rising ? "spark-rising" : "spark-falling"} />
+          {hover ? (
+            <line
+              x1={hover.x}
+              y1={0}
+              x2={hover.x}
+              y2={SPARK_HEIGHT}
+              class="chart-crosshair"
+            />
+          ) : null}
+        </svg>
+        {hoveredPoint ? (
+          <div
+            class="chart-tooltip"
+            style={{
+              left: `${(hover ? hover.x / SPARK_WIDTH : 0) * 100}%`,
+            }}
+          >
+            <strong>{hoveredPoint.close.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong>
+            <span>{hoveredPoint.date}</span>
+          </div>
+        ) : null}
+      </div>
       <figcaption>
-        {profile.price.series.length} stored closes · {first.date} to {last.date}
+        <span class="chart-bound">{first.date}</span>
+        {" · "}
+        {shown.length} stored closes{range.days ? ` · ${range.label} window` : ""}
+        {" · "}
+        <span class="chart-bound">
+          {lo.toLocaleString()} – {hi.toLocaleString()}
+        </span>
+        {" · "}
+        <span class="chart-bound">{last.date}</span>
         {profile.price.source ? ` · ${profile.price.source}` : ""}
       </figcaption>
     </figure>

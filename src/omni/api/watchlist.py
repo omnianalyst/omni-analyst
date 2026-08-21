@@ -43,6 +43,17 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def _change_30d(latest, month_ago) -> float | None:
+    """Fractional change over ~30 days, or None when either side is missing.
+
+    A missing base is not a zero -- dividing by an absent price would report a
+    nonsense change for freshly tracked names. None renders as no-change-shown.
+    """
+    if latest is None or month_ago is None or month_ago == 0:
+        return None
+    return float(latest - month_ago) / float(month_ago)
+
+
 class CreateWatchlistIn(BaseModel):
     name: str
 
@@ -131,6 +142,13 @@ def build_router(app: App) -> Router:
                     "symbol": r["symbol"],
                     "name": r["name"],
                     "added_at": _iso(r["added_at"]),
+                    "latest_price": float(r["latest_value"])
+                    if r["latest_value"] is not None
+                    else None,
+                    "latest_as_of": r["latest_as_of"].isoformat()
+                    if r["latest_as_of"] is not None
+                    else None,
+                    "change_30d": _change_30d(r["latest_value"], r["month_ago_value"]),
                 }
                 for r in rows
             ]

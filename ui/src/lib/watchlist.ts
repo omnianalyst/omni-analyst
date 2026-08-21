@@ -24,6 +24,9 @@ export interface WatchlistEntry {
   kind: string;
   symbol: string | null;
   name: string | null;
+  latest_price?: number | null;
+  latest_as_of?: string | null;
+  change_30d?: number | null;
   added_at: string | null;
 }
 
