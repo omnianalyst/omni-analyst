@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { useLocation } from "@neutron-build/core/client";
+import { useLocation, ViewTransitions } from "@neutron-build/core/client";
 import "../styles/global.css";
 import "../styles/discover.css";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "../components/CommandPalette";
@@ -176,6 +176,7 @@ export default function Layout({
   if (isPublic) {
     return (
       <div class="app-shell">
+        <ViewTransitions />
         <main class="content content-centered">{children}</main>
       </div>
     );
