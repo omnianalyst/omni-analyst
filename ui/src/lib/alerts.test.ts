@@ -12,10 +12,12 @@ describe("CONDITION_KINDS", () => {
     expect(CONDITION_KINDS).toEqual([
       "value_above",
       "value_below",
+      "pct_change_above",
+      "pct_change_below",
       "staleness_exceeds",
       "contradiction",
     ]);
-    expect(CONDITION_KINDS).toHaveLength(4);
+    expect(CONDITION_KINDS).toHaveLength(6);
   });
 });
 
@@ -34,6 +36,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "value_above",
       threshold: "42",
+      pct: "",
+      windowDays: "30",
       field: "value",
       seconds: "",
     });
@@ -51,6 +55,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "value_below",
       threshold: "0.5",
+      pct: "",
+      windowDays: "30",
       field: "pe_ratio",
       seconds: "",
     });
@@ -68,6 +74,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "value_above",
       threshold: "",
+      pct: "",
+      windowDays: "30",
       field: "value",
       seconds: "",
     });
@@ -79,6 +87,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "value_above",
       threshold: "abc",
+      pct: "",
+      windowDays: "30",
       field: "value",
       seconds: "",
     });
@@ -89,6 +99,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "value_above",
       threshold: "1",
+      pct: "",
+      windowDays: "30",
       field: "  ",
       seconds: "",
     });
@@ -100,6 +112,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "staleness_exceeds",
       threshold: "",
+      pct: "",
+      windowDays: "30",
       field: "value",
       seconds: "3600",
     });
@@ -116,6 +130,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "staleness_exceeds",
       threshold: "",
+      pct: "",
+      windowDays: "30",
       field: "value",
       seconds: "0",
     });
@@ -127,6 +143,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "staleness_exceeds",
       threshold: "",
+      pct: "",
+      windowDays: "30",
       field: "value",
       seconds: "-5",
     });
@@ -137,6 +155,8 @@ describe("buildCondition", () => {
     const out = buildCondition({
       kind: "contradiction",
       threshold: "1",
+      pct: "",
+      windowDays: "30",
       field: "value",
       seconds: "",
     });
@@ -156,6 +176,8 @@ describe("buildCondition", () => {
         threshold: "10",
         field: "value",
         seconds: "",
+        pct: "",
+        windowDays: "30",
       });
       if (!out.ok) throw new Error(`expected ok for ${kind}`);
       const c = out.condition as { kind: string; threshold: number; field: string };

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from neutron import App, Router
+from pydantic import BaseModel
 from starlette.requests import Request
 
 from omni.auth import resolve_audience_from_request
@@ -14,6 +15,11 @@ from omni.config import settings
 from omni.credentials.catalog import PROVIDER_CATALOG
 
 __all__ = ["build_router"]
+
+
+class NotifyIn(BaseModel):
+    webhook_url: str | None = None
+    email: str | None = None
 
 
 async def _load_settings(pool, user_id) -> dict[str, Any]:
@@ -136,6 +142,80 @@ def _sanitized_venues(saved: dict) -> dict:
 
 def build_router(app: App) -> Router:
     router = Router()
+
+    @router.get("/settings/notifications")
+    async def get_notifications(request: Request) -> dict:
+        """Report the notify channels without returning the webhook URL.
+
+        A webhook URL can embed a secret (a Discord/Slack token); reporting
+        its mere existence is the same rule provider keys follow on this page.
+        """
+        user = resolve_audience_from_request(request)
+        if user is None:
+            from neutron.error import unauthorized
+
+            raise unauthorized("Authentication required")
+        row = await app.db.pool.fetchrow(
+            "SELECT data FROM user_settings WHERE user_id = $1", user
+        )
+        data: dict = {}
+        if row is not None:
+            data = row["data"]
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except (ValueError, TypeError):
+                    data = {}
+        notify = (data or {}).get("notify") or {}
+        return {
+            "webhook_configured": bool(notify.get("webhook_url")),
+            "email": notify.get("email") or None,
+            "smtp_available": bool(settings.smtp_host),
+        }
+
+    @router.put("/settings/notifications")
+    async def put_notifications(body: NotifyIn, request: Request) -> dict:
+        user = resolve_audience_from_request(request)
+        if user is None:
+            from neutron.error import unauthorized
+
+            raise unauthorized("Authentication required")
+        notify = {
+            "webhook_url": (body.webhook_url or "").strip() or None,
+            "email": (body.email or "").strip() or None,
+        }
+        await app.db.pool.execute(
+            """
+            INSERT INTO user_settings (user_id, data)
+            VALUES ($1, jsonb_build_object('notify', $2::jsonb))
+            ON CONFLICT (user_id) DO UPDATE SET
+                data = user_settings.data || jsonb_build_object('notify', $2::jsonb)
+            """,
+            user,
+            json.dumps(notify),
+        )
+        return {
+            "webhook_configured": notify["webhook_url"] is not None,
+            "email": notify["email"],
+            "smtp_available": bool(settings.smtp_host),
+        }
+
+    @router.post("/settings/notifications/test")
+    async def test_notifications(request: Request) -> dict:
+        """Send one test event through every configured channel."""
+        from omni.alerts.notify import send_test
+
+        user = resolve_audience_from_request(request)
+        if user is None:
+            from neutron.error import unauthorized
+
+            raise unauthorized("Authentication required")
+        try:
+            return await send_test(app.db.pool, user)
+        except Exception as exc:  # noqa: BLE001 - the failure IS the payload
+            from neutron.error import bad_request
+
+            raise bad_request(str(exc)) from exc
 
     @router.get("/settings/config")
     async def get_settings(request: Request) -> dict:

@@ -259,7 +259,10 @@ async def surface_once(pool, *, target_hit_rate: float = 0.6) -> int:
     return n
 
 
-_ACTIVE_ALERTS = "SELECT id, user_id, entity_id, claim_type, condition FROM alert WHERE active"
+_ACTIVE_ALERTS = (
+    "SELECT id, user_id, entity_id, claim_type, condition, one_shot "
+    "FROM alert WHERE active"
+)
 
 
 async def evaluate_alerts_once(pool) -> int:
@@ -277,6 +280,14 @@ async def evaluate_alerts_once(pool) -> int:
         try:
             new = await evaluate(pool, a, audience=a["user_id"])
             fired += len(new)
+            if new:
+                # Delivery is part of firing, not a follow-up job: a firing
+                # nobody hears about is furniture. Failures are logged inside
+                # dispatch and never block the loop -- a dead webhook must not
+                # stop the next alert from being recorded.
+                from omni.alerts.notify import dispatch
+
+                await dispatch(pool, a, new)
         except Exception:
             logger.exception("alert %s evaluation failed", a["id"])
     return fired

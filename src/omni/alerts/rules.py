@@ -36,7 +36,11 @@ from omni.demand.ledger import direct_attention
 # The closed set of condition kinds. Adding one means writing its predicate in
 # _satisfying and a test; the set is spelled out so a typo in the stored JSONB
 # cannot widen what evaluate will run.
-KNOWN_KINDS = frozenset({"value_above", "value_below", "staleness_exceeds", "contradiction"})
+KNOWN_KINDS = frozenset({
+    "value_above", "value_below",
+    "pct_change_above", "pct_change_below",
+    "staleness_exceeds", "contradiction",
+})
 
 _DEFAULT_VALUE_FIELD = "value"
 
@@ -75,6 +79,28 @@ def validate_condition(condition: Any) -> dict:
         if not isinstance(field, str) or not field:
             raise InvalidCondition(f"{kind}.field must be a non-empty string")
         return {"kind": kind, "threshold": float(threshold), "field": field}
+
+    if kind in ("pct_change_above", "pct_change_below"):
+        pct = condition.get("pct")
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+            raise InvalidCondition(f"{kind}.pct must be a number")
+        if pct <= 0:
+            # A magnitude, not a signed direction: the kind carries the sign.
+            raise InvalidCondition(f"{kind}.pct must be positive")
+        window = condition.get("window_days")
+        if isinstance(window, bool) or not isinstance(window, (int, float)):
+            raise InvalidCondition(f"{kind}.window_days must be a number")
+        if window < 1:
+            raise InvalidCondition(f"{kind}.window_days must be at least 1")
+        field = condition.get("field", _DEFAULT_VALUE_FIELD)
+        if not isinstance(field, str) or not field:
+            raise InvalidCondition(f"{kind}.field must be a non-empty string")
+        return {
+            "kind": kind,
+            "pct": float(pct),
+            "window_days": float(window),
+            "field": field,
+        }
 
     if kind == "staleness_exceeds":
         seconds = condition.get("seconds")
@@ -119,29 +145,108 @@ def _value_signature(claim: dict) -> str:
     return json.dumps(_loads(claim.get("value")), sort_keys=True, default=str)
 
 
+def _ordered(claims: list) -> list:
+    """Claims oldest-first by knowledge_date, ties by id, values decoded.
+
+    Crossing detection reads the sequence; the order claims come back from a
+    query is not a sequence, it is an implementation detail.
+    """
+    return sorted(
+        claims, key=lambda c: (c["knowledge_date"], str(c["id"]))
+    )
+
+
+def _level_predicate(condition: dict):
+    """The per-claim predicate for the level kinds, as a callable."""
+    kind = condition["kind"]
+    field = condition["field"]
+    threshold = condition["threshold"]
+
+    def holds(c: dict) -> bool:
+        v = _claim_number(c, field)
+        if v is None:
+            return False
+        return v > threshold if kind == "value_above" else v < threshold
+
+    return holds
+
+
+def _pct_predicate(condition: dict, claims: list):
+    """The per-claim predicate for the percent kinds, as a callable.
+
+    A claim holds when its value has moved at least ``pct`` percent against the
+    most recent claim at least ``window_days`` older -- "up 10% over the last
+    30 days", measured claim to claim, never against a fabricated base. A claim
+    with no such base (the window's own history) or a non-numeric base does not
+    hold: an honest refusal, not a comparison against zero.
+    """
+    from bisect import bisect_right
+    from datetime import timedelta
+
+    kind = condition["kind"]
+    field = condition["field"]
+    pct = condition["pct"]
+    window = timedelta(days=condition["window_days"])
+    ordered = _ordered(claims)
+    dates = [c["knowledge_date"] for c in ordered]
+
+    def holds(c: dict) -> bool:
+        v = _claim_number(c, field)
+        if v is None:
+            return False
+        # The newest claim whose knowledge_date is at least the window older.
+        idx = bisect_right(dates, c["knowledge_date"] - window) - 1
+        if idx < 0:
+            return False
+        base = _claim_number(ordered[idx], field)
+        if base is None or base == 0:
+            return False
+        change = (v - base) / base
+        return change >= pct / 100 if kind == "pct_change_above" else change <= -pct / 100
+
+    return holds
+
+
+def _crossings(claims: list, holds) -> list:
+    """The claims where the condition becomes true -- not stays true.
+
+    This is the fix for the fires-on-every-claim defect: a level above a
+    threshold used to fire a firing per claim (a daily close above 100 meant a
+    notification per day, forever). A condition fires when it *crosses*: the
+    claim holds and the claim before it did not (or there is no claim before
+    it). Re-arming falls out of the same rule -- once above, further above
+    claims are not crossings; after a dip below, the next above claim is.
+
+    The (alert, claim) firing dedup remains the belt to these braces: a claim
+    fires at most once ever, whatever the sequence does.
+    """
+    ordered = _ordered(claims)
+    out = []
+    prev_holds = False
+    for c in ordered:
+        now_holds = holds(c)
+        if now_holds and not prev_holds:
+            out.append(c)
+        prev_holds = now_holds
+    return out
+
+
 def _satisfying(condition: dict, claims: list, now: datetime) -> list:
     """Pure: the claims this condition currently holds for.
 
-    value_above / value_below are per-claim. staleness_exceeds and
-    contradiction are conditions over the *set* of claims; they fire on the
-    concrete claim(s) that embody the condition, so the (alert, claim) dedup
-    still pins them to a real row rather than a synthetic one.
+    value_above / value_below / pct_change_* fire on crossings (see
+    _crossings). staleness_exceeds and contradiction are conditions over the
+    *set* of claims; they fire on the concrete claim(s) that embody the
+    condition, so the (alert, claim) dedup still pins them to a real row
+    rather than a synthetic one.
     """
     kind = condition["kind"]
 
     if kind in ("value_above", "value_below"):
-        field = condition["field"]
-        threshold = condition["threshold"]
-        out = []
-        for c in claims:
-            v = _claim_number(c, field)
-            if v is None:
-                continue
-            if (kind == "value_above" and v > threshold) or (
-                kind == "value_below" and v < threshold
-            ):
-                out.append(c)
-        return out
+        return _crossings(claims, _level_predicate(condition))
+
+    if kind in ("pct_change_above", "pct_change_below"):
+        return _crossings(claims, _pct_predicate(condition, claims))
 
     if kind == "staleness_exceeds":
         if not claims:
@@ -226,6 +331,14 @@ async def evaluate(pool, alert, *, audience: UUID | None) -> list:
                 entity_id=alert["entity_id"],
                 claim_type=str(alert["claim_type"]),
                 requested_by=alert["user_id"],
+            )
+
+        # A one-shot's whole contract is "after it fires, stop watching".
+        # Deactivating in the same transaction as the firing means there is no
+        # window where the alert has fired and is still armed.
+        if alert.get("one_shot"):
+            await conn.execute(
+                "UPDATE alert SET active = false WHERE id = $1", alert["id"]
             )
 
     return new

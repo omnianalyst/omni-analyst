@@ -385,7 +385,11 @@ class TestNoDoubleFire:
         )
         assert n == 1
 
-    async def test_a_later_satisfying_claim_still_fires(self, db):
+    async def test_a_later_satisfying_claim_fires_only_on_a_re_cross(self, db):
+        # The fires-on-every-claim defect, fixed 2026-08-21: a daily close
+        # above the level used to mean a firing per day, forever. A level
+        # condition fires on the CROSSING -- and re-arms only after the value
+        # has gone back to the other side.
         user = await _user(db, "a@example.com")
         entity = await _entity(db)
         first = await _claim(db, entity, "close", value={"value": 150})
@@ -398,10 +402,22 @@ class TestNoDoubleFire:
         )
         assert _ids(await evaluate(db.pool, alert, audience=user)) == [first]
 
-        # A new claim that also satisfies fires; the first is not re-reported.
-        second = await _claim(db, entity, "close", value={"value": 160})
-        fired = await evaluate(db.pool, alert, audience=user)
-        assert _ids(fired) == [second]
+        # Still above: not a crossing, no firing.
+        await _claim(db, entity, "close", value={"value": 160})
+        assert await evaluate(db.pool, alert, audience=user) == []
+
+        # Below again: the alert re-arms silently.
+        await _claim(db, entity, "close", value={"value": 90})
+        assert await evaluate(db.pool, alert, audience=user) == []
+
+        # The next crossing fires -- and only it.
+        re_cross = await _claim(db, entity, "close", value={"value": 180})
+        assert _ids(await evaluate(db.pool, alert, audience=user)) == [re_cross]
+
+        n = await db.pool.fetchval(
+            "SELECT count(*) FROM alert_firing WHERE alert_id = $1", alert["id"]
+        )
+        assert n == 2
 
 
 # --- the leak test ---------------------------------------------------------
@@ -457,9 +473,13 @@ class TestRedistributionLeak:
 
 
 class TestClosedConditionSet:
-    def test_the_set_is_exactly_the_four_kinds(self):
+    def test_the_set_is_exactly_the_six_kinds(self):
         assert KNOWN_KINDS == frozenset(
-            {"value_above", "value_below", "staleness_exceeds", "contradiction"}
+            {
+                "value_above", "value_below",
+                "pct_change_above", "pct_change_below",
+                "staleness_exceeds", "contradiction",
+            }
         )
 
     @pytest.mark.parametrize(
@@ -740,3 +760,211 @@ class TestSchedulerEvaluation:
             "SELECT count(*) FROM alert_firing WHERE claim_id = $1", good_claim
         )
         assert recorded == 1
+
+
+# --- percent-change conditions ---------------------------------------------
+
+
+class TestPctChangeConditions:
+    async def test_fires_on_a_window_move_and_not_while_it_persists(self, db):
+        user = await _user(db, "pct@example.com")
+        entity = await _entity(db, symbol="AAPL")
+        base_day = datetime(2026, 7, 1, tzinfo=UTC)
+
+        # 100 at day 0, 112 at day 30: +12% over the 30d window -> crossing.
+        await _claim(db, entity, "close", value={"value": 100},
+                     knowledge_date=base_day)
+        up = await _claim(db, entity, "close", value={"value": 112},
+                          knowledge_date=base_day + timedelta(days=30))
+        alert = await _alert(
+            db,
+            user_id=user,
+            entity_id=entity,
+            claim_type="price_snapshot",
+            condition={"kind": "pct_change_above", "pct": 10, "window_days": 30},
+        )
+        assert _ids(await evaluate(db.pool, alert, audience=user)) == [up]
+
+        # Day 31, still ~12% over its own window: not a new crossing.
+        await _claim(db, entity, "close", value={"value": 113},
+                     knowledge_date=base_day + timedelta(days=31))
+        assert await evaluate(db.pool, alert, audience=user) == []
+
+    async def test_a_shorter_window_than_the_move_does_not_fire(self, db):
+        # A +12% move accumulated over 30 days, with daily claims: over the
+        # final 7-day window the base is the day-23 close (~104), so the 7-day
+        # move is under the bar even though the 30-day move clears it.
+        user = await _user(db, "pct2@example.com")
+        entity = await _entity(db, symbol="MSFT")
+        base_day = datetime(2026, 7, 1, tzinfo=UTC)
+        for day in range(31):
+            # 100 -> 112 linearly over 30 days: ~0.4/day.
+            await _claim(db, entity, "close",
+                         value={"value": round(100 + 12 * day / 30, 4)},
+                         knowledge_date=base_day + timedelta(days=day))
+        alert = await _alert(
+            db,
+            user_id=user,
+            entity_id=entity,
+            claim_type="price_snapshot",
+            condition={"kind": "pct_change_above", "pct": 10, "window_days": 7},
+        )
+        assert await evaluate(db.pool, alert, audience=user) == []
+
+        # The same history over the 30-day window does cross.
+        alert30 = await _alert(
+            db,
+            user_id=user,
+            entity_id=entity,
+            claim_type="price_snapshot",
+            condition={"kind": "pct_change_above", "pct": 10, "window_days": 30},
+        )
+        assert await evaluate(db.pool, alert30, audience=user) != []
+
+    def test_validation_rejects_nonpositive_pct_and_short_windows(self):
+        with pytest.raises(InvalidCondition):
+            validate_condition({"kind": "pct_change_above", "pct": 0, "window_days": 30})
+        with pytest.raises(InvalidCondition):
+            validate_condition({"kind": "pct_change_below", "pct": -5, "window_days": 30})
+        with pytest.raises(InvalidCondition):
+            validate_condition({"kind": "pct_change_above", "pct": 10, "window_days": 0})
+
+
+# --- one-shot alerts --------------------------------------------------------
+
+
+class TestOneShot:
+    async def test_deactivates_itself_on_firing(self, db):
+        user = await _user(db, "once@example.com")
+        entity = await _entity(db, symbol="TSLA")
+        await _claim(db, entity, "close", value={"value": 150})
+        alert = await db.pool.fetchrow(
+            "INSERT INTO alert (user_id, entity_id, claim_type, condition, one_shot) "
+            "VALUES ($1, $2, 'price_snapshot', $3::jsonb, true) RETURNING *",
+            user, entity,
+            json.dumps({"kind": "value_above", "threshold": 100}),
+        )
+        assert await evaluate(db.pool, alert, audience=user) != []
+        active = await db.pool.fetchval(
+            "SELECT active FROM alert WHERE id = $1", alert["id"]
+        )
+        assert active is False, "a one-shot must disarm in the same transaction"
+
+    async def test_a_one_shot_that_never_fires_stays_armed(self, db):
+        user = await _user(db, "once2@example.com")
+        entity = await _entity(db, symbol="TSLA")
+        await _claim(db, entity, "close", value={"value": 50})
+        alert = await db.pool.fetchrow(
+            "INSERT INTO alert (user_id, entity_id, claim_type, condition, one_shot) "
+            "VALUES ($1, $2, 'price_snapshot', $3::jsonb, true) RETURNING *",
+            user, entity,
+            json.dumps({"kind": "value_above", "threshold": 100}),
+        )
+        assert await evaluate(db.pool, alert, audience=user) == []
+        assert await db.pool.fetchval(
+            "SELECT active FROM alert WHERE id = $1", alert["id"]
+        ) is True
+
+
+# --- the firing inbox and acknowledgement -----------------------------------
+
+
+class TestFiringInbox:
+    async def test_inbox_lists_unread_first_and_ack_clears_it(self, db, database_url):
+        user = await _user(db, "inbox@example.com")
+        other = await _user(db, "inbox-other@example.com")
+        entity = await _entity(db, symbol="NVDA")
+        c1 = await _claim(db, entity, "close", value={"value": 150})
+        alert = await _alert(
+            db,
+            user_id=user,
+            entity_id=entity,
+            claim_type="price_snapshot",
+            condition={"kind": "value_above", "threshold": 100},
+        )
+        assert await evaluate(db.pool, alert, audience=user) != []
+
+        app = create_app(database_url)
+        app.include_router(build_router(app))
+        async with _Lifespan(app), TestClient(app) as client:
+            headers = _token(user)
+
+            listed = await client.get("/alert-firings", headers=headers)
+            assert listed.status_code == 200
+            body = listed.json()
+            assert body["unread"] == 1
+            assert body["firings"][0]["entity_symbol"] == "NVDA"
+            assert body["firings"][0]["condition"]["kind"] == "value_above"
+
+            acked = await client.post(
+                f"/alert-firings/{alert['id']}/{c1}/ack", headers=headers,
+            )
+            assert acked.status_code == 201
+
+            after = await client.get("/alert-firings", headers=headers)
+            assert after.json()["unread"] == 0
+
+            # Another user's ack is a 404, not a 403 -- same enumeration rule.
+            denied = await client.post(
+                f"/alert-firings/{alert['id']}/{c1}/ack",
+                headers=_token(other),
+            )
+            assert denied.status_code == 404
+
+    async def test_ack_all_clears_the_badge(self, db, database_url):
+        user = await _user(db, "ackall@example.com")
+        entity = await _entity(db, symbol="AMD")
+        await _claim(db, entity, "close", value={"value": 150})
+        alert = await _alert(
+            db,
+            user_id=user,
+            entity_id=entity,
+            claim_type="price_snapshot",
+            condition={"kind": "value_above", "threshold": 100},
+        )
+        assert await evaluate(db.pool, alert, audience=user) != []
+
+        app = create_app(database_url)
+        app.include_router(build_router(app))
+        async with _Lifespan(app), TestClient(app) as client:
+            headers = _token(user)
+            result = await client.post(
+                f"/alerts/{alert['id']}/ack-all", headers=headers,
+            )
+            assert result.status_code == 201
+            assert result.json()["updated"] == 1
+
+
+# --- notification configuration ----------------------------------------------
+
+
+class TestNotifySettings:
+    async def test_report_and_save_without_leaking_the_url(self, db, database_url):
+        from omni.api.settings import build_router as build_settings_router
+
+        user = await _user(db, "notify@example.com")
+        app = create_app(database_url)
+        app.include_router(build_settings_router(app))
+        async with _Lifespan(app), TestClient(app) as client:
+            headers = _token(user)
+
+            initial = await client.get("/settings/notifications", headers=headers)
+            assert initial.json() == {
+                "webhook_configured": False, "email": None, "smtp_available": False,
+            }
+
+            saved = await client.put(
+                "/settings/notifications",
+                json={"webhook_url": "https://hooks.example.com/x/SECRET",
+                      "email": "me@example.com"},
+                headers=headers,
+            )
+            assert saved.status_code == 200
+            body = saved.json()
+            assert body["webhook_configured"] is True
+            assert body["email"] == "me@example.com"
+            # The URL never comes back -- it can embed a token.
+            assert "SECRET" not in json.dumps(body)
+
+            reread = await client.get("/settings/notifications", headers=headers)
+            assert reread.json()["webhook_configured"] is True

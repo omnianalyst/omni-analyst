@@ -90,6 +90,16 @@ class Settings(BaseSettings):
     #: is more usable. Env-configurable so it's tunable without code changes.
     token_expires_in: int = 3600
 
+    # Outbound email for alert delivery. All optional: with no host configured
+    # the email channel is silently absent and only the webhook (if any)
+    # delivers -- an unconfigured channel that raised would make a firing fail
+    # because nobody told it where to send mail.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "omni@localhost"
+
     @property
     def licensed(self) -> tuple[str, ...]:
         return tuple(

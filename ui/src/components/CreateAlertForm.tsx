@@ -50,6 +50,10 @@ function needsThreshold(kind: ConditionKind): boolean {
   return kind === "value_above" || kind === "value_below";
 }
 
+function needsPct(kind: ConditionKind): boolean {
+  return kind === "pct_change_above" || kind === "pct_change_below";
+}
+
 export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
   const [entityQuery, setEntityQuery] = useState("");
   const [entityId, setEntityId] = useState<string | null>(null);
@@ -59,6 +63,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
   const [form, setForm] = useState<ConditionFormState>(defaultConditionForm());
   const [create, setCreate] = useState<CreateState>({ kind: "idle" });
   const [priceContext, setPriceContext] = useState<PriceContext>({ kind: "none" });
+  const [oneShot, setOneShot] = useState(false);
 
   function patchForm(patch: Partial<ConditionFormState>) {
     setForm((prev) => ({ ...prev, ...patch }));
@@ -139,6 +144,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
         entity_id: entityId,
         claim_type: ct,
         condition: built.condition,
+        one_shot: oneShot,
       });
       setCreate({ kind: "idle" });
       setEntityId(null);
@@ -146,6 +152,7 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
       setPriceContext({ kind: "none" });
       setClaimType("");
       setForm(defaultConditionForm());
+      setOneShot(false);
       onCreated();
     } catch (err) {
       if (err instanceof AuthRequiredError) {
@@ -351,6 +358,52 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
         </div>
       ) : null}
 
+      {needsPct(form.kind) ? (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "12px" }}>
+          <label style={fieldStyle}>
+            <span class="field-label">Move (%)</span>
+            <input
+              class="search-input"
+              type="number"
+              step="any"
+              min="0"
+              value={form.pct}
+              onInput={(e) => patchForm({ pct: (e.target as HTMLInputElement).value })}
+              placeholder="e.g. 10"
+              aria-label="Move percent"
+            />
+            <span class="field-help">
+              {form.kind === "pct_change_above" ? "Up" : "Down"} at least this much.
+            </span>
+          </label>
+          <label style={fieldStyle}>
+            <span class="field-label">Over (days)</span>
+            <input
+              class="search-input"
+              type="number"
+              step="1"
+              min="1"
+              value={form.windowDays}
+              onInput={(e) => patchForm({ windowDays: (e.target as HTMLInputElement).value })}
+              placeholder="e.g. 30"
+              aria-label="Window in days"
+            />
+            <span class="field-help">Compared to the closest reading at least this old.</span>
+          </label>
+          <label style={fieldStyle}>
+            <span class="field-label">Which number (optional)</span>
+            <input
+              class="search-input"
+              type="text"
+              value={form.field}
+              onInput={(e) => patchForm({ field: (e.target as HTMLInputElement).value })}
+              placeholder="value"
+              aria-label="Which number to compare"
+            />
+          </label>
+        </div>
+      ) : null}
+
       {form.kind === "staleness_exceeds" ? (
         <label style={fieldStyle}>
           <span class="field-label">After how long, in seconds</span>
@@ -381,6 +434,18 @@ export function CreateAlertForm({ onCreated }: { onCreated: () => void }) {
           date for this entity and claim type. No parameters.
         </p>
       ) : null}
+
+      <label style={{ ...fieldStyle, flexDirection: "row", alignItems: "center", gap: "8px" }}>
+        <input
+          type="checkbox"
+          checked={oneShot}
+          onChange={(e) => setOneShot((e.target as HTMLInputElement).checked)}
+          aria-label="Deactivate after firing"
+        />
+        <span class="field-label" style={{ margin: 0 }}>
+          Deactivate after firing (one-shot)
+        </span>
+      </label>
 
       {create.kind === "error" ? (
         <ErrorState message={create.message} detail={create.detail} />

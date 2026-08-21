@@ -6392,3 +6392,8 @@ a.btn-secondary {
 .discover-overlay-card header {
   padding: 22px 24px 12px;
 }
+
+.unread-badge {
+  margin-left: 10px;
+  vertical-align: middle;
+}

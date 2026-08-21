@@ -136,3 +136,21 @@ export function blockedReason(entry: VenueEntry): string | null {
   }
   return "Add credentials first";
 }
+
+export interface NotificationsState {
+  webhook_configured: boolean;
+  email: string | null;
+  smtp_available: boolean;
+}
+
+export const getNotifications = (): Promise<NotificationsState> =>
+  authedGetJson<NotificationsState>("/settings/notifications");
+
+export const putNotifications = (body: {
+  webhook_url?: string;
+  email?: string;
+}): Promise<NotificationsState> =>
+  authedSendJson<NotificationsState>("PUT", "/settings/notifications", body);
+
+export const testNotifications = (): Promise<{ sent: string[] }> =>
+  authedSendJson<{ sent: string[] }>("POST", "/settings/notifications/test");

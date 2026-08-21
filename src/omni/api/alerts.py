@@ -90,7 +90,7 @@ def _condition_or_400(value: dict | None) -> str:
 
 _COLS = (
     "id, user_id, entity_id, claim_type::text AS claim_type, condition, "
-    "active, created_at, last_fired_at"
+    "active, one_shot, created_at, last_fired_at"
 )
 
 
@@ -115,6 +115,7 @@ def _serialize(row) -> dict:
         "claim_type": row["claim_type"],
         "condition": _loads_jsonb(row["condition"]),
         "active": row["active"],
+        "one_shot": row["one_shot"],
         "created_at": _iso(row["created_at"]),
         "last_fired_at": _iso(row["last_fired_at"]),
     }
@@ -124,11 +125,13 @@ class CreateAlertIn(BaseModel):
     entity_id: UUID
     claim_type: str
     condition: dict
+    one_shot: bool = False
 
 
 class UpdateAlertIn(BaseModel):
     active: bool | None = None
     condition: dict | None = None
+    one_shot: bool | None = None
 
 
 def build_router(app: App) -> Router:
@@ -143,13 +146,14 @@ def build_router(app: App) -> Router:
         if not exists:
             raise not_found(f"No entity {body.entity_id}")
         row = await app.db.pool.fetchrow(
-            "INSERT INTO alert (user_id, entity_id, claim_type, condition) "
-            "VALUES ($1, $2, $3::claim_type, $4::jsonb) "
+            "INSERT INTO alert (user_id, entity_id, claim_type, condition, one_shot) "
+            "VALUES ($1, $2, $3::claim_type, $4::jsonb, $5) "
             f"RETURNING {_COLS}",
             user,
             body.entity_id,
             claim_type,
             condition,
+            body.one_shot,
         )
         return _serialize(row)
 
@@ -182,6 +186,9 @@ def build_router(app: App) -> Router:
         if body.active is not None:
             params.append(body.active)
             sets.append(f"active = ${len(params)}")
+        if body.one_shot is not None:
+            params.append(body.one_shot)
+            sets.append(f"one_shot = ${len(params)}")
         if body.condition is not None:
             # Re-validate on update: a PATCH that weakened the closed set would
             # let an arbitrary shape sit where evaluate expects a known one.
@@ -246,6 +253,94 @@ def build_router(app: App) -> Router:
                 for r in rows
             ],
         }
+
+    @router.get("/alert-firings")
+    async def recent_firings(request: Request) -> dict:
+        """The firing inbox: recent firings across the caller's alerts.
+
+        Unread (acknowledged_at IS NULL) sorts first, then newest -- the shape
+        an inbox needs: what you have not seen outranks what merely happened.
+        Audience filtering is inherited from the firings join (BYO claims never
+        cross owners) and ownership from alert.user_id, the same rule the rest
+        of this router holds.
+        """
+        user = _require_user(request)
+        rows = await app.db.pool.fetch(
+            """
+            SELECT f.alert_id, f.claim_id, f.fired_at, f.acknowledged_at,
+                   a.claim_type::text AS claim_type, a.condition,
+                   e.symbol AS entity_symbol, e.name AS entity_name,
+                   c.key, c.event_date, c.value, c.source
+            FROM alert_firing f
+            JOIN alert a ON a.id = f.alert_id
+            JOIN entity e ON e.id = a.entity_id
+            JOIN claim c ON c.id = f.claim_id
+            WHERE a.user_id = $1
+              AND (c.audience_user_id IS NULL OR c.audience_user_id = $1)
+            ORDER BY f.acknowledged_at IS NULL DESC, f.fired_at DESC
+            LIMIT 100
+            """,
+            user,
+        )
+        return {
+            "firings": [
+                {
+                    "alert_id": str(r["alert_id"]),
+                    "claim_id": str(r["claim_id"]),
+                    "fired_at": _iso(r["fired_at"]),
+                    "acknowledged_at": _iso(r["acknowledged_at"]),
+                    "claim_type": r["claim_type"],
+                    "condition": _loads_jsonb(r["condition"]),
+                    "entity_symbol": r["entity_symbol"],
+                    "entity_name": r["entity_name"],
+                    "key": r["key"],
+                    "event_date": _iso(r["event_date"]),
+                    "value": _loads_jsonb(r["value"]),
+                    "source": r["source"],
+                }
+                for r in rows
+            ],
+            "unread": sum(1 for r in rows if r["acknowledged_at"] is None),
+        }
+
+    @router.post("/alert-firings/{alert_id}/{claim_id}/ack")
+    async def ack_firing(
+        alert_id: UUID, claim_id: UUID, request: Request
+    ) -> dict:
+        user = _require_user(request)
+        status = await app.db.pool.execute(
+            """
+            UPDATE alert_firing f
+            SET acknowledged_at = now()
+            FROM alert a
+            WHERE f.alert_id = a.id AND f.alert_id = $1
+              AND f.claim_id = $2 AND a.user_id = $3
+            """,
+            alert_id,
+            claim_id,
+            user,
+        )
+        if not status.endswith("1"):
+            raise not_found("Firing not found")
+        return {"acknowledged": True}
+
+    @router.post("/alerts/{alert_id}/ack-all")
+    async def ack_all(alert_id: UUID, request: Request) -> dict:
+        """Mark every firing of one alert read -- the 'clear badge' gesture."""
+        user = _require_user(request)
+        status = await app.db.pool.execute(
+            """
+            UPDATE alert_firing f
+            SET acknowledged_at = now()
+            FROM alert a
+            WHERE f.alert_id = a.id AND f.alert_id = $1 AND a.user_id = $2
+              AND f.acknowledged_at IS NULL
+            """,
+            alert_id,
+            user,
+        )
+        # Zero rows updated is fine here: "nothing unread" is a success state.
+        return {"updated": int(status.split()[-1])}
 
     return router
 

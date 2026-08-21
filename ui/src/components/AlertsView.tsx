@@ -2,6 +2,8 @@ import { useEffect, useState } from "preact/hooks";
 import { describeError } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
 import {
+  ackAll,
+  ackFiring,
   buildCondition,
   CONDITION_KINDS,
   conditionForm,
@@ -11,11 +13,13 @@ import {
   describeLastFired,
   listAlerts,
   listFirings,
+  listInbox,
   updateAlert,
   type Alert,
   type ConditionFormState,
   type ConditionKind,
   type Firing,
+  type InboxFiring,
 } from "../lib/alerts";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
@@ -30,6 +34,7 @@ type State =
 export function AlertsView() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [notice, setNotice] = useState<string | null>(null);
+  const [unread, setUnread] = useState(0);
 
   function replaceAlert(next: Alert) {
     setState((current) => current.kind === "ok"
@@ -49,6 +54,11 @@ export function AlertsView() {
     try {
       const res = await listAlerts();
       setState({ kind: "ok", alerts: res.alerts });
+      try {
+        setUnread((await listInbox()).unread);
+      } catch {
+        setUnread(0);
+      }
     } catch (err) {
       if (err instanceof AuthRequiredError) {
         setState({ kind: "auth" });
@@ -67,10 +77,14 @@ export function AlertsView() {
   return (
     <div class="alerts-view">
       <header class="page-head">
-        <h1>Alerts</h1>
+        <h1>
+          Alerts
+          {unread > 0 ? <span class="count-badge count-warning unread-badge">{unread} new</span> : null}
+        </h1>
         <p class="muted">
-          An alert watches a condition on a ticker and notifies you the moment
-          it&rsquo;s met. Pick one of the condition types below.
+          An alert watches a condition on a ticker and fires the moment it&rsquo;s
+          crossed. Deliver to a webhook or email from{" "}
+          <a href="/settings">Settings</a>.
         </p>
       </header>
 
@@ -241,6 +255,26 @@ function AlertRow({
     if (next && firings.kind === "idle") void loadFirings();
   }
 
+  async function ackOne(claimId: string) {
+    try {
+      await ackFiring(alert.id, claimId);
+      await loadFirings();
+    } catch (error) {
+      actionError(error);
+    }
+  }
+
+  async function markAllRead() {
+    setAction({ kind: "busy" });
+    try {
+      await ackAll(alert.id);
+      await loadFirings();
+      setAction({ kind: "ok", message: "All firings marked read." });
+    } catch (error) {
+      actionError(error);
+    }
+  }
+
   return (
     <li class="gap-row">
       <div class="gap-head">
@@ -251,6 +285,9 @@ function AlertRow({
         <span style={activeBadge(alert.active)}>
           {alert.active ? "active" : "paused"}
         </span>
+        {alert.one_shot ? (
+          <span style={activeBadge(false)}>one-shot</span>
+        ) : null}
       </div>
       <div class="gap-meta">
         <a href={`/entity/${alert.entity_id}`}>entity {alert.entity_id.slice(0, 8)}</a>
@@ -273,6 +310,9 @@ function AlertRow({
           }}
         >
           {open ? "Hide firings" : "Show firings"}
+        </button>
+        <button type="button" class="alert-action" disabled={action.kind === "busy"} onClick={() => void markAllRead()}>
+          Mark all read
         </button>
         <button type="button" class="alert-action" disabled={action.kind === "busy"} onClick={() => void toggleActive()}>
           {alert.active ? "Pause" : "Resume"}
@@ -317,6 +357,18 @@ function AlertRow({
               </label>
             </>
           ) : null}
+          {form.kind === "pct_change_above" || form.kind === "pct_change_below" ? (
+            <>
+              <label>
+                Move %
+                <input type="number" min="0" step="any" value={form.pct} onInput={(event) => setForm((current) => ({ ...current, pct: event.currentTarget.value }))} />
+              </label>
+              <label>
+                Window (days)
+                <input type="number" min="1" step="1" value={form.windowDays} onInput={(event) => setForm((current) => ({ ...current, windowDays: event.currentTarget.value }))} />
+              </label>
+            </>
+          ) : null}
           {form.kind === "staleness_exceeds" ? (
             <label>
               Seconds
@@ -358,6 +410,15 @@ function AlertRow({
                     {f.source ? <span>source {f.source}</span> : null}
                     {f.event_date ? (
                       <span class="faint">event {f.event_date.slice(0, 10)}</span>
+                    ) : null}
+                    {"acknowledged_at" in f && !(f as InboxFiring).acknowledged_at ? (
+                      <button
+                        type="button"
+                        class="alert-action"
+                        onClick={() => void ackOne(f.claim_id)}
+                      >
+                        Mark read
+                      </button>
                     ) : null}
                   </div>
                   <pre class="gap-detail">{JSON.stringify(f.value, null, 2)}</pre>
