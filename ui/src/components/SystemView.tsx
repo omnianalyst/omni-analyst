@@ -257,41 +257,50 @@ function EdgeSection({
         ) : null}
       </div>
       <p class="research-one-line">{describeEdgeMonitor(monitor.data)}</p>
-      <div class="responsive-table">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Rule</th>
-              <th>Role</th>
-              <th>Verdict</th>
-              <th>vs benchmark</th>
-              <th>Measured over</th>
-            </tr>
-          </thead>
-          <tbody>
-            {books.map((book) => (
-              <tr key={book.book}>
-                <td><strong>{book.book}</strong></td>
-                <td>{book.promoted ? "live rule" : "baseline"}</td>
-                <td>
-                  <span class={`status-dot-simple tone-${stateTone[book.state] ?? "quiet"}`} />
-                  {stateWord[book.state] ?? book.state}
-                </td>
-                <td>
-                  {book.state === "insufficient"
-                    ? book.reason ?? "—"
-                    : formatExcessBps(book.mean_session_excess)}
-                </td>
-                <td>
-                  {book.window_start === null || book.window_end === null
-                    ? "—"
-                    : `${book.window_start} to ${book.window_end}`}
-                </td>
+      {books.some((b) => b.state !== "insufficient") ? (
+        <div class="responsive-table">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Rule</th>
+                <th>Role</th>
+                <th>Verdict</th>
+                <th>vs benchmark</th>
+                <th>Measured over</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {books.map((book) => (
+                <tr key={book.book}>
+                  <td><strong>{book.book}</strong></td>
+                  <td>{book.promoted ? "live rule" : "baseline"}</td>
+                  <td>
+                    <span class={`status-dot-simple tone-${stateTone[book.state] ?? "quiet"}`} />
+                    {stateWord[book.state] ?? book.state}
+                  </td>
+                  <td>
+                    {book.state === "insufficient"
+                      ? <span title={book.reason ?? undefined}>{clip(book.reason ?? "—", 48)}</span>
+                      : formatExcessBps(book.mean_session_excess)}
+                  </td>
+                  <td>
+                    {book.window_start === null || book.window_end === null
+                      ? "—"
+                      : `${book.window_start} to ${book.window_end}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p class="research-one-line">
+          {books.length} books record nightly — {books.filter((b) => b.promoted).length} live
+          {" "}{books.filter((b) => b.promoted).length === 1 ? "rule" : "rules"},{" "}
+          {books.filter((b) => !b.promoted).length} baselines. The first verdicts land once
+          each book has 30 scored forward outcomes; the table appears then.
+        </p>
+      )}
       <button
         type="button"
         class="disclosure-button edge-note-disclosure"
