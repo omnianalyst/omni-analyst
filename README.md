@@ -83,6 +83,14 @@ visible only to the key's owner, fills that owner's gaps, and never enters
 shared coverage. Serving one user's keyed data to another would make the
 deployment the redistributor, which the provider terms forbid.
 
+### Static hosting note
+
+The UI's client-side navigation fetches route data with an `X-Neutron-Data:
+true` header and expects JSON. A static host whose SPA fallback answers that
+request with `index.html` breaks navigation into full page loads (each click
+reloads the document). The bundled `Caddyfile` handles this; if you front the
+UI with your own server, answer `X-Neutron-Data` requests with `200 {}`.
+
 ## Architecture
 
 Built on [Neutron](https://github.com/neutron-build/neutron) (Python tier)

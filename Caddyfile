@@ -41,6 +41,16 @@
 		/objective/* /watchlists /watchlists/* \
 		/portfolio /portfolio/* /research/* /scanner/* \
 		/settings/* /system/* /trading /trading/* /wallets /wallets/*
+	# Framework route-data fetches (SPA navigation) carry X-Neutron-Data and
+	# expect JSON; the SPA fallback would hand them index.html, the client's
+	# response.json() throws, and the framework silently falls back to a full
+	# page load -- every navigation flashes. This app's routes have no loaders,
+	# so an empty object is the complete and honest answer.
+	@frameworkdata header X-Neutron-Data true
+	handle @frameworkdata {
+		respond `{}` 200
+	}
+
 	handle @api {
 		reverse_proxy {$OMNI_API_UPSTREAM:-api:8000}
 	}

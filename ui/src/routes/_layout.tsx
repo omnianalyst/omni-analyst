@@ -150,15 +150,59 @@ export default function Layout({
 
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // SPA view transitions stay deliberately OFF (measured 2026-08-21): a
-  // same-document transition snapshots EVERYTHING visible -- including static
-  // header chrome -- and swapping the snapshot back to live text rasterizes
-  // differently for one frame, so identical header text shimmers on every
-  // navigation. Without transitions the DOM diff never touches header pixels
-  // at all: the content area swaps instantly, the header is never repainted,
-  // which is exactly the "only the content changes" feel. (The framework's
-  // <ViewTransitions/> bootstrap also never executes in a CSR build; see
-  // ADOPTION_FINDINGS A-025.) The skeleton still retires here on mount.
+  // The app's own SPA interceptor. The framework registers a global click
+  // interceptor during hydrate init, but in the static production build it
+  // never intercepts (measured 2026-08-21 on the deployed artifact: every
+  // topbar click was a real document navigation -- full repaint, header
+  // included -- with no console errors; dev builds worked, so the gap is
+  // build-specific. Filed as A-026). This listener runs the framework's own
+  // navigate() with the same guards, so SPA navigation no longer depends on
+  // that code path. If the framework's interceptor is ever active it fires
+  // first and ours sees defaultPrevented and steps aside.
+  useEffect(() => {
+    const onClick = (event: MouseEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.button !== 0) return;
+      if (event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return;
+      const target = event.target;
+      const anchor = target instanceof Element ? target.closest("a") : null;
+      if (!anchor) return;
+      if (anchor.target && anchor.target !== "_self") return;
+      if (anchor.hasAttribute("download")) return;
+      if (anchor.origin !== window.location.origin) return;
+      if (
+        anchor.hash &&
+        anchor.pathname === window.location.pathname &&
+        anchor.search === window.location.search
+      ) {
+        return;
+      }
+      const href = anchor.pathname + anchor.search + anchor.hash;
+      if (href === window.location.pathname + window.location.search + window.location.hash) {
+        return;
+      }
+      event.preventDefault();
+      // The framework's navigate() ran every click into a full document
+      // load on the deployed static build (measured 2026-08-21, A-026), so
+      // this drives the router the one way that provably renders: the same
+      // popstate path the browser's back/forward buttons use. pushState does
+      // not fire popstate natively -- the dispatch is what makes the router
+      // re-render -- and the framework's own listener applies the route.
+      window.history.pushState(null, "", href);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    };
+    // Capture phase: the framework's own interceptor (registered at hydrate
+    // init, before this layout mounts) calls navigate() whose internals hold
+    // several hard-navigation fallbacks -- whichever listener runs first wins
+    // the click, and ours must be it. With capture, ours preventDefaults
+    // first; the framework's bubble listener then sees defaultPrevented and
+    // steps aside, and the popstate dispatch below drives its renderer.
+    document.addEventListener("click", onClick, { capture: true });
+    return () =>
+      document.removeEventListener("click", onClick, { capture: true });
+  }, []);
+
+  // The skeleton retires here on mount: hydration has painted real chrome.
   useEffect(() => {
     document.getElementById("boot-skeleton")?.remove();
   }, []);
