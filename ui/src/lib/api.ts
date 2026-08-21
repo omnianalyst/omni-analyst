@@ -189,6 +189,22 @@ export function authHeaderIfPresent(): Record<string, string> {
 export const searchEntities = (q: string): Promise<EntitiesResponse> =>
   request<EntitiesResponse>(`/entities?q=${encodeURIComponent(q)}`);
 
+export const CREATABLE_KINDS = ["company", "etf", "crypto_asset"] as const;
+export type CreatableKind = (typeof CREATABLE_KINDS)[number];
+
+export function createEntity(
+  symbol: string,
+  kind: CreatableKind,
+  name?: string,
+): Promise<Entity> {
+  return sendJson<Entity>(
+    "POST",
+    "/entities",
+    { symbol, kind, name },
+    authHeaderIfPresent(),
+  );
+}
+
 // Coverage and gaps are audience-scoped server-side: an absent token reads as
 // the shared network, a present token adds this viewer's own BYO claims. Attach
 // the token when the client holds one so a logged-in user sees their private

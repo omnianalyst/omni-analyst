@@ -170,13 +170,13 @@ describe("formatP", () => {
 describe("describeEdgeMonitor", () => {
   it("says when nothing is being watched yet", () => {
     expect(describeEdgeMonitor(monitor({ books: [] }))).toBe(
-      "No promoted edge is being watched yet.",
+      "No live rule is being watched yet.",
     );
   });
 
   it("reports an accumulating forward record without claiming decay", () => {
     expect(describeEdgeMonitor(monitor())).toBe(
-      "1 promoted edge watched nightly · none decayed · forward history still accumulating",
+      "1 live rule holds its evidence · none has stopped working · still building the forward record",
     );
   });
 
@@ -187,7 +187,7 @@ describe("describeEdgeMonitor", () => {
         alerts: ["etf_tsmom_252"],
       }),
     );
-    expect(line).toContain("decayed: etf_tsmom_252");
+    expect(line).toContain("stopped working: etf_tsmom_252");
   });
 
   it("counts a measuring record separately from an accumulating one", () => {
@@ -199,6 +199,6 @@ describe("describeEdgeMonitor", () => {
         ],
       }),
     );
-    expect(line).toContain("1 of 2 still accumulating history");
+    expect(line).toContain("1 of 2 still building their record");
   });
 });

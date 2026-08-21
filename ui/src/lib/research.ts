@@ -79,16 +79,16 @@ export function describeEdgeMonitor(monitor: EdgeMonitor): string {
   const decayed = monitor.alerts.length;
   const insufficient = promoted.filter((b) => b.state === "insufficient").length;
   if (watched === 0) {
-    return "No promoted edge is being watched yet.";
+    return "No live rule is being watched yet.";
   }
-  const names = decayed === 0 ? "none decayed" : `decayed: ${monitor.alerts.join(", ")}`;
+  const names = decayed === 0 ? "none has stopped working" : `stopped working: ${monitor.alerts.join(", ")}`;
   const history =
     insufficient === watched
-      ? "forward history still accumulating"
+      ? "still building the forward record"
       : insufficient > 0
-        ? `${insufficient} of ${watched} still accumulating history`
-        : "forward history measuring";
-  return `${watched} promoted ${watched === 1 ? "edge" : "edges"} watched nightly · ${names} · ${history}`;
+        ? `${insufficient} of ${watched} still building their record`
+        : "re-judged nightly on data they have never seen";
+  return `${watched} live ${watched === 1 ? "rule holds its evidence" : "rules hold their evidence"} · ${names} · ${history}`;
 }
 
 export function isPass(test: HypothesisTest): boolean {

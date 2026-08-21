@@ -278,6 +278,40 @@ button.topnav-signout {
   background: transparent;
   box-shadow: none;
 }
+
+.search-empty .empty {
+  margin-bottom: 14px;
+}
+.track-offer {
+  max-width: 560px;
+  padding: 16px 18px;
+}
+.track-offer p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.track-offer-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.track-offer .kind-select {
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+.track-offer .quiet-line {
+  margin: 0;
+}
+.track-offer .inline-warning {
+  margin: 10px 0 0;
+}
+
 .search-btn {
   height: 42px;
   padding: 0 20px;

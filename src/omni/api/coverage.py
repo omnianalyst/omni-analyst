@@ -16,7 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from neutron import App, Query, Router
-from neutron.error import bad_request, not_found
+from neutron.error import bad_request, not_found, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
@@ -89,6 +89,26 @@ async def _entity_summary(pool, entity_id: UUID):
         "SELECT id, kind, symbol, name FROM entity WHERE id = $1",
         entity_id,
     )
+
+
+class CreateEntityIn(BaseModel):
+    symbol: str
+    kind: str
+    name: str | None = None
+
+
+# The kinds a user may will into existence. The seeded universe is deliberate
+# (companies, sector ETFs, indices); anything outside it should enter because
+# someone asked to track it, not by accident. A free-form kind would let a
+# typo mint a new asset class.
+_USER_CREATABLE_KINDS = frozenset({"company", "etf", "crypto_asset"})
+
+_EXISTING_ACTIVE_DEMAND = """
+SELECT 1 FROM demand
+WHERE entity_id = $1 AND claim_type::text = $2 AND channel = 'direct'
+  AND requested_by = $3 AND active
+LIMIT 1
+"""
 
 
 def build_router(app: App) -> Router:
@@ -267,6 +287,70 @@ def build_router(app: App) -> Router:
             for r in rows
         ]
         return {"query": q, "entities": entities}
+
+    @router.post("/entities")
+    async def create_entity(body: CreateEntityIn, request: Request) -> dict:
+        """Create an entity outside the seeded universe and demand its coverage.
+
+        This is the demand-driven path for a ticker search that honestly returned
+        nothing (a thematic ETF like BOTZ, or the ETF sharing a token's name). The
+        entity is created with the caller's spelling and attention; nothing about
+        it is fabricated -- if the ticker does not exist at any provider, the fill
+        attempts record `unfillable` with the reason, which is the correct and
+        visible outcome. Authentication is required because demand without an
+        owner cannot fill byo_only sources.
+        """
+        user = resolve_audience_from_request(request)
+        if user is None:
+            raise unauthorized("Authentication required")
+
+        symbol = body.symbol.strip().upper()
+        if not symbol or len(symbol) > 12:
+            raise bad_request("symbol must be 1-12 characters")
+        if body.kind not in _USER_CREATABLE_KINDS:
+            raise bad_request(
+                f"kind must be one of {sorted(_USER_CREATABLE_KINDS)}"
+            )
+        name = (body.name or "").strip() or symbol
+
+        from omni.demand.ledger import direct_attention
+        from omni.watchlist.lists import claim_types_for_kind
+
+        async with app.db.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                """
+                INSERT INTO entity (kind, symbol, name)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (kind, symbol) DO UPDATE SET name = entity.name
+                RETURNING id, kind, symbol, name, created_at
+                """,
+                body.kind, symbol, name,
+            )
+            # Demand is raised on every call only when this user has no active
+            # row for it -- two users tracking the same name are two rows (the
+            # ledger's own weight rule), but one user re-confirming a track is
+            # not a second unit of demand.
+            for claim_type in claim_types_for_kind(body.kind):
+                existing = await conn.fetchval(
+                    _EXISTING_ACTIVE_DEMAND, row["id"], claim_type, user,
+                )
+                if existing is None:
+                    await direct_attention(
+                        conn,
+                        entity_id=row["id"],
+                        claim_type=claim_type,
+                        key=None,
+                        requested_by=user,
+                    )
+
+        return {
+            "id": str(row["id"]),
+            "kind": row["kind"],
+            "symbol": row["symbol"],
+            "name": row["name"],
+            "created_at": row["created_at"].isoformat(),
+        }
+
 
     @router.get("/gaps/{entity_id}")
     async def list_gaps(entity_id: UUID, request: Request) -> dict:
