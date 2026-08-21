@@ -91,11 +91,18 @@ export function ObjectiveView() {
   async function onPlan(e: Event) {
     e.preventDefault();
     const req = buildRequest();
-    if (!req.text || !req.target || req.needs.length === 0) {
+    // Name the missing piece rather than restating all three requirements:
+    // "it doesn't work" diagnostics start here (observed twice live on
+    // 2026-08-21 -- a full-requirements message the user had already read,
+    // with no indication which field was actually empty).
+    const missing: string[] = [];
+    if (!req.text) missing.push("a question");
+    if (!req.target) missing.push("a subject (one ticker per plan)");
+    if (req.needs.length === 0) missing.push("at least one kind of information");
+    if (missing.length > 0) {
       setPlan({
         kind: "error",
-        message:
-          "A question, a subject, and at least one kind of information are all needed before a plan can be made.",
+        message: `Still needed: ${missing.join(", ")}.`,
       });
       setRun({ kind: "idle" });
       return;
