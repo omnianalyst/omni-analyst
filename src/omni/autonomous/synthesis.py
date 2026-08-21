@@ -15,6 +15,10 @@ from datetime import datetime
 
 logger = logging.getLogger("omni.autonomous.synthesis")
 
+# Distinguishes "memoized: no row" from "not memoized yet". None is a
+# legitimate memoized value, so it cannot double as the empty marker.
+_MISS = object()
+
 
 @dataclass(frozen=True)
 class SynthesisReport:
@@ -154,8 +158,19 @@ async def enrich_findings(pool, *, as_of: datetime | None = None) -> SynthesisRe
     if not findings:
         return SynthesisReport(findings_skipped=covered)
 
+    # The evidence reads are point-in-time consistent for the whole pass
+    # (evidence_as_of is fixed above), which makes them pure functions of
+    # their keys -- and memoizing them is the difference between a nightly
+    # catch-up pass reading the SAME regime row 200,000 times (one per
+    # finding, ~30 minutes of round-trips observed 2026-08-21) and reading it
+    # once. The values are identical; only the query count changes.
+    regime_row = await pool.fetchrow(_LATEST_REGIME, evidence_as_of)
+    sector_of: dict[tuple[str, str], object] = {}
+    sector_score: dict[tuple[str, str | None], object] = {}
+
     enriched = 0
     skipped = 0
+    pending_revisions: list[tuple] = []
 
     for finding in findings:
         chain = []
@@ -173,16 +188,24 @@ async def enrich_findings(pool, *, as_of: datetime | None = None) -> SynthesisRe
             ),
         }
 
-        sector_row = await pool.fetchrow(
-            _SECTOR_OF_COMPANY, finding["entity_id"], evidence_as_of
-        )
-        if sector_row is not None:
-            score_row = await pool.fetchrow(
-                _LATEST_SECTOR_SCORE,
-                sector_row["id"],
-                finding["audience_user_id"],
-                evidence_as_of,
+        sector_key = (str(finding["entity_id"]), str(evidence_as_of))
+        sector_row = sector_of.get(sector_key, _MISS)
+        if sector_row is _MISS:
+            sector_row = await pool.fetchrow(
+                _SECTOR_OF_COMPANY, finding["entity_id"], evidence_as_of
             )
+            sector_of[sector_key] = sector_row
+        if sector_row is not None:
+            score_key = (str(sector_row["id"]), finding["audience_user_id"])
+            score_row = sector_score.get(score_key, _MISS)
+            if score_row is _MISS:
+                score_row = await pool.fetchrow(
+                    _LATEST_SECTOR_SCORE,
+                    sector_row["id"],
+                    finding["audience_user_id"],
+                    evidence_as_of,
+                )
+                sector_score[score_key] = score_row
             if score_row is not None:
                 score = _decode(score_row["value"])
                 chain.append(
@@ -198,7 +221,6 @@ async def enrich_findings(pool, *, as_of: datetime | None = None) -> SynthesisRe
                 )
                 stock_layer["sector_etf"] = sector_row["symbol"]
 
-        regime_row = await pool.fetchrow(_LATEST_REGIME, evidence_as_of)
         if regime_row is not None:
             regime = _decode(regime_row["value"])
             chain.append(
@@ -227,13 +249,21 @@ async def enrich_findings(pool, *, as_of: datetime | None = None) -> SynthesisRe
             skipped += 1
             continue
 
-        await pool.execute(
-            _INSERT_REVISION,
-            finding["id"],
-            evidence_as_of,
-            json.dumps(chain_ordered),
+        pending_revisions.append(
+            (finding["id"], evidence_as_of, json.dumps(chain_ordered))
         )
         enriched += 1
+
+        # Batched writes: after a nightly regime change every chain's macro
+        # layer moves, and 200K one-row round-trips is minutes of latency for
+        # no semantic gain -- the rows are independent (append-only, keyed by
+        # finding), so a pipelined executemany lands the same revisions.
+        if len(pending_revisions) >= 500:
+            await pool.executemany(_INSERT_REVISION, pending_revisions)
+            pending_revisions.clear()
+
+    if pending_revisions:
+        await pool.executemany(_INSERT_REVISION, pending_revisions)
 
     if enriched:
         logger.info("synthesis enriched %d findings", enriched)

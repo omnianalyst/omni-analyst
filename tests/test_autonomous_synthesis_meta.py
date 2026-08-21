@@ -566,3 +566,56 @@ class TestMetaCalibration:
         await resolve_meta(db.pool, horizon_days=30)
         report2 = await resolve_meta(db.pool, horizon_days=30)
         assert report2.regimes_resolved == 0
+
+
+class TestTheNightlyCatchUpIsNotAReadStorm:
+    """2026-08-21, live: the nightly regime claim advances the evidence
+    horizon, every surfaced finding becomes uncovered at once, and the
+    catch-up pass re-read the SAME regime row once per finding -- 160K
+    identical reads, ~30 minutes, "no recent success" on the System page
+    while it churned. The evidence reads are pure in (keys, evidence_as_of)
+    within a pass; they must be memoized. The counting proxy asserts the
+    regime query runs exactly once no matter how many findings are uncovered.
+    """
+
+    async def test_the_regime_row_is_read_once_per_pass(self, db):
+        class RegimeCounter:
+            def __init__(self, pool):
+                self._pool = pool
+                self.regime_reads = 0
+
+            def __getattr__(self, name):
+                attr = getattr(self._pool, name)
+                if name == "fetchrow":
+                    async def counted(*args, **kwargs):
+                        if args and "regime_assessment" in str(args[0]):
+                            self.regime_reads += 1
+                        return await attr(*args, **kwargs)
+                    return counted
+                return attr
+
+        macro = await _seed_entity(db, "macro", "US_MACRO")
+        base = datetime.now(UTC) - timedelta(days=1)
+        await _seed_claim(
+            db, entity_id=macro, claim_type="regime_assessment",
+            value={"risk_regime": "risk_on"}, key="us_macro",
+            event_date=base - timedelta(days=1), knowledge_date=base,
+        )
+        # Two companies, two findings, neither covered at this horizon.
+        ids = []
+        for sym in ("AAA", "BBB"):
+            company = await _seed_entity(db, "company", sym)
+            pid = await _seed_prediction(db, entity_id=company)
+            await _seed_finding(db, entity_id=company, prediction_id=pid)
+            ids.append(company)
+
+        proxy = RegimeCounter(db.pool)
+        # Comfortably after seeding: created_at comes from the DB clock.
+        report = await enrich_findings(
+            proxy, as_of=datetime.now(UTC) + timedelta(seconds=5)
+        )
+        assert report.findings_enriched == 2
+        assert proxy.regime_reads == 1, (
+            "the regime row is constant for a whole pass; reading it per "
+            "finding is the storm"
+        )
