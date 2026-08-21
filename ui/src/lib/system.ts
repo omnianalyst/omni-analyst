@@ -75,6 +75,18 @@ export function loopCadence(name: string): LoopCadence {
 
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+// The write interval of a scheduled loop whose OUTPUT cadence is slower than
+// its tick. `prediction` here is the effect view -- the newest row in the
+// prediction table -- and the trend producer emits per entity on a weekly
+// grid, not on the predict loop's 5-minute tick. Grading that table on
+// minute-scale thresholds read a healthy 47-hour quiet period between grid
+// steps as "dead" and raised the attention headline on a green system
+// (observed live 2026-08-21). Absent from this map = tick-scale thresholds.
+export const LOOP_WRITE_INTERVAL: Record<string, number> = {
+  prediction: 7 * DAY,
+};
 
 // Operational thresholds for scheduled loops. These are glance-grade, not SLAs:
 // a prediction loop that last wrote over an hour ago has missed several ticks
@@ -85,10 +97,22 @@ const HOUR = 60 * MINUTE;
 export function scheduledLoopTier(
   ageSeconds: number | null,
   neverRun: boolean,
+  writeIntervalSeconds?: number,
 ): StalenessTier {
   if (neverRun) return "unknown";
   if (ageSeconds === null || Number.isNaN(ageSeconds)) return "unknown";
   if (ageSeconds < 0) return "fresh";
+  // A loop whose table fills on a slower-than-tick cadence is graded against
+  // that cadence with generous slack: one missed interval is "aging", two is
+  // "stale", beyond that is genuinely dead. The same shape as the tick-scale
+  // thresholds below, scaled to how often the table can honestly move.
+  if (writeIntervalSeconds !== undefined) {
+    if (ageSeconds < 1.25 * writeIntervalSeconds) return "fresh";
+    if (ageSeconds < 1.5 * writeIntervalSeconds) return "recent";
+    if (ageSeconds < 2 * writeIntervalSeconds) return "aging";
+    if (ageSeconds < 3 * writeIntervalSeconds) return "stale";
+    return "dead";
+  }
   if (ageSeconds < 2 * MINUTE) return "fresh";
   if (ageSeconds < 15 * MINUTE) return "recent";
   if (ageSeconds < HOUR) return "aging";
@@ -113,7 +137,11 @@ export function worstScheduledTier(loops: LoopStatus[]): StalenessTier {
   if (scheduled.length === 0) return "unknown";
   let worst: StalenessTier = "fresh";
   for (const l of scheduled) {
-    const tier = scheduledLoopTier(l.age_seconds, l.never_run);
+    const tier = scheduledLoopTier(
+      l.age_seconds,
+      l.never_run,
+      LOOP_WRITE_INTERVAL[l.loop],
+    );
     if (TIER_RANK[tier] > TIER_RANK[worst]) worst = tier;
   }
   return worst;

@@ -112,6 +112,25 @@ describe("worstScheduledTier", () => {
     ).toBe("dead");
   });
 
+  // The live 2026-08-21 false alarm: the trend producer emits per entity on a
+  // weekly grid, so the prediction table sat 47 hours quiet between grid steps
+  // while the predict loop itself ran green every 5 minutes. Minute-scale
+  // thresholds read that healthy quiet as dead and raised the attention
+  // headline. A between-grid-step age must read fresh; only a multi-week
+  // silence is the producer actually being gone.
+  it("grades prediction against its weekly write interval, not its tick", () => {
+    const DAY = 24 * HOUR;
+    expect(worstScheduledTier([loop("prediction", 47 * HOUR, false)])).toBe(
+      "fresh",
+    );
+    expect(worstScheduledTier([loop("prediction", 11 * DAY, false)])).toBe(
+      "aging",
+    );
+    expect(worstScheduledTier([loop("prediction", 22 * DAY, false)])).toBe(
+      "dead",
+    );
+  });
+
   it("reads unknown on a fresh deployment where scheduled loops have never run", () => {
     expect(
       worstScheduledTier([
