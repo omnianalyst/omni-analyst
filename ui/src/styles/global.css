@@ -6457,24 +6457,31 @@ a.btn-secondary {
   margin-left: auto;
 }
 
-/* SPA view transitions. The framework's <ViewTransitions /> component ships
-   its CSS as an inline <style> and its flag as an inline <script> — the
-   script only executes when server-rendered into the document; in a static
-   SPA deployment scripts inserted at runtime never run, so the flag was
-   never set and navigations hard-swapped. The CSS lives here (always
-   loaded) and the flag is set in _layout's mount effect (see ADOPTION_FINDINGS).
-   Shape: only main crossfades; the header swaps instantly because the old
-   root snapshot is hidden and static chrome is pixel-identical. */
+/* SPA view transitions: DISABLED by app choice (see _layout.tsx) -- the
+   snapshot/rasterize cycle makes identical static text (the header) shimmer
+   once per navigation, which reads as flicker. Rules kept inert for the day
+   per-element transitions that exclude chrome become workable.
+   Cross-document (real loads) keep the browser default below, where the
+   boot skeleton covers first paint anyway. */
 @view-transition {
   navigation: auto;
 }
 
+/* Navigation stability, platform-wide:
+   1. A reserved scrollbar gutter stops the whole-page width jump (header
+      included) when a tall page swaps to a short one and the scrollbar
+      disappears -- invisible with macOS overlay scrollbars, very visible
+      with classic scrollbars (Windows, Linux, some browsers).
+   2. A content floor keeps short loading states from collapsing the page
+      height, so the sticky header's content below never jumps. */
 html {
+  scrollbar-gutter: stable;
   background-color: var(--bg);
   view-transition-name: none;
 }
 
 main:not(main main) {
+  min-height: calc(100vh - 60px);
   view-transition-name: neutron-main;
 }
 

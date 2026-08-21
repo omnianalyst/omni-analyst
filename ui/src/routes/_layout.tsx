@@ -150,14 +150,16 @@ export default function Layout({
 
   const [menuOpen, setMenuOpen] = useState(false);
 
-  // Enable SPA view transitions: the framework's navigate() wraps DOM swaps
-  // in startViewTransition only when this flag is set, and its own bootstrap
-  // script never executes in a static SPA build (runtime-inserted scripts do
-  // not run). The transition CSS is in global.css; this just turns it on.
-  // Also retire the boot skeleton -- hydration has painted real chrome.
+  // SPA view transitions stay deliberately OFF (measured 2026-08-21): a
+  // same-document transition snapshots EVERYTHING visible -- including static
+  // header chrome -- and swapping the snapshot back to live text rasterizes
+  // differently for one frame, so identical header text shimmers on every
+  // navigation. Without transitions the DOM diff never touches header pixels
+  // at all: the content area swaps instantly, the header is never repainted,
+  // which is exactly the "only the content changes" feel. (The framework's
+  // <ViewTransitions/> bootstrap also never executes in a CSR build; see
+  // ADOPTION_FINDINGS A-025.) The skeleton still retires here on mount.
   useEffect(() => {
-    (window as unknown as { __NEUTRON_VIEW_TRANSITIONS__?: boolean })
-      .__NEUTRON_VIEW_TRANSITIONS__ = true;
     document.getElementById("boot-skeleton")?.remove();
   }, []);
 
