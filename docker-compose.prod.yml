@@ -33,6 +33,16 @@ services:
     # left on device" on a join that needed 8MB beyond the default. It
     # succeeded on retry, but the failure is a size problem, not luck.
     shm_size: 256mb
+    # Memory ceiling. A hard limit is standard protection against one
+    # container starving the box -- the number is set ABOVE steady usage on
+    # purpose: maintenance (VACUUM FULL peaked 2.1GB on 2026-08-20) and MV
+    # refreshes legitimately spike, and a cap at steady-state OOM-kills the
+    # process exactly when it is working hardest. memswap_limit gives
+    # maintenance work room to age out instead of dying; steady usage sits
+    # near 600MB, so the 1GB limit + 1.5GB swap-total is permission, not
+    # consumption.
+    mem_limit: 1g
+    memswap_limit: 1536m
     # Sized for a SHARED box, not a dedicated DB server. The image default
     # takes 25% of host RAM for shared_buffers (3GB of this 12GB host) and
     # 1.5GB maintenance_work_mem -- tuned for hardware this is not. Omni's
@@ -111,6 +121,11 @@ services:
       - "${API_PORT:-8000}:8000"
     # No healthcheck override: the image's HEALTHCHECK (see Dockerfile) is what
     # the scheduler's `depends_on: service_healthy` keys off.
+    # Memory ceiling: steady ~435MB, limit above it so a burst of concurrent
+    # requests never meets the OOM killer. Stateless -- if it ever is killed,
+    # restart brings it back in seconds and the scheduler never noticed.
+    mem_limit: 512m
+    memswap_limit: 640m
     restart: unless-stopped
 
   scheduler:
@@ -185,31 +200,17 @@ services:
       # encrypted the credentials.
       - omni_keys:/var/lib/omni
     # Exactly one. Do not scale.
+    # Memory ceiling: steady ~570MB with the synthesis catch-up observed at
+    # 835MB RSS (2026-08-21), so the limit sits above the recorded high-water
+    # rather than above idle. A kill here aborts one loop pass; the loops are
+    # transactional and re-run cleanly, but the nightly passes should not be
+    # racing the ceiling either.
+    mem_limit: 1g
+    memswap_limit: 1280m
     deploy:
       replicas: 1
-    restart: unless-stopped
-
-  edge:
-    image: caddy:2.8-alpine
-    container_name: omni_edge
-    depends_on:
-      api:
-        condition: service_healthy
-    environment:
-      OMNI_ADDR: ${OMNI_ADDR:-:80}
-      OMNI_API_UPSTREAM: ${OMNI_API_UPSTREAM:-api:8000}
-    ports:
-      - "${EDGE_PORT:-80}:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./ui/dist:/srv/ui:ro
-      - caddy_data:/data
-      - caddy_config:/config
     restart: unless-stopped
 
 volumes:
   omni_keys:
   postgres_data:
-  caddy_data:
-  caddy_config:
