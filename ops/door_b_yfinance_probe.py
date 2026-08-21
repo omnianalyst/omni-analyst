@@ -13,7 +13,7 @@ the harness, reports a t-stat, and exits. The prices never become claims and
 are never audience-scoped. If Door B passes, the ingest decision (yfinance
 classification, paid Polygon, or Alpha Vantage) is made separately.
 
-Run on deployment-host (fundamentals live on prod):
+Run on the deployment host (fundamentals live on prod):
 
   pip install --target=/tmp/yflib --no-deps yfinance multitasking peewee
   PYTHONPATH=/tmp/yflib docker compose -f docker-compose.prod.yml exec -T \

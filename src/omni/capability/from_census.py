@@ -13,7 +13,7 @@ from pathlib import Path
 
 from omni.capability.registry import Callability, Capability, Maturity, Registry
 
-CENSUS = Path(__file__).resolve().parents[3] / "_orchestrator/census/recensus.json"
+CENSUS = Path(__file__).resolve().parent / "recensus.json"
 
 # Routers whose output is not coverage and must never become a capability the
 # planner can schedule. Execution acts on the world; analysis describes it, and

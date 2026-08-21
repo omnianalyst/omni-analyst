@@ -14,7 +14,7 @@ DESIGN:
     7. Report both aggregate and per-channel results
 
 Run locally (YouTube blocks server IPs):
-    OMNI_REGISTRY_PATH=_orchestrator/hypothesis_registry.jsonl \\
+    OMNI_REGISTRY_PATH=docs/research/hypothesis_registry.jsonl \\
     uv run python ops/youtuber_probe.py
 
 Re-run (uses cached transcripts, only fetches new videos):

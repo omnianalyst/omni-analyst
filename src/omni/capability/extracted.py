@@ -1392,7 +1392,7 @@ def build_extracted_registry() -> Registry:
     # UNREGISTERED rather than entered as peers -- registering a second entry
     # that computes the same quantity differently is the two-incompatible-
     # registries failure this project shipped once. They are spelled out, with
-    # the divergence, in _orchestrator/reports/N6.md:
+    # the divergence, in the operator's archived research notes:
     # estimate_recession_probability (vs macro.recession_probability),
     # analyze_volatility_regime (vs regime.classify_volatility / volatility.*),
     # analyze_yield_curve_risk (vs macro.yield_curve_inversion) and

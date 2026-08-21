@@ -63,8 +63,8 @@ Defaults removed (raise `Unavailable` instead, per the work order):
   drop an adequately-sampled edge.
 
 `edge_gate.py` and `pattern_miner.py` were read and judged rather than ported.
-See `_orchestrator/reports/J4.md` for that comparison; it is worth more than
-the ports would have been.
+The comparison is archived with the operator's research notes; it is worth
+more than the ports would have been.
 """
 
 from __future__ import annotations

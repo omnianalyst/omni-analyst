@@ -7,7 +7,7 @@ descriptive idempotency key (colons, timestamps) is not valid Hyperliquid cloid
 format (0x + 128-bit hex), and the signing pipeline chokes on it.
 
 This tests three shapes on a ~$10 ETH spot probe (venue minimum). Any fill is
-sold straight back. Run on deployment-host:
+sold straight back. Run on the deployment host:
 
   docker compose -f docker-compose.prod.yml exec -T scheduler \
     python - < ops/diag_spot_order.py

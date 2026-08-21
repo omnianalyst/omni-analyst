@@ -6,7 +6,7 @@ Sources:
 - Vanguard (VTI, VXUS): CSV from advisors.vanguard.com
 - Invesco (QQQ): HTML from invesco.com
 
-Run on deployment-host:
+Run on the deployment host:
     docker compose -f docker-compose.prod.yml exec -T scheduler python - < ops/ingest_etf_holdings.py
 """
 

@@ -21,7 +21,7 @@ from omni.db import connect, migrate
 # not one.
 #
 # An explicit TEST_DATABASE_URL is honoured exactly, and nothing is created or
-# dropped under it: CI and _orchestrator/run.sh both name a database
+# dropped under it: CI and the operator's run script both name a database
 # deliberately. Without one the session gets a database named for its pid,
 # created on first use and dropped at the end.
 _EXPLICIT_URL = os.environ.get("TEST_DATABASE_URL")

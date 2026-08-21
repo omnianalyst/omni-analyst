@@ -20,7 +20,7 @@ Book-to-market rather than the agenda's "earnings yield": NetIncomeLoss is
 cumulative YTD in quarterly filings and would need TTM construction;
 StockholdersEquity is a clean stock measure. B/M is the Fama-French HML factor.
 
-Run on deployment-host (data lives on prod):
+Run on the deployment host (data lives on prod):
   docker compose -f docker-compose.prod.yml exec -T scheduler \
     python - < ops/equity_value_factor.py
 """

@@ -1,7 +1,7 @@
 """Publish the local hypothesis registry to a database so the UI can show it.
 
 WHY THIS IS A SCRIPT AND NOT A LOOP:
-    The registry is a JSONL file at `_orchestrator/hypothesis_registry.jsonl`,
+    The registry is a JSONL file at `docs/research/hypothesis_registry.jsonl`,
     and the Docker image ships only `src/` and `migrations/`. A deployed API
     therefore has no copy of the file and never will -- research runs happen
     wherever the researcher is, not in the container. So the sync has to be

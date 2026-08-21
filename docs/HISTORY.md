@@ -180,7 +180,7 @@ substitute.
 
 ## 5. Strategy research — what was tried and retired
 
-The full evidence is `_orchestrator/GATE_A_FINDINGS.md`, 51 numbered findings,
+The full evidence is `docs/research/GATE_A_FINDINGS.md`, 51 numbered findings,
 append-only. This is the shape of the arc.
 
 **Forty-eight directional hypotheses were tested. All failed.** The headline
@@ -278,10 +278,11 @@ summary, holdings filters, a recorded NAV chart and recent activity.
 
 ## 8. Superseded documents
 
-**All of these now live in `_orchestrator/_superseded/`, moved there on
-2026-08-14.** They were scattered across `_orchestrator/` and `docs/` alongside
+**All of these were archived 2026-08-14 into the operator's local
+`_orchestrator/` archive (not in the public tree).** They were scattered
+across the working set and `docs/` alongside
 the current documents, and four of them each opened by calling itself the single
-source of truth for the project's state. That directory's `README.md` is the
+source of truth for the project's state. That archive's `README.md` is the
 index; the table below is why each stopped being true.
 
 They are retained for their reasoning, not their facts.

@@ -16,8 +16,8 @@
 -- follow-up migration once this value is committed; this order's scope is a
 -- single migration file.
 --
--- Intended claim_type_policy row (staleness justification in _orchestrator/
--- reports/D10.md): DGS2/DGS10 are daily treasury constant-maturity yields, so
+-- Intended claim_type_policy row (staleness justification in the archived
+-- work orders): DGS2/DGS10 are daily treasury constant-maturity yields, so
 -- the signal's headline output (current_spread, is_inverted) can change every
 -- publication day; 1 day matches that daily cadence and the perception_divergence
 -- convention ("derived; only as fresh as its inputs"):

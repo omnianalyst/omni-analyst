@@ -16,8 +16,8 @@
 -- migration 014 once this value is committed; this is the convention 010/011
 -- established and D14 follows rather than inventing a second one.
 --
--- Intended claim_type_policy row (staleness justification in _orchestrator/
--- reports/D14.md): UNRATE is a MONTHLY FRED series (confirmed against FRED:
+-- Intended claim_type_policy row (staleness justification in the archived
+-- work orders): UNRATE is a MONTHLY FRED series (confirmed against FRED:
 -- frequency "Monthly", units "Percent"), so unlike 010's daily treasury yields
 -- the Sahm signal's headline output can change at most once per publication
 -- month. A daily staleness would mark every reading stale for ~29 of every 30

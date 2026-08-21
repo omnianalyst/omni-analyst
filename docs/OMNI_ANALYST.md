@@ -2,7 +2,7 @@
 
 **The operating document for this repository.** Current state, architecture,
 invariants, deployment, and open work. Everything else in `docs/` and
-`_orchestrator/` is either evidence, a deeper reference, or archived history.
+The operator's local `_orchestrator/` archive is either evidence, a deeper reference, or archived history.
 
 Last measured: **2026-08-13**. Every number below was read from the live system
 or the working tree on that date, not copied from an earlier document. Several
@@ -62,7 +62,7 @@ dropdown right.
 
 ## 2. Live production state
 
-Measured 2026-08-13 against `deployment-host` (the-host, Tailscale).
+Measured 2026-08-13 against `deployment-host` (the deployment host, Tailscale).
 
 ```
 containers     omni-v2-api-1        running
@@ -74,7 +74,7 @@ migrations     live 58 / local 59 (auth roles; local change is not deployed)
 images         omni-api:6179ae2 / omni-scheduler:6179ae2, also :latest
 rollback       omni-api:rollback-prev / omni-scheduler:rollback-prev = 69b73ce
 release        v0.4.0 = 95b6ed0 -- the deployed image (6179ae2) plus docs only
-host path      /home/user/omni-v2
+host path      /srv/omni
 public         http://app.omnianalyst.com   (Cloudflare terminates public TLS)
 ```
 
@@ -140,7 +140,7 @@ sector_score               66
 regime_assessment           5     written daily; latest 2026-08-11
 ```
 
-**This corrects two earlier documents.** `_orchestrator/STATUS.md` states there
+**This corrects two earlier documents.** an archived STATUS.md states there
 is "no macro data ... not thin data, none at all", and the 2026-08-11 session
 note lists FRED as "never ingested" with the regime and sector loops abstaining
 every cycle. Both were true when written and are now false: FRED is ingested and
@@ -156,7 +156,7 @@ are different things; check which one a question needs.
 ## 3. What has been measured
 
 The project's discipline is that a refusal counts as evidence. This table is the
-short form; `_orchestrator/GATE_A_FINDINGS.md` is the append-only ledger with all
+short form; `docs/research/GATE_A_FINDINGS.md` is the append-only ledger with all
 51 numbered findings and is authoritative on any detail.
 
 ```
@@ -381,10 +381,10 @@ migrations/    NNN_name.sql, run by neutron.nucleus.migrate.Migrator
 tests/         pytest, asyncio_mode=auto
 ops/           operational and research scripts
 docs/          this document, the ETF report, testing notes
-_orchestrator/ work orders, agent reports, and the evidence ledger
+docs/research/ hypothesis registry and the evidence ledger
 ```
 
-Remote: `http://the-forgejo-host:49152/Tyler/omni-analyst.git`
+Remote: `<your-forgejo>/Tyler/omni-analyst.git`
 
 Neutron is a sibling checkout. Framework defects go to
 `Neutron/docs/ADOPTION_FINDINGS.md` — not here, and not in a comment.
@@ -461,7 +461,7 @@ summary carries the current bar, the FDR bar, and the best result so far.
 
 The mechanism matters more than the panel:
 
-- The JSONL registry at `_orchestrator/hypothesis_registry.jsonl` remains the
+- The JSONL registry at `docs/research/hypothesis_registry.jsonl` remains the
   **single writer**. Migration 055 adds `hypothesis_test` as a one-way mirror,
   because the image ships only `src/` and `migrations/` and a deployed API can
   never read that file.
@@ -614,7 +614,7 @@ offline `docker commit` patch described in §13 is retired — do not use it. It
 bakes the temporary container's `Cmd` into the image and has taken production
 down once already.
 
-The host at `/home/user/omni-v2` is an rsync target, not a git checkout (its
+The host at `/srv/omni` is an rsync target, not a git checkout (its
 `.git` is an empty repo on `master`), so the deploy is:
 
 ```bash
@@ -622,18 +622,18 @@ The host at `/home/user/omni-v2` is an rsync target, not a git checkout (its
 uv build --wheel --project ../../Neutron/python --out-dir vendor
 npm --prefix ui run build
 
-rsync -az --delete --exclude='__pycache__' --exclude='*.pyc' src/ deployment-host:/home/user/omni-v2/src/
-rsync -az --delete migrations/ deployment-host:/home/user/omni-v2/migrations/
-rsync -az --delete ui/dist/   deployment-host:/home/user/omni-v2/ui/dist/
-rsync -az vendor/neutron_py-*.whl deployment-host:/home/user/omni-v2/vendor/
+rsync -az --delete --exclude='__pycache__' --exclude='*.pyc' src/ deployment-host:/srv/omni/src/
+rsync -az --delete migrations/ deployment-host:/srv/omni/migrations/
+rsync -az --delete ui/dist/   deployment-host:/srv/omni/ui/dist/
+rsync -az vendor/neutron_py-*.whl deployment-host:/srv/omni/vendor/
 rsync -az pyproject.toml uv.lock Dockerfile Dockerfile.scheduler \
           docker-compose.prod.yml Caddyfile .dockerignore AGENTS.md \
-          deployment-host:/home/user/omni-v2/
-rsync -az --exclude='__pycache__' --exclude='*.log' ops/ deployment-host:/home/user/omni-v2/ops/
+          deployment-host:/srv/omni/
+rsync -az --exclude='__pycache__' --exclude='*.log' ops/ deployment-host:/srv/omni/ops/
 
-ssh deployment-host 'cd /home/user/omni-v2 && docker compose -f docker-compose.prod.yml build'
+ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml build'
 ssh deployment-host 'docker tag omni-api:latest omni-api:<sha>; docker tag omni-scheduler:latest omni-scheduler:<sha>'
-ssh deployment-host 'cd /home/user/omni-v2 && docker compose -f docker-compose.prod.yml up -d --no-build api scheduler'
+ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml up -d --no-build api scheduler'
 ```
 
 Three things that will bite:
@@ -700,7 +700,7 @@ put a copy off-box or prove recovery from the newest production schema.
 ### Verification
 
 ```bash
-ssh deployment-host 'cd /home/user/omni-v2 && docker compose -f docker-compose.prod.yml ps'
+ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml ps'
 ssh deployment-host 'docker exec omni_postgres psql -U postgres -d omni_v2 -Atc "select max(version) from _neutron_migrations;"'
 ssh deployment-host 'curl -fsS http://127.0.0.1:49153/health'
 ssh deployment-host "curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: app.omnianalyst.com' http://127.0.0.1/bulletin"
@@ -981,32 +981,26 @@ to make a global invocation green.
 |---|---|---|
 | `AGENTS.md` | The rules an agent must follow before editing | State |
 | `docs/OMNI_ANALYST.md` (this) | Current state, invariants, deployment, backlog | Detailed evidence |
-| `docs/NEXT_SESSION.md` | The work that is left, ranked | Current state |
+| `docs/NEXT_SESSION.md` | The work that is left, ranked. **Operator-local** (gitignored) | Current state |
 
-Six more exist because they answer a question these three deliberately do not.
+Four more exist in the tree because they answer a question these three
+deliberately do not.
 
 | File | Authoritative for | Not for |
 |---|---|---|
-| `_orchestrator/GATE_A_FINDINGS.md` | Every measurement and defect, numbered, append-only | Plans |
-| `_orchestrator/GOING_LIVE.md` | Operator runbook for the live book: key, size, leverage, halts | Why the strategy works |
-| `_orchestrator/REMEASURE_RUNBOOK.md` | How to re-run GATE A at depth | Results |
-| `_orchestrator/TRADING_API_CONTRACT.md` | The frozen JSON shape API and UI share | Anything else |
+| `docs/research/GATE_A_FINDINGS.md` | Every measurement and defect, numbered, append-only | Plans |
 | `DEPLOY.md` | Detailed build and configuration reference | Live topology |
 | `docs/PRODUCT_AUDIT.md` | Living evidence-backed engineering review queue | Current live state or strategy results |
 
-And five are standing references: `_orchestrator/RESEARCH_AGENDA.md` (ranked
-directions with priors), `_orchestrator/FLOW_FAMILY_SCOPE.md` (the one open
-producer family), `docs/ETF_PORTFOLIO_EXPERIMENT.md` and
-`docs/ETF_ALLOCATION_EXPERIMENT.md` (two results, neither decision-grade), and
-`docs/HISTORY.md` (v1 lineage and what was retired).
-
-**Everything else is in `_orchestrator/_superseded/`, and nothing there is
-current.** Sixteen files were moved on 2026-08-14 because four of them each
-opened by calling itself the single source of truth for the project's state,
-written on four different dates, and one — `STATUS.md` — was measurably wrong
-about whether macro data existed at all. A session with no prior context could
-not tell which to believe. `_orchestrator/_superseded/README.md` says what each
-one was and why it stopped being true.
+The operator also keeps a local `_orchestrator/` archive (gitignored, not in
+this tree): a `GOING_LIVE.md` runbook for the live book, a `REMEASURE_RUNBOOK.md`
+for re-running GATE A at depth, the frozen `TRADING_API_CONTRACT.md`, a ranked
+`RESEARCH_AGENDA.md`, and `FLOW_FAMILY_SCOPE.md` (the one open producer family),
+plus superseded history. Nothing there is current: sixteen files were moved out
+on 2026-08-14 because four of them each opened by calling itself the single
+source of truth for the project's state, written on four different dates, and
+one — `STATUS.md` — was measurably wrong about whether macro data existed at
+all. A session with no prior context could not tell which to believe.
 
 The lesson, since it will recur: **one living document that is edited beats a
 series that is appended to.** When a number here goes stale, correct the number.
@@ -1028,7 +1022,7 @@ ls migrations/*.sql | tail -1
 uv run pytest -q | tail -1
 uv run python -c "from omni.scheduler.registry import default_registry as d; print(len(d()))"
 
-ssh deployment-host 'cd /home/user/omni-v2 && docker compose -f docker-compose.prod.yml ps'
+ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml ps'
 ssh deployment-host 'docker exec omni_postgres psql -U postgres -d omni_v2 -Atc "select claim_type, count(*) from claim group by 1 order by 2 desc;"'
 ssh deployment-host 'docker exec omni_postgres psql -U postgres -d omni_v2 -Atc "select nav, cash, net_exposure, taken_at from nav_snapshot order by taken_at desc limit 1;"'
 ```

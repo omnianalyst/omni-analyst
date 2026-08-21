@@ -7,12 +7,15 @@ work order is wrong — say so in your report and change nothing.
 
 1. `AGENTS.md` (this) — the rules. They are invariants, not preferences.
 2. `docs/OMNI_ANALYST.md` — current state, architecture, deployment, backlog.
-3. `docs/NEXT_SESSION.md` — what is actually left, ranked.
+3. `docs/NEXT_SESSION.md` — the operator's repair queue and session context.
+   **Operator-local** (gitignored, not in this tree). On a fresh clone, treat
+   `docs/OMNI_ANALYST.md` as the state of record.
 
-Anything in `_orchestrator/_superseded/` is history and **must not be briefed
-off**. Four documents in there each call themselves the single source of truth
-and one of them is measurably wrong; that is why they were moved. If a document
-outside those three tells you the state of this project, check its date against
+The operator keeps an `_orchestrator/` archive (also gitignored) of work
+orders, specs and agent reports. It is history and **must not be briefed
+off**: four documents in it each called themselves the single source of truth
+and one of them is measurably wrong. If a document outside those listed above
+tells you the state of this project, check its date against
 `docs/OMNI_ANALYST.md` before believing it.
 
 ## What this is
@@ -139,7 +142,7 @@ correlation from pure noise.
 src/omni/          application code
 migrations/        NNN_name.sql, run by neutron.nucleus.migrate.Migrator
 tests/             pytest, asyncio_mode=auto
-_orchestrator/     work orders, specs, agent reports and logs
+docs/research/     the published research record: hypothesis registry + evidence ledger
 ```
 
 ## Running

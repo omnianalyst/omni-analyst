@@ -8,7 +8,7 @@ the event-study reads. Resumable: skips accessions already in the output.
 PIT-correct: only `filing_date` is recorded as the disclosure anchor; the
 event-study joins on it, never on transaction_date.
 
-Run on deployment-host (EDGAR + the company CIKs are there):
+Run on the deployment host (EDGAR + the company CIKs are there):
   python3 /tmp/form4_fetch.py --years 3 --out /tmp/form4_trades.parquet
 
 Free, ~10 req/s. A 100-name subset over 3 years is ~10-20 min; the full 500

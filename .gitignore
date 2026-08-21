@@ -11,3 +11,8 @@ vendor/
 _orchestrator/logs/
 _orchestrator/worktrees/
 _orchestrator/queue-state/
+
+# Operator-local context: the session handoff and the orchestrator archive
+# (work orders, agent reports, superseded docs) are private working files.
+docs/NEXT_SESSION.md
+_orchestrator/

@@ -1,7 +1,7 @@
 -- Every hypothesis this project has ever tested, mirrored from the research
 -- registry so the running system can show its own search.
 --
--- The JSONL registry at _orchestrator/hypothesis_registry.jsonl remains the
+-- The JSONL registry at docs/research/hypothesis_registry.jsonl remains the
 -- single WRITER. It is what `harness.evaluate()` appends to, and the
 -- significance bar is computed from it during a research run. This table is a
 -- one-way published mirror: the image ships only src/ and migrations/, so a

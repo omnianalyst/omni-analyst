@@ -10,7 +10,7 @@ Idempotent: write_claims is ON CONFLICT DO NOTHING on the unique
 (entity, type, key, source, event_date, knowledge_date), so a re-run costs
 nothing and duplicates nothing. Free: SEC EDGAR is a public API.
 
-Run on deployment-host from /home/user/omni-v2:
+Run on the deployment host from /srv/omni:
   docker compose -f docker-compose.prod.yml exec -T scheduler \
     python - < ops/ingest_edgar_bulk.py
 """

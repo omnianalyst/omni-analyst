@@ -3,8 +3,8 @@
 Ported from v1 `app/services/quant/regime_detection.py` (570 lines, the
 "service") and the inline classifier at
 `app/api/v1/endpoints/risk_analysis.py:203-281` (the "inline"). The two
-disagree, and reconciling them is the work; see the report at
-`_orchestrator/reports/H6.md` for the full disagreement table.
+disagree, and reconciling them is the work; the full disagreement table is in the
+operator's archived research notes.
 
 What carried, and from where:
 

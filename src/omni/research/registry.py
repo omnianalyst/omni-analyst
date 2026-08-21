@@ -27,7 +27,7 @@ from math import erfc, sqrt
 from pathlib import Path
 from typing import Any
 
-DEFAULT_PATH = Path(__file__).resolve().parents[3] / "_orchestrator" / "hypothesis_registry.jsonl"
+DEFAULT_PATH = Path(__file__).resolve().parents[3] / "docs" / "research" / "hypothesis_registry.jsonl"
 
 # The permutation null measured on crypto cross-sections puts the null's own
 # 95th percentile at |t| 2.2-2.5 even for a SINGLE test, because one dominant
