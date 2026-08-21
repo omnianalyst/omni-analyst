@@ -33,6 +33,12 @@ EXPECTED_OPERATION_INTERVALS: dict[str, float] = {
 def _bounded(value: object | None) -> str | None:
     if value is None:
         return None
+    # A report that can say what it did in plain words is displayed that way;
+    # the dataclass repr is programmer telemetry and reads as such on the
+    # System page's scheduled-units table.
+    summary = getattr(value, "summary", None)
+    if callable(summary):
+        return str(summary())[:_MAX_RESULT_LENGTH]
     return str(value)[:_MAX_RESULT_LENGTH]
 
 

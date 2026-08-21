@@ -221,9 +221,22 @@ class AutonomousRunner:
             except Exception:
                 logger.exception("autonomous %s failed at startup", name)
 
+    async def _macro_once(self):
+        """Wrap the macro loop's return for the health record.
+
+        `assess_macro_regime` returns a claim UUID or None -- correct as an
+        API, useless as a status line ("8065a3bb-..." was literally displayed
+        as the job's result on the System page). The words carry the meaning.
+        """
+        from omni.autonomous.macro import assess_macro_regime
+
+        claim_id = await assess_macro_regime(self._pool)
+        if claim_id is None:
+            return "no assessment: a required series is missing or thin"
+        return "regime assessment recorded"
+
     def _loops(self):
         from omni.autonomous.demand import create_autonomous_demand
-        from omni.autonomous.macro import assess_macro_regime
         from omni.autonomous.meta import resolve_meta
         from omni.autonomous.sector import scan_sectors
         from omni.autonomous.synthesis import enrich_findings
@@ -231,7 +244,7 @@ class AutonomousRunner:
         return [
             (
                 "macro",
-                lambda: assess_macro_regime(self._pool),
+                lambda: self._macro_once(),
                 self._config.macro_interval,
             ),
             ("sector", lambda: scan_sectors(

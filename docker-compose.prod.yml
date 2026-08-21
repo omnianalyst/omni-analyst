@@ -27,6 +27,12 @@ services:
   postgres:
     image: timescale/timescaledb:2.17.2-pg17
     container_name: omni_postgres
+    # Postgres uses POSIX shared memory for parallel-query workspaces, and the
+    # Docker default /dev/shm of 64MB cannot hold them: the 2026-08-21
+    # synthesis pass hit "could not resize shared memory segment ... No space
+    # left on device" on a join that needed 8MB beyond the default. It
+    # succeeded on retry, but the failure is a size problem, not luck.
+    shm_size: 256mb
     # Sized for a SHARED box, not a dedicated DB server. The image default
     # takes 25% of host RAM for shared_buffers (3GB of this 12GB host) and
     # 1.5GB maintenance_work_mem -- tuned for hardware this is not. Omni's

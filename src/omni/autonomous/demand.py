@@ -51,6 +51,14 @@ class DemandReport:
     sectors_demanded: int = 0
     constituents_demanded: int = 0
 
+    def summary(self) -> str:
+        if not self.sectors_demanded and not self.constituents_demanded:
+            return "no new standing demand (all constituents already covered)"
+        return (
+            f"standing demand confirmed for {self.sectors_demanded} sectors, "
+            f"{self.constituents_demanded} new constituents"
+        )
+
 
 def _rank_sectors(scores: list[dict]) -> list[dict]:
     """Rank sector scores: highest RS first, favorable alignment as tiebreak."""

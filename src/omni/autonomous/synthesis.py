@@ -21,6 +21,14 @@ class SynthesisReport:
     findings_enriched: int = 0
     findings_skipped: int = 0
 
+    def summary(self) -> str:
+        if not self.findings_enriched:
+            return f"evidence unchanged behind all {self.findings_skipped} findings"
+        return (
+            f"{self.findings_enriched} findings re-evidenced, "
+            f"{self.findings_skipped} unchanged"
+        )
+
 
 _NEWEST_CLAIM_EVIDENCE = """
 SELECT max(knowledge_date) FROM claim

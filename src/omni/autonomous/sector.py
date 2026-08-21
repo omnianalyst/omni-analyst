@@ -68,6 +68,14 @@ class SectorScanReport:
     skipped_unchanged: int = 0
     details: tuple[str, ...] = ()
 
+    def summary(self) -> str:
+        parts = [f"scored {self.scored} sector ETFs"]
+        if self.abstained:
+            parts.append(f"{self.abstained} abstained (insufficient data)")
+        if self.skipped_unchanged:
+            parts.append(f"{self.skipped_unchanged} unchanged since last scan")
+        return "; ".join(parts)
+
 
 def macro_alignment(cycle_phase: str | None, etf_symbol: str) -> str:
     """Whether the current cycle phase historically favors this sector.

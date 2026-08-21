@@ -38,6 +38,17 @@ class MetaReport:
     sectors_resolved: int = 0
     already_resolved: int = 0
 
+    def summary(self) -> str:
+        resolved = self.regimes_resolved + self.sectors_resolved
+        if not resolved and not self.already_resolved:
+            return "no regime or sector verdicts due for resolution"
+        parts = []
+        if resolved:
+            parts.append(f"{resolved} verdicts resolved against outcomes")
+        if self.already_resolved:
+            parts.append(f"{self.already_resolved} already resolved")
+        return "; ".join(parts)
+
 
 async def _index_return(pool, *, entity_id, event_date, horizon):
     """The return on the broad-market proxy (SPY) over [event_date, +horizon]."""

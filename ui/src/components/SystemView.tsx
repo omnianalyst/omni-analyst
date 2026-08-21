@@ -44,6 +44,10 @@ function interval(seconds: number | null): string {
   return `Every ${seconds / 86400} days`;
 }
 
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
 
 
 // The strategy research record, compressed to the one line an operator needs
@@ -539,13 +543,21 @@ export function SystemView() {
                         <span class={`fill fill-${loop.state === "ok" ? "good" : loop.state === "never_run" ? "neutral" : "failed"}`}>
                           {loop.last_status ?? "never run"}
                         </span>
-                        {loop.last_result ? <small>{loop.last_result}</small> : null}
+                        {loop.last_result ? (
+                          <small title={loop.last_result}>{clip(loop.last_result, 90)}</small>
+                        ) : null}
                       </td>
                       <td>{interval(loop.expected_interval_seconds)}</td>
                       <td>{timestamp(loop.last_success_at)}</td>
                       <td>
-                        {loop.last_error ?? "None recorded"}
-                        {loop.last_failure_at ? <small>{timestamp(loop.last_failure_at)}</small> : null}
+                        {loop.last_status === "failure" && loop.last_error ? (
+                          <>
+                            <span title={loop.last_error}>{clip(loop.last_error, 90)}</span>
+                            {loop.last_failure_at ? <small>{timestamp(loop.last_failure_at)}</small> : null}
+                          </>
+                        ) : (
+                          <small>—</small>
+                        )}
                       </td>
                     </tr>
                   ))}

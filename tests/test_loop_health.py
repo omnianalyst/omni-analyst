@@ -86,6 +86,25 @@ class TestRecordLoopHealth:
             "SELECT count(*) FROM loop_health WHERE loop_name = 'nav'"
         ) == 1
 
+    async def test_a_report_is_recorded_as_its_words_not_its_repr(self, db):
+        # The scheduled-units table displayed raw dataclass reprs
+        # ("SectorScanReport(scored=0, ...)") and even a bare UUID as a job
+        # result. A report that can summarize itself is recorded that way.
+        from omni.autonomous.sector import SectorScanReport
+
+        await record_loop_health(
+            db.pool,
+            loop_name="autonomous.sector",
+            ok=True,
+            result=SectorScanReport(scored=3, skipped_unchanged=8),
+            expected_interval_seconds=43_200,
+        )
+
+        row = await _row(db.pool, "autonomous.sector")
+        assert row["last_result"] == (
+            "scored 3 sector ETFs; 8 unchanged since last scan"
+        )
+
     async def test_a_first_failure_records_one_not_zero(self, db):
         # The INSERT path must seed consecutive_failures at 1, not the column
         # default of 0 -- a failure that reads as 0 is invisible to the verdict.
