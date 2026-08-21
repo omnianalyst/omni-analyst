@@ -234,7 +234,7 @@ async def entries(pool, *, watchlist_id: UUID, user_id: UUID) -> list | None:
         FROM watchlist_entry e
         JOIN entity en ON en.id = e.entity_id
         LEFT JOIN LATERAL (
-            SELECT (c.value->>'value')::numeric AS value,
+            SELECT (c.value->>'close')::numeric AS value,
                    c.event_date
             FROM claim c
             WHERE c.entity_id = e.entity_id
@@ -248,7 +248,7 @@ async def entries(pool, *, watchlist_id: UUID, user_id: UUID) -> list | None:
             LIMIT 1
         ) latest ON true
         LEFT JOIN LATERAL (
-            SELECT (c.value->>'value')::numeric AS value
+            SELECT (c.value->>'close')::numeric AS value
             FROM claim c
             WHERE c.entity_id = e.entity_id
               AND c.claim_type = 'price_snapshot'
