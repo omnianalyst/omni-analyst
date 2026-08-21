@@ -288,6 +288,22 @@ export function HoldingsTable({ refreshKey }: { refreshKey: number }) {
 
       <p class="quiet-line">{describeHoldings(summary)}</p>
 
+      {holdings.length === 0 ? (
+        <div class="empty" style={{ padding: "4px 18px 14px" }}>
+          <p>
+            <strong>Empty is honest here.</strong> Nothing is tracked yet, and
+            the system covers only what someone asks for.
+          </p>
+          <p class="mono">
+            Add a position above, or search any ticker under Discover and track
+            it. Prices fill in as coverage arrives; if a symbol stays
+            unpriced, the deployment is missing that provider&rsquo;s key
+            (FRED is free; equity prices need Polygon) &mdash; see the
+            deployment&rsquo;s README for which keys unlock what.
+          </p>
+        </div>
+      ) : null}
+
       {holdings.length > 0 ? (
         <div class="responsive-table">
           <table class="data-table">

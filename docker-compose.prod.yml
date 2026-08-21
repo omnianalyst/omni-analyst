@@ -151,6 +151,13 @@ services:
       # Optional. Absent, Omni generates a key into omni_keys on first use.
       # Supplying one here overrides the file (12-factor / secrets manager).
       OMNI_CREDENTIAL_KEY: ${OMNI_CREDENTIAL_KEY:-}
+      # Outbound email for alert delivery. Absent = the email channel is
+      # honestly unavailable and only webhook delivery works.
+      OMNI_SMTP_HOST: ${OMNI_SMTP_HOST:-}
+      OMNI_SMTP_PORT: ${OMNI_SMTP_PORT:-587}
+      OMNI_SMTP_USER: ${OMNI_SMTP_USER:-}
+      OMNI_SMTP_PASSWORD: ${OMNI_SMTP_PASSWORD:-}
+      OMNI_SMTP_FROM: ${OMNI_SMTP_FROM:-omni@localhost}
       # Trading credentials, scheduler ONLY -- deliberately absent from the api
       # service above. The api serves reads; a process that answers public
       # requests has no use for a key that can place orders, and the cheapest

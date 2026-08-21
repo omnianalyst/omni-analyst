@@ -35,7 +35,7 @@
 		/alerts /alerts/* /analysis /analysis/* /auth /auth/* \
 		/autonomous /autonomous/* /briefing /briefing/* /bulletin /bulletin/* \
 		/capabilities /capabilities/* /coverage /coverage/* \
-		/entities /entities/* /exposure /exposure/* /gaps /gaps/* \
+		/entities /entities/* /exposure /exposure/* /export/* /gaps /gaps/* \
 		/holdings /holdings/* \
 		/mcp /mcp/* \
 		/objective/* /watchlists /watchlists/* \
