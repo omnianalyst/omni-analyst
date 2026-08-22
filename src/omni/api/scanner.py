@@ -1153,7 +1153,17 @@ async def _build_scanner(app: App, audience) -> dict:
         }
         for symbol in company_panel.columns:
             metrics = _compute_metrics(company_panel[symbol], "stocks")
-            if metrics.get("complete_years", 0) < 3:
+            # No 3-complete-year floor here, deliberately: Polygon's free
+            # window is two years, so every company in the store has exactly
+            # 2 complete years and a 3-year floor would rank none of them
+            # ever. The panel's own 200-session admission floor already ran;
+            # the long-term/consistency components simply come back None and
+            # the scorer reweights what remains (volatility, drawdown, 1y
+            # return) -- the documented "available measures are reweighted
+            # when history is shorter" behavior. The honest cost: company
+            # scores lean on stability and recency, and the table's
+            # ranking_method line already says so.
+            if not metrics.get("returns"):
                 continue
             correlation = (
                 _correlation_to_market(company_panel[symbol], spy)
