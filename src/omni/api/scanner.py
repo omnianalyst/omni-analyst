@@ -987,13 +987,18 @@ async def _sector_leaders(pool, audience) -> list[dict]:
     return _sector_leader_payload(rows)
 
 
-def _payload(buckets_data: list[dict], sectors: list[dict], coverage: dict[str, Any]) -> dict:
+def _payload(
+    buckets_data: list[dict],
+    sectors: list[dict],
+    coverage: dict[str, Any],
+    company_entries: list[dict] | None = None,
+) -> dict:
     assets = [asset for bucket in buckets_data for asset in bucket["assets"]]
 
-    def category_ranked(asset_class: str) -> list[dict]:
+    def category_ranked(asset_class: str, extra: list[dict] | None = None) -> list[dict]:
         available = [
             asset
-            for asset in assets
+            for asset in list(assets) + list(extra or [])
             if asset["asset_class"] == asset_class
             and asset.get("scores", {}).get("balanced") is not None
         ]
@@ -1001,7 +1006,7 @@ def _payload(buckets_data: list[dict], sectors: list[dict], coverage: dict[str, 
         return available
 
     rankings = {
-        "stocks": category_ranked("stocks"),
+        "stocks": category_ranked("stocks", company_entries or []),
         "defensive": category_ranked("defensive"),
         "crypto": category_ranked("crypto"),
     }
@@ -1129,8 +1134,52 @@ async def _build_scanner(app: App, audience) -> dict:
             "assets": bucket_assets,
         })
 
+    # The company universe joins the stocks ranking from the claim store --
+    # the same audience-scoped panel the comparator reads (byo_only Polygon
+    # claims; an unlicensed audience scores none and the ETF panel stands
+    # alone). Same metrics, same scoring, one honest universe instead of a
+    # 28-ETF proxy set wearing "stocks".
+    company_panel = await _company_panel_cached(app.db.pool, audience)
+    spy = prices["SPY"] if "SPY" in prices.columns else None
+    company_entries: list[dict[str, Any]] = []
+    if not company_panel.empty:
+        company_names = dict(await app.db.pool.fetch(
+            "SELECT symbol, name FROM entity WHERE kind = 'company'"
+        )) if False else {
+            row["symbol"]: row["name"]
+            for row in await app.db.pool.fetch(
+                "SELECT symbol, name FROM entity WHERE kind = 'company'"
+            )
+        }
+        for symbol in company_panel.columns:
+            metrics = _compute_metrics(company_panel[symbol], "stocks")
+            if metrics.get("complete_years", 0) < 3:
+                continue
+            correlation = (
+                _correlation_to_market(company_panel[symbol], spy)
+                if spy is not None else None
+            )
+            company_entries.append({
+                "symbol": symbol,
+                "name": company_names.get(symbol, symbol),
+                "asset_class": "stocks",
+                "area": "Companies",
+                "risk_tier": _risk_tier(metrics["volatility"]),
+                "correlation_to_spy": correlation,
+                "market_behavior": _market_behavior(correlation),
+                "from_claim_store": True,
+                **metrics,
+            })
+            company_entries[-1]["return_1y"] = metrics.get("returns", {}).get("365d")
+            company_entries[-1]["income_yield"] = None
+            company_entries[-1]["expense_ratio"] = None
+            company_entries[-1]["funding_apr"] = None
+
     for asset_class in ("stocks", "defensive", "crypto"):
-        _score_assets([entry for entry in all_entries if entry["asset_class"] == asset_class])
+        _score_assets(
+            [entry for entry in all_entries if entry["asset_class"] == asset_class]
+            + (company_entries if asset_class == "stocks" else [])
+        )
     for bucket in buckets_data:
         bucket["assets"].sort(
             key=lambda asset: asset.get("scores", {}).get("balanced") or -1,
@@ -1173,7 +1222,7 @@ async def _build_scanner(app: App, audience) -> dict:
             "reason": "Verified GICS industry metadata is not yet stored.",
         },
     }
-    payload = _payload(buckets_data, sectors, coverage)
+    payload = _payload(buckets_data, sectors, coverage, company_entries)
     # The assembled mix's own history, shown only when every representative
     # sleeve is present: one refused feed and the honest answer is nothing.
     representatives = [
