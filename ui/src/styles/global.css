@@ -833,17 +833,31 @@ tr.row.tier-unknown td:first-child {
 .loading {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: var(--s-5);
-  color: var(--muted);
+  justify-content: center;
+  padding: var(--s-7) var(--s-5);
+  color: var(--text);
+}
+.loading-brand {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+}
+.loading-word {
+  letter-spacing: 0.14em;
+  font-size: 13px;
+  font-weight: 500;
 }
 .spinner {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   border: 2px solid var(--border-strong);
-  border-top-color: var(--accent);
+  border-top-color: var(--text);
   animation: spin 0.7s linear infinite;
+}
+.loading-note {
+  color: var(--muted);
+  font-size: 12px;
 }
 @keyframes spin {
   to {
