@@ -52,7 +52,18 @@ import httpx
 
 CHANNEL = "official_d3f4ult"
 CHANNEL_URL = f"https://t.me/s/{CHANNEL}"
-LEDGER = Path(__file__).resolve().parents[1] / "docs" / "research" / "calls_ledger.jsonl"
+def _arg(name: str, default: str) -> str:
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
+_LEDGER_PATH = str(
+    Path(__file__).resolve().parents[1] / "docs" / "research" / "calls_ledger.jsonl"
+)
+# Read path and write path are separable because the host cron copies the
+# ledger INTO the container (arriving root-owned; readable, not writable by
+# the app user) and copies the result back OUT from a fresh path.
+LEDGER = Path(_arg("--ledger", _LEDGER_PATH))
+LEDGER_OUT = Path(_arg("--out", _arg("--ledger", _LEDGER_PATH)))
 
 # The caller's own products. A call is ecosystem when its post promotes these
 # or the token is one of them; those calls cannot be audited for information
@@ -275,11 +286,12 @@ async def run() -> int:
             await asyncio.sleep(1.2)
 
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    with LEDGER.open("w") as fh:
+    LEDGER_OUT.parent.mkdir(parents=True, exist_ok=True)
+    with LEDGER_OUT.open("w") as fh:
         for rec in ledger.values():
             fh.write(json.dumps(rec) + "\n")
 
-    print(f"ledger: {len(ledger)} calls ({new_calls} new) -> {LEDGER}")
+    print(f"ledger: {len(ledger)} calls ({new_calls} new) -> {LEDGER_OUT}")
     third = [r for r in ledger.values() if r["classification"] == "third_party"]
     eco = len(ledger) - len(third)
     print(f"  third_party: {len(third)}  ecosystem-excluded: {eco}\n")
