@@ -557,6 +557,63 @@ def _panel() -> pd.DataFrame:
 
 _company_cache: dict[str, dict[str, Any]] = {}
 
+# The DISPLAY-ONLY long-history company panel. yfinance daily closes, ten
+# years, the same source class the 28 ETFs already score on -- completing
+# the coherence rather than adding a new one. NEVER ingested as claims: the
+# claim store (Polygon, audited, audience-scoped) remains the sole source
+# of truth for entity pages, valuation, predictions and calibration; if a
+# price ever disagrees, the claim wins. Absent here means the ETF-style
+# long-term scoring is simply not offered for that name, not approximated.
+_company_history_cache: dict[str, Any] = {"panel": None, "ts": 0.0}
+_COMPANY_HISTORY_TTL = 24 * 3600
+
+
+def _company_history_panel(symbols: list[str]) -> pd.DataFrame:
+    """Ten years of daily closes for the scoring universe, or None.
+
+    Fetched in batches with a pause between them: yfinance rate-limits by
+    request cadence, and the observed failure mode is a silent partial
+    answer rather than an error, so a batch that comes back empty is
+    retried once and then skipped -- the names simply score on shorter
+    history that day, which the method line already discloses.
+    """
+    now = time.time()
+    cached = _company_history_cache["panel"]
+    if cached is not None and now - _company_history_cache["ts"] < _COMPANY_HISTORY_TTL:
+        return cached
+    import yfinance as yf
+
+    frames: dict[str, pd.Series] = {}
+    batch_size = 100
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i : i + batch_size]
+        try:
+            raw = yf.download(
+                " ".join(batch), period="10y", interval="1d",
+                auto_adjust=True, progress=False, group_by="ticker",
+                threads=False,
+            )
+        except Exception:  # noqa: BLE001 - a display panel may fail quietly
+            continue
+        if raw.empty:
+            continue
+        for symbol in batch:
+            try:
+                col = raw[symbol]["Close"] if len(batch) > 1 else raw["Close"]
+                s = col.dropna() if hasattr(col, "dropna") else None
+                if s is not None and len(s) >= 200:
+                    frames[symbol] = s
+            except (KeyError, TypeError):
+                continue
+    if not frames:
+        return pd.DataFrame()
+    panel = pd.DataFrame(frames)
+    panel.index = pd.to_datetime(panel.index).tz_localize(None).normalize()
+    panel = panel.groupby(level=0).last().sort_index()
+    _company_history_cache["panel"] = panel
+    _company_history_cache["ts"] = now
+    return panel
+
 
 async def _company_panel_cached(pool, audience) -> pd.DataFrame:
     """The audience-scoped company panel, cached for an hour beside the other
@@ -1140,19 +1197,37 @@ async def _build_scanner(app: App, audience) -> dict:
     # alone). Same metrics, same scoring, one honest universe instead of a
     # 28-ETF proxy set wearing "stocks".
     company_panel = await _company_panel_cached(app.db.pool, audience)
+    company_symbols = (
+        list(company_panel.columns) if not company_panel.empty else []
+    )
+    company_names = {
+        row["symbol"]: row["name"]
+        for row in await app.db.pool.fetch(
+            "SELECT symbol, name FROM entity WHERE kind = 'company'"
+        )
+    }
+    # The long-history display panel: same depth the ETFs score on. Built
+    # from the names the audience is entitled to see at all (the claim-store
+    # panel IS the entitlement list), so display scoring never widens the
+    # audience the claims allow.
+    history_panel = (
+        _company_history_panel(company_symbols) if company_symbols else pd.DataFrame()
+    )
     spy = prices["SPY"] if "SPY" in prices.columns else None
     company_entries: list[dict[str, Any]] = []
-    if not company_panel.empty:
-        company_names = dict(await app.db.pool.fetch(
-            "SELECT symbol, name FROM entity WHERE kind = 'company'"
-        )) if False else {
-            row["symbol"]: row["name"]
-            for row in await app.db.pool.fetch(
-                "SELECT symbol, name FROM entity WHERE kind = 'company'"
+    if company_symbols:
+        for symbol in company_symbols:
+            # Long history when the display panel has it; the claim-store
+            # panel otherwise. Never blended per metric -- one source per
+            # name, so a score never mixes two price series.
+            series = (
+                history_panel[symbol]
+                if history_panel is not None
+                and not history_panel.empty
+                and symbol in history_panel.columns
+                else company_panel[symbol]
             )
-        }
-        for symbol in company_panel.columns:
-            metrics = _compute_metrics(company_panel[symbol], "stocks")
+            metrics = _compute_metrics(series, "stocks")
             # No 3-complete-year floor here, deliberately: Polygon's free
             # window is two years, so every company in the store has exactly
             # 2 complete years and a 3-year floor would rank none of them
@@ -1169,7 +1244,7 @@ async def _build_scanner(app: App, audience) -> dict:
                 _correlation_to_market(company_panel[symbol], spy)
                 if spy is not None else None
             )
-            company_entries.append({
+            entry = {
                 "symbol": symbol,
                 "name": company_names.get(symbol, symbol),
                 "asset_class": "stocks",
@@ -1179,7 +1254,11 @@ async def _build_scanner(app: App, audience) -> dict:
                 "market_behavior": _market_behavior(correlation),
                 "from_claim_store": True,
                 **metrics,
-            })
+            }
+            entry["scoring_history"] = (
+                "display_long" if series is not company_panel[symbol] else "claims"
+            )
+            company_entries.append(entry)
             company_entries[-1]["return_1y"] = metrics.get("returns", {}).get("365d")
             company_entries[-1]["income_yield"] = None
             company_entries[-1]["expense_ratio"] = None
