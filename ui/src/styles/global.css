@@ -6518,3 +6518,92 @@ main:not(main main) {
 ::view-transition-new(neutron-main) {
   animation: 120ms ease-in 60ms both;
 }
+
+/* Settings, second pass: one card per concern, quiet rows inside. The first
+   version stacked four differently-shaped sections (two bare, two cards,
+   forms always open) and read as convoluted; this gives every section the
+   same skeleton -- heading, rows of label + state + one action, forms
+   disclosed only on request. */
+.settings-card {
+  display: grid;
+  gap: 0;
+}
+.settings-card .section-heading {
+  padding: 16px 18px 10px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-soft);
+}
+.settings-row-label {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.settings-row-label small {
+  color: var(--muted);
+}
+.settings-row-state {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.settings-row-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.settings-row-note {
+  margin: 0;
+  padding: 8px 18px 12px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+.settings-row-note:first-of-type {
+  border-top: 0;
+}
+.settings-inline-form {
+  display: grid;
+  gap: 12px;
+  padding: 14px 18px 16px;
+  border-top: 1px solid var(--border-soft);
+  background: var(--panel-2);
+}
+.settings-inline-form label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.settings-inline-form label small {
+  color: var(--faint);
+}
+.settings-inline-form input {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+.settings-inline-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.settings-inline-form .btn-primary {
+  justify-self: start;
+}
+@media (max-width: 560px) {
+  .settings-row {
+    flex-wrap: wrap;
+  }
+  .settings-row-state {
+    order: 3;
+    width: 100%;
+  }
+}

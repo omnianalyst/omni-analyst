@@ -2,8 +2,12 @@ import { useCallback, useEffect, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError } from "../lib/api";
 import { AuthRequiredError, changePassword } from "../lib/auth";
 import {
+  getNotifications,
   getSettings,
   getVenueStatus,
+  putNotifications,
+  testNotifications,
+  type NotificationsState,
   type ProviderEntry,
   type SettingsData,
   type VenueStatusResponse,
@@ -20,7 +24,7 @@ type PwState =
 
 type NotifyState =
   | { kind: "loading" }
-  | { kind: "ok"; webhookConfigured: boolean; email: string | null; smtpAvailable: boolean }
+  | { kind: "ok"; data: NotificationsState }
   | { kind: "error"; message: string };
 
 type State =
@@ -29,11 +33,40 @@ type State =
   | { kind: "ok"; data: SettingsData; live: VenueStatusResponse }
   | { kind: "error"; message: string; detail?: string };
 
+// The page's one shape: a quiet card per concern, rows of label + state +
+// one action inside it. Nothing expands unless asked; nothing that cannot
+// act looks like it can (the same rule VenueCard holds).
+
+function Row({
+  label,
+  hint,
+  state,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  state?: string;
+  children?: preact.ComponentChildren;
+}) {
+  return (
+    <div class="settings-row">
+      <div class="settings-row-label">
+        <strong>{label}</strong>
+        {hint ? <small>{hint}</small> : null}
+      </div>
+      {state ? <span class="settings-row-state">{state}</span> : null}
+      {children ? <div class="settings-row-actions">{children}</div> : null}
+    </div>
+  );
+}
+
 export function SettingsView() {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [pwOpen, setPwOpen] = useState(false);
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [pw, setPw] = useState<PwState>({ kind: "idle" });
+  const [notifyOpen, setNotifyOpen] = useState(false);
   const [notify, setNotify] = useState<NotifyState>({ kind: "loading" });
   const [webhookUrl, setWebhookUrl] = useState("");
   const [notifyEmail, setNotifyEmail] = useState("");
@@ -41,16 +74,10 @@ export function SettingsView() {
 
   useEffect(() => {
     let cancelled = false;
-    import("../lib/settings")
-      .then(({ getNotifications }) => getNotifications())
+    void getNotifications()
       .then((data) => {
         if (!cancelled) {
-          setNotify({
-            kind: "ok",
-            webhookConfigured: data.webhook_configured,
-            email: data.email,
-            smtpAvailable: data.smtp_available,
-          });
+          setNotify({ kind: "ok", data });
           setNotifyEmail(data.email ?? "");
         }
       })
@@ -62,20 +89,14 @@ export function SettingsView() {
 
   async function saveNotifications(e: Event) {
     e.preventDefault();
-    if (notify.kind !== "ok") return;
     setNotifyMsg("Saving…");
     try {
-      const { putNotifications, testNotifications } = await import("../lib/settings");
       const saved = await putNotifications({
         webhook_url: webhookUrl.trim() || undefined,
         email: notifyEmail.trim() || undefined,
       });
-      setNotify({
-        kind: "ok",
-        webhookConfigured: saved.webhook_configured,
-        email: saved.email,
-        smtpAvailable: saved.smtp_available,
-      });
+      setNotify({ kind: "ok", data: saved });
+      setWebhookUrl("");
       try {
         const test = await testNotifications();
         setNotifyMsg(`Saved. Test sent through: ${test.sent.join(", ")}.`);
@@ -96,9 +117,9 @@ export function SettingsView() {
       setOldPw("");
       setNewPw("");
       setPw({ kind: "done" });
+      setPwOpen(false);
     } catch (err) {
-      const described = describeError(err);
-      setPw({ kind: "error", message: described.message });
+      setPw({ kind: "error", message: describeError(err).message });
     }
   }
 
@@ -130,30 +151,148 @@ export function SettingsView() {
   const providers = state.data.provider_catalog.filter((provider) => provider.wired);
   const unavailable = state.data.provider_catalog.filter((provider) => !provider.wired);
   const configuredProviders = providers.filter((provider) => provider.configured).length;
-  const configurableVenues = state.data.venue_catalog.filter((venue) => venue.connectable);
-  const configuredVenues = configurableVenues.filter((venue) => venue.configured).length;
   const categories = providers.reduce<Record<string, ProviderEntry[]>>((grouped, provider) => {
     (grouped[provider.category || "Other"] ||= []).push(provider);
     return grouped;
   }, {});
+
+  const notifyChannels = notify.kind === "ok"
+    ? [
+        notify.data.webhook_configured ? "Webhook" : null,
+        notify.data.email ? "Email" : null,
+      ].filter((x): x is string => x !== null)
+    : [];
 
   return (
     <div class="settings-view product-page">
       <header class="settings-page-heading">
         <div>
           <h1>Settings</h1>
-          <p>Connections, data sources, and deployment configuration.</p>
+          <p>Account, notifications, connections, and data sources.</p>
         </div>
         <div class="settings-summary">
-          <span><strong>{configuredVenues}/{configurableVenues.length}</strong> user-managed venues configured</span>
-          <span><strong>{configuredProviders}</strong> data sources configured</span>
+          <span><strong>{configuredProviders}</strong> of {providers.length} data sources active</span>
         </div>
       </header>
 
-      <section class="settings-section">
-        <div class="section-heading settings-section-heading">
+      <section class="surface-card settings-card">
+        <div class="section-heading">
+          <div><p class="eyebrow">Account</p><h2>Password</h2></div>
+        </div>
+        <Row
+          label="Password"
+          hint="Rotate your own sign-in."
+          state="Set"
+        >
+          <button
+            type="button"
+            class="btn-secondary compact-button"
+            onClick={() => { setPwOpen((v) => !v); setPw({ kind: "idle" }); }}
+          >
+            {pwOpen ? "Cancel" : "Change"}
+          </button>
+        </Row>
+        {pwOpen ? (
+          <form class="settings-inline-form" onSubmit={onPasswordChange}>
+            <label>
+              <span>Current password</span>
+              <input
+                type="password"
+                required
+                autocomplete="current-password"
+                value={oldPw}
+                onInput={(e) => setOldPw((e.target as HTMLInputElement).value)}
+              />
+            </label>
+            <label>
+              <span>New password</span>
+              <input
+                type="password"
+                required
+                minlength={12}
+                autocomplete="new-password"
+                value={newPw}
+                onInput={(e) => setNewPw((e.target as HTMLInputElement).value)}
+              />
+              <small>At least 12 characters.</small>
+            </label>
+            <button class="btn-primary" type="submit" disabled={pw.kind === "busy"}>
+              {pw.kind === "busy" ? "Changing…" : "Save password"}
+            </button>
+            {pw.kind === "error" ? <p class="inline-warning">{pw.message}</p> : null}
+          </form>
+        ) : null}
+        {pw.kind === "done" ? <p class="settings-row-note">Password changed.</p> : null}
+      </section>
+
+      <section class="surface-card settings-card">
+        <div class="section-heading">
+          <div><p class="eyebrow">Notifications</p><h2>Alert delivery</h2></div>
+        </div>
+        {notify.kind === "loading" ? (
+          <p class="settings-row-note">Reading channels…</p>
+        ) : null}
+        {notify.kind === "error" ? (
+          <p class="settings-row-note">Notification settings unavailable.</p>
+        ) : null}
+        {notify.kind === "ok" ? (
+          <>
+            <Row
+              label="Channels"
+              hint="Where fired alerts are sent."
+              state={notifyChannels.length > 0 ? notifyChannels.join(" · ") : "None"}
+            >
+              <button
+                type="button"
+                class="btn-secondary compact-button"
+                onClick={() => { setNotifyOpen((v) => !v); setNotifyMsg(null); }}
+              >
+                {notifyOpen ? "Close" : "Edit"}
+              </button>
+            </Row>
+            {notify.kind === "ok" && !notify.data.smtp_available ? (
+              <p class="settings-row-note">
+                Email needs the deployment&rsquo;s SMTP configuration — a webhook works today.
+              </p>
+            ) : null}
+            {notifyOpen ? (
+              <form class="settings-inline-form" onSubmit={(e) => void saveNotifications(e)}>
+                <label>
+                  <span>Webhook URL</span>
+                  <input
+                    type="url"
+                    placeholder={
+                      notify.kind === "ok" && notify.data.webhook_configured
+                        ? "Configured — paste to replace"
+                        : "https://…"
+                    }
+                    value={webhookUrl}
+                    onInput={(e) => setWebhookUrl((e.target as HTMLInputElement).value)}
+                  />
+                  {notify.kind === "ok" && notify.data.webhook_configured && webhookUrl.trim() === "" ? (
+                    <small>Empty on save removes the configured webhook.</small>
+                  ) : null}
+                </label>
+                <label>
+                  <span>Email</span>
+                  <input
+                    type="email"
+                    placeholder="you@example.com"
+                    value={notifyEmail}
+                    onInput={(e) => setNotifyEmail((e.target as HTMLInputElement).value)}
+                  />
+                </label>
+                <button class="btn-primary" type="submit">Save and send test</button>
+                {notifyMsg ? <p class="settings-row-note">{notifyMsg}</p> : null}
+              </form>
+            ) : null}
+          </>
+        ) : null}
+      </section>
+
+      <section class="surface-card settings-card">
+        <div class="section-heading">
           <div><p class="eyebrow">Trading</p><h2>Venue connections</h2></div>
-          <p>Connection state is checked live; desired state is shown separately.</p>
         </div>
         <div class="connection-grid">
           {state.data.venue_catalog.map((venue) => (
@@ -167,105 +306,14 @@ export function SettingsView() {
         </div>
       </section>
 
-      <section class="settings-section">
-        <div class="section-heading settings-section-heading">
-          <div><p class="eyebrow">Account</p><h2>Password</h2></div>
-        </div>
-        <form class="auth-form password-form" onSubmit={onPasswordChange}>
-          <label>
-            <span class="auth-label">Current password</span>
-            <input
-              class="search-input"
-              type="password"
-              required
-              autocomplete="current-password"
-              value={oldPw}
-              onInput={(e) => setOldPw((e.target as HTMLInputElement).value)}
-            />
-          </label>
-          <label>
-            <span class="auth-label">New password</span>
-            <input
-              class="search-input"
-              type="password"
-              required
-              minlength={12}
-              autocomplete="new-password"
-              value={newPw}
-              onInput={(e) => setNewPw((e.target as HTMLInputElement).value)}
-            />
-            <span class="field-help">At least 12 characters.</span>
-          </label>
-          <button class="search-btn" type="submit" disabled={pw.kind === "busy"}>
-            {pw.kind === "busy" ? "Changing…" : "Change password"}
-          </button>
-          {pw.kind === "done" ? (
-            <p class="alert-feedback">Password changed.</p>
-          ) : null}
-          {pw.kind === "error" ? (
-            <p class="auth-error">{pw.message}</p>
-          ) : null}
-        </form>
-      </section>
-
-      <section class="settings-section surface-card">
-        <div class="section-heading settings-section-heading">
-          <div><p class="eyebrow">Notifications</p><h2>Alert delivery</h2></div>
-        </div>
-        <p class="settings-lead">
-          Where fired alerts are sent. A webhook receives one JSON POST per
-          firing batch (ntfy, a bridge script, a chat hook); email needs the
-          deployment&rsquo;s SMTP configuration.
-          {notify.kind === "ok" && !notify.smtpAvailable
-            ? " This deployment has no SMTP configured — email is listed but will not send until the operator adds it."
-            : null}
-        </p>
-        {notify.kind === "loading" ? <Loading label="Loading notifications…" /> : null}
-        {notify.kind === "error" ? (
-          <p class="auth-error">Notification settings unavailable.</p>
-        ) : null}
-        {notify.kind === "ok" ? (
-          <form class="auth-form password-form" onSubmit={(e) => void saveNotifications(e)}>
-            <label>
-              <span class="auth-label">Webhook URL</span>
-              <input
-                class="search-input"
-                type="url"
-                placeholder={notify.webhookConfigured
-                  ? "Configured — paste to replace"
-                  : "https://…"}
-                value={webhookUrl}
-                onInput={(e) => setWebhookUrl((e.target as HTMLInputElement).value)}
-              />
-              {notify.webhookConfigured && webhookUrl.trim() === "" ? (
-                <span class="field-help">A webhook is configured. Saving with this empty removes it.</span>
-              ) : null}
-            </label>
-            <label>
-              <span class="auth-label">Email address</span>
-              <input
-                class="search-input"
-                type="email"
-                placeholder="you@example.com"
-                value={notifyEmail}
-                onInput={(e) => setNotifyEmail((e.target as HTMLInputElement).value)}
-              />
-            </label>
-            <button class="search-btn" type="submit">
-              Save and send test
-            </button>
-            {notifyMsg ? <p class="alert-feedback">{notifyMsg}</p> : null}
-          </form>
-        ) : null}
-      </section>
-
-      <section class="settings-section surface-card provider-settings">
-        <div class="section-heading settings-section-heading">
-          <div><p class="eyebrow">Research</p><h2>Data sources</h2></div>
+      <section class="surface-card settings-card">
+        <div class="section-heading">
+          <div><p class="eyebrow">Data sources</p><h2>Provider keys</h2></div>
           <span class="count-badge">{configuredProviders}/{providers.length}</span>
         </div>
-        <p class="settings-lead">
-          Provider keys are read from deployment secrets. This page reports their state without returning the keys to the browser.
+        <p class="settings-row-note">
+          Keys live in the deployment&rsquo;s environment, not the browser. This
+          is each source&rsquo;s state.
         </p>
         {Object.entries(categories).map(([category, entries]) => (
           <div class="provider-category" key={category}>
@@ -275,7 +323,7 @@ export function SettingsView() {
                 <div class="provider-status-row" key={provider.key}>
                   <span class={`connection-state-dot ${provider.configured ? "is-configured" : ""}`} aria-hidden="true" />
                   <strong>{provider.label}</strong>
-                  <span>{provider.configured ? "Configured" : provider.key_required ? "Key needed" : "Available without a key"}</span>
+                  <span>{provider.configured ? "Active" : provider.key_required ? "Key needed" : "No key required"}</span>
                 </div>
               ))}
             </div>
@@ -283,7 +331,7 @@ export function SettingsView() {
         ))}
         {unavailable.length > 0 ? (
           <details class="unavailable-providers">
-            <summary>{unavailable.length} catalogued providers are not connected in this build</summary>
+            <summary>{unavailable.length} catalogued but not connected in this build</summary>
             <p>{unavailable.map((provider) => provider.label).join(", ")}</p>
           </details>
         ) : null}
