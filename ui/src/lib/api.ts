@@ -159,16 +159,22 @@ export async function sendJson<T>(
   headers: Record<string, string> = {},
 ): Promise<T> {
   const url = API_BASE_URL + path;
+  // A bodiless request must not declare a JSON content-type: the server
+  // parses a request that claims a body, and a DELETE with content-type
+  // but no body is malformed before the route ever runs (observed as
+  // every DELETE returning 400 while the same call at the HTTP level
+  // succeeded -- bulletin removal, 2026-08-22).
+  const hasBody = body !== undefined;
   let res: Response;
   try {
     res = await fetch(url, {
       method,
       headers: {
         accept: "application/json",
-        "content-type": "application/json",
+        ...(hasBody ? { "content-type": "application/json" } : {}),
         ...headers,
       },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: hasBody ? JSON.stringify(body) : undefined,
     });
   } catch (err) {
     throw new ApiUnavailableError(url, err);
