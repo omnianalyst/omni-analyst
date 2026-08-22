@@ -222,11 +222,13 @@ function RankedCategory({
   title,
   description,
   assets,
+  total,
   horizon = "long",
 }: {
   title: string;
   description: string;
   assets: AssetMetric[];
+  total?: number;
   horizon?: "short" | "long";
 }) {
   const ranked = [...assets].sort((a, b) => {
@@ -243,7 +245,11 @@ function RankedCategory({
     <section class="rank-category">
       <div class="asset-group-heading">
         <div><h2>{title}</h2><p>{description}</p></div>
-        <span>{ranked.length}</span>
+        <span>
+          {total && total > ranked.length
+            ? `Top ${ranked.length} of ${total} tracked`
+            : `${ranked.length} tracked`}
+        </span>
       </div>
       <div class="rank-table-wrap">
         <table class="rank-table">
@@ -335,6 +341,7 @@ function BestMeasured({ data }: { data: ScannerData }) {
             0,
             5,
           )}
+          total={(data.category_rankings[category.key] ?? []).length}
           horizon={horizon}
         />
       ))}
