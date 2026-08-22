@@ -243,8 +243,8 @@ export function ObjectiveView() {
                 In credits. A step that would exceed it is left out of the plan.
               </span>
             </label>
-            <label style={fieldStyle}>
-              <span
+            <div style={fieldStyle}>
+              <label
                 style={{ display: "flex", gap: "8px", alignItems: "center" }}
               >
                 <input
@@ -257,13 +257,13 @@ export function ObjectiveView() {
                 <span class="field-label" style={{ margin: 0 }}>
                   Answer must be shareable
                 </span>
-              </span>
-              <span class="field-help">
+              </label>
+              <span class="field-help" style={{ paddingLeft: "26px" }}>
                 Excludes sources whose terms forbid passing the data on, so the
                 answer can be shown to someone else. The same question plans
-                differently \u2014 and may not be answerable at all.
+                differently, and may not be answerable at all.
               </span>
-            </label>
+            </div>
           </div>
           <div>
             <button class="search-btn" type="submit" disabled={plan.kind === "planning"}>
