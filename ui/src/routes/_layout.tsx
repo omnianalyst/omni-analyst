@@ -5,7 +5,6 @@ import "../styles/discover.css";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "../components/CommandPalette";
 import { HeaderBulletin } from "../components/HeaderBulletin";
 import { StatusRail } from "../components/StatusRail";
-import type { CommandItem } from "../lib/command";
 import {
   AUTH_STATE_EVENT,
   AUTH_TOKEN_KEY,
@@ -51,27 +50,10 @@ const NAV = [
   { href: "/system", label: "System" },
 ];
 
-// The command palette jumps from the same set of destinations as the topbar,
-// with the first nine carrying a digit hotkey hint. Derived, not duplicated, so
-// adding a route to NAV is the only change needed. The record page rides the
-// palette without a topbar slot: it is a receipts destination, linked from
-// wherever accuracy is mentioned, not a daily stop.
-const COMMANDS: CommandItem[] = [
-  ...NAV.map((item, i) => ({
-    href: item.href,
-    label: item.label,
-    hint: i < 9 ? String(i + 1) : undefined,
-  })),
-  // Ask lives in the palette without a topbar slot (demoted 2026-08-22 --
-  // and also reachable from Discover's Ask button). The track record folded
-  // into System's own page the same day; no standalone destination remains.
-  {
-    href: "/objective",
-    label: "Ask the system",
-    hint: undefined,
-    keywords: ["ask", "question", "objective", "plan", "research a ticker"],
-  },
-];
+// The palette is search-only: the topbar owns navigation, and a palette
+// listing the same routes read as a second nav bar. Ask stays reachable from
+// Discover's Ask button (and /objective directly).
+const COMMANDS: never[] = [];
 
 // Routes that render for an unauthenticated visitor. Everything else requires
 // a token; the guard below redirects signed-out users away before the page can

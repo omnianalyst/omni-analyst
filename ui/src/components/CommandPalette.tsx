@@ -19,7 +19,11 @@ interface EntityResult {
   kind: string;
 }
 
-export function CommandPalette({ commands }: { commands: CommandItem[] }) {
+// Search-only by design (2026-08-22): navigation lives in the topbar, and
+// the palette duplicating it read as a second nav. `commands` stays in the
+// signature (optional, empty by default) so callers don't break the day an
+// action -- add position, create alert -- belongs here; routes never did.
+export function CommandPalette({ commands = [] }: { commands?: CommandItem[] }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -141,13 +145,13 @@ export function CommandPalette({ commands }: { commands: CommandItem[] }) {
         <input
           ref={inputRef}
           class="palette-input"
-          placeholder="Search stocks, crypto, ETFs, or jump to a page..."
+          placeholder="Search a ticker or name..."
           value={query}
           onInput={(e) => setQuery((e.currentTarget as HTMLInputElement).value)}
         />
         {allResults.length === 0 ? (
           <p class="palette-empty">
-            {query.trim().length >= 2 ? "Searching..." : "Type to search entities or jump to a page."}
+            {query.trim().length >= 2 ? "Searching..." : "Type a ticker or name to search."}
           </p>
         ) : (
           <ul class="palette-list" ref={listRef}>
