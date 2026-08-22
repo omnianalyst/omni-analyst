@@ -48,7 +48,6 @@ function isPublicPath(pathname: string): boolean {
 const NAV = [
   { href: "/", label: "Portfolio" },
   { href: "/search", label: "Discover" },
-  { href: "/objective", label: "Ask" },
   { href: "/system", label: "System" },
 ];
 
@@ -63,6 +62,11 @@ const COMMANDS: CommandItem[] = [
     label: item.label,
     hint: i < 9 ? String(i + 1) : undefined,
   })),
+  // Ask and the record page live in the palette without topbar slots: Ask
+  // demoted 2026-08-22 (one real usage in its life, and it was a prediction
+  // question the gate correctly refused; the route and API stay). The record
+  // page is a receipts destination, linked wherever accuracy is mentioned.
+  { href: "/objective", label: "Ask the system", hint: undefined },
   { href: "/record", label: "Track record", hint: undefined },
 ];
 
