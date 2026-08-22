@@ -6646,3 +6646,38 @@ main:not(main main) {
   border-radius: var(--r-md);
   margin-top: 12px;
 }
+
+/* Pinned kinds, visually distinct: a link is a door (accent, arrowless
+   affordance via the hostname under it), a note is text you wrote (quiet,
+   left rule like a margin jot). Same shape, different voice -- the kind
+   switcher in the form already says which is which; now the list does too. */
+.bulletin-item-note .bulletin-item-copy {
+  border-left: 2px solid var(--border-strong);
+  padding-left: 10px;
+}
+.bulletin-item-note .bulletin-item-copy strong {
+  font-weight: 600;
+}
+.bulletin-item-note .bulletin-item-copy p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.bulletin-item-link .bulletin-item-copy a {
+  display: grid;
+  gap: 2px;
+  text-decoration: none;
+}
+.bulletin-item-link .bulletin-item-copy a strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+.bulletin-item-link .bulletin-item-copy a span {
+  color: var(--faint);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+.bulletin-item-link .bulletin-item-copy a:hover strong {
+  text-decoration: underline;
+}
