@@ -301,3 +301,163 @@
 @media (max-width: 860px) {
   .d-sliders { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ============================================================
+   Discover, second pass: carry the bold layer below the fold.
+   The hero already read 2030; the rank tables, stat rows and
+   sub-cards underneath still read terminal -- 8px mono caps,
+   boxed tables, mono numerals everywhere. These rules restyle
+   everything under the scanner's top sections into the same
+   display language: no boxes, hairline rules, humanist labels,
+   tabular numerals only where numbers align.
+   ============================================================ */
+
+/* Rank tables: from boxed data-grid to editorial rows. The box, the
+   8px uppercase mono headers and the circular rank chips were the
+   loudest terminal tells on the page. */
+.scanner-view .rank-table-wrap {
+  border: 0;
+  border-top: 1px solid var(--d-line);
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+.scanner-view .rank-table {
+  font-size: 13.5px;
+}
+.scanner-view .rank-table th {
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--d-faint);
+  padding: 18px 12px 10px 0;
+  border-bottom: 1px solid var(--d-line);
+  background: none;
+}
+.scanner-view .rank-table td {
+  padding: 13px 12px 13px 0;
+  border-top: 0;
+  border-bottom: 1px solid var(--d-line);
+  color: var(--d-dim);
+  font-variant-numeric: tabular-nums;
+}
+.scanner-view .rank-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.scanner-view .rank-table tbody tr:hover {
+  background: rgba(147, 167, 196, 0.05);
+}
+.scanner-view .rank-table td strong,
+.scanner-view .rank-table td .rank-asset {
+  color: var(--d-ink);
+  font-size: 14px;
+}
+.scanner-view .rank-number {
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--d-faint);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.scanner-view .rank-table tr:nth-child(-n + 3) .rank-number {
+  border-color: transparent;
+  color: var(--d-green);
+}
+
+/* Asset group headings inside the ranked list: sentence case, calmer. */
+.scanner-view .asset-group-heading h2 {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--d-ink);
+}
+.scanner-view .asset-group-heading p,
+.scanner-view .asset-group-heading > span {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 12.5px;
+  color: var(--d-faint);
+}
+
+/* Holdings/stat blocks: mono only where digits align; labels humanist. */
+.scanner-view .d-holding .sym {
+  font-family: inherit;
+  font-size: 24px;
+  letter-spacing: -0.01em;
+}
+.scanner-view .d-holding dd {
+  font-family: inherit;
+  font-weight: 600;
+}
+.scanner-view .d-holding .pct {
+  font-family: inherit;
+}
+.scanner-view .d-sl label {
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.scanner-view .decision-table-wrap th {
+  font-family: inherit;
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+}
+.scanner-view .decision-table-wrap .mono,
+.scanner-view .decision-table-wrap td strong {
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.scanner-view .discover-compact-meta {
+  font-family: inherit;
+  letter-spacing: 0.02em;
+}
+
+/* Sector/overall leader cards + comparator + view switch: de-box to the
+   same hairline rhythm. */
+.scanner-view .sector-leader-card,
+.scanner-view .overall-leaders-card,
+.scanner-view .custom-compare,
+.scanner-view .leader-company {
+  background: none;
+  border: 0;
+  box-shadow: none;
+  border-radius: 0;
+}
+.scanner-view .sector-leadership-block,
+.scanner-view .overall-leader-grid {
+  border-top: 1px solid var(--d-line);
+  padding-top: 22px;
+}
+.scanner-view .view-switch {
+  border-color: var(--d-line);
+  background: none;
+}
+.scanner-view .view-switch button {
+  border-radius: 7px;
+}
+.scanner-view .view-switch button.is-active,
+.scanner-view .view-switch button.active {
+  background: rgba(147, 167, 196, 0.12);
+  color: var(--d-ink);
+}
+
+/* The coverage/audit foot: the most terminal-styled block on the page
+   (grids of mono caps). Keep the substance, soften the voice. */
+.scanner-view .coverage-audit-grid,
+.scanner-view .coverage-audit-list,
+.scanner-view .foot-details,
+.scanner-view .foot-panel {
+  font-family: inherit;
+}
+.scanner-view .coverage-gate-note,
+.scanner-view .coverage-note {
+  font-family: inherit;
+  letter-spacing: 0.01em;
+}
