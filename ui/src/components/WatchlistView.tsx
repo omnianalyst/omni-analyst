@@ -108,7 +108,11 @@ export function WatchlistView() {
             </p>
           ) : null}
           {state.watchlists.map((w) => (
-            <WatchlistPanel key={w.id} watchlist={w} />
+            <WatchlistPanel
+              key={w.id}
+              watchlist={w}
+              onDeleted={() => void reload()}
+            />
           ))}
         </>
       ) : null}

@@ -267,3 +267,31 @@ async def entries(pool, *, watchlist_id: UUID, user_id: UUID) -> list | None:
         watchlist_id,
         user_id,
     )
+
+
+async def delete_list(pool, *, watchlist_id: UUID, user_id: UUID) -> bool:
+    """Delete a watchlist and withdraw every demand its entries raised.
+
+    Same rule remove_entity holds, applied to the whole list: the demand a
+    watch entry raised is withdrawn when the entry goes, so a deleted list
+    leaves no orphaned demand keeping coverage alive nobody asked for.
+    Returns False when the list is not this user's (the caller's 404).
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        owned = await conn.fetchval(
+            "SELECT 1 FROM watchlist WHERE id = $1 AND user_id = $2 FOR UPDATE",
+            watchlist_id,
+            user_id,
+        )
+        if owned is None:
+            return False
+        rows = await conn.fetch(
+            "SELECT demand_id FROM watchlist_entry_demand WHERE watchlist_id = $1",
+            watchlist_id,
+        )
+        for row in rows:
+            await withdraw(conn, row["demand_id"])
+        await conn.execute(
+            "DELETE FROM watchlist WHERE id = $1", watchlist_id
+        )
+        return True

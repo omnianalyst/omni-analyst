@@ -126,6 +126,17 @@ def build_router(app: App) -> Router:
             raise not_found("Entry not found")
         return {"removed": True}
 
+    @router.delete("/watchlists/{watchlist_id}")
+    async def delete_watchlist(watchlist_id: UUID, request: Request) -> dict:
+        """Delete a list. Cascades entries and withdraws their demand."""
+        user = _require_user(request)
+        ok = await wl.delete_list(
+            app.db.pool, watchlist_id=watchlist_id, user_id=user
+        )
+        if not ok:
+            raise not_found("Watchlist not found")
+        return {"deleted": True}
+
     @router.get("/watchlists/{watchlist_id}/entries")
     async def list_entries(watchlist_id: UUID, request: Request) -> dict:
         user = _require_user(request)

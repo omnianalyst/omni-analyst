@@ -3,6 +3,7 @@ import { describeError, searchEntities, type Entity } from "../lib/api";
 import { AuthRequiredError } from "../lib/auth";
 import {
   addEntity,
+  deleteWatchlist,
   entryName,
   entrySymbol,
   listEntries,
@@ -53,7 +54,10 @@ const addRowStyle = {
   borderRadius: "8px",
 } as const;
 
-export function WatchlistPanel({ watchlist }: { watchlist: Watchlist }) {
+export function WatchlistPanel({
+  watchlist,
+  onDeleted,
+}: { watchlist: Watchlist; onDeleted?: (id: string) => void }) {
   const [entries, setEntries] = useState<EntriesState>({ kind: "loading" });
   const [showAdd, setShowAdd] = useState(false);
   const [query, setQuery] = useState("");
@@ -119,6 +123,24 @@ export function WatchlistPanel({ watchlist }: { watchlist: Watchlist }) {
     }
   }
 
+  async function onDeleteList() {
+    if (
+      !window.confirm(
+        `Delete the list "${watchlist.name}"? Its entries are removed and their coverage demand withdrawn.`,
+      )
+    )
+      return;
+    setRemovingId("LIST");
+    try {
+      await deleteWatchlist(watchlist.id);
+      onDeleted?.(watchlist.id);
+    } catch (err) {
+      setMutateError({ message: describeErrorAuth(err).message });
+    } finally {
+      setRemovingId(null);
+    }
+  }
+
   async function onRemove(entityId: string) {
     setMutateError(null);
     setRemovingId(entityId);
@@ -137,6 +159,15 @@ export function WatchlistPanel({ watchlist }: { watchlist: Watchlist }) {
     <section class="panel">
       <h2 class="panel-title">
         {watchlist.name}
+        <button
+          type="button"
+          class="alert-action alert-action-delete"
+          title="Delete this list"
+          disabled={removingId === "LIST"}
+          onClick={() => void onDeleteList()}
+        >
+          Delete list
+        </button>
       </h2>
 
       {mutateError ? (

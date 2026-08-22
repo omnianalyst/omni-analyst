@@ -26,6 +26,7 @@ from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.demand.ledger import direct_attention, rank
 from omni.main import create_app
 from omni.watchlist import lists as wl
+from omni.watchlist.lists import add_entity, delete_list as delete_list_fn
 
 
 async def _user(db, email) -> uuid4:
@@ -453,3 +454,60 @@ class TestImplicitDemandReachesTheGapEngine:
             "WHERE entity_id = $1 AND gap_class = 'missing' AND resolved_at IS NULL",
             entity,
         ) == len(missing)
+
+
+class TestDeleteList:
+    async def test_delete_removes_entries_and_withdraws_demand(self, db):
+        user = await db.pool.fetchval(
+            "INSERT INTO users (email, password_hash) "
+            "VALUES ($1, 'x') RETURNING id", "del@example.com"
+        )
+        entity = await db.pool.fetchval(
+            "INSERT INTO entity (kind, symbol, name) "
+            "VALUES ('company', 'AAPL', 'Apple') RETURNING id"
+        )
+        created = await wl.create(db.pool, user_id=user, name="to delete")
+        await add_entity(
+            db.pool, watchlist_id=created["id"], entity_id=entity, user_id=user
+        )
+        demand_ids = [
+            r["demand_id"]
+            for r in await db.pool.fetch(
+                "SELECT demand_id FROM watchlist_entry_demand "
+                "WHERE watchlist_id = $1", created["id"],
+            )
+        ]
+        assert demand_ids, "entry raised demand"
+
+        ok = await delete_list_fn(db.pool, watchlist_id=created["id"], user_id=user)
+        assert ok is True
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM watchlist WHERE id = $1", created["id"]
+        ) == 0
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM watchlist_entry WHERE watchlist_id = $1",
+            created["id"],
+        ) == 0
+        # The demand rows are withdrawn (inactive), not left standing.
+        for did in demand_ids:
+            active = await db.pool.fetchval(
+                "SELECT active FROM demand WHERE id = $1", did
+            )
+            assert active is False
+
+    async def test_delete_another_users_list_is_false_not_deleted(self, db):
+        owner = await db.pool.fetchval(
+            "INSERT INTO users (email, password_hash) "
+            "VALUES ($1, 'x') RETURNING id", "owner@example.com"
+        )
+        other = await db.pool.fetchval(
+            "INSERT INTO users (email, password_hash) "
+            "VALUES ($1, 'x') RETURNING id", "other@example.com"
+        )
+        created = await wl.create(db.pool, user_id=owner, name="mine")
+        assert await delete_list_fn(
+            db.pool, watchlist_id=created["id"], user_id=other
+        ) is False
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM watchlist WHERE id = $1", created["id"]
+        ) == 1

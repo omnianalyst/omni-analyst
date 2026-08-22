@@ -77,3 +77,11 @@ export function entrySymbol(entry: WatchlistEntry): string {
 export function entryName(entry: WatchlistEntry): string {
   return entry.name ?? "(unnamed)";
 }
+
+export const deleteWatchlist = (
+  watchlistId: string,
+): Promise<{ deleted: boolean }> =>
+  authedSendJson<{ deleted: boolean }>(
+    "DELETE",
+    `/watchlists/${encodeURIComponent(watchlistId)}`,
+  );
