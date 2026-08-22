@@ -4,12 +4,11 @@ import { SearchView } from "./SearchView";
 import { AlertsView } from "./AlertsView";
 import { WatchlistView } from "./WatchlistView";
 
-// The page IS the ranked overview; Saved and Alerts are overlays opened from
-// the header's right, the same pattern Portfolio uses. A deep link with
-// ?tab= or ?q= still routes where it always did (entity search results from
-// the command palette's history, saved lists, alerts) so nothing that was
-// reachable breaks -- the tab bar itself is gone because the header search
-// already does what the Search tab did.
+// The page IS the ranked overview. Its actions -- Saved, Alerts, Ask -- sit
+// top-right, the same pattern Portfolio uses; Ask opens the objective page
+// as an overlay rather than navigating, so a question never loses the ranked
+// context it came from. Deep links (?tab=, ?q=) still route where they
+// always did.
 function overlayFromUrl(): "search" | "watchlist" | "alerts" | null {
   const params = new URLSearchParams(window.location.search);
   if (params.has("q")) return "search";
@@ -57,8 +56,14 @@ export function DiscoverView() {
   return (
     <div class="discover-view">
       <div class="discover-overlay-bar">
-        <p class="quiet-line">Ranked on everything the system measures.</p>
         <div class="portfolio-header-actions">
+          <a
+            class="btn-secondary compact-button"
+            href="/objective"
+            title="Ask the system a question"
+          >
+            Ask
+          </a>
           <button
             type="button"
             class="btn-secondary compact-button"

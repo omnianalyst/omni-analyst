@@ -62,21 +62,14 @@ const COMMANDS: CommandItem[] = [
     label: item.label,
     hint: i < 9 ? String(i + 1) : undefined,
   })),
-  // Ask and the record page live in the palette without topbar slots: Ask
-  // demoted 2026-08-22 (one real usage in its life, and it was a prediction
-  // question the gate correctly refused; the route and API stay). The record
-  // page is a receipts destination, linked wherever accuracy is mentioned.
+  // Ask lives in the palette without a topbar slot (demoted 2026-08-22 --
+  // and also reachable from Discover's Ask button). The track record folded
+  // into System's own page the same day; no standalone destination remains.
   {
     href: "/objective",
     label: "Ask the system",
     hint: undefined,
     keywords: ["ask", "question", "objective", "plan", "research a ticker"],
-  },
-  {
-    href: "/record",
-    label: "Track record",
-    hint: undefined,
-    keywords: ["record", "accuracy", "scorecard", "receipts", "refusals"],
   },
 ];
 

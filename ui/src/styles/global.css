@@ -6381,7 +6381,7 @@ a.btn-secondary {
 .discover-overlay-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
   padding: 10px 2px 0;
   flex-wrap: wrap;
@@ -6621,4 +6621,14 @@ main:not(main main) {
 .key-input:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+/* The track record folded into System: disclosure + stacked panels inside. */
+.record-fold {
+  margin-top: 14px;
+}
+.record-fold .panel {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  margin-top: 12px;
 }

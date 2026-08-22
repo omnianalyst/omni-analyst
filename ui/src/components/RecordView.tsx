@@ -22,18 +22,25 @@ import { ScorecardTable } from "./ScorecardTable";
 // stores only what it surfaced can claim any accuracy it likes.
 
 type Async<T> =
-  | { kind: "loading" }
+  | { kind: "idle" | "loading" }
   | { kind: "ok"; data: T }
   | { kind: "error"; message: string; detail?: string };
 
-export function RecordView() {
-  const [calls, setCalls] = useState<Async<BriefingFinding[]>>({ kind: "loading" });
-  const [scorecard, setScorecard] = useState<Async<ScorecardRow[]>>({ kind: "loading" });
-  const [refusals, setRefusals] = useState<Async<RefusalCounts>>({ kind: "loading" });
+// The receipts, folded into System as a disclosure: how often the system has
+// been right and what it declined to say. Both halves together on purpose --
+// an accuracy figure without its refusals is a number you cannot check. Data
+// loads only when the disclosure opens; a collapsed section costs nothing.
+export function RecordSection() {
+  const [open, setOpen] = useState(false);
+  const [calls, setCalls] = useState<Async<BriefingFinding[]>>({ kind: "idle" });
+  const [scorecard, setScorecard] = useState<Async<ScorecardRow[]>>({ kind: "idle" });
+  const [refusals, setRefusals] = useState<Async<RefusalCounts>>({ kind: "idle" });
 
   useEffect(() => {
+    if (!open || calls.kind !== "idle") return;
     let cancelled = false;
-    const run = <T,>(set: (v: Async<T>) => void, fetcher: () => Promise<T>) => {
+    const run = <T,>(set: (v: Async<T>) => void, fetcher: () => Promise<T>, idle: boolean) => {
+      if (!idle) return;
       fetcher()
         .then((d) => {
           if (!cancelled) set({ kind: "ok", data: d });
@@ -46,32 +53,32 @@ export function RecordView() {
         });
     };
 
-    run(setCalls, getBriefing);
-    run(setScorecard, getScorecard);
-    run(setRefusals, getRefusals);
+    run(setCalls, getBriefing, calls.kind === "idle");
+    run(setScorecard, getScorecard, scorecard.kind === "idle");
+    run(setRefusals, getRefusals, refusals.kind === "idle");
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [open]);
 
   const refusedTotal = refusals.kind === "ok" ? refusalTotal(refusals.data) : null;
 
   return (
-    <div class="record-view">
-      <header class="page-head">
-        <h1>Track record</h1>
-        <p class="muted">
-          How often the system has been right, and what it chose not to say.
-          Both halves are here on purpose: an accuracy figure without its{" "}
-          <Hint term="refusal">refusals</Hint> is a number you cannot check.
-        </p>
-      </header>
-
-      <section class="panel">
-        <h2 class="panel-title">
-          Accuracy by method
-        </h2>
+    <div class="record-fold">
+      <button
+        type="button"
+        class="disclosure-button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span>Track record · how often it has been right, and what it refused to say</span>
+        <span aria-hidden="true">{open ? "−" : "+"}</span>
+      </button>
+      {open ? (
+        <>
+          <section class="panel">
+            <h2 class="panel-title">Accuracy by method</h2>
         <p class="panel-sub muted">
           A <Hint term="hit_rate">hit rate</Hint> appears only once at least ten
           calls of a class have played out. Fewer than that is noise wearing a
@@ -84,8 +91,8 @@ export function RecordView() {
         {scorecard.kind === "ok" ? <ScorecardTable rows={scorecard.data} /> : null}
       </section>
 
-      <section class="panel">
-        <h2 class="panel-title">Refusals — what it declined to say, and why</h2>
+          <section class="panel">
+            <h2 class="panel-title">Refusals — what it declined to say, and why</h2>
         {refusals.kind === "loading" ? <Loading label="Loading refusals…" /> : null}
         {refusals.kind === "error" ? (
           <ErrorState message={refusals.message} detail={refusals.detail} />
@@ -93,11 +100,8 @@ export function RecordView() {
         {refusals.kind === "ok" ? <RefusalList counts={refusals.data} /> : null}
       </section>
 
-      <section class="panel">
-        <h2 class="panel-title">
-          Open calls
-          <a class="panel-clear" href="/">portfolio</a>
-        </h2>
+          <section class="panel">
+            <h2 class="panel-title">Open calls</h2>
         <p class="panel-sub muted">
           Every call currently standing, with the evidence and the price that
           would prove each one wrong.
@@ -131,6 +135,8 @@ export function RecordView() {
           </ul>
         ) : null}
       </section>
+        </>
+      ) : null}
     </div>
   );
 }

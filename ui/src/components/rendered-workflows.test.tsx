@@ -414,7 +414,11 @@ describe("rendered failure and empty states", () => {
     render(<SystemView />, container);
 
     await waitFor(() => expect(container.textContent).toContain("View technical details"));
-    await act(() => (container.querySelector(".disclosure-button") as HTMLButtonElement).click());
+    // The technical-details button specifically: the Track record fold above
+    // it is also a .disclosure-button now.
+    const details = Array.from(container.querySelectorAll<HTMLButtonElement>(".disclosure-button"))
+      .find((b) => b.textContent?.includes("technical details"));
+    await act(() => details!.click());
 
     expect(container.textContent).toContain("Last execution result");
     expect(container.textContent).toContain("NAV snapshot 210.12");

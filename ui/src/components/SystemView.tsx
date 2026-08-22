@@ -29,6 +29,7 @@ import {
 } from "../lib/trading";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
+import { RecordSection } from "./RecordView";
 
 function timestamp(iso: string | null): string {
   if (!iso) return "—";
@@ -500,6 +501,7 @@ export function SystemView() {
       <ProcessBoard loops={snapshot.health.loops} />
       <EdgeSection monitor={edges} />
       <ResearchSection research={research} onRetry={loadResearch} />
+      <RecordSection />
 
       <button
         type="button"
