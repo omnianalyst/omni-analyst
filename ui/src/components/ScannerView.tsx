@@ -218,6 +218,9 @@ function rankableByMedian(asset: AssetMetric): boolean {
 
 // The measured facts behind a row, on demand. Nothing here is derived in the
 // browser -- every field is what the scanner measured for that asset.
+const RANK_PREVIEW = 10;
+const RANK_EXPANDED = 50;
+
 function RankedCategory({
   title,
   description,
@@ -231,7 +234,12 @@ function RankedCategory({
   total?: number;
   horizon?: "short" | "long";
 }) {
-  const ranked = [...assets].sort((a, b) => {
+  // The caller passes the full ranked list (top slice no longer happens at
+  // the call site); this component owns how much shows. 10 by default, 50
+  // expanded, scrollable beyond -- enough depth to be a real ranking without
+  // rendering 500 rows unprompted.
+  const [expanded, setExpanded] = useState(false);
+  const rankedAll = [...assets].sort((a, b) => {
     if (horizon === "short") {
       return (b.returns?.["365d"] ?? -Infinity) - (a.returns?.["365d"] ?? -Infinity);
     }
@@ -241,16 +249,31 @@ function RankedCategory({
     if (right == null) return -1;
     return right - left;
   });
+  const ranked = rankedAll.slice(0, expanded ? RANK_EXPANDED : RANK_PREVIEW);
   return (
     <section class="rank-category">
       <div class="asset-group-heading">
         <div><h2>{title}</h2><p>{description}</p></div>
         <span>
-          {total && total > ranked.length
-            ? `Top ${ranked.length} of ${total} tracked`
-            : `${ranked.length} tracked`}
+          {total && total > rankedAll.length
+            ? `Top ${rankedAll.length} of ${total} tracked`
+            : `${rankedAll.length} tracked`}
         </span>
       </div>
+      {rankedAll.length > RANK_PREVIEW ? (
+        <button
+          type="button"
+          class="rank-more"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded
+            ? "Show fewer"
+            : `Show more · next ${Math.min(
+                RANK_EXPANDED - RANK_PREVIEW,
+                rankedAll.length - RANK_PREVIEW,
+              )}`}
+        </button>
+      ) : null}
       <div class="rank-table-wrap">
         <table class="rank-table">
           <thead>
@@ -337,10 +360,7 @@ function BestMeasured({ data }: { data: ScannerData }) {
           key={category.key}
           title={category.title}
           description={category.description}
-          assets={(data.category_rankings[category.key] ?? []).slice(
-            0,
-            5,
-          )}
+          assets={data.category_rankings[category.key] ?? []}
           total={(data.category_rankings[category.key] ?? []).length}
           horizon={horizon}
         />

@@ -6681,3 +6681,23 @@ main:not(main main) {
 .bulletin-item-link .bulletin-item-copy a:hover strong {
   text-decoration: underline;
 }
+
+.rank-more {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px 0 10px;
+  border: 0;
+  border-top: 1px solid var(--d-line, var(--border-soft));
+  background: none;
+  color: var(--d-faint, var(--faint));
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  text-align: center;
+}
+.rank-more:hover {
+  color: var(--d-dim, var(--muted));
+}
