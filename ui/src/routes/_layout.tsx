@@ -66,8 +66,18 @@ const COMMANDS: CommandItem[] = [
   // demoted 2026-08-22 (one real usage in its life, and it was a prediction
   // question the gate correctly refused; the route and API stay). The record
   // page is a receipts destination, linked wherever accuracy is mentioned.
-  { href: "/objective", label: "Ask the system", hint: undefined },
-  { href: "/record", label: "Track record", hint: undefined },
+  {
+    href: "/objective",
+    label: "Ask the system",
+    hint: undefined,
+    keywords: ["ask", "question", "objective", "plan", "research a ticker"],
+  },
+  {
+    href: "/record",
+    label: "Track record",
+    hint: undefined,
+    keywords: ["record", "accuracy", "scorecard", "receipts", "refusals"],
+  },
 ];
 
 // Routes that render for an unauthenticated visitor. Everything else requires

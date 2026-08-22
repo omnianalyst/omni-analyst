@@ -1,4 +1,5 @@
 export interface CommandItem {
+  keywords?: string[];
   label: string;
   href: string;
   // Optional affordance hint shown at the row's right edge (e.g. the digit
@@ -18,6 +19,7 @@ export function filterRoutes(
   return items.filter(
     (i) =>
       i.label.toLowerCase().includes(q) ||
-      i.href.toLowerCase().includes(q),
+      i.href.toLowerCase().includes(q) ||
+      (i.keywords ?? []).some((k) => k.includes(q)),
   );
 }
