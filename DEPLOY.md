@@ -149,18 +149,14 @@ this, and the gap engine computes gaps **per audience**, never globally.
 
 | Provider key | Category | Env-configurable today |
 |---|---|---|
-| `alpha_vantage` | market data | no (catalog-only) |
 | `polygon` | market data | `POLYGON_API_KEY` |
-| `fmp` | market data | no (catalog-only) |
-| `finnhub` | market data | no (catalog-only) |
-| `twelve_data` | market data | no (catalog-only) |
-| `trading_economics` | market data | no (catalog-only) |
-| `quandl` | market data | no (catalog-only) |
 | `coingecko` | crypto | `COINGECKO_API_KEY` |
-| `binance` | crypto | no (catalog-only) |
-| `coinmarketcap` | crypto | no (catalog-only) |
-| `messari` | crypto | no (catalog-only) |
-| `news_api` | news | no (catalog-only) |
+| `binance` | crypto | no (keyless public endpoints) |
+
+Catalog entries for providers without adapters were removed 2026-08-21; the
+catalog now lists only live sources. Users can also paste their own keys for
+`polygon`, `fred`, `etherscan` and `coingecko` in Settings (encrypted at
+rest, used for their fetches, deployment env as fallback).
 
 Only `polygon` and `coingecko` have a `Settings` field today, so only they can
 be configured via environment. The rest are catalog entries without env wiring;

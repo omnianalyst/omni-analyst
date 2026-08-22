@@ -6607,3 +6607,18 @@ main:not(main main) {
     width: 100%;
   }
 }
+
+.key-input {
+  width: 180px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+.key-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

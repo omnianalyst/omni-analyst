@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from neutron import App, Router
+from neutron.error import bad_request, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
@@ -20,6 +21,10 @@ __all__ = ["build_router"]
 class NotifyIn(BaseModel):
     webhook_url: str | None = None
     email: str | None = None
+
+
+class DataKeyIn(BaseModel):
+    api_key: str | None = None
 
 
 async def _load_settings(pool, user_id) -> dict[str, Any]:
@@ -143,6 +148,53 @@ def _sanitized_venues(saved: dict) -> dict:
 def build_router(app: App) -> Router:
     router = Router()
 
+    @router.get("/settings/data-keys")
+    async def get_data_keys(request: Request) -> dict:
+        """Which keyed data providers exist and whether the caller has stored one.
+
+        The key itself never returns -- only presence, the same rule the
+        webhook URL follows.
+        """
+        from omni.credentials.data_keys import KEYED_PROVIDERS, configured
+
+        user = resolve_audience_from_request(request)
+        if user is None:
+            raise unauthorized("Authentication required")
+        state = await configured(app.db.pool, user)
+        return {
+            "providers": [
+                {"key": k, "description": d, "configured": state.get(k, False)}
+                for k, d in KEYED_PROVIDERS.items()
+            ]
+        }
+
+    @router.put("/settings/data-keys/{provider_key}")
+    async def put_data_key(
+        provider_key: str, body: DataKeyIn, request: Request
+    ) -> dict:
+        from omni.credentials.data_keys import KEYED_PROVIDERS, configured, put_key
+
+        user = resolve_audience_from_request(request)
+        if user is None:
+            raise unauthorized("Authentication required")
+        if provider_key not in KEYED_PROVIDERS:
+            raise bad_request(f"Unknown data provider: {provider_key}")
+        await put_key(app.db.pool, user, provider_key, body.api_key or "")
+        state = await configured(app.db.pool, user)
+        return {"configured": state.get(provider_key, False)}
+
+    @router.delete("/settings/data-keys/{provider_key}")
+    async def delete_data_key(provider_key: str, request: Request) -> dict:
+        from omni.credentials.data_keys import KEYED_PROVIDERS, put_key
+
+        user = resolve_audience_from_request(request)
+        if user is None:
+            raise unauthorized("Authentication required")
+        if provider_key not in KEYED_PROVIDERS:
+            raise bad_request(f"Unknown data provider: {provider_key}")
+        await put_key(app.db.pool, user, provider_key, "")
+        return {"configured": False}
+
     @router.get("/settings/notifications")
     async def get_notifications(request: Request) -> dict:
         """Report the notify channels without returning the webhook URL.
@@ -152,8 +204,6 @@ def build_router(app: App) -> Router:
         """
         user = resolve_audience_from_request(request)
         if user is None:
-            from neutron.error import unauthorized
-
             raise unauthorized("Authentication required")
         row = await app.db.pool.fetchrow(
             "SELECT data FROM user_settings WHERE user_id = $1", user
@@ -177,8 +227,6 @@ def build_router(app: App) -> Router:
     async def put_notifications(body: NotifyIn, request: Request) -> dict:
         user = resolve_audience_from_request(request)
         if user is None:
-            from neutron.error import unauthorized
-
             raise unauthorized("Authentication required")
         notify = {
             "webhook_url": (body.webhook_url or "").strip() or None,
@@ -207,14 +255,10 @@ def build_router(app: App) -> Router:
 
         user = resolve_audience_from_request(request)
         if user is None:
-            from neutron.error import unauthorized
-
             raise unauthorized("Authentication required")
         try:
             return await send_test(app.db.pool, user)
         except Exception as exc:  # noqa: BLE001 - the failure IS the payload
-            from neutron.error import bad_request
-
             raise bad_request(str(exc)) from exc
 
     @router.get("/settings/config")

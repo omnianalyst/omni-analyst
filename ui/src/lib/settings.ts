@@ -154,3 +154,34 @@ export const putNotifications = (body: {
 
 export const testNotifications = (): Promise<{ sent: string[] }> =>
   authedSendJson<{ sent: string[] }>("POST", "/settings/notifications/test");
+
+export interface DataKeyProvider {
+  key: string;
+  description: string;
+  configured: boolean;
+}
+
+export interface DataKeysResponse {
+  providers: DataKeyProvider[];
+}
+
+export const getDataKeys = (): Promise<DataKeysResponse> =>
+  authedGetJson<DataKeysResponse>("/settings/data-keys");
+
+export const putDataKey = (
+  providerKey: string,
+  apiKey: string,
+): Promise<{ configured: boolean }> =>
+  authedSendJson<{ configured: boolean }>(
+    "PUT",
+    `/settings/data-keys/${encodeURIComponent(providerKey)}`,
+    { api_key: apiKey },
+  );
+
+export const deleteDataKey = (
+  providerKey: string,
+): Promise<{ configured: boolean }> =>
+  authedSendJson<{ configured: boolean }>(
+    "DELETE",
+    `/settings/data-keys/${encodeURIComponent(providerKey)}`,
+  );

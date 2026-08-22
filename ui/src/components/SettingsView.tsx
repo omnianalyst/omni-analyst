@@ -2,13 +2,16 @@ import { useCallback, useEffect, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError } from "../lib/api";
 import { AuthRequiredError, changePassword } from "../lib/auth";
 import {
+  deleteDataKey,
+  getDataKeys,
   getNotifications,
   getSettings,
   getVenueStatus,
+  putDataKey,
   putNotifications,
   testNotifications,
+  type DataKeyProvider,
   type NotificationsState,
-  type ProviderEntry,
   type SettingsData,
   type VenueStatusResponse,
 } from "../lib/settings";
@@ -71,9 +74,16 @@ export function SettingsView() {
   const [webhookUrl, setWebhookUrl] = useState("");
   const [notifyEmail, setNotifyEmail] = useState("");
   const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
+  const [dataKeys, setDataKeys] = useState<DataKeyProvider[] | null>(null);
+  const [keyDraft, setKeyDraft] = useState<Record<string, string>>({});
+  const [keyBusy, setKeyBusy] = useState<string | null>(null);
+  const [keyMsg, setKeyMsg] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    void getDataKeys()
+      .then((res) => { if (!cancelled) setDataKeys(res.providers); })
+      .catch(() => { if (!cancelled) setDataKeys([]); });
     void getNotifications()
       .then((data) => {
         if (!cancelled) {
@@ -105,6 +115,42 @@ export function SettingsView() {
       }
     } catch (err) {
       setNotifyMsg(describeError(err).message);
+    }
+  }
+
+  async function saveKey(provider: string) {
+    const value = (keyDraft[provider] ?? "").trim();
+    setKeyBusy(provider);
+    setKeyMsg(null);
+    try {
+      await putDataKey(provider, value);
+      setKeyDraft((d) => ({ ...d, [provider]: "" }));
+      const res = await getDataKeys();
+      setDataKeys(res.providers);
+      setKeyMsg(
+        value === ""
+          ? "Key removed. The deployment's own key (if set) applies again."
+          : "Key stored, encrypted. New fetches use it.",
+      );
+    } catch (err) {
+      setKeyMsg(describeError(err).message);
+    } finally {
+      setKeyBusy(null);
+    }
+  }
+
+  async function removeKey(provider: string) {
+    setKeyBusy(provider);
+    setKeyMsg(null);
+    try {
+      await deleteDataKey(provider);
+      const res = await getDataKeys();
+      setDataKeys(res.providers);
+      setKeyMsg("Key removed.");
+    } catch (err) {
+      setKeyMsg(describeError(err).message);
+    } finally {
+      setKeyBusy(null);
     }
   }
 
@@ -148,13 +194,6 @@ export function SettingsView() {
   if (state.kind === "auth") return <ErrorState message="Sign in to view settings." />;
   if (state.kind === "error") return <ErrorState message={state.message} detail={state.detail} />;
 
-  const providers = state.data.provider_catalog.filter((provider) => provider.wired);
-  const unavailable = state.data.provider_catalog.filter((provider) => !provider.wired);
-  const configuredProviders = providers.filter((provider) => provider.configured).length;
-  const categories = providers.reduce<Record<string, ProviderEntry[]>>((grouped, provider) => {
-    (grouped[provider.category || "Other"] ||= []).push(provider);
-    return grouped;
-  }, {});
 
   const notifyChannels = notify.kind === "ok"
     ? [
@@ -171,7 +210,7 @@ export function SettingsView() {
           <p>Account, notifications, connections, and data sources.</p>
         </div>
         <div class="settings-summary">
-          <span><strong>{configuredProviders}</strong> of {providers.length} data sources active</span>
+          <span>Keys run your fetches · encrypted at rest</span>
         </div>
       </header>
 
@@ -308,33 +347,60 @@ export function SettingsView() {
 
       <section class="surface-card settings-card">
         <div class="section-heading">
-          <div><p class="eyebrow">Data sources</p><h2>Provider keys</h2></div>
-          <span class="count-badge">{configuredProviders}/{providers.length}</span>
+          <div><p class="eyebrow">Data sources</p><h2>Keys</h2></div>
         </div>
         <p class="settings-row-note">
-          Keys live in the deployment&rsquo;s environment, not the browser. This
-          is each source&rsquo;s state.
+          The system runs with zero keys (crypto, macro, fundamentals, news).
+          Equity and ETF prices need a Polygon key — the free tier is enough.
+          Pasted keys are encrypted at rest and used for your fetches.
         </p>
-        {Object.entries(categories).map(([category, entries]) => (
-          <div class="provider-category" key={category}>
-            <h3>{category}</h3>
-            <div class="provider-status-list">
-              {entries.map((provider) => (
-                <div class="provider-status-row" key={provider.key}>
-                  <span class={`connection-state-dot ${provider.configured ? "is-configured" : ""}`} aria-hidden="true" />
-                  <strong>{provider.label}</strong>
-                  <span>{provider.configured ? "Active" : provider.key_required ? "Key needed" : "No key required"}</span>
-                </div>
-              ))}
+        {dataKeys === null ? (
+          <p class="settings-row-note">Reading keys…</p>
+        ) : (
+          dataKeys.map((p) => (
+            <div class="settings-row" key={p.key}>
+              <div class="settings-row-label">
+                <strong>{p.key === "fred" ? "FRED" : p.key.charAt(0).toUpperCase() + p.key.slice(1)}</strong>
+                <small>{p.description}</small>
+              </div>
+              <span class="settings-row-state">{p.configured ? "Key set" : "—"}</span>
+              <div class="settings-row-actions">
+                <input
+                  class="key-input"
+                  type="password"
+                  placeholder={p.configured ? "Replace" : "Paste key"}
+                  value={keyDraft[p.key] ?? ""}
+                  onInput={(e) =>
+                    setKeyDraft((d) => ({ ...d, [p.key]: (e.target as HTMLInputElement).value }))}
+                  aria-label={`${p.key} key`}
+                />
+                <button
+                  type="button"
+                  class="btn-secondary compact-button"
+                  disabled={keyBusy === p.key || (keyDraft[p.key] ?? "").trim() === ""}
+                  onClick={() => void saveKey(p.key)}
+                >
+                  {keyBusy === p.key ? "Saving…" : "Save"}
+                </button>
+                {p.configured ? (
+                  <button
+                    type="button"
+                    class="btn-secondary compact-button"
+                    disabled={keyBusy === p.key}
+                    onClick={() => void removeKey(p.key)}
+                  >
+                    Remove
+                  </button>
+                ) : null}
+              </div>
             </div>
-          </div>
-        ))}
-        {unavailable.length > 0 ? (
-          <details class="unavailable-providers">
-            <summary>{unavailable.length} catalogued but not connected in this build</summary>
-            <p>{unavailable.map((provider) => provider.label).join(", ")}</p>
-          </details>
-        ) : null}
+          ))
+        )}
+        {keyMsg ? <p class="settings-row-note">{keyMsg}</p> : null}
+        <p class="settings-row-note">
+          Included without keys: SEC EDGAR, World Bank, DefiLlama, RSS news,
+          and the crypto venues (Binance, Coinbase, Kraken, Bybit, OKX).
+        </p>
       </section>
     </div>
   );

@@ -162,6 +162,22 @@ async def fill_gap(
     needs_entity = any(c.provider_key in _PROVIDER_IDENTIFIER for c in candidates)
     entity = await _load_entity(pool, gap["entity_id"]) if needs_entity else None
 
+    # The gap owner's own provider keys, resolved once per fill. A key pasted in
+    # Settings takes precedence over the deployment's env key for the fetch,
+    # which is also what makes the licence attribution true: a byo_only claim
+    # fetched with the owner's key is private to them because it WAS fetched
+    # with their key. No stored key -> the env-bound credentials the adapter
+    # was registered with, unchanged.
+    owner_keys: dict[str, str] = {}
+    owner = credential_owner or gap.get("audience_user_id")
+    if owner is not None:
+        try:
+            from omni.credentials.data_keys import get_keys
+
+            owner_keys = await get_keys(pool, owner)
+        except Exception:  # noqa: BLE001 - key resolution must never block a fill
+            owner_keys = {}
+
     for registration in candidates:
         if registration.is_derived:
             # A derived capability produces a claim from coverage already in the
@@ -207,7 +223,14 @@ async def fill_gap(
                         f"gap has no key and {registration.provider_key!r} "
                         f"is fetched by it"
                     )
-            drafts = await registration.call(arg)
+            # The registration's credentials dict spreads as factory kwargs
+            # (factory(api_key=...)), so the override is a kwarg of the same
+            # shape -- every keyed adapter's parameter is api_key.
+            user_key = owner_keys.get(registration.provider_key)
+            if user_key:
+                drafts = await registration.call(arg, api_key=user_key)
+            else:
+                drafts = await registration.call(arg)
         except Unavailable as exc:
             failures.append(f"{registration.name}: {exc}")
             continue

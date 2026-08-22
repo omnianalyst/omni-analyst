@@ -123,6 +123,16 @@ test("a signed-out protected route redirects before private settings render", as
 
 test("Settings renders user-managed and scheduler-managed venue truth", async ({ page }) => {
   await mockApi(page, (path) => {
+    if (path === "/settings/data-keys") {
+      return {
+        body: {
+          providers: [
+            { key: "polygon", description: "Equity and ETF prices.", configured: true },
+            { key: "fred", description: "Macro series.", configured: false },
+          ],
+        },
+      };
+    }
     if (path === "/settings/config") {
       return {
         body: {
@@ -201,6 +211,8 @@ test("Settings renders user-managed and scheduler-managed venue truth", async ({
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByText("Scheduler-managed", { exact: true })).toBeVisible();
   await expect(page.getByText("FRED", { exact: true })).toBeVisible();
+  await expect(page.getByText("Equity and ETF prices.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Key set", { exact: true })).toBeVisible();
 });
 
 test("wallet API failure stays distinct from an empty wallet list", async ({ page }) => {

@@ -24,19 +24,15 @@ CATEGORY_BLOCKCHAIN = "blockchain"
 
 # --- Wired providers ---------------------------------------------------------
 #
-# A provider is "wired" when an adapter exists in capability/builtin.py and
-# the settings field it references exists in config.py. The catalog lists
-# providers that are NOT wired yet (alpha_vantage, the AI providers, etc.)
-# because the licensing resolver needs to classify them -- `redistribution_for`
-# must return "byo_only" for polygon even if polygon's adapter is temporarily
-# removed, and it must return "prohibited" for yahoo whose terms bind whether
-# or not anything calls it. But the Settings UI must not render a provider the
-# operator cannot use, and a reader must not mistake a licensing placeholder
-# for a working integration. The `wired` field, applied below, is that signal.
-#
-# When you add an adapter to builtin.py, add the provider_key here and add the
-# settings field to config.py. The test test_wired_providers_have_adapters
-# catches the drift if you forget.
+# Every entry here is real: either an adapter exists in capability/builtin.py
+# (wired) or the source is live through another path and needs its licence
+# class on file (yahoo: prohibited, binding on the yfinance research path;
+# world_bank, hyperliquid: keyless live sources). Catalog entries for
+# never-built adapters were removed 2026-08-21 -- a Settings row or licence
+# entry for a provider that cannot fetch anything is a promise the code does
+# not keep. When you add an adapter to builtin.py, add the provider_key here
+# and the settings field to config.py; test_wired_providers_have_adapters
+# catches the drift.
 _WIRED_PROVIDERS = frozenset({
     "fred",
     "sec_edgar",
@@ -76,24 +72,10 @@ FALLBACK_PROHIBITED = "prohibited"
 
 PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
     # --- Market data (equities / fundamentals / economics) ---
-    "alpha_vantage": {
-        "label": "Alpha Vantage",
-        "category": CATEGORY_MARKET_DATA,
-        "settings_field": "alpha_vantage_api_key",
-        "key_required": True,
-        "fallback": FALLBACK_BYO_ONLY,
-    },
     "polygon": {
         "label": "Polygon.io",
         "category": CATEGORY_MARKET_DATA,
         "settings_field": "polygon_api_key",
-        "key_required": True,
-        "fallback": FALLBACK_BYO_ONLY,
-    },
-    "fmp": {
-        "label": "Financial Modeling Prep",
-        "category": CATEGORY_MARKET_DATA,
-        "settings_field": "fmp_api_key",
         "key_required": True,
         "fallback": FALLBACK_BYO_ONLY,
     },
@@ -103,35 +85,6 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "settings_field": "fred_api_key",
         "key_required": False,  # works without a key; higher limits with one
         "fallback": FALLBACK_ALLOWED,
-    },
-    "finnhub": {
-        "label": "Finnhub",
-        "category": CATEGORY_MARKET_DATA,
-        "settings_field": "finnhub_api_key",
-        "key_required": True,
-        "fallback": FALLBACK_BYO_ONLY,
-    },
-    "twelve_data": {
-        "label": "Twelve Data",
-        "category": CATEGORY_MARKET_DATA,
-        "settings_field": "twelve_data_api_key",
-        "key_required": True,
-        "fallback": FALLBACK_BYO_ONLY,
-    },
-    "trading_economics": {
-        "label": "Trading Economics",
-        "category": CATEGORY_MARKET_DATA,
-        "settings_field": "trading_economics_api_key",
-        "key_required": True,
-        "fallback": FALLBACK_BYO_ONLY,
-    },
-    "quandl": {
-        # Now Nasdaq Data Link; the quandl key/alias still works for backward compat.
-        "label": "Quandl (Nasdaq Data Link)",
-        "category": CATEGORY_MARKET_DATA,
-        "settings_field": "quandl_api_key",
-        "key_required": True,
-        "fallback": FALLBACK_BYO_ONLY,
     },
     "world_bank": {
         # Public-domain open data. No key exists, so settings_field is empty and
@@ -175,20 +128,6 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "category": CATEGORY_CRYPTO,
         "settings_field": "binance_api_key",
         "key_required": False,
-        "fallback": FALLBACK_BYO_ONLY,
-    },
-    "coinmarketcap": {
-        "label": "CoinMarketCap",
-        "category": CATEGORY_CRYPTO,
-        "settings_field": "coinmarketcap_api_key",
-        "key_required": True,
-        "fallback": FALLBACK_BYO_ONLY,
-    },
-    "messari": {
-        "label": "Messari",
-        "category": CATEGORY_CRYPTO,
-        "settings_field": "messari_api_key",
-        "key_required": False,  # some endpoints work keyless; key raises limits
         "fallback": FALLBACK_BYO_ONLY,
     },
     # --- Exchange venues reached through ccxt ---
@@ -253,13 +192,6 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "fallback": FALLBACK_ALLOWED,
     },
     # --- News ---
-    "news_api": {
-        "label": "NewsAPI",
-        "category": CATEGORY_NEWS,
-        "settings_field": "news_api_key",
-        "key_required": True,
-        "fallback": FALLBACK_BYO_ONLY,
-    },
     "rss": {
         # Public RSS/Atom feeds. No credential exists. The adapter stores only
         # the headline, the link and the feed name -- a citation, not a copy
@@ -273,55 +205,26 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "fallback": FALLBACK_ALLOWED,
     },
     # --- AI ---
-    "fylun": {
-        "label": "Fylun (unified AI gateway)",
-        "category": CATEGORY_AI,
-        "settings_field": "fylun_api_key",
-        "key_required": False,  # one key covers all AI; replaces deepseek/glm/openai
-        "fallback": FALLBACK_ALLOWED,
-    },
-    "deepseek": {
-        "label": "DeepSeek (direct)",
-        "category": CATEGORY_AI,
-        "settings_field": "deepseek_api_key",
-        "key_required": False,
-        "fallback": FALLBACK_ALLOWED,
-    },
+    # --- AI (the Polymarket tier) ---
+    # Only the two adapters that exist (polymarket/glm_adapter.py,
+    # anthropic_adapter.py). The model selects and phrases; the protocol
+    # forbids it producing a figure. Never-adaptered AI entries were removed
+    # 2026-08-21 along with the rest of the aspirational catalog.
     "glm": {
-        "label": "GLM / Zhipu (direct)",
+        "label": "GLM / Zhipu (Polymarket phrasing)",
         "category": CATEGORY_AI,
         "settings_field": "glm_api_key",
         "key_required": False,
         "fallback": FALLBACK_ALLOWED,
     },
-    "openai": {
-        "label": "OpenAI (direct)",
-        "category": CATEGORY_AI,
-        "settings_field": "openai_api_key",
-        "key_required": False,
-        "fallback": FALLBACK_ALLOWED,
-    },
     "anthropic": {
-        "label": "Anthropic (direct)",
+        "label": "Anthropic (Polymarket phrasing)",
         "category": CATEGORY_AI,
         "settings_field": "anthropic_api_key",
         "key_required": False,
         "fallback": FALLBACK_ALLOWED,
     },
-    "groq": {
-        "label": "Groq",
-        "category": CATEGORY_AI,
-        "settings_field": "groq_api_key",
-        "key_required": False,
-        "fallback": FALLBACK_ALLOWED,
-    },
-    "xai": {
-        "label": "xAI (Grok)",
-        "category": CATEGORY_AI,
-        "settings_field": "xai_api_key",
-        "key_required": False,
-        "fallback": FALLBACK_ALLOWED,
-    },
+
     # --- Keyless / prohibited ---
     "yahoo": {
         # Listed so the fallback policy can see it, NOT because it takes a key.
@@ -338,13 +241,6 @@ PROVIDER_CATALOG: dict[str, dict[str, Any]] = {
         "fallback": FALLBACK_PROHIBITED,
     },
     # --- Blockchain ---
-    "alchemy": {
-        "label": "Alchemy",
-        "category": CATEGORY_BLOCKCHAIN,
-        "settings_field": "alchemy_api_key",
-        "key_required": False,
-        "fallback": FALLBACK_ALLOWED,
-    },
     "etherscan": {
         "label": "Etherscan",
         "category": CATEGORY_BLOCKCHAIN,

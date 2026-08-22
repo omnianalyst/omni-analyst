@@ -63,7 +63,7 @@ class TestRedistributionFor:
     def test_licence_promotes_only_the_named_provider(self):
         assert redistribution_for("polygon", licensed=["polygon"]) == FALLBACK_ALLOWED
         assert (
-            redistribution_for("alpha_vantage", licensed=["polygon"])
+            redistribution_for("coingecko", licensed=["polygon"])
             == FALLBACK_BYO_ONLY
         )
 
@@ -86,17 +86,14 @@ class TestRedistributionFor:
     @pytest.mark.parametrize(
         "provider",
         [
-            "alpha_vantage",
-            "fmp",
-            "finnhub",
-            "twelve_data",
-            "trading_economics",
-            "quandl",
+            "polygon",
             "coingecko",
             "binance",
-            "coinmarketcap",
-            "messari",
-            "news_api",
+            "coinbase",
+            "kraken",
+            "bybit",
+            "okx",
+            "hyperliquid",
         ],
     )
     def test_commercial_providers_are_byo_only(self, provider):
