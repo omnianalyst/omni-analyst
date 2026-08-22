@@ -34,7 +34,9 @@ costs, hold windows) is the honest test -- predeclared, run once.
 
 Run:  uv run python ops/call_tracker.py          (laptop; prints summary)
       ops/call_tracker.sh                        (host cron wrapper)
-Ledger: docs/research/calls_ledger.jsonl (committed)
+Ledger: docs/research/calls_ledger.jsonl (operator-local, gitignored --
+tracked-channel data is research material about third parties and does not
+ship in the public tree; the committed tree ships the tool only).
 """
 
 from __future__ import annotations
@@ -50,7 +52,28 @@ from pathlib import Path
 
 import httpx
 
-CHANNEL = "official_d3f4ult"
+# The channel is an argument, not a hardcoded dossier: a public repo shipping
+# one named caller's activity log would be publishing surveillance of a
+# private individual, and the tracker is a tool, not a verdict. The default
+# channel (and its ecosystem classification) lives in the operator-local
+# config -- see ops/call_tracker.config.json.example.
+DEFAULT_CHANNEL = ""  # operator sets via --channel or the local config
+CONFIG = (
+    Path(__file__).resolve().parent / "call_tracker.config.json"
+)
+if CONFIG.exists():
+    _cfg = json.loads(CONFIG.read_text())
+    DEFAULT_CHANNEL = _cfg.get("channel", "")
+CHANNEL = sys.argv[sys.argv.index("--channel") + 1] if "--channel" in sys.argv else DEFAULT_CHANNEL
+if not CHANNEL:
+    print(
+        "call tracker: no channel. Pass --channel <name> or create "
+        "ops/call_tracker.config.json (see .example). The ledger stays "
+        "operator-local (gitignored) -- a tracked channel's calls are research "
+        "material, not product data.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 CHANNEL_URL = f"https://t.me/s/{CHANNEL}"
 def _arg(name: str, default: str) -> str:
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
@@ -65,21 +88,17 @@ _LEDGER_PATH = str(
 LEDGER = Path(_arg("--ledger", _LEDGER_PATH))
 LEDGER_OUT = Path(_arg("--out", _arg("--ledger", _LEDGER_PATH)))
 
-# The caller's own products. A call is ecosystem when its post promotes these
-# or the token is one of them; those calls cannot be audited for information
-# because the caller controls the supply he is calling.
+# The caller's own products, from the operator-local config. A call is
+# ecosystem when its post promotes these or the token is one of them; those
+# calls cannot be audited for information because the caller controls the
+# supply he is calling. Empty by default -- each operator classifies the
+# channel they choose to track.
+_cfg_eco_tokens = (_cfg.get("ecosystem_tokens", {}) if CONFIG.exists() else {}) or {}
+_cfg_eco_markers = (_cfg.get("ecosystem_markers", []) if CONFIG.exists() else []) or []
 ECOSYSTEM_TOKENS = {
-    # launched on launchpad.mezzanine.fund by the channel itself
-    "0x46544163f545a8e306e2671528ffc1b0ef8fe8cf": "flork (own launchpad)",
-    # the HoodBot funnel token
-    "0x8e62f281f282686fca6dcb39288069a93fc23f1c": "hoodrat (own bot funnel)",
+    str(k): str(v) for k, v in _cfg_eco_tokens.items()
 }
-ECOSYSTEM_MARKERS = (
-    "mezzanine",
-    "hoodbot",
-    "launchpad.mezzanine",
-    "referral",
-)
+ECOSYSTEM_MARKERS = tuple(_cfg_eco_markers)
 
 _ETH_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 _SOL_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")

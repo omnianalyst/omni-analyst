@@ -1,0 +1,7 @@
+{
+  "channel": "some_public_calls_channel",
+  "ecosystem_tokens": {
+    "0x<the caller's own token>": "launched by the caller themselves"
+  },
+  "ecosystem_markers": ["their-dao", "their-bot"]
+}

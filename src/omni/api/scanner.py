@@ -719,6 +719,8 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
             "sharpe": None,
             "volatility": None,
             "max_drawdown": None,
+            "downside_deviation": None,
+            "underwater_pct": None,
             "cagr_5y": None,
             "cagr_10y": None,
             "median_annual_return": None,
@@ -764,6 +766,25 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
     drawdown = (cumulative - peak) / peak
     max_dd = round(float(drawdown.min()) * 100, 2)
 
+    # Downside-specific risk. Total volatility counts a +8% day as "risk" the
+    # same as a -8% day; a holder is only hurt by one of those. Downside
+    # deviation annualises only the below-zero half. Time underwater is the
+    # duration dimension depth alone misses: a -30% dip recovered in a month
+    # and a -30% dip held for three years share a max-drawdown figure and are
+    # different assets.
+    negative_ret = daily_ret[daily_ret < 0]
+    downside_dev = (
+        float(negative_ret.std() * np.sqrt(sessions) * 100)
+        if len(negative_ret) >= 20
+        else None
+    )
+    underwater = drawdown < -1e-9
+    underwater_pct = (
+        round(float(underwater.mean() * 100), 1)
+        if len(underwater) > 0
+        else None
+    )
+
     elapsed_years = max((prices.index[-1] - prices.index[0]).days / 365.2425, 0)
 
     def cagr(years: int) -> float | None:
@@ -794,6 +815,10 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
         "sharpe": sharpe,
         "volatility": round(ann_vol, 1),
         "max_drawdown": max_dd,
+        "downside_deviation": (
+            round(downside_dev, 2) if downside_dev is not None else None
+        ),
+        "underwater_pct": underwater_pct,
         "cagr_5y": cagr(5),
         "cagr_10y": cagr(10),
         "median_annual_return": round(float(annual.median()), 2) if len(annual) else None,
@@ -853,6 +878,79 @@ def _score_assets(entries: list[dict]) -> None:
             "stability": stability,
             "diversification": diversification,
         }
+
+
+def _qualitative_scores(entries: list[dict]) -> None:
+    """The reliability score: median of components, every component required.
+
+    Two rules that make it different from the balanced average:
+
+    MEDIAN aggregation -- a single stellar component cannot rescue a failing
+    one. The balanced score let a name carry growth ~97 and stability ~1 to a
+    mid rank; the median of the same components reads that record as what it
+    is: failing on half its dimensions. A name wins here by being good
+    everywhere, which is the plain meaning of "reliably best".
+
+    EVIDENCE GATING -- a name missing any component is not ranked (score
+    None). A half-measured record competing with fully-measured ones is how
+    short-history names floated to the top on stability alone. Sub-lists
+    ranked on a single component (best 1-year etc.) remain the honest home
+    for incomplete records; "best overall" is not.
+
+    Components (four, deliberately balanced -- two reward, two protect):
+      durable growth     long-horizon return (cagr 5/10, median year)
+      consistency        median annual + positive-year rate
+      downside           depth, DURATION (time underwater), and downside-only
+                         deviation -- upside volatility is not charged
+      diversification    inverse correlation to the market
+
+    ELIGIBILITY -- every component measured AND none in the category's bottom
+    quartile. A collapse on one dimension is disqualification from "best
+    overall", not a debit a strong dimension can buy back.
+    """
+    # Direction matters: max_drawdown is negative (less negative = better,
+    # so the ascending percentile is already correct); underwater_pct and
+    # downside_deviation are positive magnitudes where LOWER is better and
+    # must be inverted or the worst crash scores as the best protection.
+    downside_components = {
+        "max_drawdown": _percentile_scores(entries, "max_drawdown"),
+        "underwater_pct": _percentile_scores(
+            entries, "underwater_pct", inverse=True
+        ),
+        "downside_deviation": _percentile_scores(
+            entries, "downside_deviation", inverse=True
+        ),
+    }
+    import statistics
+
+    for entry in entries:
+        symbol = entry["symbol"]
+        durable = entry.get("scores", {}).get("durable_growth")
+        consistency = entry.get("scores", {}).get("consistency")
+        diversification = entry.get("scores", {}).get("diversification")
+        downsides = [
+            comp[symbol]
+            for comp in downside_components.values()
+            if symbol in comp
+        ]
+        downside = round(sum(downsides) / len(downsides), 1) if downsides else None
+
+        components = [durable, consistency, downside, diversification]
+        complete = all(c is not None for c in components)
+        # The floor is the rule the median alone could not express: a name
+        # with two stellar components and one bottom-quartile collapse still
+        # posts a respectable median, and compensation is exactly what
+        # "best overall" must not allow. Failing any dimension (bottom
+        # quartile of the category) disqualifies from the reliability list,
+        # the same way missing evidence does -- it stays ranked in balanced,
+        # visible, but it is not in the running for best overall.
+        floor_cleared = complete and min(components) > 25.0
+        entry.setdefault("scores", {})
+        entry["scores"]["downside"] = downside
+        entry["scores"]["reliability"] = (
+            round(statistics.median(components), 1) if floor_cleared else None
+        )
+        entry["scores"]["evidence_complete"] = complete
 
 
 def _correlation_to_market(asset: pd.Series, market: pd.Series) -> float | None:
@@ -1068,14 +1166,39 @@ def _payload(
         "crypto": category_ranked("crypto"),
     }
 
+    def reliability_ranked(asset_class: str, extra: list[dict] | None = None) -> list[dict]:
+        # Evidence-gated: only names with every reliability component
+        # measured may compete for "best overall". Incomplete records stay
+        # visible in the balanced list; hiding them entirely would pretend
+        # they were never measured.
+        available = [
+            asset
+            for asset in list(assets) + list(extra or [])
+            if asset["asset_class"] == asset_class
+            and asset.get("scores", {}).get("reliability") is not None
+        ]
+        available.sort(
+            key=lambda asset: asset["scores"]["reliability"], reverse=True
+        )
+        return available
+
+    reliability = {
+        "stocks": reliability_ranked("stocks", company_entries or []),
+        "defensive": reliability_ranked("defensive"),
+        "crypto": reliability_ranked("crypto"),
+    }
+
     return {
         "buckets": buckets_data,
         "category_rankings": rankings,
+        "reliability_rankings": reliability,
         "risk_census": {
             category: _tier_census(entries) for category, entries in rankings.items()
         },
         "ranking_method": {
             "balanced": "Within each category: 35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification; available measures are reweighted when history is shorter.",
+            "reliability": "Reliability is the MEDIAN of four components -- durable growth, consistency, downside (depth, time underwater, downside-only deviation), diversification -- and requires every component measured: a spectacular single dimension cannot rescue a failing one, and incompletely measured names are not ranked for best overall. Backward-looking ranks within the tracked universe, not forecasts.",
+            "reliability": "Reliability is the MEDIAN of four components -- durable growth, consistency, downside (depth, time underwater, downside-only deviation), diversification -- and requires every component measured: a spectacular single dimension cannot rescue a failing one, and incompletely measured names are not ranked for best overall. Backward-looking ranks within the tracked universe, not forecasts.",
             "history": "One-year return is trailing. Five- and ten-year figures are annualized. Median return uses complete calendar years; long-term and consistency ranks require at least three complete years.",
             "scope": "Scores are percentile ranks against the other assets in the same category, not forecasts or recommendations.",
             "risk_tier": f"Annualised volatility under {RISK_TIER_LOW_MAX:.0f}% is low, under {RISK_TIER_MEDIUM_MAX:.0f}% is medium, and at or above it is high. A tier showing zero means no asset in that category reached it, not that any were filtered out — diversified funds rarely clear the high threshold.",
@@ -1265,10 +1388,12 @@ async def _build_scanner(app: App, audience) -> dict:
             company_entries[-1]["funding_apr"] = None
 
     for asset_class in ("stocks", "defensive", "crypto"):
-        _score_assets(
+        scored = (
             [entry for entry in all_entries if entry["asset_class"] == asset_class]
             + (company_entries if asset_class == "stocks" else [])
         )
+        _score_assets(scored)
+        _qualitative_scores(scored)
     for bucket in buckets_data:
         bucket["assets"].sort(
             key=lambda asset: asset.get("scores", {}).get("balanced") or -1,

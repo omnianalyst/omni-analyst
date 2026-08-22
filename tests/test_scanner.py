@@ -580,3 +580,89 @@ def test_without_a_census_price_the_price_check_degrades_to_not_running() -> Non
         index=pd.date_range("2024-01-01", periods=200, freq="D", tz=UTC),
     )
     assert _feed_defect_reasons(tail, census_price=None) == []
+
+
+class TestReliabilityScore:
+    """Median-of-components with an evidence gate -- the two failure modes of
+    a weighted average that motivated it (observed live 2026-08-22): a name
+    carrying growth 96.6 / stability 0.9 to a mid "balanced" rank, and a
+    half-measured name reaching #2 on its present components alone."""
+
+    def _entry(self, symbol, **scores):
+        return {
+            "symbol": symbol,
+            "max_drawdown": scores.get("max_drawdown", -50.0),
+            "underwater_pct": scores.get("underwater_pct", 50.0),
+            "downside_deviation": scores.get("downside_deviation", 20.0),
+            "scores": {
+                "durable_growth": scores.get("durable_growth"),
+                "consistency": scores.get("consistency"),
+                "diversification": scores.get("diversification"),
+            },
+        }
+
+    def test_a_bottom_quartile_dimension_disqualifies_not_debits(self):
+        # The APP shape: brilliant growth AND consistency, catastrophic
+        # downside. The balanced average read this mid-pack; a median alone
+        # still reads it respectable (two strong components govern the
+        # middle). The rule "best overall" needs: failing any dimension in
+        # the bottom quartile disqualifies outright -- a strong dimension
+        # can never buy back a collapsed one.
+        entries = [
+            self._entry("BLOWOUT", durable_growth=96.6, consistency=76.7,
+                        diversification=48.4, max_drawdown=-91.9,
+                        underwater_pct=99.0, downside_deviation=77.5),
+            self._entry("STEADY", durable_growth=70.0, consistency=72.0,
+                        diversification=75.0, max_drawdown=-15.0,
+                        underwater_pct=20.0, downside_deviation=8.0),
+            # fillers so percentiles spread
+            self._entry("F1", durable_growth=50.0, consistency=50.0,
+                        diversification=50.0),
+            self._entry("F2", durable_growth=30.0, consistency=30.0,
+                        diversification=30.0),
+        ]
+        from omni.api.scanner import _qualitative_scores
+
+        _qualitative_scores(entries)
+        by = {e["symbol"]: e["scores"] for e in entries}
+        assert by["STEADY"]["reliability"] is not None
+        assert by["BLOWOUT"]["reliability"] is None, (
+            "a bottom-quartile dimension must disqualify from best overall"
+        )
+        assert by["BLOWOUT"]["downside"] < by["STEADY"]["downside"]  # the crash is priced into the downside component
+
+    def test_missing_component_gates_out_not_fills_in(self):
+        # The EA shape: long-term components unmeasurable on short history.
+        entries = [
+            self._entry("HALF", durable_growth=None, consistency=None,
+                        diversification=80.0),
+            self._entry("FULL", durable_growth=60.0, consistency=60.0,
+                        diversification=60.0),
+        ]
+        from omni.api.scanner import _qualitative_scores
+
+        _qualitative_scores(entries)
+        assert entries[0]["scores"]["reliability"] is None
+        assert entries[0]["scores"]["evidence_complete"] is False
+        assert entries[1]["scores"]["reliability"] is not None
+
+    def test_reliability_ranking_skips_incomplete_records(self):
+        from omni.api.scanner import _payload
+
+        full = self._entry("FULL", durable_growth=60.0, consistency=60.0,
+                           diversification=60.0)
+        full.update({"asset_class": "stocks", "name": "Full", "area": "x"})
+        half = self._entry("HALF", durable_growth=None, consistency=None,
+                           diversification=95.0)
+        half.update({"asset_class": "stocks", "name": "Half", "area": "x"})
+        # The pipeline sets balanced before _payload; the test mirrors it.
+        full["scores"]["balanced"] = 60.0
+        half["scores"]["balanced"] = 65.0
+        from omni.api.scanner import _qualitative_scores
+
+        _qualitative_scores([full, half])
+        payload = _payload([], [], {}, [full, half])
+        ranked = payload["category_rankings"]["stocks"]
+        # Balanced still ranks both (it reweights); reliability ranks only FULL.
+        assert {a["symbol"] for a in payload["reliability_rankings"]["stocks"]} == {"FULL"}
+        assert "HALF" in {a["symbol"] for a in ranked}

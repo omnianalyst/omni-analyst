@@ -242,16 +242,18 @@ test("keyboard shortcuts open the palette and navigate without a pointer", async
   await expect(page.getByTitle("Search (Cmd or Ctrl+K)")).toBeVisible();
 
   await page.keyboard.press("Control+K");
-  await expect(page.getByPlaceholder("Search stocks, crypto, ETFs, or jump to a page...")).toBeFocused();
+  await expect(page.getByPlaceholder("Search a ticker or name...")).toBeFocused();
   await page.keyboard.press("Escape");
-  await expect(page.getByPlaceholder("Search stocks, crypto, ETFs, or jump to a page...")).toHaveCount(0);
+  await expect(page.getByPlaceholder("Search a ticker or name...")).toHaveCount(0);
   await page.evaluate(() => new Promise<void>((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
   }));
-  await page.keyboard.press("2");
-
-  await expect(page).toHaveURL("/search");
-  await expect(page.getByRole("button", { name: "Saved" })).toBeVisible();
+  // The palette is search-only now: digits are typing, not route hotkeys, so
+  // pressing "2" stays on the page and opens the query for entity search.
+  await page.keyboard.press("Control+K");
+  await page.keyboard.type("2");
+  await expect(page).toHaveURL("/");
+  await page.keyboard.press("Escape");
 });
 
 test("alerts hydration emits no mismatch or uncaught browser error", async ({ page }) => {

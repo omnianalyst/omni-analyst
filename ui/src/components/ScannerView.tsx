@@ -39,6 +39,9 @@ export interface AssetMetric {
     consistency: number | null;
     stability: number | null;
     diversification: number | null;
+    downside?: number | null;
+    reliability?: number | null;
+    evidence_complete?: boolean;
   };
 }
 
@@ -94,6 +97,7 @@ interface ScannerData {
   decision_table_as_of?: string;
   comparator_universe?: Array<{ symbol: string; name: string; kind?: string }>;
   category_rankings: Record<AssetClass, AssetMetric[]>;
+  reliability_rankings?: Record<AssetClass, AssetMetric[]>;
   sectors: SectorLeaders[];
   overall_leaders: OverallLeader[];
   ranking_method: { balanced: string; history: string; scope: string; risk_tier: string };
@@ -227,12 +231,14 @@ function RankedCategory({
   assets,
   total,
   horizon = "long",
+  rankBy = "balanced",
 }: {
   title: string;
   description: string;
   assets: AssetMetric[];
   total?: number;
   horizon?: "short" | "long";
+  rankBy?: "balanced" | "reliability";
 }) {
   // The caller passes the full ranked list (top slice no longer happens at
   // the call site); this component owns how much shows. 10 by default, 50
@@ -240,6 +246,9 @@ function RankedCategory({
   // rendering 500 rows unprompted.
   const [expanded, setExpanded] = useState(false);
   const rankedAll = [...assets].sort((a, b) => {
+    if (rankBy === "reliability") {
+      return (b.scores.reliability ?? -1) - (a.scores.reliability ?? -1);
+    }
     if (horizon === "short") {
       return (b.returns?.["365d"] ?? -Infinity) - (a.returns?.["365d"] ?? -Infinity);
     }
@@ -280,7 +289,7 @@ function RankedCategory({
             <tr>
               <th>Rank</th>
               <th>Asset</th>
-              <th>Score</th>
+              <th>{rankBy === "reliability" ? "Reliability" : "Score"}</th>
               <th class={horizon === "short" ? "col-active" : ""}>1 year</th>
               <th class={horizon === "long" ? "col-active" : ""}>Median year, all measured</th>
               <th>Volatility</th>
@@ -300,7 +309,13 @@ function RankedCategory({
                     </small>
                   </span>
                 </td>
-                <td><strong class="canonical-score">{asset.scores.balanced?.toFixed(0) ?? "—"}</strong></td>
+                <td>
+                  <strong class="canonical-score">
+                    {rankBy === "reliability"
+                      ? asset.scores.reliability?.toFixed(0) ?? "—"
+                      : asset.scores.balanced?.toFixed(0) ?? "—"}
+                  </strong>
+                </td>
                 <td class={`${tone(asset.returns?.["365d"])} ${horizon === "short" ? "col-active" : ""}`}>
                   {percent(asset.returns?.["365d"])}
                 </td>
@@ -327,6 +342,8 @@ function RankedCategory({
 // floor). Top 8 per category; the full tables live behind the disclosure.
 function BestMeasured({ data }: { data: ScannerData }) {
   const [horizon, setHorizon] = useState<"short" | "long">("long");
+  const [rankBy, setRankBy] = useState<"balanced" | "reliability">("balanced");
+  const reliability = data.reliability_rankings;
   return (
     <section class="best-measured" aria-label="Best measured by category">
       <div class="section-heading-row section-heading-compact">
@@ -338,33 +355,62 @@ function BestMeasured({ data }: { data: ScannerData }) {
               : "Ranked by median calendar year over everything measured (3-year minimum) -- who wins over time."}
           </p>
         </div>
-        <div class="view-switch" role="tablist" aria-label="Ranking horizon">
+        <div class="view-switch" role="tablist" aria-label="Rank by">
           <button
             type="button"
-            class={horizon === "long" ? "active" : ""}
-            onClick={() => setHorizon("long")}
+            class={rankBy === "balanced" ? "active" : ""}
+            onClick={() => setRankBy("balanced")}
+            title="Weighted average of components; incomplete records reweighted"
           >
-            Long term
+            Balanced
           </button>
           <button
             type="button"
-            class={horizon === "short" ? "active" : ""}
-            onClick={() => setHorizon("short")}
+            class={rankBy === "reliability" ? "active" : ""}
+            onClick={() => setRankBy("reliability")}
+            title="Median of four components; every dimension must be measured and none in the bottom quartile -- a failing dimension disqualifies, it cannot be compensated"
           >
-            Short term
+            Reliability
           </button>
         </div>
+        {rankBy === "balanced" ? (
+          <div class="view-switch" role="tablist" aria-label="Ranking horizon">
+            <button
+              type="button"
+              class={horizon === "long" ? "active" : ""}
+              onClick={() => setHorizon("long")}
+            >
+              Long term
+            </button>
+            <button
+              type="button"
+              class={horizon === "short" ? "active" : ""}
+              onClick={() => setHorizon("short")}
+            >
+              Short term
+            </button>
+          </div>
+        ) : null}
       </div>
-      {CATEGORY_DETAILS.map((category) => (
-        <RankedCategory
-          key={category.key}
-          title={category.title}
-          description={category.description}
-          assets={data.category_rankings[category.key] ?? []}
-          total={(data.category_rankings[category.key] ?? []).length}
-          horizon={horizon}
-        />
-      ))}
+      {CATEGORY_DETAILS.map((category) => {
+        const universe = data.category_rankings[category.key] ?? [];
+        const eligible = reliability?.[category.key] ?? [];
+        return (
+          <RankedCategory
+            key={category.key}
+            title={category.title}
+            description={
+              rankBy === "reliability" && universe.length > 0
+                ? `${category.description} ${eligible.length} of ${universe.length} qualify for best overall -- the rest fail a dimension or lack the history to measure one.`
+                : category.description
+            }
+            assets={rankBy === "reliability" ? eligible : universe}
+            total={universe.length}
+            horizon={horizon}
+            rankBy={rankBy}
+          />
+        );
+      })}
     </section>
   );
 }

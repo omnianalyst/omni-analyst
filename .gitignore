@@ -16,3 +16,5 @@ _orchestrator/queue-state/
 # (work orders, agent reports, superseded docs) are private working files.
 docs/NEXT_SESSION.md
 _orchestrator/
+docs/research/calls_ledger.jsonl
+ops/call_tracker.config.json
