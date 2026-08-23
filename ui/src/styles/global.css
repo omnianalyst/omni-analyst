@@ -6701,3 +6701,15 @@ main:not(main main) {
 .rank-more:hover {
   color: var(--d-dim, var(--muted));
 }
+
+.rank-worst {
+  display: block;
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.rank-worst-critical {
+  color: #f87171;
+}

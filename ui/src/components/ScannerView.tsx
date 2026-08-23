@@ -315,6 +315,33 @@ function RankedCategory({
                       ? asset.scores.reliability?.toFixed(0) ?? "—"
                       : asset.scores.balanced?.toFixed(0) ?? "—"}
                   </strong>
+                  {(() => {
+                    // The deduction, visible: the weakest fully-measured
+                    // component under the headline score. A veteran reading
+                    // "APP 59 / worst: stability 0.9" sees the whole argument.
+                    const measured: Array<[string, number | null | undefined]> = [
+                      ["growth", asset.scores.durable_growth],
+                      ["consistency", asset.scores.consistency],
+                      ["stability", asset.scores.stability],
+                      ["downside", asset.scores.downside],
+                      ["diversification", asset.scores.diversification],
+                    ];
+                    const present = measured.filter(
+                      ([, v]) => typeof v === "number",
+                    ) as Array<[string, number]>;
+                    if (present.length < 2) {
+                      return asset.scores.evidence_complete === false ? (
+                        <small class="rank-worst">short history</small>
+                      ) : null;
+                    }
+                    present.sort((a, b) => a[1] - b[1]);
+                    const [name, value] = present[0];
+                    return (
+                      <small class={`rank-worst${value < 25 ? " rank-worst-critical" : ""}`}>
+                        worst: {name} {value.toFixed(0)}
+                      </small>
+                    );
+                  })()}
                 </td>
                 <td class={`${tone(asset.returns?.["365d"])} ${horizon === "short" ? "col-active" : ""}`}>
                   {percent(asset.returns?.["365d"])}
@@ -395,6 +422,18 @@ function BestMeasured({ data }: { data: ScannerData }) {
       {CATEGORY_DETAILS.map((category) => {
         const universe = data.category_rankings[category.key] ?? [];
         const eligible = reliability?.[category.key] ?? [];
+        // The default (balanced) list gets the same evidence floor as
+        // reliability: a name missing long-term components has not been
+        // measured, and outscoring fully-measured names on its remaining
+        // half is the EA failure (stability alone carried it to #2,
+        // 2026-08-22). Incomplete records sort to the bottom, marked.
+        const completeRecords = universe.filter(
+          (a) => a.scores.evidence_complete !== false,
+        );
+        const incompleteRecords = universe.filter(
+          (a) => a.scores.evidence_complete === false,
+        );
+        const balancedUniverse = [...completeRecords, ...incompleteRecords];
         return (
           <RankedCategory
             key={category.key}
@@ -404,7 +443,7 @@ function BestMeasured({ data }: { data: ScannerData }) {
                 ? `${category.description} ${eligible.length} of ${universe.length} qualify for best overall -- the rest fail a dimension or lack the history to measure one.`
                 : category.description
             }
-            assets={rankBy === "reliability" ? eligible : universe}
+            assets={rankBy === "reliability" ? eligible : balancedUniverse}
             total={universe.length}
             horizon={horizon}
             rankBy={rankBy}
