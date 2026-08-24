@@ -935,6 +935,18 @@ def _qualitative_scores(entries: list[dict]) -> None:
         ]
         downside = round(sum(downsides) / len(downsides), 1) if downsides else None
 
+        # Quality: the three dimensions of the ASSET itself, with
+        # diversification deliberately absent -- index correlation is a
+        # portfolio-construction fact (NVDA at ~8% of SPY scores 4 because it
+        # IS the market), not a defect of the business. Charging it against a
+        # single name is how the candidate list a veteran actually wants --
+        # "best stocks right now to choose from" -- excluded its best growth
+        # franchise. Diversification stays visible on the row; it gates the
+        # reliability list, never the quality list.
+        quality_components = [durable, consistency, downside]
+        quality_complete = all(c is not None for c in quality_components)
+        quality_cleared = quality_complete and min(quality_components) > 25.0
+
         components = [durable, consistency, downside, diversification]
         complete = all(c is not None for c in components)
         # The floor is the rule the median alone could not express: a name
@@ -947,6 +959,11 @@ def _qualitative_scores(entries: list[dict]) -> None:
         floor_cleared = complete and min(components) > 25.0
         entry.setdefault("scores", {})
         entry["scores"]["downside"] = downside
+        entry["scores"]["quality"] = (
+            round(statistics.median(quality_components), 1)
+            if quality_cleared
+            else None
+        )
         entry["scores"]["reliability"] = (
             round(statistics.median(components), 1) if floor_cleared else None
         )
@@ -1188,16 +1205,35 @@ def _payload(
         "crypto": reliability_ranked("crypto"),
     }
 
+    def quality_ranked(asset_class: str, extra: list[dict] | None = None) -> list[dict]:
+        available = [
+            asset
+            for asset in list(assets) + list(extra or [])
+            if asset["asset_class"] == asset_class
+            and asset.get("scores", {}).get("quality") is not None
+        ]
+        available.sort(key=lambda asset: asset["scores"]["quality"], reverse=True)
+        return available
+
+    quality = {
+        "stocks": quality_ranked("stocks", company_entries or []),
+        "defensive": quality_ranked("defensive"),
+        "crypto": quality_ranked("crypto"),
+    }
+
     return {
         "buckets": buckets_data,
         "category_rankings": rankings,
         "reliability_rankings": reliability,
+        "quality_rankings": quality,
         "risk_census": {
             category: _tier_census(entries) for category, entries in rankings.items()
         },
         "ranking_method": {
             "balanced": "Within each category: 35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification; available measures are reweighted when history is shorter.",
+            "quality": "Quality is the MEDIAN of three asset dimensions -- durable growth, consistency, downside (depth, time underwater, downside-only deviation) -- every one measured, none in the bottom quartile. Market correlation is shown but never gates: it is a portfolio-construction fact, not a defect of the business.",
             "reliability": "Reliability is the MEDIAN of four components -- durable growth, consistency, downside (depth, time underwater, downside-only deviation), diversification -- and requires every component measured: a spectacular single dimension cannot rescue a failing one, and incompletely measured names are not ranked for best overall. Backward-looking ranks within the tracked universe, not forecasts.",
+            "quality": "Quality is the MEDIAN of three asset dimensions -- durable growth, consistency, downside (depth, time underwater, downside-only deviation) -- every one measured, none in the bottom quartile. Market correlation is shown but never gates: it is a portfolio-construction fact, not a defect of the business.",
             "reliability": "Reliability is the MEDIAN of four components -- durable growth, consistency, downside (depth, time underwater, downside-only deviation), diversification -- and requires every component measured: a spectacular single dimension cannot rescue a failing one, and incompletely measured names are not ranked for best overall. Backward-looking ranks within the tracked universe, not forecasts.",
             "history": "One-year return is trailing. Five- and ten-year figures are annualized. Median return uses complete calendar years; long-term and consistency ranks require at least three complete years.",
             "scope": "Scores are percentile ranks against the other assets in the same category, not forecasts or recommendations.",

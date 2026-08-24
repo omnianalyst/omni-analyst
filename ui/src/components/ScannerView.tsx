@@ -41,6 +41,7 @@ export interface AssetMetric {
     diversification: number | null;
     downside?: number | null;
     reliability?: number | null;
+    quality?: number | null;
     evidence_complete?: boolean;
   };
 }
@@ -98,6 +99,7 @@ interface ScannerData {
   comparator_universe?: Array<{ symbol: string; name: string; kind?: string }>;
   category_rankings: Record<AssetClass, AssetMetric[]>;
   reliability_rankings?: Record<AssetClass, AssetMetric[]>;
+  quality_rankings?: Record<AssetClass, AssetMetric[]>;
   sectors: SectorLeaders[];
   overall_leaders: OverallLeader[];
   ranking_method: { balanced: string; history: string; scope: string; risk_tier: string };
@@ -238,7 +240,7 @@ function RankedCategory({
   assets: AssetMetric[];
   total?: number;
   horizon?: "short" | "long";
-  rankBy?: "balanced" | "reliability";
+  rankBy?: "balanced" | "reliability" | "quality";
 }) {
   // The caller passes the full ranked list (top slice no longer happens at
   // the call site); this component owns how much shows. 10 by default, 50
@@ -251,6 +253,7 @@ function RankedCategory({
   // Reliability -> the median composite. A hidden second ordering under a
   // displayed score is how APP presented as "#1 with 59" (2026-08-23).
   const scoreOf = (a: AssetMetric): number => {
+    if (rankBy === "quality") return a.scores.quality ?? -Infinity;
     if (rankBy === "reliability") return a.scores.reliability ?? -Infinity;
     if (horizon === "short") return a.returns?.["365d"] ?? -Infinity;
     return a.scores.balanced ?? -Infinity;
@@ -288,7 +291,9 @@ function RankedCategory({
               <th>Rank</th>
               <th>Asset</th>
               <th>
-                {rankBy === "reliability"
+                {rankBy === "quality"
+                  ? "Quality"
+                  : rankBy === "reliability"
                   ? "Reliability"
                   : horizon === "short"
                     ? "1-year return"
@@ -315,7 +320,9 @@ function RankedCategory({
                 </td>
                 <td>
                   <strong class="canonical-score">
-                    {rankBy === "reliability"
+                    {rankBy === "quality"
+                      ? asset.scores.quality?.toFixed(0) ?? "—"
+                      : rankBy === "reliability"
                       ? asset.scores.reliability?.toFixed(0) ?? "—"
                       : horizon === "short"
                         ? `${(asset.returns?.["365d"] ?? 0).toFixed(1)}%`
@@ -375,8 +382,11 @@ function RankedCategory({
 // floor). Top 8 per category; the full tables live behind the disclosure.
 function BestMeasured({ data }: { data: ScannerData }) {
   const [horizon, setHorizon] = useState<"short" | "long">("long");
-  const [rankBy, setRankBy] = useState<"balanced" | "reliability">("balanced");
+  const [rankBy, setRankBy] = useState<"balanced" | "reliability" | "quality">(
+    "balanced",
+  );
   const reliability = data.reliability_rankings;
+  const quality = data.quality_rankings;
   return (
     <section class="best-measured" aria-label="Best measured by category">
       <div class="section-heading-row section-heading-compact">
@@ -399,9 +409,17 @@ function BestMeasured({ data }: { data: ScannerData }) {
           </button>
           <button
             type="button"
+            class={rankBy === "quality" ? "active" : ""}
+            onClick={() => setRankBy("quality")}
+            title="Median of the three asset dimensions -- growth, consistency, downside -- every one measured, none in the bottom quartile. Market correlation never gates: it is a portfolio fact, not the stock's fault. The candidate list."
+          >
+            Quality
+          </button>
+          <button
+            type="button"
             class={rankBy === "reliability" ? "active" : ""}
             onClick={() => setRankBy("reliability")}
-            title="Median of four components; every dimension must be measured and none in the bottom quartile -- a failing dimension disqualifies, it cannot be compensated"
+            title="Median of four components including diversification -- portfolio building blocks that do not just duplicate the index. A failing dimension disqualifies."
           >
             Reliability
           </button>
@@ -427,7 +445,10 @@ function BestMeasured({ data }: { data: ScannerData }) {
       </div>
       {CATEGORY_DETAILS.map((category) => {
         const universe = data.category_rankings[category.key] ?? [];
-        const eligible = reliability?.[category.key] ?? [];
+        const eligible =
+          (rankBy === "quality"
+            ? quality?.[category.key]
+            : reliability?.[category.key]) ?? [];
         // The default (balanced) list gets the same evidence floor as
         // reliability: a name missing long-term components has not been
         // measured, and outscoring fully-measured names on its remaining

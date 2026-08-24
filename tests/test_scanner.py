@@ -666,3 +666,74 @@ class TestReliabilityScore:
         # Balanced still ranks both (it reweights); reliability ranks only FULL.
         assert {a["symbol"] for a in payload["reliability_rankings"]["stocks"]} == {"FULL"}
         assert "HALF" in {a["symbol"] for a in ranked}
+
+
+class TestQualityScore:
+    """The candidate list: best stocks right now to choose from.
+
+    Quality ranks the three ASSET dimensions and refuses to charge market
+    correlation against a single name -- the NVDA case (2026-08-23): the
+    universe's best growth franchise, excluded from reliability because it
+    IS ~8% of the index it correlates with. Diversification gates
+    reliability (portfolio building blocks); it never gates quality (the
+    candidate set a veteran chooses FROM, then allocates).
+    """
+
+    def _entry(self, symbol, **kw):
+        return {
+            "symbol": symbol,
+            "max_drawdown": kw.get("max_drawdown", -50.0),
+            "underwater_pct": kw.get("underwater_pct", 50.0),
+            "downside_deviation": kw.get("downside_deviation", 20.0),
+            "scores": {
+                "durable_growth": kw.get("durable_growth"),
+                "consistency": kw.get("consistency"),
+                "diversification": kw.get("diversification", 50.0),
+            },
+        }
+
+    def test_market_correlation_never_gates_quality(self):
+        from omni.api.scanner import _qualitative_scores
+
+        # Six names so quartiles are meaningful: MAG7's downside must be
+        # mid-pack (a real but survivable drawdown), not the category's worst.
+        entries = [
+            self._entry("MAG7", durable_growth=99.0, consistency=84.0,
+                        diversification=4.0, max_drawdown=-55.0,
+                        underwater_pct=60.0, downside_deviation=30.0),
+            self._entry("STEADY", durable_growth=70.0, consistency=72.0,
+                        diversification=90.0, max_drawdown=-15.0,
+                        underwater_pct=20.0, downside_deviation=8.0),
+            self._entry("F1", durable_growth=50.0, consistency=50.0),
+            self._entry("F2", durable_growth=30.0, consistency=30.0),
+            self._entry("WORSE1", durable_growth=40.0, consistency=40.0,
+                        diversification=40.0, max_drawdown=-80.0,
+                        underwater_pct=85.0, downside_deviation=55.0),
+            self._entry("WORSE2", durable_growth=45.0, consistency=35.0,
+                        diversification=45.0, max_drawdown=-85.0,
+                        underwater_pct=90.0, downside_deviation=60.0),
+        ]
+        _qualitative_scores(entries)
+        by = {e["symbol"]: e["scores"] for e in entries}
+        # Quality ranks MAG7 despite div=4 (correlation is not the stock's
+        # fault); reliability still refuses it.
+        assert by["MAG7"]["quality"] is not None
+        assert by["MAG7"]["reliability"] is None
+        assert by["MAG7"]["quality"] > by["STEADY"]["quality"]
+        assert by["STEADY"]["reliability"] is not None
+
+    def test_quality_still_gates_on_evidence_and_floor(self):
+        from omni.api.scanner import _qualitative_scores
+
+        entries = [
+            self._entry("HALF", durable_growth=None, consistency=80.0),
+            self._entry("CRASH", durable_growth=90.0, consistency=85.0,
+                        max_drawdown=-92.0, underwater_pct=95.0,
+                        downside_deviation=70.0),
+            self._entry("F1", durable_growth=50.0, consistency=50.0),
+            self._entry("F2", durable_growth=30.0, consistency=30.0),
+        ]
+        _qualitative_scores(entries)
+        by = {e["symbol"]: e["scores"] for e in entries}
+        assert by["HALF"]["quality"] is None          # unmeasured dimension
+        assert by["CRASH"]["quality"] is None         # bottom-quartile downside
