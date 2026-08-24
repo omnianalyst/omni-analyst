@@ -1570,6 +1570,31 @@ async def _ranking_faceoff(app: App, audience) -> dict[str, Any] | None:
         return None
     sector_of = await _sector_map(app.db.pool)
 
+    # Company picks price from the claim store's audience-scoped panel -- the
+    # yfinance _panel() does not carry them. The display-history panel is the
+    # right source here (this is display measurement), with the claims panel
+    # as fallback for any name yfinance lacks, and a missing series still
+    # refuses the whole face-off rather than dropping one holding quietly.
+    company_panel = await _company_panel_cached(app.db.pool, audience)
+    history_panel = (
+        _company_history_panel(list(company_panel.columns))
+        if not company_panel.empty
+        else pd.DataFrame()
+    )
+    extra = {}
+    for sym in set(prices.columns) | (
+        set(company_panel.columns) if not company_panel.empty else set()
+    ):
+        if sym in prices.columns:
+            continue
+        if not history_panel.empty and sym in history_panel.columns:
+            extra[sym] = history_panel[sym]
+        elif not company_panel.empty and sym in company_panel.columns:
+            extra[sym] = company_panel[sym]
+    if extra:
+        joined = pd.DataFrame(extra).reindex(sorted(set(prices.index) | set(next(iter(extra.values())).index)))
+        prices = prices.join(joined, how="outer")
+
     # ETF sector for the broad funds used in spreads.
     for sym, etf in (("XLK", "XLK"), ("XLV", "XLV"), ("XLF", "XLF"), ("XLE", "XLE"),
                      ("XLY", "XLY"), ("XLI", "XLI"), ("XLP", "XLP"), ("XLU", "XLU"),
