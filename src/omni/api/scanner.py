@@ -1508,6 +1508,128 @@ async def _build_scanner(app: App, audience) -> dict:
     return payload
 
 
+async def _sector_map(pool) -> dict[str, str]:
+    """company symbol -> sector ETF symbol, from the claim store's edges."""
+    rows = await pool.fetch(
+        """
+        SELECT e.symbol AS company, etf.symbol AS sector
+        FROM entity e
+        JOIN entity_edge ed ON ed.from_entity = e.id
+             AND ed.relation = 'member_of_sector'
+        JOIN entity etf ON etf.id = ed.to_entity AND etf.kind = 'sector_etf'
+        WHERE e.kind = 'company'
+        """
+    )
+    return {r["company"]: r["sector"] for r in rows}
+
+
+def _sector_spread(
+    ranked: list[dict],
+    sector_of: dict[str, str],
+    *,
+    max_names: int = 10,
+    per_sector: int = 2,
+) -> list[tuple[str, float]]:
+    """Greedy per-sector selection from an already-ordered list.
+
+    The highest-scored name in each sector first, then seconds -- a top-N by
+    score alone is one bet wearing ten tickers (the tech-heavy lists this
+    replaced would have been 8 correlated names). ETFs map to their own
+    sector; names with no sector edge are skipped (construction must be
+    spread, so an unsectorable name cannot occupy a slot).
+    """
+    picks: list[tuple[str, float]] = []
+    counts: dict[str, int] = {}
+    for asset in ranked:
+        sector = sector_of.get(asset["symbol"])
+        if sector is None:
+            continue
+        if counts.get(sector, 0) >= per_sector:
+            continue
+        picks.append((asset["symbol"], 1.0))
+        counts[sector] = counts.get(sector, 0) + 1
+        if len(picks) >= max_names:
+            break
+    return picks
+
+
+async def _ranking_faceoff(app: App, audience) -> dict[str, Any] | None:
+    """The three ranking modes as actually-held portfolios, plus a blend.
+
+    Descriptive, not predictive: each mode's qualified list is built into a
+    sector-spread 10-name portfolio, measured with the same mixer the
+    comparator uses (January rebalanced, whole years, gap-honest), every mix
+    over the SAME window -- the union of all holdings, so the numbers are
+    comparable. The window is short (companies carry ~2y display history);
+    that is disclosed in the response, because a 2-3 year backward comparison
+    is a description of what those lists would have held, not a forecast.
+    """
+    payload = await _build_scanner(app, audience)
+    prices = _panel()
+    if prices.empty:
+        return None
+    sector_of = await _sector_map(app.db.pool)
+
+    # ETF sector for the broad funds used in spreads.
+    for sym, etf in (("XLK", "XLK"), ("XLV", "XLV"), ("XLF", "XLF"), ("XLE", "XLE"),
+                     ("XLY", "XLY"), ("XLI", "XLI"), ("XLP", "XLP"), ("XLU", "XLU"),
+                     ("XLB", "XLB"), ("XLC", "XLC"), ("XLRE", "XLRE"),
+                     ("SPY", "SPY"), ("QQQ", "XLK"), ("VTI", "SPY"), ("IWM", "SPY"),
+                     ("MTUM", "XLK"), ("QUAL", "XLK"), ("VUG", "XLK"), ("VTV", "XLF")):
+        sector_of.setdefault(sym, etf)
+
+    universes: dict[str, list[dict]] = {}
+    for mode, key in (
+        ("balanced", "stocks"),
+        ("quality", "stocks_quality"),
+        ("reliability", "stocks_reliability"),
+    ):
+        source = payload.get("quality_rankings", {}).get("stocks", []) if mode == "quality" else (
+            payload.get("reliability_rankings", {}).get("stocks", []) if mode == "reliability"
+            else payload["category_rankings"]["stocks"]
+        )
+        universes[mode] = _sector_spread(source, sector_of)
+    if not all(universes.values()):
+        return None
+
+    # The blend: one pick per mode per sector round-robin -- each view's
+    # best spread idea, interleaved.
+    blend: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    per_mode = {m: list(u) for m, u in universes.items()}
+    for round_i in range(4):
+        for mode in ("quality", "reliability", "balanced"):
+            if round_i < len(per_mode[mode]):
+                sym, w = per_mode[mode][round_i]
+                if sym not in seen:
+                    seen.add(sym)
+                    blend.append((sym, 1.0))
+
+    all_symbols = sorted({s for u in universes.values() for s, _ in u} | {s for s, _ in blend})
+    if any(sym not in prices.columns for sym in all_symbols):
+        return None
+
+    mixes: dict[str, Any] = {}
+    for mode, holdings in {**universes, "blend": blend}.items():
+        mix = _mix_history(prices, holdings, window_symbols=all_symbols)
+        if mix is None:
+            return None
+        mixes[mode] = {**mix, "holdings": [h for h, _ in holdings]}
+
+    years = mixes["balanced"].get("complete_years", 0)
+    return {
+        "modes": mixes,
+        "window_years": years,
+        "sector_spread": "one per sector, seconds allowed; no sector more than 2 names",
+        "caveat": (
+            f"{years} whole years, backward-looking on the shared window the "
+            "companies' histories set. A description of what these lists "
+            "held, not a forecast; ranking modes differ on data depth, so a "
+            "longer window favors the modes that could use it."
+        ),
+    }
+
+
 def build_router(app: App) -> Router:
     router = Router()
 
@@ -1515,6 +1637,17 @@ def build_router(app: App) -> Router:
     async def scanner_market(request: Request) -> dict:
         audience = resolve_audience_from_request(request)
         return await _build_scanner(app, audience)
+
+    @router.get("/scanner/faceoff")
+    async def scanner_faceoff(request: Request) -> dict:
+        """The three ranking modes measured as sector-spread portfolios."""
+        from neutron.error import not_found
+
+        audience = resolve_audience_from_request(request)
+        result = await _ranking_faceoff(app, audience)
+        if result is None:
+            raise not_found("Face-off unavailable: not every holding is measured")
+        return result
 
     @router.post("/scanner/custom-portfolio")
     async def custom_portfolio(request: Request) -> dict:
