@@ -245,19 +245,17 @@ function RankedCategory({
   // expanded, scrollable beyond -- enough depth to be a real ranking without
   // rendering 500 rows unprompted.
   const [expanded, setExpanded] = useState(false);
-  const rankedAll = [...assets].sort((a, b) => {
-    if (rankBy === "reliability") {
-      return (b.scores.reliability ?? -1) - (a.scores.reliability ?? -1);
-    }
-    if (horizon === "short") {
-      return (b.returns?.["365d"] ?? -Infinity) - (a.returns?.["365d"] ?? -Infinity);
-    }
-    const left = a.median_annual_return;
-    const right = b.median_annual_return;
-    if (left == null) return 1;
-    if (right == null) return -1;
-    return right - left;
-  });
+  // ONE rule: the table is ordered by exactly the number in its Score
+  // column. Balanced -> balanced composite. Short term -> trailing 1-year
+  // return (and the column shows that return, so the order is self-evident).
+  // Reliability -> the median composite. A hidden second ordering under a
+  // displayed score is how APP presented as "#1 with 59" (2026-08-23).
+  const scoreOf = (a: AssetMetric): number => {
+    if (rankBy === "reliability") return a.scores.reliability ?? -Infinity;
+    if (horizon === "short") return a.returns?.["365d"] ?? -Infinity;
+    return a.scores.balanced ?? -Infinity;
+  };
+  const rankedAll = [...assets].sort((a, b) => scoreOf(b) - scoreOf(a));
   const ranked = rankedAll.slice(0, expanded ? RANK_EXPANDED : RANK_PREVIEW);
   return (
     <section class="rank-category">
@@ -289,7 +287,13 @@ function RankedCategory({
             <tr>
               <th>Rank</th>
               <th>Asset</th>
-              <th>{rankBy === "reliability" ? "Reliability" : "Score"}</th>
+              <th>
+                {rankBy === "reliability"
+                  ? "Reliability"
+                  : horizon === "short"
+                    ? "1-year return"
+                    : "Balanced score"}
+              </th>
               <th class={horizon === "short" ? "col-active" : ""}>1 year</th>
               <th class={horizon === "long" ? "col-active" : ""}>Median year, all measured</th>
               <th>Volatility</th>
@@ -313,7 +317,9 @@ function RankedCategory({
                   <strong class="canonical-score">
                     {rankBy === "reliability"
                       ? asset.scores.reliability?.toFixed(0) ?? "—"
-                      : asset.scores.balanced?.toFixed(0) ?? "—"}
+                      : horizon === "short"
+                        ? `${(asset.returns?.["365d"] ?? 0).toFixed(1)}%`
+                        : asset.scores.balanced?.toFixed(0) ?? "—"}
                   </strong>
                   {(() => {
                     // The deduction, visible: the weakest fully-measured
@@ -379,7 +385,7 @@ function BestMeasured({ data }: { data: ScannerData }) {
           <p>
             {horizon === "short"
               ? "Ranked by the trailing year -- who is winning right now. A single year's winner is often an extreme event; ZEC's +1223% was real, and it says nothing about the next year."
-              : "Ranked by median calendar year over everything measured (3-year minimum) -- who wins over time."}
+              : "Ordered by the score shown. Balanced weighs growth, consistency, stability and diversification; every row states its weakest dimension. Short term orders by trailing 1-year return."}
           </p>
         </div>
         <div class="view-switch" role="tablist" aria-label="Rank by">
