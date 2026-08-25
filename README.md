@@ -30,6 +30,13 @@ See `DEPLOY.md` for the production stack (API, scheduler, Timescale Postgres,
 Caddy edge) and the full configuration reference. The only source of truth for
 settings is `src/omni/config.py`.
 
+## The live site
+
+[omnianalyst.com](https://omnianalyst.com) is this project's website. There is
+no hosted demo and no public signup anywhere — a running instance is
+operator-private by design, and this project is the software, not a service.
+Self-hosting is the product.
+
 ## Footprint
 
 The deployment profile decides how much the system collects:
