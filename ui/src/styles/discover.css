@@ -636,13 +636,130 @@
 }
 
 .map-canvas {
+  position: relative;
   margin-top: 18px;
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 84vh;
+  border: 1px solid var(--d-line);
+  border-radius: 10px;
+  background: rgba(7, 10, 18, 0.5);
 }
 .map-svg {
-  width: 100%;
-  min-width: 760px;
+  /* Vectors: rendered large and scrolled, never shrunk to fit. */
+  width: 1500px;
+  min-width: 1500px;
+  height: auto;
   display: block;
+  margin: 0 auto;
+}
+
+/* The hover card: full measured breakdown, HTML so it ignores the canvas
+   scale, pointer-events none so it never steals the hover it explains. */
+.map-popover {
+  position: absolute;
+  z-index: 6;
+  width: 280px;
+  padding: 14px 16px;
+  border: 1px solid rgba(147, 167, 196, 0.32);
+  border-radius: 10px;
+  background: #0b111c;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+.map-popover header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.map-popover header strong {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--d-ink);
+}
+.map-popover header span {
+  font-size: 12px;
+  color: var(--d-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.map-pop-sub {
+  margin: 3px 0 10px;
+  font-size: 11px;
+  color: var(--d-faint);
+}
+.map-pop-score {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 7px 0 9px;
+  border-top: 1px solid var(--d-line);
+  border-bottom: 1px solid var(--d-line);
+  font-size: 11px;
+  color: var(--d-dim);
+}
+.map-pop-score strong {
+  font-size: 19px;
+  font-weight: 800;
+  color: var(--d-ink);
+  font-variant-numeric: tabular-nums;
+}
+.map-pop-bar {
+  display: grid;
+  grid-template-columns: 92px 1fr 24px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--d-faint);
+}
+.map-pop-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-pop-bar b {
+  font-weight: 600;
+  color: var(--d-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.map-pop-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(147, 167, 196, 0.15);
+  overflow: hidden;
+}
+.map-pop-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--d-dim);
+}
+.map-pop-bar-worst span,
+.map-pop-bar-worst b { color: #f87171; }
+.map-pop-bar-worst .map-pop-fill { background: #f87171; }
+.map-pop-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 14px;
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--d-line);
+}
+.map-pop-facts dt {
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+}
+.map-pop-facts dd {
+  margin: 1px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--d-ink);
+  font-variant-numeric: tabular-nums;
+}
+.map-pop-note {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--d-faint);
 }
 
 .map-wedge {

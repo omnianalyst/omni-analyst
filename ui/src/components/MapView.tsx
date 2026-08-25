@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, request } from "../lib/api";
 import { AssetMetric } from "./ScannerView";
 import { ErrorState } from "./ErrorState";
@@ -49,6 +49,14 @@ interface Chip {
   width: number;
   x: number;
   y: number;
+  asset?: AssetMetric;
+  company?: {
+    name: string;
+    sector: string;
+    sectorPlain: string;
+    returnWindow: number;
+    sessions: number;
+  };
 }
 
 interface Wedge {
@@ -153,6 +161,7 @@ function buildWedges(data: MapData): Wedge[] {
       width: chipWidth(asset.symbol, index + 1),
       x: 0,
       y: 0,
+      asset,
     }));
     if (chips.length > 0) {
       groups.push({
@@ -186,6 +195,13 @@ function buildWedges(data: MapData): Wedge[] {
       width: chipWidth(leader.symbol, seat + 1),
       x: 0,
       y: 0,
+      company: {
+        name: leader.name,
+        sector: sector.name,
+        sectorPlain: SECTOR_PLAIN[sector.symbol] ?? sector.name.split(" ").slice(0, 2).join(" "),
+        returnWindow: leader.return_window,
+        sessions: data.sector_coverage.window_sessions,
+      },
     }));
     groups.push({
       key: sector.symbol,
@@ -249,8 +265,110 @@ function wedgePath(group: Wedge): string {
   return `M ${C} ${C} L ${x0} ${y0} A ${r} ${r} 0 0 1 ${x1} ${y1} Z`;
 }
 
+const RISK_TIER_WORDS: Record<string, string> = {
+  low: "steady (under 10% volatility)",
+  medium: "balanced (10-30% volatility)",
+  high: "aggressive (30%+ volatility)",
+  unrated: "not tiered",
+};
+
+const BEHAVIOR_WORDS: Record<string, string> = {
+  risk_on: "moves with stocks",
+  diversifier: "diversifier",
+  counterweight: "counterweight",
+  unrated: "not measured",
+};
+
+function pct(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)}%`;
+}
+
+// The hover card: the full measured breakdown behind a chip, in HTML over
+// the SVG so it inherits the page's type and never scales with the canvas.
+function MapPopover({ chip, x, y }: { chip: Chip; x: number; y: number }) {
+  if (chip.asset) {
+    const a = chip.asset;
+    const components: Array<[string, number | null | undefined]> = [
+      ["growth", a.scores.durable_growth],
+      ["consistency", a.scores.consistency],
+      ["stability", a.scores.stability],
+      ["downside", a.scores.downside],
+      ["diversification", a.scores.diversification],
+    ];
+    const present = components.filter(([, v]) => typeof v === "number") as Array<[string, number]>;
+    const worst = present.length >= 2
+      ? present.reduce((min, item) => (item[1] < min[1] ? item : min))[0]
+      : null;
+    return (
+      <div class="map-popover" style={`left:${x}px;top:${y}px`}>
+        <header>
+          <strong>{a.symbol}</strong>
+          <span>{a.name}</span>
+        </header>
+        <p class="map-pop-sub">
+          #{chip.rank} in {classLabel(a.asset_class)} · {RISK_TIER_WORDS[a.risk_tier] ?? a.risk_tier}
+        </p>
+        <div class="map-pop-score">
+          <span>balanced score</span>
+          <strong>{a.scores.balanced?.toFixed(0) ?? "—"}</strong>
+        </div>
+        {present.map(([name, value]) => (
+          <div class={`map-pop-bar${name === worst ? " map-pop-bar-worst" : ""}`} key={name}>
+            <span>{name === worst ? `${name} · weakest` : name}</span>
+            <div class="map-pop-track">
+              <div class="map-pop-fill" style={`width:${Math.max(0, Math.min(100, value))}%`} />
+            </div>
+            <b>{value.toFixed(0)}</b>
+          </div>
+        ))}
+        <dl class="map-pop-facts">
+          <div><dt>Median year</dt><dd>{pct(a.median_annual_return)}</dd></div>
+          <div><dt>1 year</dt><dd>{pct(a.returns?.["365d"])}</dd></div>
+          <div><dt>Volatility</dt><dd>{pct(a.volatility)}</dd></div>
+          <div><dt>Max drawdown</dt><dd>{pct(a.max_drawdown)}</dd></div>
+          <div><dt>5-year CAGR</dt><dd>{pct(a.cagr_5y)}</dd></div>
+          <div><dt>Positive years</dt><dd>{pct(a.positive_year_rate)}</dd></div>
+          <div><dt>Sharpe</dt><dd>{a.sharpe?.toFixed(2) ?? "—"}</dd></div>
+          <div><dt>History</dt><dd>{a.complete_years} full of {a.history_years.toFixed(1)}y</dd></div>
+          <div><dt>Market role</dt><dd>{BEHAVIOR_WORDS[a.market_behavior] ?? a.market_behavior}</dd></div>
+          <div><dt>Corr. to SPY</dt><dd>{a.correlation_to_spy?.toFixed(2) ?? "—"}</dd></div>
+        </dl>
+      </div>
+    );
+  }
+  const c = chip.company!;
+  return (
+    <div class="map-popover" style={`left:${x}px;top:${y}px`}>
+      <header>
+        <strong>{chip.label}</strong>
+        <span>{c.name}</span>
+      </header>
+      <p class="map-pop-sub">
+        #{chip.rank} in {c.sectorPlain} · {c.sector}
+      </p>
+      <div class="map-pop-score">
+        <span>{c.sessions}-session return</span>
+        <strong class={c.returnWindow > 0 ? "value-positive" : "value-negative"}>
+          {pct(c.returnWindow)}
+        </strong>
+      </div>
+      <p class="map-pop-note">
+        Company rankings use the {c.sessions}-session history currently measurable --
+        shorter than the asset-class record, so the two numbers are not comparable.
+      </p>
+    </div>
+  );
+}
+
+function classLabel(cls: string): string {
+  return cls === "stocks" ? "Stocks & ETFs" : cls === "defensive" ? "Defensive & real assets" : cls === "crypto" ? "Crypto" : cls;
+}
+
 export function MapView() {
   const [state, setState] = useState<State>({ kind: "loading" });
+  const [pop, setPop] = useState<{ chip: Chip; x: number; y: number } | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -281,6 +399,19 @@ export function MapView() {
     .sort((a, b) => (b.scores.balanced ?? -Infinity) - (a.scores.balanced ?? -Infinity));
   const best = universe[0] ?? null;
 
+  const openPop = (chip: Chip, event: MouseEvent) => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const rect = canvas.getBoundingClientRect();
+    const W = 292;
+    const H = chip.asset ? 428 : 240;
+    let x = event.clientX - rect.left + canvas.scrollLeft + 14;
+    let y = event.clientY - rect.top + canvas.scrollTop + 14;
+    if (x + W > canvas.scrollWidth) x = event.clientX - rect.left + canvas.scrollLeft - W - 8;
+    if (y + H > canvas.scrollHeight) y = Math.max(8, canvas.scrollHeight - H - 8);
+    setPop({ chip, x, y });
+  };
+
   return (
     <div class="map-view product-page">
       <header class="map-heading">
@@ -300,7 +431,8 @@ export function MapView() {
         </div>
       </header>
 
-      <div class="map-canvas">
+      <div class="map-canvas" ref={canvasRef} onScroll={() => setPop(null)}>
+        {pop ? <MapPopover chip={pop.chip} x={pop.x} y={pop.y} /> : null}
         <svg
           viewBox={`0 0 ${SIZE} ${SIZE}`}
           class="map-svg"
@@ -330,7 +462,16 @@ export function MapView() {
                 </text>
               ) : null}
               {group.chips.map((chip) => (
-                <a key={chip.id} class="map-chip" href={chip.href}>
+                <a
+                  key={chip.id}
+                  class="map-chip"
+                  href={chip.href}
+                  onMouseOver={(event) => openPop(chip, event)}
+                  onMouseOut={(event) => {
+                    const to = event.relatedTarget as Node | null;
+                    if (!(event.currentTarget as Node).contains(to)) setPop(null);
+                  }}
+                >
                   <title>{chip.title}</title>
                   <rect
                     class="map-chip-box"

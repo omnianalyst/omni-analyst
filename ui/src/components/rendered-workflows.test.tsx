@@ -783,33 +783,33 @@ describe("the Discover map", () => {
     return {
       category_rankings: {
         stocks: [
-          { ...baseAsset, symbol: "SPY", risk_tier: "medium", volatility: 18, median_annual_return: 11,
+          { ...baseAsset, symbol: "SPY", name: "S&P 500 ETF", risk_tier: "medium", volatility: 18, median_annual_return: 11,
             scores: { balanced: 72, durable_growth: 55, consistency: 80, stability: 70, diversification: 60, evidence_complete: true } },
-          { ...baseAsset, symbol: "VTI", risk_tier: "medium", volatility: 17, median_annual_return: 10,
+          { ...baseAsset, symbol: "VTI", name: "Total Market ETF", risk_tier: "medium", volatility: 17, median_annual_return: 10,
             scores: { balanced: 70, durable_growth: 50, consistency: 78, stability: 72, diversification: 58, evidence_complete: true } },
-          { ...baseAsset, symbol: "QQQ", risk_tier: "high", volatility: 24, median_annual_return: 14,
+          { ...baseAsset, symbol: "QQQ", name: "Nasdaq 100 ETF", risk_tier: "high", volatility: 24, median_annual_return: 14,
             scores: { balanced: 68, durable_growth: 66, consistency: 60, stability: 50, diversification: 40, evidence_complete: true } },
           { ...baseAsset, symbol: "NEWP", risk_tier: "medium", volatility: 18, median_annual_return: 12,
             scores: { balanced: 99, stability: 92, evidence_complete: false } },
         ],
         defensive: [
-          { ...baseAsset, symbol: "GLD", risk_tier: "medium", volatility: 15, median_annual_return: 9,
+          { ...baseAsset, symbol: "GLD", asset_class: "defensive", name: "Gold Shares", risk_tier: "medium", volatility: 15, median_annual_return: 9,
             scores: { balanced: 68, durable_growth: 45, consistency: 60, stability: 75, diversification: 90, evidence_complete: true } },
         ],
         crypto: [
-          { ...baseAsset, symbol: "BTC", risk_tier: "high", volatility: 66, median_annual_return: 40,
+          { ...baseAsset, symbol: "BTC", asset_class: "crypto", name: "Bitcoin", risk_tier: "high", volatility: 66, median_annual_return: 40,
             scores: { balanced: 60, durable_growth: 70, consistency: 40, stability: 30, diversification: 20, evidence_complete: true } },
-          { ...baseAsset, symbol: "ETH", risk_tier: "high", volatility: 84, median_annual_return: 42,
+          { ...baseAsset, symbol: "ETH", asset_class: "crypto", name: "Ethereum", risk_tier: "high", volatility: 84, median_annual_return: 42,
             scores: { balanced: 58, durable_growth: 68, consistency: 38, stability: 28, diversification: 22, evidence_complete: true } },
-          { ...baseAsset, symbol: "SOL", risk_tier: "high", volatility: 118, median_annual_return: 48,
+          { ...baseAsset, symbol: "SOL", asset_class: "crypto", name: "Solana", risk_tier: "high", volatility: 118, median_annual_return: 48,
             scores: { balanced: 55, durable_growth: 72, consistency: 30, stability: 22, diversification: 18, evidence_complete: true } },
-          { ...baseAsset, symbol: "XRP", risk_tier: "high", volatility: 111, median_annual_return: 30,
+          { ...baseAsset, symbol: "XRP", asset_class: "crypto", name: "XRP", risk_tier: "high", volatility: 111, median_annual_return: 30,
             scores: { balanced: 52, durable_growth: 60, consistency: 28, stability: 24, diversification: 16, evidence_complete: true } },
-          { ...baseAsset, symbol: "DOGE", risk_tier: "high", volatility: 171, median_annual_return: 35,
+          { ...baseAsset, symbol: "DOGE", asset_class: "crypto", name: "Dogecoin", risk_tier: "high", volatility: 171, median_annual_return: 35,
             scores: { balanced: 50, durable_growth: 62, consistency: 25, stability: 20, diversification: 14, evidence_complete: true } },
-          { ...baseAsset, symbol: "XMR", risk_tier: "high", volatility: 90, median_annual_return: 28,
+          { ...baseAsset, symbol: "XMR", asset_class: "crypto", name: "Monero", risk_tier: "high", volatility: 90, median_annual_return: 28,
             scores: { balanced: 47, durable_growth: 58, consistency: 24, stability: 26, diversification: 12, evidence_complete: true } },
-          { ...baseAsset, symbol: "HBAR", risk_tier: "high", volatility: 125, median_annual_return: 33,
+          { ...baseAsset, symbol: "HBAR", asset_class: "crypto", name: "Hedera", risk_tier: "high", volatility: 125, median_annual_return: 33,
             scores: { balanced: 44, durable_growth: 55, consistency: 22, stability: 18, diversification: 10, evidence_complete: true } },
         ],
       },
@@ -857,6 +857,41 @@ describe("the Discover map", () => {
     expect(cryptoChips.length).toBe(7);
     expect(cryptoChips[0].textContent).toContain("BTC");
     expect((cryptoChips[0] as SVGElement).getAttribute("href")).toBe("/search?q=BTC");
+    container.remove();
+  });
+
+  it("opens the full breakdown card on chip hover", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(mapPayload())));
+    const container = root();
+    render(<MapView />, container);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".map-svg > g").length).toBe(6),
+    );
+
+    const btcChip = container.querySelector('[data-key="crypto"] .map-chip') as SVGElement;
+    await act(() => {
+      btcChip.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    });
+    await waitFor(() =>
+      expect(container.querySelector(".map-popover")).toBeTruthy(),
+    );
+    const card = container.querySelector(".map-popover")!;
+    // The asset card carries the identity, the headline score with its
+    // weakest component flagged, and the measured facts grid.
+    expect(card.textContent).toContain("Bitcoin");
+    expect(card.textContent).toContain("balanced score");
+    expect(card.textContent).toContain("weakest");
+    expect(card.textContent).toContain("Median year");
+
+    // A company chip carries its own shape: sector wording, window return.
+    const wdayChip = container.querySelector('[data-kind="sector"] .map-chip') as SVGElement;
+    await act(() => {
+      wdayChip.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    });
+    await waitFor(() =>
+      expect(container.querySelector(".map-popover")?.textContent).toContain("30-session return"),
+    );
+    expect(container.querySelector(".map-popover")?.textContent).toContain("Technology");
     container.remove();
   });
 
