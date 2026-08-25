@@ -55,6 +55,7 @@ interface Wedge {
   key: string;
   kind: "class" | "sector";
   label: string;
+  sectorName?: string;
   color: string;
   chips: Chip[];
   a0: number;
@@ -83,6 +84,23 @@ const SECTOR_COLORS = [
   "#93c5fd", "#fca5a5", "#c4b5fd", "#86efac", "#f9a8d4",
   "#7dd3fc", "#fdba74", "#a3e635", "#f0abfc", "#fcd34d", "#5eead4",
 ];
+
+// The plain-English name under each sector ticker, so nobody needs to know
+// that XLB is Materials. The sector's own name arrives from the payload;
+// this maps the sector ETF ticker to the everyday word.
+const SECTOR_PLAIN: Record<string, string> = {
+  XLK: "Tech",
+  XLF: "Banks & money",
+  XLV: "Health care",
+  XLE: "Energy",
+  XLY: "Shopping",
+  XLP: "Everyday goods",
+  XLI: "Industry",
+  XLU: "Utilities",
+  XLB: "Raw materials",
+  XLC: "Phone & media",
+  XLRE: "Real estate",
+};
 
 function assetFacts(asset: AssetMetric): string {
   const parts = [
@@ -173,6 +191,7 @@ function buildWedges(data: MapData): Wedge[] {
       key: sector.symbol,
       kind: "sector",
       label: sector.symbol,
+      sectorName: sector.name.split(" ").slice(0, 2).join(" "),
       color: SECTOR_COLORS[index % SECTOR_COLORS.length],
       chips,
       a0: 0,
@@ -300,6 +319,16 @@ export function MapView() {
               >
                 {group.label}
               </text>
+              {group.kind === "sector" ? (
+                <text
+                  class="map-wedge-sublabel"
+                  x={C + group.labelR * Math.cos(group.mid)}
+                  y={C + group.labelR * Math.sin(group.mid) + 15}
+                  text-anchor="middle"
+                >
+                  {SECTOR_PLAIN[group.label] ?? group.sectorName ?? ""}
+                </text>
+              ) : null}
               {group.chips.map((chip) => (
                 <a key={chip.id} class="map-chip" href={chip.href}>
                   <title>{chip.title}</title>

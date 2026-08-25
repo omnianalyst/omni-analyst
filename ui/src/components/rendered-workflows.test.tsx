@@ -876,6 +876,8 @@ describe("the Discover map", () => {
     expect(sectorWedges.length).toBe(3);
     expect(sectorWedges[0].querySelector(".map-chip")?.textContent).toContain("WDAY");
     expect(sectorWedges[0].querySelector(".map-wedge-label")?.textContent).toContain("XLK");
+    // The plain-English word rides under the ticker: XLK is Tech.
+    expect(sectorWedges[0].querySelector(".map-wedge-sublabel")?.textContent).toBe("Tech");
     expect(sectorWedges[2].querySelector(".map-chip")?.textContent).toContain("CEG");
 
     // The measurement window is stated where the ranking is shown.
