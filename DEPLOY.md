@@ -215,3 +215,29 @@ resilience. **Test the restore** before relying on it: stop the stack,
 `pg_restore --clean --if-exists -d omni_v2 <file>.dump` into the postgres
 container, then bring the stack back up. An untested backup is a hope, not a
 recovery.
+
+### Moving machines
+
+Settings has a **Download backup** button (operator account): one click
+produces the same custom-format dump the nightly script takes. Moving an
+instance to a new computer is then three steps:
+
+1. On the old machine: Settings -> Download backup (or run `ops/backup.sh`).
+2. Install the stack on the new machine (this document), bring it up once
+   with a fresh database, then stop the api and scheduler.
+3. Restore the dump into the new postgres container:
+
+   ```
+   docker cp omni-backup-YYYYMMDD.dump omni_postgres:/tmp/restore.dump
+   docker exec omni_postgres dropdb -U postgres omni_v2
+   docker exec omni_postgres createdb -U postgres omni_v2
+   docker exec omni_postgres pg_restore -U postgres -d omni_v2 /tmp/restore.dump
+   ```
+
+   Then start the stack. Restore is deliberately not a UI button: it writes
+   over a live database, and a browser-upload path to that action is a
+   self-destruct button wearing a friendly label.
+
+One licensing note: the dump contains every claim fetched under your keys,
+including byo_only data licensed to you. Moving YOUR dump to YOUR new machine
+is personal use. Publishing or sharing the file is redistribution -- don't.

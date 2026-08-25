@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -10,8 +12,9 @@ from neutron import App, Router
 from neutron.error import bad_request, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
+from starlette.responses import Response
 
-from omni.auth import resolve_audience_from_request
+from omni.auth import resolve_audience_from_request, resolve_role_from_request
 from omni.config import settings
 from omni.credentials.catalog import PROVIDER_CATALOG
 
@@ -145,6 +148,14 @@ def _sanitized_venues(saved: dict) -> dict:
     }
 
 
+def _unlink(path: str) -> None:
+    import contextlib
+    import os
+
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+
+
 def build_router(app: App) -> Router:
     router = Router()
 
@@ -247,6 +258,72 @@ def build_router(app: App) -> Router:
             "email": notify["email"],
             "smtp_available": bool(settings.smtp_host),
         }
+
+    @router.get("/settings/backup")
+    async def download_backup(request: Request) -> Response:
+        """One-click instance backup: a pg_dump custom archive, as a download.
+
+        Operator-only -- the archive contains every user's claims including
+        byo_only data that is private to each owner; a member account must
+        never be able to pull the whole store. Restore is deliberately NOT a
+        button: restoring over a live database from a browser upload is the
+        one action that can destroy a year of data with one bad file, so it
+        stays a documented two-command step (DEPLOY.md, Moving machines).
+        The dump is written to a temp file, served once, and unlinked; the
+        custom format is chosen because it is what the tested restore drill
+        consumes.
+        """
+        import os
+        import subprocess
+        import tempfile
+        import urllib.parse
+        from datetime import UTC, datetime
+
+        from starlette.responses import FileResponse
+
+        if resolve_role_from_request(request) != "operator":
+            raise unauthorized("Operator role required")
+
+        parsed = urllib.parse.urlparse(settings.database_url)
+        host = parsed.hostname or "postgres"
+        port = str(parsed.port or 5432)
+        user = parsed.username or "postgres"
+        dbname = parsed.path.lstrip("/") or "omni_v2"
+        password = parsed.password or ""
+
+        fd, path = tempfile.mkstemp(prefix="omni-backup-", suffix=".dump")
+        os.close(fd)
+        env = {**os.environ, "PGPASSWORD": password}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "pg_dump", "-h", host, "-p", port, "-U", user,
+                "-F", "c", "-f", path, dbname,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                os.unlink(path)
+                raise bad_request(
+                    f"pg_dump failed: {stderr.decode()[:200]}"
+                )
+            stamp = datetime.now(UTC).strftime("%Y%m%d")
+            # The temp file must survive until the response has been sent;
+            # a background task unlinks it after. (Unlinking here would race
+            # FileResponse's read on some platforms.)
+            from starlette.background import BackgroundTask
+
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename=f"omni-backup-{stamp}.dump",
+                background=BackgroundTask(_unlink, path),
+            )
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
+            raise
 
     @router.post("/settings/notifications/test")
     async def test_notifications(request: Request) -> dict:

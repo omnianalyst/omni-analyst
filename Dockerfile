@@ -85,6 +85,21 @@ ENV PYTHONUNBUFFERED=1 \
 LABEL org.opencontainers.image.revision=${OMNI_REVISION} \
       com.omnianalyst.neutron.revision=${NEUTRON_REVISION}
 
+# pg_dump (exact server major: the store is Postgres 17, and a client older
+# than the server cannot dump it) for the Settings backup download. PGDG
+# because bookworm's stock client is 15.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client-17 \
+ && apt-get purge -y curl && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
 # Non-root user. uid 10001 avoids colliding with any host uid bind-mounted in.
 RUN useradd --create-home --uid 10001 --shell /sbin/nologin omni
 

@@ -75,6 +75,39 @@ export function SettingsView() {
   const [notifyEmail, setNotifyEmail] = useState("");
   const [notifyMsg, setNotifyMsg] = useState<string | null>(null);
   const [dataKeys, setDataKeys] = useState<DataKeyProvider[] | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupNote, setBackupNote] = useState<string | null>(null);
+
+  async function downloadBackup() {
+    setBackupBusy(true);
+    setBackupNote("Preparing backup… this streams the whole store and can take a minute.");
+    try {
+      const { getAuthToken } = await import("../lib/auth");
+      const token = getAuthToken();
+      const res = await fetch("/settings/backup", {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        setBackupNote(`Backup failed: ${text.slice(0, 120) || res.status}`);
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `omni-backup-${new Date().toISOString().slice(0, 10)}.dump`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setBackupNote(
+        "Downloaded. Restore is a documented two-command step (DEPLOY.md, Moving machines) -- deliberately not a button.",
+      );
+    } catch (err) {
+      setBackupNote(`Backup failed: ${describeError(err).message}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  }
   const [keyDraft, setKeyDraft] = useState<Record<string, string>>({});
   const [keyBusy, setKeyBusy] = useState<string | null>(null);
   const [keyMsg, setKeyMsg] = useState<string | null>(null);
@@ -343,6 +376,26 @@ export function SettingsView() {
             />
           ))}
         </div>
+      </section>
+
+      <section class="surface-card settings-card">
+        <div class="section-heading">
+          <div><p class="eyebrow">Instance</p><h2>Backup</h2></div>
+        </div>
+        <Row
+          label="Full backup"
+          hint="Everything: claims, predictions, calibration, watchlists. Custom-format dump; restore is documented, not a button."
+        >
+          <button
+            type="button"
+            class="btn-secondary compact-button"
+            disabled={backupBusy}
+            onClick={() => void downloadBackup()}
+          >
+            {backupBusy ? "Preparing…" : "Download"}
+          </button>
+        </Row>
+        {backupNote ? <p class="settings-row-note">{backupNote}</p> : null}
       </section>
 
       <section class="surface-card settings-card">
