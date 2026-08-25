@@ -341,6 +341,14 @@
   border-bottom: 1px solid var(--d-line);
   color: var(--d-dim);
   font-variant-numeric: tabular-nums;
+  /* Global gives every cell nowrap, which forces the table wider than the
+     container and turns into a horizontal scrollbar. Numbers cannot wrap
+     anyway; letting the asset label line wrap is what makes the table fit. */
+  white-space: normal;
+}
+.scanner-view .rank-table td strong,
+.scanner-view .rank-table td .canonical-score {
+  white-space: nowrap;
 }
 .scanner-view .rank-table tbody tr:last-child td {
   border-bottom: 0;
