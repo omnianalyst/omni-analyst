@@ -584,3 +584,203 @@
     gap: var(--s-6);
   }
 }
+
+/* ============================================================
+   The map: the measured market as pyramids around one point.
+   Same dark bold layer as the scanner, its own canvas. Chips
+   keep text horizontal everywhere -- the sideways arms widen
+   vertically, so nothing is ever rotated.
+   ============================================================ */
+.map-view {
+  --d-bg: #070a12;
+  --d-ink: #eef4fb;
+  --d-dim: #93a7c4;
+  --d-faint: #5a6d89;
+  --d-line: rgba(147, 167, 196, 0.16);
+
+  background:
+    radial-gradient(900px 600px at 50% 38%, #101a30 0%, transparent 62%),
+    var(--d-bg);
+  min-height: 100vh;
+  padding: 0 clamp(16px, 4vw, 56px) 80px;
+  color: var(--d-ink);
+}
+.map-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s-6);
+  flex-wrap: wrap;
+}
+.map-heading h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+  margin: 26px 0 2px;
+}
+.map-heading p {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--d-dim);
+  max-width: 68ch;
+}
+.map-heading .discover-compact-meta {
+  color: var(--d-faint);
+  font-size: 11px;
+  display: flex;
+  gap: var(--s-5);
+  align-items: center;
+  margin-top: 30px;
+}
+
+.map-canvas {
+  margin-top: 30px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+}
+.map-arm-title {
+  margin: 0 0 10px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+  text-align: center;
+}
+.map-arm-empty,
+.map-arm-note {
+  margin: 4px 0;
+  font-size: 11.5px;
+  color: var(--d-faint);
+  text-align: center;
+}
+.map-arm-note a { color: var(--d-dim); }
+
+.map-rows {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.map-row {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+}
+
+.map-columns {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  gap: 6px;
+}
+.map-column {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.map-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--d-line);
+  border-radius: 7px;
+  background: rgba(16, 26, 48, 0.55);
+  color: var(--d-ink);
+  font: 600 12.5px inherit;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.map-chip small {
+  font-size: 9.5px;
+  color: var(--d-faint);
+}
+.map-chip:hover {
+  border-color: var(--d-dim);
+  background: rgba(147, 167, 196, 0.14);
+}
+
+.map-mid {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  width: 100%;
+  justify-content: center;
+  padding: 18px 0;
+}
+
+.map-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 110px;
+  text-align: center;
+}
+.map-center-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--d-ink);
+  box-shadow: 0 0 0 5px rgba(238, 244, 251, 0.12), 0 0 26px rgba(238, 244, 251, 0.35);
+}
+.map-center-symbol {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--d-ink);
+  text-decoration: none;
+}
+.map-center-symbol:hover { text-decoration: underline; }
+.map-center small {
+  font-size: 10.5px;
+  color: var(--d-faint);
+}
+
+.map-arm-left,
+.map-arm-right {
+  max-width: 34vw;
+}
+.map-sector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.map-sector-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 9px;
+  border-left: 3px solid var(--d-line);
+}
+.map-sector-label {
+  font: 700 10.5px var(--mono);
+  color: var(--d-faint);
+  width: 44px;
+  flex: none;
+}
+.map-chip-company {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+@media (max-width: 960px) {
+  .map-mid {
+    flex-direction: column;
+    gap: 18px;
+  }
+  .map-arm-left,
+  .map-arm-right {
+    max-width: 100%;
+  }
+}

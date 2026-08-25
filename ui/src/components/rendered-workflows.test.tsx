@@ -18,6 +18,7 @@ import { CreateAlertForm } from "./CreateAlertForm";
 import { TrackButton } from "./TrackButton";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "./CommandPalette";
 import { DiscoverView } from "./DiscoverView";
+import { MapView } from "./MapView";
 import { ScannerView } from "./ScannerView";
 import { LoginView } from "./LoginView";
 import { PortfolioView } from "./PortfolioView";
@@ -757,6 +758,136 @@ describe("the Discover short answer", () => {
     await waitFor(() =>
       expect(tierCard(container, "Aggressive").textContent)
         .toContain("No asset has finished measuring in this tier."),
+    );
+    container.remove();
+  });
+});
+
+describe("the Discover map", () => {
+  beforeEach(() => {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const baseAsset = {
+    name: "Asset",
+    area: "US",
+    market_behavior: "risk_on",
+    history_years: 10,
+    complete_years: 9,
+  } as const;
+
+  function mapPayload(): Record<string, unknown> {
+    return {
+      category_rankings: {
+        stocks: [
+          { ...baseAsset, symbol: "SPY", risk_tier: "medium", volatility: 18, median_annual_return: 11,
+            scores: { balanced: 72, durable_growth: 55, consistency: 80, stability: 70, diversification: 60, evidence_complete: true } },
+          { ...baseAsset, symbol: "VTI", risk_tier: "medium", volatility: 17, median_annual_return: 10,
+            scores: { balanced: 70, durable_growth: 50, consistency: 78, stability: 72, diversification: 58, evidence_complete: true } },
+          { ...baseAsset, symbol: "QQQ", risk_tier: "high", volatility: 24, median_annual_return: 14,
+            scores: { balanced: 68, durable_growth: 66, consistency: 60, stability: 50, diversification: 40, evidence_complete: true } },
+          { ...baseAsset, symbol: "NEWP", risk_tier: "medium", volatility: 18, median_annual_return: 12,
+            scores: { balanced: 99, stability: 92, evidence_complete: false } },
+        ],
+        defensive: [
+          { ...baseAsset, symbol: "GLD", risk_tier: "medium", volatility: 15, median_annual_return: 9,
+            scores: { balanced: 68, durable_growth: 45, consistency: 60, stability: 75, diversification: 90, evidence_complete: true } },
+        ],
+        crypto: [
+          { ...baseAsset, symbol: "BTC", risk_tier: "high", volatility: 66, median_annual_return: 40,
+            scores: { balanced: 60, durable_growth: 70, consistency: 40, stability: 30, diversification: 20, evidence_complete: true } },
+          { ...baseAsset, symbol: "ETH", risk_tier: "high", volatility: 84, median_annual_return: 42,
+            scores: { balanced: 58, durable_growth: 68, consistency: 38, stability: 28, diversification: 22, evidence_complete: true } },
+          { ...baseAsset, symbol: "SOL", risk_tier: "high", volatility: 118, median_annual_return: 48,
+            scores: { balanced: 55, durable_growth: 72, consistency: 30, stability: 22, diversification: 18, evidence_complete: true } },
+          { ...baseAsset, symbol: "XRP", risk_tier: "high", volatility: 111, median_annual_return: 30,
+            scores: { balanced: 52, durable_growth: 60, consistency: 28, stability: 24, diversification: 16, evidence_complete: true } },
+          { ...baseAsset, symbol: "DOGE", risk_tier: "high", volatility: 171, median_annual_return: 35,
+            scores: { balanced: 50, durable_growth: 62, consistency: 25, stability: 20, diversification: 14, evidence_complete: true } },
+          { ...baseAsset, symbol: "XMR", risk_tier: "high", volatility: 90, median_annual_return: 28,
+            scores: { balanced: 47, durable_growth: 58, consistency: 24, stability: 26, diversification: 12, evidence_complete: true } },
+          { ...baseAsset, symbol: "HBAR", risk_tier: "high", volatility: 125, median_annual_return: 33,
+            scores: { balanced: 44, durable_growth: 55, consistency: 22, stability: 18, diversification: 10, evidence_complete: true } },
+        ],
+      },
+      sectors: [
+        { name: "Technology", symbol: "XLK", coverage: 40, leaders: [
+          { symbol: "WDAY", name: "Workday", return_window: 43.94, as_of: "2026-08-24" },
+        ] },
+        { name: "Energy", symbol: "XLE", coverage: 22, leaders: [
+          { symbol: "PSX", name: "Phillips 66", return_window: 28.94, as_of: "2026-08-24" },
+        ] },
+        { name: "Utilities", symbol: "XLU", coverage: 28, leaders: [
+          { symbol: "CEG", name: "Constellation", return_window: 8.55, as_of: "2026-08-24" },
+        ] },
+      ],
+      sector_coverage: { available: 11, total: 11, window_sessions: 30 },
+      as_of: "2026-08-24T22:00:00Z",
+    };
+  }
+
+  it("centers on the true best and keeps incomplete evidence off the map", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(mapPayload())));
+    const container = root();
+    render(<MapView />, container);
+
+    // The discriminating assertion lives inside waitFor: toBeDefined()
+    // passes on null, which returns before the fetch has settled.
+    await waitFor(() =>
+      expect(container.querySelector(".map-center-symbol")?.textContent).toBe("SPY"),
+    );
+    // NEWP carries balanced 99 but incomplete evidence; SPY at 72 is the
+    // honest center. A constant sort would seat NEWP and fail this.
+    expect(container.querySelector(".map-center-symbol")?.textContent).toBe("SPY");
+    expect(container.querySelector(".map-center")?.textContent).toContain("balanced 72");
+    expect(container.textContent).not.toContain("NEWP");
+
+    // Stocks arm: three fully-measured names pack as rows 1-2, innermost
+    // row the single best of the category.
+    const upRows = container.querySelectorAll(".map-arm-up .map-row");
+    expect(upRows.length).toBe(2);
+    expect(upRows[0].textContent).toContain("SPY");
+
+    // Crypto arm packs seven names as columns 1-2-4 (merge rule), nearest
+    // column first, best name innermost.
+    const columns = container.querySelectorAll(".map-arm-left .map-column");
+    expect(columns.length).toBe(3);
+    expect(columns[0].textContent).toContain("BTC");
+    expect(columns[2].children.length).toBe(4);
+
+    // Every chip routes through search, never a bare symbol link.
+    const firstChip = container.querySelector(".map-chip") as HTMLAnchorElement;
+    expect(firstChip.getAttribute("href")).toBe("/search?q=SPY");
+    container.remove();
+  });
+
+  it("orders sector strips by their own leader and names the window", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(mapPayload())));
+    const container = root();
+    render(<MapView />, container);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".map-chip").length).toBeGreaterThan(0),
+    );
+
+    const strips = container.querySelectorAll(".map-sector-strip");
+    // Hot sector first: XLK's leader (43.94) beats XLE (28.94) beats XLU (8.55).
+    expect(strips[0].textContent).toContain("WDAY");
+    expect(strips[2].textContent).toContain("CEG");
+    // The measurement window is stated where the ranking is shown.
+    expect(container.querySelector(".map-arm-right .map-arm-title")?.textContent)
+      .toContain("30-session return");
+    container.remove();
+  });
+
+  it("says so plainly when the market cannot be mapped", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("upstream gone", { status: 503 })));
+    const container = root();
+    render(<MapView />, container);
+    await waitFor(() =>
+      expect(container.querySelector(".error-state, .quiet-state, [class*=error]")).toBeTruthy(),
     );
     container.remove();
   });

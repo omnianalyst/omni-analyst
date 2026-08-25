@@ -59,6 +59,13 @@ export function DiscoverView() {
         <div class="portfolio-header-actions">
           <a
             class="btn-secondary compact-button"
+            href="/map"
+            title="The measured market as pyramids around the best point"
+          >
+            Map
+          </a>
+          <a
+            class="btn-secondary compact-button"
             href="/objective"
             title="Ask the system a question"
           >
