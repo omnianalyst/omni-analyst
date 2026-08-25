@@ -586,10 +586,9 @@
 }
 
 /* ============================================================
-   The map: the measured market as pyramids around one point.
-   Same dark bold layer as the scanner, its own canvas. Chips
-   keep text horizontal everywhere -- the sideways arms widen
-   vertically, so nothing is ever rotated.
+   The map: every measured group as a triangular wedge whose
+   apex touches one shared center point -- a radial fan of
+   pyramids. SVG layout, chips always horizontal.
    ============================================================ */
 .map-view {
   --d-bg: #070a12;
@@ -599,10 +598,10 @@
   --d-line: rgba(147, 167, 196, 0.16);
 
   background:
-    radial-gradient(900px 600px at 50% 38%, #101a30 0%, transparent 62%),
+    radial-gradient(820px 820px at 50% 46%, #101a30 0%, transparent 64%),
     var(--d-bg);
   min-height: 100vh;
-  padding: 0 clamp(16px, 4vw, 56px) 80px;
+  padding: 0 clamp(16px, 4vw, 56px) 70px;
   color: var(--d-ink);
 }
 .map-heading {
@@ -637,150 +636,67 @@
 }
 
 .map-canvas {
-  margin-top: 30px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
+  margin-top: 18px;
   overflow-x: auto;
 }
-.map-arm-title {
-  margin: 0 0 10px;
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--d-faint);
-  text-align: center;
-}
-.map-arm-empty,
-.map-arm-note {
-  margin: 4px 0;
-  font-size: 11.5px;
-  color: var(--d-faint);
-  text-align: center;
-}
-.map-arm-note a { color: var(--d-dim); }
-
-.map-rows {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-}
-.map-row {
-  display: flex;
-  justify-content: center;
-  gap: 6px;
-}
-
-.map-columns {
-  display: flex;
-  flex-direction: row-reverse;
-  align-items: center;
-  gap: 6px;
-}
-.map-column {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.map-chip {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  padding: 4px 9px;
-  border: 1px solid var(--d-line);
-  border-radius: 7px;
-  background: rgba(16, 26, 48, 0.55);
-  color: var(--d-ink);
-  font: 600 12.5px inherit;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.01em;
-  text-decoration: none;
-  white-space: nowrap;
-}
-.map-chip small {
-  font-size: 9.5px;
-  color: var(--d-faint);
-}
-.map-chip:hover {
-  border-color: var(--d-dim);
-  background: rgba(147, 167, 196, 0.14);
-}
-
-.map-mid {
-  display: flex;
-  align-items: center;
-  gap: 28px;
+.map-svg {
   width: 100%;
-  justify-content: center;
-  padding: 18px 0;
+  min-width: 760px;
+  display: block;
 }
 
-.map-center {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  min-width: 110px;
-  text-align: center;
+.map-wedge {
+  fill-opacity: 0.05;
+  stroke: var(--d-line);
+  stroke-width: 1;
 }
-.map-center-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--d-ink);
-  box-shadow: 0 0 0 5px rgba(238, 244, 251, 0.12), 0 0 26px rgba(238, 244, 251, 0.35);
+.map-wedge-label {
+  font: 500 10.5px var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }
-.map-center-symbol {
+
+.map-chip { cursor: pointer; }
+.map-chip-box {
+  fill: rgba(16, 26, 48, 0.78);
+  stroke: rgba(147, 167, 196, 0.3);
+  stroke-width: 1;
+}
+.map-chip:hover .map-chip-box {
+  fill: rgba(147, 167, 196, 0.2);
+  stroke: #93a7c4;
+}
+.map-chip-rank {
+  font: 600 9.5px var(--mono);
+  fill: var(--d-faint);
+}
+.map-chip-sym {
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  fill: var(--d-ink);
+}
+
+.map-center-dot { fill: var(--d-ink); }
+.map-center-glow {
+  fill: rgba(238, 244, 251, 0.12);
+}
+.map-center-symbol text {
+  font-family: inherit;
   font-size: 22px;
   font-weight: 800;
   letter-spacing: -0.01em;
-  color: var(--d-ink);
-  text-decoration: none;
+  fill: var(--d-ink);
 }
-.map-center-symbol:hover { text-decoration: underline; }
-.map-center small {
-  font-size: 10.5px;
-  color: var(--d-faint);
-}
-
-.map-arm-left,
-.map-arm-right {
-  max-width: 34vw;
-}
-.map-sector-list {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-.map-sector-strip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-left: 9px;
-  border-left: 3px solid var(--d-line);
-}
-.map-sector-label {
-  font: 700 10.5px var(--mono);
-  color: var(--d-faint);
-  width: 44px;
-  flex: none;
-}
-.map-chip-company {
-  padding: 3px 8px;
-  font-size: 12px;
+.map-center-symbol:hover text { fill: #ffffff; }
+.map-center-caption {
+  font: 500 10.5px var(--mono);
+  fill: var(--d-faint);
 }
 
-@media (max-width: 960px) {
-  .map-mid {
-    flex-direction: column;
-    gap: 18px;
-  }
-  .map-arm-left,
-  .map-arm-right {
-    max-width: 100%;
-  }
+.map-foot {
+  margin: 14px 0 0;
+  font-size: 11px;
+  color: var(--d-faint);
 }

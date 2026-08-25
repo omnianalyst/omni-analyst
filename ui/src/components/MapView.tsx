@@ -1,16 +1,16 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { authHeaderIfPresent, describeError, request } from "../lib/api";
 import { AssetMetric } from "./ScannerView";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 
-// The market as pyramids around a single point. The center is the best
-// measured asset overall; four arms radiate out -- stocks above, defensive
-// below, crypto to the left, companies to the right -- and each arm widens
-// with rank: the innermost row holds the top name, deeper rows hold more.
-// Placement is ordinal (rank), never a invented distance scale; the measured
-// numbers travel on the chip (hover) and the linking table carries the
-// precision. Same /scanner/market payload the ranked tables read.
+// The market as triangles converging on one point. Every group -- the three
+// asset classes and each measured company sector -- owns a triangular wedge
+// whose apex touches the shared center; the group's best name sits nearest
+// the center and deeper ranks sit further out along the widening wedge, so
+// each wedge literally is that group's pyramid. Placement is ordinal (rank),
+// never an invented distance scale; measured facts travel on hover. Same
+// /scanner/market payload the ranked tables read.
 
 type AssetClass = "stocks" | "crypto" | "defensive";
 
@@ -40,35 +40,49 @@ type State =
   | { kind: "ok"; data: MapData }
   | { kind: "error"; message: string; detail?: string };
 
-const SECTOR_COLORS = [
-  "#5eead4", "#93c5fd", "#fca5a5", "#fcd34d", "#c4b5fd", "#86efac",
-  "#f9a8d4", "#7dd3fc", "#fdba74", "#a3e635", "#f0abfc",
-];
+interface Chip {
+  id: string;
+  label: string;
+  href: string;
+  title: string;
+  rank: number;
+  width: number;
+  x: number;
+  y: number;
+}
 
-const ARM_TITLES: Record<AssetClass, string> = {
-  stocks: "Stocks & ETFs",
-  defensive: "Defensive & real assets",
-  crypto: "Crypto",
+interface Wedge {
+  key: string;
+  kind: "class" | "sector";
+  label: string;
+  color: string;
+  chips: Chip[];
+  a0: number;
+  a1: number;
+  mid: number;
+  pathR: number;
+  labelR: number;
+}
+
+const SIZE = 1000;
+const C = SIZE / 2;
+const INNER_R = 104;
+const STEP = 56;
+const SLOT = 76;
+const CHIP_H = 26;
+const MAX_SECTOR_LEADERS = 5;
+const CLASS_CHIP_LIMIT = 15;
+
+const CLASS_COLORS: Record<AssetClass, string> = {
+  stocks: "#7dd3fc",
+  defensive: "#fbbf24",
+  crypto: "#5eead4",
 };
 
-// Triangular packing with a merge rule: if fewer items remain than the next
-// row would hold, they join the current row, so seven names sit as 1-2-4
-// rather than 1-2-3-1.
-function pyramidRows<T>(items: T[], maxRows = 6): T[][] {
-  const rows: T[][] = [];
-  let index = 0;
-  for (let size = 1; size <= maxRows && index < items.length; size += 1) {
-    const next: T[] = items.slice(index, index + size);
-    index += size;
-    const remaining = items.length - index;
-    if (remaining > 0 && remaining < size + 1) {
-      next.push(...items.slice(index, index + remaining));
-      index += remaining;
-    }
-    rows.push(next);
-  }
-  return rows;
-}
+const SECTOR_COLORS = [
+  "#93c5fd", "#fca5a5", "#c4b5fd", "#86efac", "#f9a8d4",
+  "#7dd3fc", "#fdba74", "#a3e635", "#f0abfc", "#fcd34d", "#5eead4",
+];
 
 function assetFacts(asset: AssetMetric): string {
   const parts = [
@@ -94,146 +108,126 @@ function assetFacts(asset: AssetMetric): string {
   return parts.join(" · ");
 }
 
-function AssetChip({ asset, rank }: { asset: AssetMetric; rank: number }) {
-  return (
-    <a
-      class="map-chip"
-      href={`/search?q=${encodeURIComponent(asset.symbol)}`}
-      title={assetFacts(asset)}
-    >
-      <small>{rank}</small>
-      {asset.symbol}
-    </a>
-  );
+function chipWidth(label: string, rank: number): number {
+  return 12 + (rank > 0 ? 13 : 0) + label.length * 7.4 + 12;
 }
 
-// Up and down arms: horizontal rows of chips, widest row furthest from the
-// center. A vertical arm of rows reads as a pyramid; a horizontal arm would
-// need rotated text, which is unreadable, so the sideways arms below pack
-// columns instead.
-function VerticalPyramid({
-  title,
-  assets,
-  direction,
-}: {
-  title: string;
-  assets: AssetMetric[];
-  direction: "up" | "down";
-}) {
-  const eligible = assets.filter(
-    (a) => a.scores.evidence_complete !== false && typeof a.scores.balanced === "number",
-  );
-  const ordered = [...eligible].sort(
-    (a, b) => (b.scores.balanced ?? -Infinity) - (a.scores.balanced ?? -Infinity),
-  );
-  const shown = ordered.slice(0, 21);
-  const rows = pyramidRows(shown);
-  const incomplete = assets.length - eligible.length;
-  if (direction === "down") rows.reverse();
-  return (
-    <div class={`map-arm map-arm-${direction}`}>
-      <p class="map-arm-title">{title}</p>
-      {ordered.length === 0 ? (
-        <p class="map-arm-empty">Nothing fully measured yet.</p>
-      ) : (
-        <div class="map-rows">
-          {rows.map((row) => (
-            <div class="map-row">
-              {row.map((asset) => (
-                <AssetChip key={asset.symbol} asset={asset} rank={shown.indexOf(asset) + 1} />
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-      {ordered.length > shown.length || incomplete > 0 ? (
-        <p class="map-arm-note">
-          {ordered.length > shown.length ? `+${ordered.length - shown.length} more ranked ` : ""}
-          {incomplete > 0 ? `${incomplete} still short of full evidence` : ""}
-          <a href="/search">on Discover</a>
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-// Sideways pyramid (crypto, left arm): columns of chips, the nearest column
-// to the center holds the top name, further columns hold more. All text
-// stays horizontal because the shape widens vertically.
-function SidewaysPyramid({ title, assets }: { title: string; assets: AssetMetric[] }) {
-  const eligible = assets.filter(
-    (a) => a.scores.evidence_complete !== false && typeof a.scores.balanced === "number",
-  );
-  const ordered = [...eligible].sort(
-    (a, b) => (b.scores.balanced ?? -Infinity) - (a.scores.balanced ?? -Infinity),
-  );
-  const shown = ordered.slice(0, 12);
-  const columns = pyramidRows(shown, 4);
-  return (
-    <div class="map-arm map-arm-left">
-      <p class="map-arm-title">{title}</p>
-      {ordered.length === 0 ? (
-        <p class="map-arm-empty">Nothing fully measured yet.</p>
-      ) : (
-        <div class="map-columns">
-          {columns.map((column) => (
-            <div class="map-column">
-              {column.map((asset) => (
-                <AssetChip key={asset.symbol} asset={asset} rank={shown.indexOf(asset) + 1} />
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Companies, right arm: one strip per measured sector, ordered by the
-// sector's own leader. The strip's first chip -- its apex -- touches the
-// center spine; further leaders extend outward.
-function SectorSpine({ data }: { data: MapData }) {
-  const groups = [...data.sectors].sort(
+function buildWedges(data: MapData): Wedge[] {
+  const groups: Array<Wedge> = [];
+  const classLabels: Record<AssetClass, string> = {
+    stocks: "Stocks & ETFs",
+    defensive: "Defensive & real assets",
+    crypto: "Crypto",
+  };
+  for (const cls of ["stocks", "defensive", "crypto"] as AssetClass[]) {
+    const eligible = (data.category_rankings[cls] ?? []).filter(
+      (a) => a.scores.evidence_complete !== false && typeof a.scores.balanced === "number",
+    );
+    const ordered = [...eligible].sort(
+      (a, b) => (b.scores.balanced ?? -Infinity) - (a.scores.balanced ?? -Infinity),
+    );
+    const chips = ordered.slice(0, CLASS_CHIP_LIMIT).map((asset, index) => ({
+      id: asset.symbol,
+      label: asset.symbol,
+      href: `/search?q=${encodeURIComponent(asset.symbol)}`,
+      title: assetFacts(asset),
+      rank: index + 1,
+      width: chipWidth(asset.symbol, index + 1),
+      x: 0,
+      y: 0,
+    }));
+    if (chips.length > 0) {
+      groups.push({
+        key: cls,
+        kind: "class",
+        label: classLabels[cls],
+        color: CLASS_COLORS[cls],
+        chips,
+        a0: 0,
+        a1: 0,
+        mid: 0,
+        pathR: 0,
+        labelR: 0,
+      });
+    }
+  }
+  const sectors = [...data.sectors].sort(
     (a, b) =>
       (b.leaders[0]?.return_window ?? -Infinity) -
       (a.leaders[0]?.return_window ?? -Infinity),
   );
-  return (
-    <div class="map-arm map-arm-right">
-      <p class="map-arm-title">
-        Companies by sector · {data.sector_coverage.window_sessions}-session return
-      </p>
-      {groups.length === 0 ? (
-        <p class="map-arm-empty">
-          Company rankings are still building; no sector has comparable history yet.
-        </p>
-      ) : (
-        <div class="map-sector-list">
-          {groups.map((sector, index) => (
-            <div
-              class="map-sector-strip"
-              key={sector.symbol}
-              style={`border-left-color:${SECTOR_COLORS[index % SECTOR_COLORS.length]}`}
-            >
-              <span class="map-sector-label" title={sector.name}>
-                {sector.symbol}
-              </span>
-              {sector.leaders.map((leader) => (
-                <a
-                  class="map-chip map-chip-company"
-                  key={leader.symbol}
-                  href={`/search?q=${encodeURIComponent(leader.symbol)}`}
-                  title={`${leader.name} · ${sector.name} · ${data.sector_coverage.window_sessions}-session ${leader.return_window.toFixed(1)}%`}
-                >
-                  {leader.symbol}
-                </a>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  sectors.forEach((sector, index) => {
+    const leaders = sector.leaders.slice(0, MAX_SECTOR_LEADERS);
+    if (leaders.length === 0) return;
+    const chips = leaders.map((leader, seat) => ({
+      id: leader.symbol,
+      label: leader.symbol,
+      href: `/search?q=${encodeURIComponent(leader.symbol)}`,
+      title: `${leader.name} · ${sector.name} · ${data.sector_coverage.window_sessions}-session ${leader.return_window.toFixed(1)}%`,
+      rank: seat + 1,
+      width: chipWidth(leader.symbol, seat + 1),
+      x: 0,
+      y: 0,
+    }));
+    groups.push({
+      key: sector.symbol,
+      kind: "sector",
+      label: sector.symbol,
+      color: SECTOR_COLORS[index % SECTOR_COLORS.length],
+      chips,
+      a0: 0,
+      a1: 0,
+      mid: 0,
+      pathR: 0,
+      labelR: 0,
+    });
+  });
+
+  // Wider groups take wider wedges, but sub-linearly: a 15-name class does
+  // not need fifteen times the arc of a 5-name sector, and angle is what
+  // lets outer bands hold more chips -- the pyramid's widening rows.
+  const total = groups.reduce((sum, g) => sum + Math.pow(g.chips.length, 0.7), 0);
+  let cursor = -Math.PI / 2;
+  for (const group of groups) {
+    const span = (Math.pow(group.chips.length, 0.7) / total) * Math.PI * 2;
+    group.a0 = cursor;
+    group.a1 = cursor + span;
+    group.mid = cursor + span / 2;
+    cursor += span;
+
+    // Fill bands from the center outward. A band's capacity grows with its
+    // radius (more arc to sit on), so inner bands hold one chip and outer
+    // bands hold more -- rank order becomes geometry.
+    let index = 0;
+    let r = INNER_R;
+    while (index < group.chips.length) {
+      const arc = r * (group.a1 - group.a0);
+      const capacity = Math.max(1, Math.floor((arc * 0.86) / SLOT));
+      const take = Math.min(capacity, group.chips.length - index);
+      const spread = ((take - 1) * SLOT) / r;
+      for (let i = 0; i < take; i += 1) {
+        const angle =
+          take === 1 ? group.mid : group.mid - spread / 2 + (spread * i) / (take - 1);
+        const chip = group.chips[index + i];
+        chip.x = C + r * Math.cos(angle) - chip.width / 2;
+        chip.y = C + r * Math.sin(angle) - CHIP_H / 2;
+      }
+      index += take;
+      r += STEP;
+    }
+    group.pathR = r - STEP + 14;
+    group.labelR = r - STEP + 40;
+  }
+  return groups;
+}
+
+function wedgePath(group: Wedge): string {
+  const r = group.pathR;
+  const x0 = C + r * Math.cos(group.a0);
+  const y0 = C + r * Math.sin(group.a0);
+  const x1 = C + r * Math.cos(group.a1);
+  const y1 = C + r * Math.sin(group.a1);
+  return `M ${C} ${C} L ${x0} ${y0} A ${r} ${r} 0 0 1 ${x1} ${y1} Z`;
 }
 
 export function MapView() {
@@ -250,6 +244,11 @@ export function MapView() {
       });
     return () => { cancelled = true; };
   }, []);
+
+  const wedges = useMemo(
+    () => (state.kind === "ok" ? buildWedges(state.data) : []),
+    [state],
+  );
 
   if (state.kind === "loading") return <Loading label="Placing the measured market…" />;
   if (state.kind === "error") return <ErrorState message={state.message} detail={state.detail} />;
@@ -269,10 +268,11 @@ export function MapView() {
         <div>
           <h1>Map</h1>
           <p>
-            Every measured asset as pyramids around the best point. Innermost row = highest
-            balanced score; rows widen with rank. Companies are ranked within sector by{" "}
+            Every measured group as a pyramid touching one point: the apex is its best
+            name, deeper ranks sit further out along the widening wedge. Stocks, defensive
+            assets and crypto rank by balanced score; companies rank within sector by{" "}
             {data.sector_coverage.window_sessions}-session return. Hover a name for its
-            measured facts; the ranked tables carry the precision.
+            measured facts; the tables carry the precision.
           </p>
         </div>
         <div class="discover-compact-meta">
@@ -281,39 +281,90 @@ export function MapView() {
         </div>
       </header>
 
-      <div class="map-canvas" role="img" aria-label="The measured market arranged as pyramids around the single best point">
-        <VerticalPyramid
-          title={ARM_TITLES.stocks}
-          assets={data.category_rankings.stocks ?? []}
-          direction="up"
-        />
-        <div class="map-mid">
-          <SidewaysPyramid title={ARM_TITLES.crypto} assets={data.category_rankings.crypto ?? []} />
-          <div class="map-center">
-            {best ? (
-              <>
-                <span class="map-center-dot" aria-hidden="true" />
-                <a
-                  class="map-center-symbol"
-                  href={`/search?q=${encodeURIComponent(best.symbol)}`}
-                  title={assetFacts(best)}
-                >
-                  {best.symbol}
+      <div class="map-canvas">
+        <svg
+          viewBox={`0 0 ${SIZE} ${SIZE}`}
+          class="map-svg"
+          role="img"
+          aria-label="The measured market as pyramids converging on the single best point"
+        >
+          {wedges.map((group) => (
+            <g key={group.key} data-key={group.key} data-kind={group.kind}>
+              <path class="map-wedge" d={wedgePath(group)} fill={group.color} />
+              <text
+                class="map-wedge-label"
+                x={C + group.labelR * Math.cos(group.mid)}
+                y={C + group.labelR * Math.sin(group.mid)}
+                text-anchor="middle"
+                fill={group.color}
+              >
+                {group.label}
+              </text>
+              {group.chips.map((chip) => (
+                <a key={chip.id} class="map-chip" href={chip.href}>
+                  <title>{chip.title}</title>
+                  <rect
+                    class="map-chip-box"
+                    x={chip.x}
+                    y={chip.y}
+                    width={chip.width}
+                    height={CHIP_H}
+                    rx={7}
+                  />
+                  {chip.rank > 0 ? (
+                    <text
+                      class="map-chip-rank"
+                      x={chip.x + 8}
+                      y={chip.y + CHIP_H / 2}
+                      dominant-baseline="central"
+                    >
+                      {chip.rank}
+                    </text>
+                  ) : null}
+                  <text
+                    class="map-chip-sym"
+                    x={chip.x + (chip.rank > 0 ? 21 : 10)}
+                    y={chip.y + CHIP_H / 2}
+                    dominant-baseline="central"
+                  >
+                    {chip.label}
+                  </text>
                 </a>
-                <small>best measured · balanced {best.scores.balanced?.toFixed(0)}</small>
-              </>
-            ) : (
-              <small>nothing fully measured yet</small>
-            )}
-          </div>
-          <SectorSpine data={data} />
-        </div>
-        <VerticalPyramid
-          title={ARM_TITLES.defensive}
-          assets={data.category_rankings.defensive ?? []}
-          direction="down"
-        />
+              ))}
+            </g>
+          ))}
+          <circle class="map-center-glow" cx={C} cy={C} r={16} />
+          <circle class="map-center-dot" cx={C} cy={C} r={5} />
+          {best ? (
+            <>
+              <a
+                class="map-center-symbol"
+                href={`/search?q=${encodeURIComponent(best.symbol)}`}
+                text-anchor="middle"
+              >
+                <title>{assetFacts(best)}</title>
+                <text x={C} y={C + 38} text-anchor="middle" dominant-baseline="central">
+                  {best.symbol}
+                </text>
+              </a>
+              <text class="map-center-caption" x={C} y={C + 58} text-anchor="middle">
+                best measured · balanced {best.scores.balanced?.toFixed(0)}
+              </text>
+            </>
+          ) : (
+            <text class="map-center-caption" x={C} y={C + 38} text-anchor="middle">
+              nothing fully measured yet
+            </text>
+          )}
+        </svg>
       </div>
+
+      <p class="map-foot">
+        Companies shown per sector: top {MAX_SECTOR_LEADERS} of each measured sector's
+        ranking · {data.sector_coverage.available} of {data.sector_coverage.total} sectors
+        measured · classes show up to {CLASS_CHIP_LIMIT} ranked names, the rest on the
+        tables.
+      </p>
     </div>
   );
 }

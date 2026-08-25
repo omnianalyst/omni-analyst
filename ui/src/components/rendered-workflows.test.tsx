@@ -835,50 +835,53 @@ describe("the Discover map", () => {
     render(<MapView />, container);
 
     // The discriminating assertion lives inside waitFor: toBeDefined()
-    // passes on null, which returns before the fetch has settled.
+    // passes on null, which returns before the fetch has settled. SVG <a>
+    // textContent includes the tooltip <title>, so match the trailing label.
     await waitFor(() =>
-      expect(container.querySelector(".map-center-symbol")?.textContent).toBe("SPY"),
+      expect(container.querySelector(".map-center-symbol")?.textContent).toContain("SPY"),
     );
-    // NEWP carries balanced 99 but incomplete evidence; SPY at 72 is the
-    // honest center. A constant sort would seat NEWP and fail this.
-    expect(container.querySelector(".map-center-symbol")?.textContent).toBe("SPY");
-    expect(container.querySelector(".map-center")?.textContent).toContain("balanced 72");
+    expect(container.querySelector(".map-center-caption")?.textContent)
+      .toContain("balanced 72");
+    // NEWP carries balanced 99 but incomplete evidence; it never enters.
     expect(container.textContent).not.toContain("NEWP");
 
-    // Stocks arm: three fully-measured names pack as rows 1-2, innermost
-    // row the single best of the category.
-    const upRows = container.querySelectorAll(".map-arm-up .map-row");
-    expect(upRows.length).toBe(2);
-    expect(upRows[0].textContent).toContain("SPY");
+    // Six wedges: three asset classes plus the three measured sectors.
+    const wedgeKeys = Array.from(container.querySelectorAll(".map-svg > g")).map(
+      (g) => (g as HTMLElement).dataset.key,
+    );
+    expect(wedgeKeys).toEqual(["stocks", "defensive", "crypto", "XLK", "XLE", "XLU"]);
 
-    // Crypto arm packs seven names as columns 1-2-4 (merge rule), nearest
-    // column first, best name innermost.
-    const columns = container.querySelectorAll(".map-arm-left .map-column");
-    expect(columns.length).toBe(3);
-    expect(columns[0].textContent).toContain("BTC");
-    expect(columns[2].children.length).toBe(4);
-
-    // Every chip routes through search, never a bare symbol link.
-    const firstChip = container.querySelector(".map-chip") as HTMLAnchorElement;
-    expect(firstChip.getAttribute("href")).toBe("/search?q=SPY");
+    // The crypto wedge's first chip (innermost band) is its best name.
+    const cryptoWedge = container.querySelector('[data-key="crypto"]');
+    const cryptoChips = cryptoWedge ? cryptoWedge.querySelectorAll(".map-chip") : [];
+    expect(cryptoChips.length).toBe(7);
+    expect(cryptoChips[0].textContent).toContain("BTC");
+    expect((cryptoChips[0] as SVGElement).getAttribute("href")).toBe("/search?q=BTC");
     container.remove();
   });
 
-  it("orders sector strips by their own leader and names the window", async () => {
+  it("orders sector wedges by their own leader, hottest first", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(mapPayload())));
     const container = root();
     render(<MapView />, container);
     await waitFor(() =>
-      expect(container.querySelectorAll(".map-chip").length).toBeGreaterThan(0),
+      expect(container.querySelectorAll(".map-svg > g").length).toBe(6),
     );
 
-    const strips = container.querySelectorAll(".map-sector-strip");
-    // Hot sector first: XLK's leader (43.94) beats XLE (28.94) beats XLU (8.55).
-    expect(strips[0].textContent).toContain("WDAY");
-    expect(strips[2].textContent).toContain("CEG");
+    // Sector wedges come after the three classes, hottest leader first:
+    // XLK (43.94) before XLE (28.94) before XLU (8.55), each apex chip its leader.
+    const sectorWedges = Array.from(
+      container.querySelectorAll('[data-kind="sector"]'),
+    );
+    expect(sectorWedges.length).toBe(3);
+    expect(sectorWedges[0].querySelector(".map-chip")?.textContent).toContain("WDAY");
+    expect(sectorWedges[0].querySelector(".map-wedge-label")?.textContent).toContain("XLK");
+    expect(sectorWedges[2].querySelector(".map-chip")?.textContent).toContain("CEG");
+
     // The measurement window is stated where the ranking is shown.
-    expect(container.querySelector(".map-arm-right .map-arm-title")?.textContent)
+    expect(container.querySelector(".map-heading p")?.textContent)
       .toContain("30-session return");
+    expect(container.querySelector(".map-foot")?.textContent).toContain("11 of 11 sectors");
     container.remove();
   });
 
