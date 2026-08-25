@@ -461,3 +461,118 @@
   font-family: inherit;
   letter-spacing: 0.01em;
 }
+
+/* ============================================================
+   The short answer: the first-glance section. Three temperament
+   cards (one pick each, stated with its weakest dimension) and,
+   for the person who would rather not pick, the measured mixes.
+   Same voice as the rest of the bold layer: no boxes, hairline
+   rules, one big symbol per card.
+   ============================================================ */
+.d-answer {
+  margin-top: 30px;
+}
+.d-answer-head {
+  border-top: 1px solid var(--d-line);
+  padding-top: 22px;
+}
+.d-answer-head h2 {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--d-ink);
+}
+.d-answer-head p {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--d-faint);
+  max-width: 62ch;
+}
+.d-answer-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--s-7);
+  margin-top: 22px;
+}
+.d-answer-card {
+  border-top: 2px solid var(--d-line);
+  padding-top: 14px;
+  min-width: 0;
+}
+.d-answer-card header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.d-answer-tier {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.d-answer-card header small {
+  font-size: 11px;
+  color: var(--d-faint);
+}
+.d-answer-symbol {
+  display: block;
+  margin-top: 12px;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  color: var(--d-ink);
+}
+.d-answer-name {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--d-dim);
+}
+.d-answer-facts {
+  display: flex;
+  gap: var(--s-6);
+  margin: 14px 0 0;
+  flex-wrap: wrap;
+}
+.d-answer-facts dt {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+}
+.d-answer-facts dd {
+  margin: 2px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--d-ink);
+}
+.d-answer-count {
+  display: block;
+  margin-top: 14px;
+  font-size: 11px;
+  color: var(--d-faint);
+}
+.d-answer-empty {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--d-dim);
+}
+.d-answer-mixes {
+  margin-top: 42px;
+}
+.d-answer-as-of {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--d-faint);
+}
+
+@media (max-width: 860px) {
+  .d-answer-grid {
+    grid-template-columns: 1fr;
+    gap: var(--s-6);
+  }
+}

@@ -18,6 +18,7 @@ import { CreateAlertForm } from "./CreateAlertForm";
 import { TrackButton } from "./TrackButton";
 import { CommandPalette, OPEN_COMMAND_PALETTE } from "./CommandPalette";
 import { DiscoverView } from "./DiscoverView";
+import { ScannerView } from "./ScannerView";
 import { LoginView } from "./LoginView";
 import { PortfolioView } from "./PortfolioView";
 import { SetupView } from "./SetupView";
@@ -583,5 +584,180 @@ describe("the entity page's Track button", () => {
     await waitFor(() => expect(button(container, "Track")).toBeDefined());
     expect(removed).toEqual(["e-9"]);
     localStorage.removeItem(AUTH_TOKEN_KEY);
+  });
+});
+
+describe("the Discover short answer", () => {
+  beforeEach(() => {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+  });
+
+  function tierCard(container: ParentNode, label: string): HTMLElement {
+    const match = Array.from(container.querySelectorAll(".d-answer-card")).find(
+      (card) => card.querySelector(".d-answer-tier")?.textContent?.trim() === label,
+    );
+    if (!(match instanceof HTMLElement)) throw new Error(`tier card not found: ${label}`);
+    return match;
+  }
+
+  const measuredAsset = {
+    name: "Asset",
+    area: "US",
+    asset_class: "stocks",
+    market_behavior: "risk_on",
+    history_years: 10,
+    complete_years: 9,
+  } as const;
+
+  function scannerPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      category_rankings: {
+        stocks: [
+          {
+            ...measuredAsset,
+            symbol: "SPY",
+            name: "S&P 500 ETF",
+            risk_tier: "medium",
+            volatility: 18,
+            median_annual_return: 11,
+            scores: {
+              balanced: 72, durable_growth: 55, consistency: 80, stability: 70,
+              diversification: 60, evidence_complete: true,
+            },
+          },
+          {
+            ...measuredAsset,
+            symbol: "USMV",
+            name: "Min Vol",
+            risk_tier: "low",
+            volatility: 9,
+            median_annual_return: 8,
+            scores: {
+              balanced: 65, durable_growth: 40, consistency: 75, stability: 90,
+              diversification: 70, evidence_complete: true,
+            },
+          },
+          {
+            ...measuredAsset,
+            symbol: "NEWP",
+            name: "Incomplete Newco",
+            risk_tier: "low",
+            volatility: 8,
+            median_annual_return: 9,
+            history_years: 1,
+            complete_years: 1,
+            scores: { balanced: 95, stability: 92, evidence_complete: false },
+          },
+        ],
+        defensive: [
+          {
+            ...measuredAsset,
+            symbol: "GLD",
+            name: "Gold Shares",
+            asset_class: "defensive",
+            risk_tier: "medium",
+            volatility: 15,
+            median_annual_return: 9,
+            scores: {
+              balanced: 68, durable_growth: 45, consistency: 60, stability: 75,
+              diversification: 90, evidence_complete: true,
+            },
+          },
+        ],
+        crypto: [
+          {
+            ...measuredAsset,
+            symbol: "ZEC",
+            name: "Zcash",
+            asset_class: "crypto",
+            risk_tier: "high",
+            volatility: 80,
+            median_annual_return: 40,
+            scores: {
+              balanced: 51, durable_growth: 70, consistency: 30, stability: 22,
+              diversification: 20, evidence_complete: true,
+            },
+          },
+        ],
+      },
+      reliability_rankings: { stocks: [], defensive: [], crypto: [] },
+      quality_rankings: { stocks: [], defensive: [], crypto: [] },
+      sectors: [],
+      overall_leaders: [],
+      ranking_method: { balanced: "b", history: "h", scope: "s", risk_tier: "r" },
+      sector_coverage: { available: 0, total: 11, window_sessions: 0 },
+      coverage: {
+        policy_version: "p1",
+        complete: true,
+        crypto: {
+          source: "x", live: true, market_cap_limit: 50, ranked: 1,
+          excluded: [], unmapped: [], insufficient_history: [],
+        },
+        broad_assets: { configured: 0, ranked: 0, unavailable: [] },
+        companies: { sectors_measured: 0, sectors_required: 11, complete: false },
+        industries: { complete: false, reason: "none" },
+      },
+      decision_table: [
+        { tolerate: "-6%", allocation: "25% each: VTI, GLD, TLT, SGOV", cagr_pct: 8.1, worst_year_pct: -5.9 },
+      ],
+      decision_table_as_of: "2026-08",
+      as_of: "2026-08-24T00:00:00Z",
+      ...overrides,
+    };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("picks one asset per tier, cross-class, with the evidence floor enforced", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(scannerPayload())));
+    const container = root();
+    render(<ScannerView />, container);
+    await waitFor(() => expect(tierCard(container, "Steady")).toBeDefined());
+
+    // NEWP scores 95 in tier but its record is incomplete: the floor the
+    // ranked tables apply keeps it out of the short answer too.
+    expect(tierCard(container, "Steady").textContent).toContain("USMV");
+    expect(tierCard(container, "Steady").textContent).not.toContain("NEWP");
+    // Balanced is the whole-market slice: SPY (stocks, 72) over GLD (defensive, 68).
+    expect(tierCard(container, "Balanced").textContent).toContain("SPY");
+    expect(tierCard(container, "Aggressive").textContent).toContain("ZEC");
+    // The deduction is visible: SPY's weakest measured dimension is growth.
+    expect(tierCard(container, "Balanced").textContent).toContain("growth 55");
+  });
+
+  it("renders the measured mixes with their as-of, or nothing without them", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(scannerPayload())));
+    const container = root();
+    render(<ScannerView />, container);
+    await waitFor(() => expect(container.textContent).toContain("If you would rather hold a mix"));
+    expect(container.textContent).toContain("8.1%");
+    expect(container.textContent).toContain("-5.9%");
+    expect(container.textContent).toContain("2026-08");
+    container.remove();
+
+    const bare = scannerPayload();
+    delete bare.decision_table;
+    delete bare.decision_table_as_of;
+    vi.stubGlobal("fetch", vi.fn(async () => json(bare)));
+    const second = root();
+    render(<ScannerView />, second);
+    await waitFor(() => expect(tierCard(second, "Steady").textContent).toContain("USMV"));
+    expect(second.textContent).not.toContain("If you would rather hold a mix");
+    second.remove();
+  });
+
+  it("says so plainly when a tier has nothing measured", async () => {
+    const noCrypto = scannerPayload();
+    (noCrypto.category_rankings as Record<string, unknown[]>).crypto = [];
+    vi.stubGlobal("fetch", vi.fn(async () => json(noCrypto)));
+    const container = root();
+    render(<ScannerView />, container);
+    await waitFor(() =>
+      expect(tierCard(container, "Aggressive").textContent)
+        .toContain("No asset has finished measuring in this tier."),
+    );
+    container.remove();
   });
 });

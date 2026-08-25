@@ -46,13 +46,6 @@ export interface AssetMetric {
   };
 }
 
-interface ScenarioBucket {
-  name: string;
-  role: string;
-  representative?: { symbol: string; reason: string } | null;
-  assets: AssetMetric[];
-}
-
 interface SectorLeader {
   symbol: string;
   name: string;
@@ -72,23 +65,7 @@ interface SectorLeaders {
   leaders: SectorLeader[];
 }
 
-export interface PortfolioHistory {
-  window_start: string;
-  window_end: string;
-  volatility: number;
-  median_year: number;
-  worst_year: { year: string; return: number };
-  best_year: { year: string; return: number };
-  worst_drawdown: number;
-  up_years: number;
-  complete_years: number;
-  path?: Array<[number, number]>;
-}
-
 interface ScannerData {
-  buckets: ScenarioBucket[];
-  portfolio_history: PortfolioHistory | null;
-  income_as_of?: string;
   decision_table?: Array<{
     tolerate: string;
     allocation: string;
@@ -96,7 +73,6 @@ interface ScannerData {
     worst_year_pct: number;
   }>;
   decision_table_as_of?: string;
-  comparator_universe?: Array<{ symbol: string; name: string; kind?: string }>;
   category_rankings: Record<AssetClass, AssetMetric[]>;
   reliability_rankings?: Record<AssetClass, AssetMetric[]>;
   quality_rankings?: Record<AssetClass, AssetMetric[]>;
@@ -170,8 +146,6 @@ const BEHAVIOR_LABELS: Record<MarketBehavior, string> = {
   unrated: "Not measured",
 };
 
-const TOP_PER_TIER = 10;
-
 const TIER_COLUMNS: Array<{
   tier: Exclude<RiskTier, "unrated">;
   title: string;
@@ -193,32 +167,41 @@ function tone(value: number | null | undefined): string {
   return value > 0 ? "value-positive" : value < 0 ? "value-negative" : "";
 }
 
-// The same floor the server applies before letting the median feed a rank
-// (scanner.py: has_long_enough_record). A median of one or two yearly returns
-// is noise wearing a median's clothes, and an asset below the floor stays out
-// of the builder -- it remains in the full table, where the number is labelled
-// for what it is.
-const MIN_COMPLETE_YEARS = 3;
-
-function classLabel(asset: AssetMetric): string {
-  const entry = CATEGORY_DETAILS.find((category) => category.key === asset.asset_class);
-  return entry ? entry.title : asset.asset_class;
+function plainPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(1)}%`;
 }
 
-// Ranked by median annual return -- the steady-centre metric, not the trailing
-// year. An asset without a measured median cannot be ranked by it and stays
-// out rather than being seated by a stand-in number.
-function byMedian(a: AssetMetric, b: AssetMetric): number {
-  const left = a.median_annual_return;
-  const right = b.median_annual_return;
-  if (left === null || left === undefined) return 1;
-  if (right === null || right === undefined) return -1;
-  return right - left;
+// The weakest fully-measured component under a headline score. A veteran
+// reading "APP 59 / worst: stability 0.9" sees the whole argument. Shared by
+// the short answer and the ranked tables so the two can never disagree.
+function worstDimension(asset: AssetMetric): { name: string; value: number } | null {
+  const measured: Array<[string, number | null | undefined]> = [
+    ["growth", asset.scores.durable_growth],
+    ["consistency", asset.scores.consistency],
+    ["stability", asset.scores.stability],
+    ["downside", asset.scores.downside],
+    ["diversification", asset.scores.diversification],
+  ];
+  const present = measured.filter(
+    ([, v]) => typeof v === "number",
+  ) as Array<[string, number]>;
+  if (present.length < 2) return null;
+  present.sort((a, b) => a[1] - b[1]);
+  return { name: present[0][0], value: present[0][1] };
 }
 
-function rankableByMedian(asset: AssetMetric): boolean {
+function WeakestDimension({ asset }: { asset: AssetMetric }) {
+  const worst = worstDimension(asset);
+  if (worst === null) {
+    return asset.scores.evidence_complete === false ? (
+      <small class="rank-worst">short history</small>
+    ) : null;
+  }
   return (
-    asset.median_annual_return != null && asset.complete_years >= MIN_COMPLETE_YEARS
+    <small class={`rank-worst${worst.value < 25 ? " rank-worst-critical" : ""}`}>
+      worst: {worst.name} {worst.value.toFixed(0)}
+    </small>
   );
 }
 
@@ -328,33 +311,7 @@ function RankedCategory({
                         ? `${(asset.returns?.["365d"] ?? 0).toFixed(1)}%`
                         : asset.scores.balanced?.toFixed(0) ?? "—"}
                   </strong>
-                  {(() => {
-                    // The deduction, visible: the weakest fully-measured
-                    // component under the headline score. A veteran reading
-                    // "APP 59 / worst: stability 0.9" sees the whole argument.
-                    const measured: Array<[string, number | null | undefined]> = [
-                      ["growth", asset.scores.durable_growth],
-                      ["consistency", asset.scores.consistency],
-                      ["stability", asset.scores.stability],
-                      ["downside", asset.scores.downside],
-                      ["diversification", asset.scores.diversification],
-                    ];
-                    const present = measured.filter(
-                      ([, v]) => typeof v === "number",
-                    ) as Array<[string, number]>;
-                    if (present.length < 2) {
-                      return asset.scores.evidence_complete === false ? (
-                        <small class="rank-worst">short history</small>
-                      ) : null;
-                    }
-                    present.sort((a, b) => a[1] - b[1]);
-                    const [name, value] = present[0];
-                    return (
-                      <small class={`rank-worst${value < 25 ? " rank-worst-critical" : ""}`}>
-                        worst: {name} {value.toFixed(0)}
-                      </small>
-                    );
-                  })()}
+                  <WeakestDimension asset={asset} />
                 </td>
                 <td class={`${tone(asset.returns?.["365d"])} ${horizon === "short" ? "col-active" : ""}`}>
                   {percent(asset.returns?.["365d"])}
@@ -373,6 +330,120 @@ function RankedCategory({
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+// Section 0: the first-glance answer. One pick per temperament -- the
+// highest balanced score within each volatility tier, across every measured
+// asset class -- then, for the person who would rather not pick, the
+// measured mixes. Everything below this section is the evidence for it.
+function ShortAnswer({ data }: { data: ScannerData }) {
+  const universe = Object.values(data.category_rankings)
+    .flat()
+    .filter(
+      (a) =>
+        a.scores.evidence_complete !== false &&
+        typeof a.scores.balanced === "number" &&
+        a.risk_tier !== "unrated",
+    );
+  const tiers = TIER_COLUMNS.map(({ tier, title, hint, accent }) => {
+    const inTier = universe
+      .filter((a) => a.risk_tier === tier)
+      .sort((a, b) => (b.scores.balanced ?? -Infinity) - (a.scores.balanced ?? -Infinity));
+    return { tier, title, hint, accent, pick: inTier[0] ?? null, measured: inTier.length };
+  });
+  return (
+    <section class="d-answer" aria-label="The short answer">
+      <div class="d-answer-head">
+        <h2>The short answer</h2>
+        <p>
+          One pick per temperament -- the highest balanced score in each volatility tier,
+          across every measured asset class. The weakest dimension is stated, not hidden.
+          Everything below is the evidence.
+        </p>
+      </div>
+      <div class="d-answer-grid">
+        {tiers.map(({ tier, title, hint, accent, pick, measured }) => (
+          <article class="d-answer-card" key={tier} style={`border-top-color:${accent}`}>
+            <header>
+              <span class="d-answer-tier" style={`color:${accent}`}>{title}</span>
+              <small>{hint}</small>
+            </header>
+            {pick ? (
+              <>
+                <strong class="d-answer-symbol">{pick.symbol}</strong>
+                <small class="d-answer-name">{pick.name} · {pick.area}</small>
+                <dl class="d-answer-facts">
+                  <div>
+                    <dt>Median year</dt>
+                    <dd class={tone(pick.median_annual_return)}>{percent(pick.median_annual_return)}</dd>
+                  </div>
+                  <div>
+                    <dt>Volatility</dt>
+                    <dd>{plainPercent(pick.volatility)}</dd>
+                  </div>
+                  <div>
+                    <dt>Weakest</dt>
+                    <dd>
+                      {(() => {
+                        const worst = worstDimension(pick);
+                        return worst ? `${worst.name} ${worst.value.toFixed(0)}` : "—";
+                      })()}
+                    </dd>
+                  </div>
+                </dl>
+                <small class="d-answer-count">
+                  {measured > 1
+                    ? `${measured} assets measured in this tier`
+                    : measured === 1
+                      ? "the only asset measured in this tier"
+                      : "nothing measured in this tier yet"}
+                </small>
+              </>
+            ) : (
+              <p class="d-answer-empty">No asset has finished measuring in this tier.</p>
+            )}
+          </article>
+        ))}
+      </div>
+      {data.decision_table && data.decision_table.length > 0 ? (
+        <div class="d-answer-mixes">
+          <div class="d-answer-head">
+            <h2>If you would rather hold a mix</h2>
+            <p>
+              Equal-weight mixes and what they measured: the return per year, and the worst
+              calendar year each one cost. Pick the worst year you would have sat through.
+              History, not a promise.
+            </p>
+          </div>
+          <div class="decision-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Worst year to accept</th>
+                  <th>The mix</th>
+                  <th>Returned per year</th>
+                  <th>Its worst year</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.decision_table.map((row) => (
+                  <tr key={row.tolerate}>
+                    <td><strong>{row.tolerate}</strong></td>
+                    <td>{row.allocation}</td>
+                    <td class="mono">{row.cagr_pct.toFixed(1)}%</td>
+                    <td class="mono">{row.worst_year_pct.toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p class="d-answer-as-of">
+            Measured through {data.decision_table_as_of ?? "the latest complete window"}.
+          </p>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -586,6 +657,8 @@ export function ScannerView() {
           <time dateTime={state.data.as_of}>Updated {new Date(state.data.as_of).toLocaleString()}</time>
         </div>
       </header>
+
+      <ShortAnswer data={state.data} />
 
       <BestMeasured data={state.data} />
 
