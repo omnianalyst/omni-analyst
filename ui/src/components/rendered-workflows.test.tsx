@@ -958,18 +958,20 @@ describe("the verdict page", () => {
     const container = root();
     render(<VerdictView />, container);
 
-    const cards = container.querySelectorAll(".verdict-card");
-    expect(cards.length).toBe(2);
-    // The Pareto pair, with their measured numbers and the as-of stated.
-    expect(cards[0].textContent).toContain("Steady");
-    expect(cards[0].textContent).toContain("6.9%");
-    expect(cards[0].textContent).toContain("-11.8%");
-    expect(cards[1].textContent).toContain("41.3%");
-    expect(cards[1].textContent).toContain("-23.2%");
-    expect(container.querySelector(".verdict-head p")?.textContent).toContain("2026-08-26");
+    const bands = container.querySelectorAll(".v-verdict");
+    expect(bands.length).toBe(2);
+    // The Pareto pair, each with its giant number and worst year stated.
+    expect(bands[0].textContent).toContain("Steady");
+    expect(bands[0].textContent).toContain("6.9");
+    expect(bands[0].textContent).toContain("-11.8%");
+    expect(bands[1].textContent).toContain("41.3");
+    expect(bands[1].textContent).toContain("-23.2%");
+    // The as-of and the BTC-decade caveat sit in the header note.
+    expect(container.querySelector(".v-note")?.textContent).toContain("2026-08-26");
+    expect(container.querySelector(".v-note")?.textContent).toContain("BTC");
 
     // Beaten but not hidden: both dominated shapes named with their numbers.
-    const dominated = container.querySelectorAll(".verdict-dominated p");
+    const dominated = container.querySelectorAll(".v-dom-line");
     expect(dominated.length).toBe(2);
     expect(dominated[1].textContent).toContain("Mag 7");
     expect(dominated[1].textContent).toContain("-47.3%");

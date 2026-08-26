@@ -882,113 +882,134 @@
 }
 
 /* ============================================================
-   The verdict page: Discover's front door. Two mixes that
-   survived the comparison on every axis, the beaten shapes
-   stated beneath, nothing to configure.
+   The verdict page: Discover's front door. Editorial bands,
+   one giant number per verdict, hairlines, nothing else.
    ============================================================ */
 .verdict-view {
   margin-top: 30px;
+  display: flex;
+  flex-direction: column;
 }
-.verdict-head {
+.v-hero {
   border-top: 1px solid var(--d-line);
   padding-top: 22px;
 }
-.verdict-head h1 {
-  text-transform: none;
-  letter-spacing: 0.01em;
-  font-size: 19px;
+.v-kicker {
+  margin: 0;
+  font-size: 10.5px;
   font-weight: 700;
-  color: var(--d-ink);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--d-faint);
 }
-.verdict-head p {
-  margin: 6px 0 0;
+.v-line {
+  margin: 12px 0 0;
+  font-size: clamp(30px, 4.6vw, 52px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  color: var(--d-ink);
+  max-width: 20ch;
+}
+.v-note {
+  margin: 14px 0 0;
   font-size: 12.5px;
-  line-height: 1.55;
+  line-height: 1.6;
   color: var(--d-faint);
   max-width: 62ch;
 }
-.verdict-grid {
+
+.v-verdict {
+  border-top: 2px solid var(--v-accent, var(--d-line));
+  margin-top: 44px;
+  padding-top: 20px;
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--s-7);
-  margin-top: 22px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--s-8);
+  align-items: end;
 }
-.verdict-card {
-  border-top: 2px solid var(--d-line);
-  padding-top: 14px;
-}
-.verdict-card header {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.verdict-card header span {
-  font-size: 10.5px;
+.v-title {
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
+  color: var(--v-accent, var(--d-dim));
 }
-.verdict-card header small {
-  font-size: 11px;
-  color: var(--d-faint);
+.v-thesis {
+  margin: 10px 0 0;
+  font-size: clamp(17px, 2vw, 22px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--d-ink);
+  max-width: 26ch;
 }
-.verdict-mix {
+.v-mix {
   margin: 12px 0 0;
-  font-size: 14.5px;
-  font-weight: 600;
+  font: 500 12.5px var(--mono);
+  color: var(--d-dim);
+  letter-spacing: 0.02em;
+}
+.v-right {
+  text-align: right;
+}
+.v-big {
+  font-size: clamp(64px, 10vw, 138px);
+  font-weight: 800;
+  letter-spacing: -0.045em;
+  line-height: 0.9;
   color: var(--d-ink);
-  line-height: 1.5;
-}
-.verdict-facts {
-  display: flex;
-  gap: var(--s-7);
-  margin: 14px 0 0;
-  flex-wrap: wrap;
-}
-.verdict-facts dt {
-  font-size: 9.5px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--d-faint);
-}
-.verdict-facts dd {
-  margin: 2px 0 0;
-  font-size: 15px;
-  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  color: var(--d-ink);
+  white-space: nowrap;
 }
-.verdict-dominated {
-  margin-top: 42px;
+.v-big small {
+  font-size: 0.42em;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--d-dim);
+}
+.v-under {
+  margin: 12px 0 0;
+  font: 500 11.5px var(--mono);
+  color: var(--d-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.v-dominated {
+  margin-top: 54px;
   border-top: 1px solid var(--d-line);
   padding-top: 18px;
 }
-.verdict-dominated h2 {
-  text-transform: none;
-  letter-spacing: 0.01em;
-  font-size: 15px;
+.v-dom-kicker {
+  margin: 0;
+  font-size: 10px;
   font-weight: 700;
-  color: var(--d-dim);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--d-faint);
 }
-.verdict-dominated p {
-  margin: 10px 0 0;
+.v-dom-line {
+  margin: 14px 0 0;
   font-size: 12.5px;
-  line-height: 1.6;
+  line-height: 1.65;
   color: var(--d-dim);
-  max-width: 72ch;
+  max-width: 74ch;
 }
-.verdict-dominated strong {
+.v-dom-line strong {
   color: var(--d-ink);
   font-weight: 600;
 }
 .verdict-links {
-  margin-top: 34px;
+  margin-top: 40px;
   display: flex;
   gap: var(--s-4);
 }
-@media (max-width: 860px) {
-  .verdict-grid {
+@media (max-width: 760px) {
+  .v-verdict {
     grid-template-columns: 1fr;
-    gap: var(--s-6);
+    gap: 18px;
+  }
+  .v-right {
+    text-align: left;
   }
 }

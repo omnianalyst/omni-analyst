@@ -526,7 +526,8 @@ export function MapView() {
           </p>
         </div>
         <div class="discover-compact-meta">
-          <a class="btn-secondary compact-button" href="/search">Tables</a>
+          <a class="btn-secondary compact-button" href="/search">Verdict</a>
+          <a class="btn-secondary compact-button" href="/rankings">Tables</a>
           <time dateTime={data.as_of}>Updated {new Date(data.as_of).toLocaleString()}</time>
         </div>
       </header>

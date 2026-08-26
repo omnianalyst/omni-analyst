@@ -32,23 +32,23 @@ const VERDICTS: Verdict[] = [
     key: "steady",
     title: "Steady",
     thesis: "The mix that never asked you to be brave.",
-    mix: "25% each: VTI, GLD, SGOV, TLT",
+    mix: "25% each · VTI · GLD · SGOV · TLT",
     cagr: 6.9,
     worstYear: -11.8,
     worstYearWhen: 2022,
     years: 7,
-    accent: "var(--tier-fresh)",
+    accent: "#2dd4bf",
   },
   {
     key: "aggressive",
     title: "Aggressive",
     thesis: "The mix the measured decade rewarded most, per unit of worst year.",
-    mix: "20% BTC, 30% QQQ, 20% GLD, 10% TSLA, 10% LLY, 10% PGR",
+    mix: "20% BTC · 30% QQQ · 20% GLD · 10% TSLA · 10% LLY · 10% PGR",
     cagr: 41.3,
     worstYear: -23.2,
     worstYearWhen: 2022,
     years: 11,
-    accent: "var(--tier-aging)",
+    accent: "#fbbf24",
   },
 ];
 
@@ -58,7 +58,7 @@ const DOMINATED: Array<{ label: string; mix: string; cagr: number; worstYear: nu
     mix: "35% VTI, 15% QQQ, 15% GLD, 15% TLT, 10% BTC, 10% TSLA",
     cagr: 27.6,
     worstYear: -29.6,
-    why: "measured a deeper worst year than Aggressive with less return -- compromising bought nothing",
+    why: "a deeper worst year than Aggressive, with less return -- compromising bought nothing",
   },
   {
     label: "The famous stocks",
@@ -72,49 +72,41 @@ const DOMINATED: Array<{ label: string; mix: string; cagr: number; worstYear: nu
 export function VerdictView() {
   return (
     <div class="verdict-view">
-      <header class="verdict-head">
-        <h1>The verdict</h1>
-        <p>
-          Every mix below is equal weight, rebalanced each year, measured on daily
-          closes 2015&ndash;2026 ({AS_OF}). Two mixes survived the comparison on
-          every axis; the rest are shown below them, beaten but not hidden.
-          History, not a promise -- and the Aggressive edge is BTC's decade,
-          which is the only decade we have.
+      <header class="v-hero">
+        <p class="v-kicker">The verdict · measured 2015&ndash;2026</p>
+        <h2 class="v-line">Two mixes survived every comparison.</h2>
+        <p class="v-note">
+          Equal weight, rebalanced each year, daily closes. History, not a promise --
+          and the Aggressive edge is BTC's decade, the only decade we have.
+          As of {AS_OF}.
         </p>
       </header>
 
-      <div class="verdict-grid">
-        {VERDICTS.map((v) => (
-          <article class="verdict-card" key={v.key} style={`border-top-color:${v.accent}`}>
-            <header>
-              <span style={`color:${v.accent}`}>{v.title}</span>
-              <small>{v.thesis}</small>
-            </header>
-            <p class="verdict-mix">{v.mix}</p>
-            <dl class="verdict-facts">
-              <div>
-                <dt>Returned per year</dt>
-                <dd>{v.cagr.toFixed(1)}%</dd>
-              </div>
-              <div>
-                <dt>Worst year</dt>
-                <dd class="value-negative">{v.worstYear.toFixed(1)}% ({v.worstYearWhen})</dd>
-              </div>
-              <div>
-                <dt>Measured over</dt>
-                <dd>{v.years} years</dd>
-              </div>
-            </dl>
-          </article>
-        ))}
-      </div>
+      {VERDICTS.map((v) => (
+        <section class="v-verdict" key={v.key} style={`--v-accent:${v.accent}`}>
+          <div class="v-left">
+            <span class="v-title">{v.title}</span>
+            <p class="v-thesis">{v.thesis}</p>
+            <p class="v-mix">{v.mix}</p>
+          </div>
+          <div class="v-right">
+            <span class="v-big">
+              {v.cagr.toFixed(1)}
+              <small>%</small>
+            </span>
+            <p class="v-under">
+              per year · worst year {v.worstYear.toFixed(1)}% ({v.worstYearWhen}) · {v.years}y measured
+            </p>
+          </div>
+        </section>
+      ))}
 
-      <section class="verdict-dominated">
-        <h2>Measured off the pace</h2>
+      <section class="v-dominated">
+        <p class="v-dom-kicker">Measured off the pace</p>
         {DOMINATED.map((d) => (
-          <p key={d.label}>
-            <strong>{d.label}</strong> ({d.mix}): {d.cagr.toFixed(1)}%/yr, worst year{" "}
-            {d.worstYear.toFixed(1)}% -- {d.why}.
+          <p class="v-dom-line" key={d.label}>
+            <strong>{d.label}</strong> -- {d.mix} -- {d.cagr.toFixed(1)}%/yr, worst year{" "}
+            {d.worstYear.toFixed(1)}%: {d.why}.
           </p>
         ))}
       </section>
