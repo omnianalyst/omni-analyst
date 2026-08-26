@@ -959,13 +959,16 @@ describe("the verdict page", () => {
     render(<VerdictView />, container);
 
     const bands = container.querySelectorAll(".v-verdict");
-    expect(bands.length).toBe(2);
-    // The Pareto pair, each with its giant number and worst year stated.
+    expect(bands.length).toBe(3);
+    // The frontier pair of poles plus the classic middle reference.
     expect(bands[0].textContent).toContain("Steady");
     expect(bands[0].textContent).toContain("6.9");
     expect(bands[0].textContent).toContain("-11.8%");
-    expect(bands[1].textContent).toContain("41.3");
-    expect(bands[1].textContent).toContain("-23.2%");
+    expect(bands[1].textContent).toContain("VOO");
+    expect(bands[1].textContent).toContain("15.3");
+    expect(bands[1].textContent).toContain("-18.2%");
+    expect(bands[2].textContent).toContain("41.3");
+    expect(bands[2].textContent).toContain("-23.2%");
     // The as-of and the BTC-decade caveat sit in the header note.
     expect(container.querySelector(".v-note")?.textContent).toContain("2026-08-26");
     expect(container.querySelector(".v-note")?.textContent).toContain("BTC");

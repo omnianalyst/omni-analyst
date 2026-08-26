@@ -40,6 +40,17 @@ const VERDICTS: Verdict[] = [
     accent: "#2dd4bf",
   },
   {
+    key: "balanced",
+    title: "Balanced",
+    thesis: "The classic answer: own the whole market.",
+    mix: "100% VOO · the S&P 500",
+    cagr: 15.3,
+    worstYear: -18.2,
+    worstYearWhen: 2022,
+    years: 10,
+    accent: "#7dd3fc",
+  },
+  {
     key: "aggressive",
     title: "Aggressive",
     thesis: "The mix the measured decade rewarded most, per unit of worst year.",
@@ -54,11 +65,11 @@ const VERDICTS: Verdict[] = [
 
 const DOMINATED: Array<{ label: string; mix: string; cagr: number; worstYear: number; why: string }> = [
   {
-    label: "The middle compromise",
+    label: "The hedged compromise",
     mix: "35% VTI, 15% QQQ, 15% GLD, 15% TLT, 10% BTC, 10% TSLA",
     cagr: 27.6,
     worstYear: -29.6,
-    why: "a deeper worst year than Aggressive, with less return -- compromising bought nothing",
+    why: "a deeper worst year than Balanced with less return than Aggressive -- hedging both ways bought nothing",
   },
   {
     label: "The famous stocks",
@@ -74,11 +85,12 @@ export function VerdictView() {
     <div class="verdict-view">
       <header class="v-hero">
         <p class="v-kicker">The verdict · measured 2015&ndash;2026</p>
-        <h2 class="v-line">Two mixes survived every comparison.</h2>
+        <h2 class="v-line">Pick by the worst year you can sit through.</h2>
         <p class="v-note">
-          Equal weight, rebalanced each year, daily closes. History, not a promise --
-          and the Aggressive edge is BTC's decade, the only decade we have.
-          As of {AS_OF}.
+          Equal weight, rebalanced each year, daily closes. Three answers survived every
+          comparison: Steady (&minus;12), Balanced (&minus;18), Aggressive (&minus;23).
+          History, not a promise -- and the Aggressive edge is BTC's decade, the only
+          decade we have. As of {AS_OF}.
         </p>
       </header>
 
