@@ -31,10 +31,10 @@ const VERDICTS: Verdict[] = [
   {
     key: "steady",
     title: "Steady",
-    thesis: "The mix that never asked you to be brave.",
-    mix: "25% each · VTI · GLD · SGOV · TLT",
-    cagr: 6.9,
-    worstYear: -11.8,
+    thesis: "Equity, gold, cash and short bonds -- sized so the worst year stays shallow.",
+    mix: "40% VTI · 20% GLD · 20% SGOV · 20% IEF",
+    cagr: 9.7,
+    worstYear: -10.4,
     worstYearWhen: 2022,
     years: 7,
     accent: "#2dd4bf",
@@ -42,12 +42,12 @@ const VERDICTS: Verdict[] = [
   {
     key: "balanced",
     title: "Balanced",
-    thesis: "The classic answer: own the whole market.",
-    mix: "100% VOO · the S&P 500",
-    cagr: 15.3,
-    worstYear: -18.2,
+    thesis: "The classic answer, plus gold's shock absorber.",
+    mix: "90% VOO · 10% GLD",
+    cagr: 13.7,
+    worstYear: -16.7,
     worstYearWhen: 2022,
-    years: 10,
+    years: 11,
     accent: "#7dd3fc",
   },
   {
@@ -88,9 +88,10 @@ export function VerdictView() {
         <h2 class="v-line">Pick by the worst year you can sit through.</h2>
         <p class="v-note">
           Equal weight, rebalanced each year, daily closes. Three answers survived every
-          comparison: Steady (&minus;12), Balanced (&minus;18), Aggressive (&minus;23).
-          History, not a promise -- and the Aggressive edge is BTC's decade, the only
-          decade we have. As of {AS_OF}.
+          comparison: Steady (&minus;10), Balanced (&minus;17), Aggressive (&minus;23).
+          Steady's cash sleeve dates to 2020, so its window is shorter. History, not a
+          promise -- and the Aggressive edge is BTC's decade, the only decade we have.
+          As of {AS_OF}.
         </p>
       </header>
 

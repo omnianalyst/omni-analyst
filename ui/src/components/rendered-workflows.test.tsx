@@ -962,11 +962,11 @@ describe("the verdict page", () => {
     expect(bands.length).toBe(3);
     // The frontier pair of poles plus the classic middle reference.
     expect(bands[0].textContent).toContain("Steady");
-    expect(bands[0].textContent).toContain("6.9");
-    expect(bands[0].textContent).toContain("-11.8%");
+    expect(bands[0].textContent).toContain("9.7");
+    expect(bands[0].textContent).toContain("-10.4%");
     expect(bands[1].textContent).toContain("VOO");
-    expect(bands[1].textContent).toContain("15.3");
-    expect(bands[1].textContent).toContain("-18.2%");
+    expect(bands[1].textContent).toContain("13.7");
+    expect(bands[1].textContent).toContain("-16.7%");
     expect(bands[2].textContent).toContain("41.3");
     expect(bands[2].textContent).toContain("-23.2%");
     // The as-of and the BTC-decade caveat sit in the header note.
