@@ -23,9 +23,31 @@ interface Verdict {
   cagr: number;
   worstYear: number;
   worstYearWhen: number;
+  maxDrawdown: number;
   years: number;
   accent: string;
 }
+
+// The same selection rule with hindsight removed: each January the mix was
+// re-picked from trailing five-year data only, then held for the year.
+// 2016-2025, core+sleeve universe. The gap between these numbers and the
+// frozen mixes above IS the cost of hindsight -- and the reason no number on
+// this page is a forecast.
+const WALK_FORWARD: Record<string, number> = {
+  steady: 19.2,
+  balanced: 22.8,
+  aggressive: 24.8,
+};
+
+// Block-bootstrap on each tier's measured daily path, 2000 ten-year replays:
+// the median multiple and the odds of living through a deep drawdown. The
+// replay assumes the decade's distribution repeats -- it can only price
+// recurrence, not guarantee it.
+const BOOTSTRAP: Record<string, { medianMultiple: number; dd30: number }> = {
+  steady: { medianMultiple: 2.7, dd30: 0 },
+  balanced: { medianMultiple: 4.2, dd30: 36 },
+  aggressive: { medianMultiple: 46.5, dd30: 53 },
+};
 
 const VERDICTS: Verdict[] = [
   {
@@ -33,10 +55,11 @@ const VERDICTS: Verdict[] = [
     title: "Steady",
     thesis: "Equity, gold, cash and short bonds -- sized so the worst year stays shallow.",
     mix: "40% VTI · 20% GLD · 20% SGOV · 20% IEF",
-    cagr: 9.7,
-    worstYear: -10.4,
+    cagr: 10.8,
+    worstYear: -10.5,
     worstYearWhen: 2022,
-    years: 7,
+    maxDrawdown: -15,
+    years: 6,
     accent: "#2dd4bf",
   },
   {
@@ -44,9 +67,10 @@ const VERDICTS: Verdict[] = [
     title: "Balanced",
     thesis: "The classic answer, plus gold's shock absorber.",
     mix: "90% VOO · 10% GLD",
-    cagr: 13.7,
-    worstYear: -16.7,
+    cagr: 15.2,
+    worstYear: -16.3,
     worstYearWhen: 2022,
+    maxDrawdown: -31,
     years: 11,
     accent: "#7dd3fc",
   },
@@ -55,9 +79,10 @@ const VERDICTS: Verdict[] = [
     title: "Aggressive",
     thesis: "The mix the measured decade rewarded most, per unit of worst year.",
     mix: "20% BTC · 30% QQQ · 20% GLD · 10% TSLA · 10% LLY · 10% PGR",
-    cagr: 41.3,
-    worstYear: -23.2,
+    cagr: 47.2,
+    worstYear: -22.1,
     worstYearWhen: 2022,
+    maxDrawdown: -31,
     years: 11,
     accent: "#fbbf24",
   },
@@ -67,16 +92,16 @@ const DOMINATED: Array<{ label: string; mix: string; cagr: number; worstYear: nu
   {
     label: "The hedged compromise",
     mix: "35% VTI, 15% QQQ, 15% GLD, 15% TLT, 10% BTC, 10% TSLA",
-    cagr: 27.6,
-    worstYear: -29.6,
+    cagr: 31.5,
+    worstYear: -28.5,
     why: "a deeper worst year than Balanced with less return than Aggressive -- hedging both ways bought nothing",
   },
   {
     label: "The famous stocks",
     mix: "Mag 7, equal weight",
-    cagr: 32.7,
-    worstYear: -47.3,
-    why: "the household names cost a -47% year to make less than Aggressive made",
+    cagr: 38.3,
+    worstYear: -45.7,
+    why: "the household names cost a -46% year to make less than Aggressive made",
   },
 ];
 
@@ -87,11 +112,12 @@ export function VerdictView() {
         <p class="v-kicker">The verdict · measured 2015&ndash;2026</p>
         <h2 class="v-line">Pick by the worst year you can sit through.</h2>
         <p class="v-note">
-          Equal weight, rebalanced each year, daily closes. Three answers survived every
-          comparison: Steady (&minus;10), Balanced (&minus;17), Aggressive (&minus;23).
-          Steady's cash sleeve dates to 2020, so its window is shorter. History, not a
-          promise -- and the Aggressive edge is BTC's decade, the only decade we have.
-          As of {AS_OF}.
+          Equal weight, rebalanced each year, daily closes. Worst year is the calendar
+          year; worst moment is the deepest dip between any peak and bottom -- judge by
+          the one you would actually sit through. Steady's cash sleeve dates to 2020,
+          so its window is shorter. Aggressive moves 39&ndash;47%/yr with rebalance
+          timing alone. History, not a promise -- the Aggressive edge is BTC's decade,
+          the only decade we have. As of {AS_OF}.
         </p>
       </header>
 
@@ -108,7 +134,12 @@ export function VerdictView() {
               <small>%</small>
             </span>
             <p class="v-under">
-              per year · worst year {v.worstYear.toFixed(1)}% ({v.worstYearWhen}) · {v.years}y measured
+              per year · worst year {v.worstYear.toFixed(1)}% ({v.worstYearWhen}) · worst moment{" "}
+              {v.maxDrawdown.toFixed(0)}% · {v.years}y measured
+            </p>
+            <p class="v-under v-under-quiet">
+              no hindsight: {WALK_FORWARD[v.key].toFixed(1)}%/yr · replay median x{BOOTSTRAP[v.key].medianMultiple} ·{" "}
+              {BOOTSTRAP[v.key].dd30}% odds of a -30% moment
             </p>
           </div>
         </section>
