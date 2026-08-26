@@ -639,7 +639,10 @@
   position: relative;
   margin-top: 18px;
   overflow: hidden;
-  height: 84vh;
+  /* Scale with the window: the pane takes the viewport below the heading,
+   with a floor so short windows keep a usable canvas. */
+  height: calc(100dvh - 210px);
+  min-height: 480px;
   border: 1px solid var(--d-line);
   border-radius: 10px;
   background: rgba(7, 10, 18, 0.5);

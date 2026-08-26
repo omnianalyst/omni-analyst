@@ -79,7 +79,7 @@ const INNER_R = 104;
 const STEP = 56;
 const SLOT = 76;
 const CHIP_H = 26;
-const MAX_SECTOR_LEADERS = 5;
+const MAX_SECTOR_LEADERS = 8;
 const CLASS_CHIP_LIMIT = 15;
 
 const CLASS_COLORS: Record<AssetClass, string> = {
@@ -460,10 +460,15 @@ export function MapView() {
     const rect = canvas.getBoundingClientRect();
     const W = 292;
     const H = chip.asset ? 428 : 240;
+    // Clamp on every edge: the card opens beside the cursor when there is
+    // room and shifts inside the pane when there is not, but never spills.
+    const pad = 8;
     let x = event.clientX - rect.left + 14;
     let y = event.clientY - rect.top + 14;
-    if (x + W > rect.width) x = event.clientX - rect.left - W - 8;
-    if (y + H > rect.height) y = Math.max(8, rect.height - H - 8);
+    const maxX = Math.max(pad, rect.width - W - pad);
+    const maxY = Math.max(pad, rect.height - H - pad);
+    x = Math.min(maxX, Math.max(pad, x));
+    y = Math.min(maxY, Math.max(pad, y));
     setPop({ chip, x, y });
   };
 
