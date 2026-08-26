@@ -216,12 +216,13 @@ describe("positionSide", () => {
 });
 
 describe("describeReconciliation", () => {
-  it("covers exactly the four statuses the contract allows", () => {
+  it("covers exactly the five statuses the contract allows", () => {
     expect(RECONCILIATION_STATUSES).toEqual([
       "reconciled",
       "diverged",
       "never_run",
       "stale",
+      "disconnected",
     ]);
   });
 
@@ -246,6 +247,14 @@ describe("describeReconciliation", () => {
     expect(stale.tone).toBe("unresolved");
     expect(stale.tone).not.toBe(describeReconciliation("reconciled").tone);
     expect(readsAsHealthy("stale")).toBe(false);
+  });
+
+  it("reports a deconfigured venue as disconnected, not eternally stale", () => {
+    const off = describeReconciliation("disconnected");
+    expect(off.tone).toBe("unresolved");
+    expect(off.label).toBe("Disconnected");
+    expect(off.explanation).toContain("history");
+    expect(readsAsHealthy("disconnected")).toBe(false);
   });
 
   it("gives a diverged venue its own tone, separate from the unresolved ones", () => {

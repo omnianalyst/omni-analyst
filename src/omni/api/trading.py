@@ -627,21 +627,27 @@ def _discrepancy_payload(discrepancy) -> dict:
 
 
 def _reconciliation_status(
-    result, *, stale_after: timedelta | None, now: datetime
+    result, *, stale_after: timedelta | None, now: datetime, configured: bool = True
 ) -> str:
-    """Which of the four verdicts this venue's stored result supports.
+    """Which of the five verdicts this venue's stored result supports.
 
     Ordered so that every path to `reconciled` is a path that had evidence.
 
     - No stored result is `never_run`. Not `reconciled`: a venue nobody looked at
       is not a venue that agreed, and this substitution has shipped here twice.
-    - A divergence outranks staleness. An old disagreement is still the last
-      thing known about the venue, and downgrading it to `stale` would replace a
-      statement about the books with a statement about the clock.
+    - A divergence outranks everything. An old disagreement is still the last
+      thing known about the venue, and downgrading it to `stale` or
+      `disconnected` would replace a statement about the books with a statement
+      about the clock or the config.
+    - A venue with no enabled configuration is `disconnected`, not `stale`:
+      nothing will ever refresh its check, and rendering an eternal obligation
+      where the operator removed the connection trains the page to be ignored
+      (observed live: a deconfigured hyperliquid aging as "Stale" forever).
+      The stored result is still shown -- it is history, not a current claim.
     - **An unbounded age is not a fresh one.** With no `stale_after` configured
-      for the venue there is nothing this result can be shown to be inside, so it
-      reports `stale` rather than `reconciled`. Absence of a threshold cannot be
-      permission; a missing bound is how "we never set one" comes to render as
+      for the venue there is nothing this result can be shown to be inside, so
+      it reports `stale` rather than `reconciled`. Absence of a threshold cannot
+      be permission; a missing bound is how "we never set one" comes to render as
       green.
     - A result stamped in the future is stale too. The clocks disagree, and an
       age computed across disagreeing clocks is not a measurement.
@@ -650,12 +656,27 @@ def _reconciliation_status(
         return "never_run"
     if not result.reconciled:
         return "diverged"
+    if not configured:
+        return "disconnected"
     if stale_after is None:
         return "stale"
     age = now - result.checked_at
     if age < timedelta(0) or age > stale_after:
         return "stale"
     return "reconciled"
+
+
+# Venue keys with an enabled configuration under ANY active user's settings --
+# the same source of truth reconcile_once reads. A venue here is connected or
+# connectable; a venue in the report but not here is history only.
+_ENABLED_VENUE_KEYS = """
+SELECT DISTINCT v.key AS venue
+FROM users u
+JOIN user_settings s ON s.user_id = u.id
+CROSS JOIN LATERAL jsonb_each(COALESCE((s.data)::jsonb -> 'venues', '{}'::jsonb))
+  AS v(key, value)
+WHERE u.active AND COALESCE((v.value ->> 'enabled')::boolean, false)
+"""
 
 
 # Every venue the schedule has something to say about. Cycle rows first, because
@@ -1309,6 +1330,9 @@ def build_router(app: App) -> Router:
             row["venue"]: row["stale_after"]
             for row in await pool.fetch(_RECONCILIATION_STALENESS, portfolio_id)
         }
+        configured_venues = {
+            row["venue"] for row in await pool.fetch(_ENABLED_VENUE_KEYS)
+        }
 
         # One reading of the clock for the whole page. Ageing each venue against
         # its own `now` would let two venues checked at the same instant land on
@@ -1323,7 +1347,10 @@ def build_router(app: App) -> Router:
                 {
                     "venue": venue,
                     "status": _reconciliation_status(
-                        result, stale_after=staleness.get(venue), now=now
+                        result,
+                        stale_after=staleness.get(venue),
+                        now=now,
+                        configured=venue in configured_venues,
                     ),
                     "checked_at": (
                         None if result is None else result.checked_at.isoformat()

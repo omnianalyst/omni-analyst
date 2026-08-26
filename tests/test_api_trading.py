@@ -188,6 +188,19 @@ async def _stale_after(db, portfolio_id, *, venue, after, active=True):
     )
 
 
+async def _venue_enabled(db, user_id, venue):
+    """Mark a venue enabled under the operator's settings -- the source of
+    truth both reconcile_once and the reconciliation report read."""
+    await db.pool.execute(
+        """
+        INSERT INTO user_settings (user_id, data)
+        VALUES ($1, jsonb_build_object('venues', jsonb_build_object($2::text, jsonb_build_object('enabled', true))))
+        ON CONFLICT (user_id) DO UPDATE SET data = user_settings.data || EXCLUDED.data
+        """,
+        user_id, venue,
+    )
+
+
 async def _reconciliation(db, portfolio_id, *, venue, checked_at, discrepancies=()):
     """Store one reconciliation result through the writer production uses."""
     await record(
@@ -1403,6 +1416,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
 
             r = await _read(client, token, "/trading/reconciliation")
 
@@ -1451,6 +1465,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
             await _stale_after(
                 db, portfolio_id, venue="binance", after=timedelta(hours=1)
             )
@@ -1475,6 +1490,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
             await _stale_after(
                 db, portfolio_id, venue="binance", after=timedelta(hours=1)
             )
@@ -1489,6 +1505,36 @@ class TestReconciliationReportsWhatIsRecorded:
 
         row = _venue_row(r.json(), "binance")
         assert row["status"] == "stale"
+
+    async def test_a_deconfigured_venue_reads_disconnected_not_eternally_stale(
+        self, db, database_url
+    ):
+        """The live 2026-08-26 shape: a pass recorded when the venue was
+        configured, the configuration since removed. Nothing will ever refresh
+        that check, so `stale` would render an eternal obligation where the
+        operator removed the connection. `disconnected` keeps the stored
+        result visible as history without claiming a current check."""
+        app = _app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            token, user_id = await _operator(client)
+            portfolio_id = await _portfolio(db, user_id)
+            await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            # No _venue_enabled: the configuration is gone.
+            await _stale_after(
+                db, portfolio_id, venue="binance", after=timedelta(hours=1)
+            )
+            await _reconciliation(
+                db,
+                portfolio_id,
+                venue="binance",
+                checked_at=datetime.now(UTC) - timedelta(hours=2),
+            )
+
+            r = await _read(client, token, "/trading/reconciliation")
+
+        row = _venue_row(r.json(), "binance")
+        assert row["status"] == "disconnected"
+        assert row["checked_at"] is not None  # history, not erased
         assert row["status"] != "reconciled"
         # It did run, so the moment it ran is still reported -- `stale` is a
         # statement about the age of a real check, not the absence of one.
@@ -1509,6 +1555,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
             await _reconciliation(
                 db,
                 portfolio_id,
@@ -1530,6 +1577,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
             await _stale_after(
                 db,
                 portfolio_id,
@@ -1558,6 +1606,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
             await _stale_after(
                 db, portfolio_id, venue="binance", after=timedelta(days=7)
             )
@@ -1587,6 +1636,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
             await _cash(db, portfolio_id, venue="kraken", asset="USD", free="1000")
             await _stale_after(
                 db, portfolio_id, venue="binance", after=timedelta(hours=1)
@@ -1686,6 +1736,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
             await _cash(db, portfolio_id, venue="okx", asset="USD", free="1000")
             for venue in ("binance", "okx"):
                 await _stale_after(
@@ -1744,6 +1795,7 @@ class TestReconciliationReportsWhatIsRecorded:
             token, user_id = await _operator(client)
             portfolio_id = await _portfolio(db, user_id)
             await _cash(db, portfolio_id, venue="binance", asset="USD", free="1000")
+            await _venue_enabled(db, user_id, "binance")
             await _reconciliation(
                 db,
                 portfolio_id,

@@ -41,13 +41,15 @@ export type ReconciliationStatus =
   | "reconciled"
   | "diverged"
   | "never_run"
-  | "stale";
+  | "stale"
+  | "disconnected";
 
 export const RECONCILIATION_STATUSES: ReconciliationStatus[] = [
   "reconciled",
   "diverged",
   "never_run",
   "stale",
+  "disconnected",
 ];
 
 export interface Divergence {
@@ -292,6 +294,14 @@ export function describeReconciliation(status: string): StatusPresentation {
         label: "Stale",
         explanation:
           "The last check is too old to describe the book now. What it found then says nothing about what is there today.",
+      };
+    case "disconnected":
+      return {
+        status,
+        tone: "unresolved",
+        label: "Disconnected",
+        explanation:
+          "No connection is configured, so nothing will refresh this check. The last result is history, not a claim about the venue now.",
       };
     default:
       return {

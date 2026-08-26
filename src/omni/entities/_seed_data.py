@@ -610,3 +610,21 @@ SP500_CONSTITUENTS = (
     ("ZBRA", "Zebra Technologies", "Information Technology", "Electronic Equipment & Instruments"),
     ("ZTS", "Zoetis", "Health Care", "Pharmaceuticals"),
 )
+
+# Public companies the system scans that are NOT in the S&P 500 tuple. Kept
+# separate so the index-membership snapshot (which reads SP500_CONSTITUENTS
+# and its accessed date) never observes a member it cannot vouch for.
+#
+# Verified against the display feed 2026-08-26, ticker to daily closes:
+#   SPCX  SpaceX -- listed 2026-06-12 (52 sessions by 2026-08-26). Not yet
+#         index-eligible on seasoning; operator-requested from day one.
+#   VMRK  Vivmark Residential -- a full year of sessions; carried by the
+#         canonical constituents list while AVB/EQR, which that list drops,
+#         still trade on the feed. Those drops were NOT actioned here:
+#         removing a live company's reference row is a coverage decision,
+#         and the file's rule is re-derive-then-verify, not trust-the-diff.
+EXTRA_COMPANIES = (
+    # (symbol, name, gics_sector, gics_sub_industry)
+    ("SPCX", "SpaceX", "Industrials", "Aerospace & Defense"),
+    ("VMRK", "Vivmark Residential", "Real Estate", "Multi-Family Residential REITs"),
+)

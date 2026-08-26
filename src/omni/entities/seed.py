@@ -45,6 +45,7 @@ from dataclasses import dataclass
 
 from omni.entities._seed_data import (
     ALLOCATION_ETFS,
+    EXTRA_COMPANIES,
     INDICES,
     MACRO_ENTITIES,
     SECTOR_ETFS,
@@ -269,7 +270,12 @@ async def seed_market_universe(pool) -> SeedReport:
     company_count = 0
     edge_count = 0
     unlinked: list[tuple[str, str]] = []
-    for symbol, name, gics_sector, gics_sub_industry in SP500_CONSTITUENTS:
+    # EXTRA_COMPANIES ride the same upsert path but are NOT part of the index
+    # membership observation above -- the snapshot reads SP500_CONSTITUENTS
+    # only, so an extra can never be recorded as a member it is not.
+    for symbol, name, gics_sector, gics_sub_industry in (
+        SP500_CONSTITUENTS + EXTRA_COMPANIES
+    ):
         company_id = await _upsert(
             pool,
             COMPANY_KIND,

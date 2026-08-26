@@ -6,7 +6,9 @@ declare module "@neutron-build/core" {
     | "/console"
     | `/entity/${string}`
     | "/login"
+    | "/map"
     | "/objective"
+    | "/rankings"
     | "/scanner"
     | "/search"
     | "/settings"
