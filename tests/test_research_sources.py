@@ -363,7 +363,7 @@ class TestTheUniversePolicyIsStatedAndReproducible:
 
     def test_the_same_policy_twice_selects_the_same_universe_in_the_same_order(self):
         frame, liquidity = self._panel_frames()
-        policy = Universe(min_liquidity=Decimal("1000"), min_assets=2, max_assets=2)
+        policy = Universe(min_liquidity=Decimal(1000), min_assets=2, max_assets=2)
 
         first, _ = apply_universe(frame, policy=policy, liquidity=liquidity, source="s")
         second, _ = apply_universe(frame, policy=policy, liquidity=liquidity, source="s")
@@ -375,7 +375,7 @@ class TestTheUniversePolicyIsStatedAndReproducible:
 
         kept, dropped = apply_universe(
             frame,
-            policy=Universe(min_liquidity=Decimal("1000"), min_assets=1),
+            policy=Universe(min_liquidity=Decimal(1000), min_assets=1),
             liquidity=liquidity,
             source="s",
         )
@@ -418,7 +418,7 @@ class TestTheUniversePolicyIsStatedAndReproducible:
         with pytest.raises(Unavailable, match="it is not a result"):
             apply_universe(
                 frame,
-                policy=Universe(min_liquidity=Decimal("100000"), min_assets=10),
+                policy=Universe(min_liquidity=Decimal(100000), min_assets=10),
                 liquidity=liquidity,
                 source="s",
             )
@@ -434,7 +434,7 @@ class TestTheUniversePolicyIsStatedAndReproducible:
         with pytest.raises(Unavailable, match="no liquidity series"):
             apply_universe(
                 frame,
-                policy=Universe(min_liquidity=Decimal("10"), min_assets=1),
+                policy=Universe(min_liquidity=Decimal(10), min_assets=1),
                 liquidity=None,
                 source="s",
             )
@@ -763,7 +763,7 @@ class TestAlignmentPutsEveryAssetOnOneGrid:
         )
 
         with pytest.raises(ValueError, match="naive"):
-            align(rows, as_of=datetime(2024, 1, 1))
+            align(rows, as_of=datetime(2024, 1, 1))  # noqa: DTZ001 - naive is the point
 
 
 async def _entity(db, symbol: str) -> UUID:
@@ -895,7 +895,7 @@ class TestTheClaimStoreSourceIsAudienceScoped:
         panel = await ClaimStoreSource(
             claim_source="e2e", liquidity_field="volume", database_url=database_url,
             cache=Cache(tmp_path / "cache"),
-        ).panel(universe=Universe(min_liquidity=Decimal("100"), min_assets=10))
+        ).panel(universe=Universe(min_liquidity=Decimal(100), min_assets=10))
 
         verdicts = evaluate(
             name="sources.e2e", source="claim_store", horizons=(3,),

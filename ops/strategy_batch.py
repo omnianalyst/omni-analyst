@@ -64,7 +64,7 @@ async def fetch_universe() -> dict[str, np.ndarray]:
             arr = c.to_numpy() if hasattr(c, "to_numpy") else None
             if arr is not None and len(arr) >= 400:
                 panel[sym] = arr
-        except Exception:  # noqa: BLE001 - a dead ticker is skipped, not fatal
+        except Exception:  # noqa: BLE001, S112 - a dead ticker is skipped, not fatal
             continue
     return panel
 
@@ -210,7 +210,7 @@ async def main() -> int:
     baseline_hits = baseline_n = 0
     strategy_outcomes: dict[str, list[int]] = {name: [] for name in SIGNALS}
 
-    for sym, prices in panel.items():
+    for prices in panel.values():
         if len(prices) < 400:
             continue
         positions = {name: fn(prices) for name, fn in SIGNALS.items()}

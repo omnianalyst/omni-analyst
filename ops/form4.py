@@ -94,7 +94,7 @@ def parse_ownership_xml(
         try:
             shares = Decimal(shares_raw)
             price = Decimal(price_raw) if price_raw is not None else None
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - an unparseable row is skipped, not fatal
             continue
         value = shares * price if price is not None else None
 

@@ -161,8 +161,6 @@ def build_cells(prices: dict[str, pd.Series]) -> dict[str, list[float]]:
     }
     seen_weeks: set[tuple[str, object]] = set()
     # Weekly evaluation dates across the union of history.
-    all_days = sorted(set(btc.index))
-    week_marks = all_days[::7]
     half_lives: dict[str, float | None] = {}
 
     for alt in PAIRS:
@@ -187,7 +185,6 @@ def build_cells(prices: dict[str, pd.Series]) -> dict[str, list[float]]:
         excess = (alt_ret - btc_ret) * 10_000 - COST_BPS_PER_FLIP
 
         neg = (z < 0).astype(int)
-        widening = neg.diff().fillna(0).eq(0) & neg.eq(1)
         streak = neg.groupby((~neg).cumsum()).cumsum()
 
         # One observation per pair per ISO WEEK: overlapping daily entries

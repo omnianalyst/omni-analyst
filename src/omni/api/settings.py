@@ -274,7 +274,6 @@ def build_router(app: App) -> Router:
         consumes.
         """
         import os
-        import subprocess
         import tempfile
         import urllib.parse
         from datetime import UTC, datetime
@@ -335,7 +334,7 @@ def build_router(app: App) -> Router:
             raise unauthorized("Authentication required")
         try:
             return await send_test(app.db.pool, user)
-        except Exception as exc:  # noqa: BLE001 - the failure IS the payload
+        except Exception as exc:
             raise bad_request(str(exc)) from exc
 
     @router.get("/settings/config")

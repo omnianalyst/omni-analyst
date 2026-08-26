@@ -250,7 +250,7 @@ class Cache:
             return None
         try:
             frame = pd.read_pickle(path)
-        except Exception:
+        except Exception:  # noqa: BLE001 - the cache entry is dropped and refetched
             logger.warning("unreadable cache entry %s; refetching", path)
             return None
         return frame if isinstance(frame, pd.DataFrame) else None
@@ -284,7 +284,7 @@ async def persist(
             return await call()
         except fatal:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - recorded as `last`, re-raised below
             last = exc
             if attempt + 1 < attempts and backoff > 0:
                 await asyncio.sleep(backoff * (attempt + 1))
@@ -1484,6 +1484,4 @@ def _period_wanted(
     finishes = _period_end(period)
     if start is not None and finishes < start.floor("D"):
         return False
-    if end is not None and begins > end:
-        return False
-    return True
+    return not (end is not None and begins > end)

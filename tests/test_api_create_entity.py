@@ -8,11 +8,7 @@ kind's honest set is noise dressed as coverage.
 
 import pytest
 from neutron.test import TestClient
-
-from omni.api.coverage import build_router
-from omni.main import create_app
-
-from test_api_coverage import _Lifespan, _make_app, _auth, _user
+from test_api_coverage import _auth, _Lifespan, _make_app, _user
 
 
 @pytest.fixture(autouse=True)

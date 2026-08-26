@@ -107,7 +107,7 @@ _TICKER_RE = re.compile(r"\$([a-zA-Z0-9]{2,10})")
 _POST_SPLIT = "tgme_widget_message "
 _TIME_RE = re.compile(r'datetime="([^"]+)"')
 _TEXT_RE = re.compile(
-    r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', re.S
+    r'class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', re.DOTALL
 )
 _TAG_RE = re.compile(r"<[^>]+>")
 
@@ -296,7 +296,7 @@ async def run() -> int:
                         rec["symbol"] = (
                             pairs[0]["baseToken"]["symbol"] or "?"
                         ).lower()
-                except Exception:  # noqa: BLE001 - cosmetic enrichment
+                except Exception:  # noqa: BLE001, S110 - cosmetic enrichment
                     pass
             if snap is not None:
                 last = rec["observations"][-1]["ts"] if rec["observations"] else None
@@ -306,7 +306,7 @@ async def run() -> int:
 
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     LEDGER_OUT.parent.mkdir(parents=True, exist_ok=True)
-    with LEDGER_OUT.open("w") as fh:
+    with LEDGER_OUT.open("w") as fh:  # noqa: ASYNC230 - ops script, not the app
         for rec in ledger.values():
             fh.write(json.dumps(rec) + "\n")
 

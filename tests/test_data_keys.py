@@ -4,16 +4,14 @@ import json
 from uuid import uuid4
 
 import pytest
-
-from omni.credentials import keyring
 from neutron.auth.jwt import create_token
 from neutron.test import TestClient
-
-from omni.credentials.data_keys import configured, get_keys, put_key
-from omni.api.settings import build_router
-from omni.main import create_app
-
 from test_api_coverage import _Lifespan
+
+from omni.api.settings import build_router
+from omni.credentials import keyring
+from omni.credentials.data_keys import configured, get_keys, put_key
+from omni.main import create_app
 
 
 async def _user(db) -> uuid4:

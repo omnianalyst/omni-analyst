@@ -24,7 +24,6 @@ Run inside the scheduler container:
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 from uuid import UUID
 
 from omni.config import settings

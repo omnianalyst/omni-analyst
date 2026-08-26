@@ -59,7 +59,7 @@ def _describe_condition(condition) -> str:
             return f"data older than {condition.get('seconds')}s"
         if kind == "contradiction":
             return "sources disagree"
-    except Exception:  # noqa: BLE001 - a subject line never justifies a raise
+    except Exception:  # noqa: BLE001, S110 - a subject line never justifies a raise
         pass
     return "condition met"
 
@@ -220,7 +220,7 @@ async def dispatch(pool, alert, firings: list) -> None:
     if webhook_url:
         try:
             await _send_webhook(webhook_url, payload)
-        except Exception:  # noqa: BLE001 - logged, never blocking
+        except Exception:
             logger.warning("alert webhook delivery failed", exc_info=True)
 
     if email_to and settings.smtp_host:
@@ -228,7 +228,7 @@ async def dispatch(pool, alert, firings: list) -> None:
             await asyncio.to_thread(
                 _send_email, email_to, alert, firings, entity_symbol
             )
-        except Exception:  # noqa: BLE001 - logged, never blocking
+        except Exception:
             logger.warning("alert email delivery failed", exc_info=True)
 
 

@@ -26,7 +26,8 @@ from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.demand.ledger import direct_attention, rank
 from omni.main import create_app
 from omni.watchlist import lists as wl
-from omni.watchlist.lists import add_entity, delete_list as delete_list_fn
+from omni.watchlist.lists import add_entity
+from omni.watchlist.lists import delete_list as delete_list_fn
 
 
 async def _user(db, email) -> uuid4:

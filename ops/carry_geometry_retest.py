@@ -19,7 +19,6 @@ Run from the repo root: uv run python ops/carry_geometry_retest.py
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 from datetime import UTC, datetime
 

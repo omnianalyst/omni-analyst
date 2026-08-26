@@ -8,8 +8,6 @@ than the one asked about would be silently wrong.
 """
 
 import asyncio
-import json
-from datetime import UTC, datetime, timedelta
 
 import pytest
 from neutron.test import TestClient

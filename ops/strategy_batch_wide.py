@@ -15,14 +15,13 @@ import asyncio
 import math
 import sys
 
-import httpx
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, "ops")
-from strategy_batch import SIGNALS, barrier_outcome, HORIZON  # noqa: E402
+from strategy_batch import HORIZON, SIGNALS, barrier_outcome
 
-from omni.research.registry import Registry  # noqa: E402
+from omni.research.registry import Registry
 
 K = 2.0
 DASHBOARD_LIMIT = 8
@@ -61,7 +60,7 @@ def evaluate_rule(
 
     pairs: list[tuple[int, int]] = []
     n_calls = 0
-    for sym, prices in panel.items():
+    for prices in panel.values():
         if len(prices) < 400:
             continue
         sig = signal_fn(prices)
@@ -132,7 +131,7 @@ async def fetch_equities_yf() -> dict[str, np.ndarray]:
             arr = c.to_numpy() if hasattr(c, "to_numpy") else None
             if arr is not None and len(arr) >= 400:
                 panel[s] = arr
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - a dead ticker is skipped, not fatal
             continue
     return panel
 

@@ -593,7 +593,7 @@ def _company_history_panel(symbols: list[str]) -> pd.DataFrame:
                 auto_adjust=True, progress=False, group_by="ticker",
                 threads=False,
             )
-        except Exception:  # noqa: BLE001 - a display panel may fail quietly
+        except Exception:  # noqa: BLE001, S112 - a display panel may fail quietly
             continue
         if raw.empty:
             continue
@@ -1233,10 +1233,6 @@ def _payload(
             "balanced": "Within each category: 35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification; available measures are reweighted when history is shorter.",
             "quality": "Quality is the MEDIAN of three asset dimensions -- durable growth, consistency, downside (depth, time underwater, downside-only deviation) -- every one measured, none in the bottom quartile. Market correlation is shown but never gates: it is a portfolio-construction fact, not a defect of the business.",
             "reliability": "Reliability is the MEDIAN of four components -- durable growth, consistency, downside (depth, time underwater, downside-only deviation), diversification -- and requires every component measured: a spectacular single dimension cannot rescue a failing one, and incompletely measured names are not ranked for best overall. Backward-looking ranks within the tracked universe, not forecasts.",
-            "quality": "Quality is the MEDIAN of three asset dimensions -- durable growth, consistency, downside (depth, time underwater, downside-only deviation) -- every one measured, none in the bottom quartile. Market correlation is shown but never gates: it is a portfolio-construction fact, not a defect of the business.",
-            "reliability": "Reliability is the MEDIAN of four components -- durable growth, consistency, downside (depth, time underwater, downside-only deviation), diversification -- and requires every component measured: a spectacular single dimension cannot rescue a failing one, and incompletely measured names are not ranked for best overall. Backward-looking ranks within the tracked universe, not forecasts.",
-            "history": "One-year return is trailing. Five- and ten-year figures are annualized. Median return uses complete calendar years; long-term and consistency ranks require at least three complete years.",
-            "scope": "Scores are percentile ranks against the other assets in the same category, not forecasts or recommendations.",
             "risk_tier": f"Annualised volatility under {RISK_TIER_LOW_MAX:.0f}% is low, under {RISK_TIER_MEDIUM_MAX:.0f}% is medium, and at or above it is high. A tier showing zero means no asset in that category reached it, not that any were filtered out — diversified funds rarely clear the high threshold.",
             "sharpe": f"Sharpe is withheld below {MIN_SHARPE_VOLATILITY:.0f}% annualised volatility, where the ratio measures the denominator's noise rather than risk-adjusted return.",
         },
@@ -1625,7 +1621,7 @@ async def _ranking_faceoff(app: App, audience) -> dict[str, Any] | None:
     for round_i in range(4):
         for mode in ("quality", "reliability", "balanced"):
             if round_i < len(per_mode[mode]):
-                sym, w = per_mode[mode][round_i]
+                sym, _ = per_mode[mode][round_i]
                 if sym not in seen:
                     seen.add(sym)
                     blend.append((sym, 1.0))

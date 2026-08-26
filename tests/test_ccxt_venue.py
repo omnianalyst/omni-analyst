@@ -27,6 +27,7 @@ from __future__ import annotations
 import inspect
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
+from typing import ClassVar
 
 import pytest
 
@@ -1129,8 +1130,8 @@ class TestConnectDoesNotLeakTheSessionItOpened:
         class _Unpriced:
             id = "unpriced"
             has = HAS
-            fees = {"trading": {}}
-            markets = {k: {**v} for k, v in MARKETS.items()}
+            fees: ClassVar[dict] = {"trading": {}}
+            markets: ClassVar[dict] = {k: {**v} for k, v in MARKETS.items()}
 
             def __init__(self, options):
                 self.options = options

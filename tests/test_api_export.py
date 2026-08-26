@@ -12,11 +12,10 @@ from uuid import uuid4
 
 import pytest
 from neutron.test import TestClient
+from test_api_coverage import _Lifespan
 
 from omni.api.export import build_router
 from omni.main import create_app
-
-from test_api_coverage import _Lifespan
 
 
 async def _user(db) -> uuid4:
