@@ -23,6 +23,7 @@ refreshes on first use so resolve-then-read tests stay deterministic.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 
 from asyncpg import Pool
@@ -31,7 +32,11 @@ _REFRESH_CALIBRATION = "REFRESH MATERIALIZED VIEW CONCURRENTLY calibration_bucke
 _REFRESH_PAYOFF = "REFRESH MATERIALIZED VIEW CONCURRENTLY finding_payoff"
 
 _THROTTLE = timedelta(minutes=10)
-_last_refresh: dict[int, datetime] = {}
+# Bounded: each entry retains one (closed) pool object so its id stays
+# unambiguous for as long as the entry lives. The scheduler contributes one
+# entry; a long test session contributes at most _MAX_TRACKED.
+_MAX_TRACKED = 64
+_last_refresh: OrderedDict[int, tuple[datetime, Pool]] = OrderedDict()
 
 
 async def refresh_statistics(pool) -> None:
@@ -39,22 +44,35 @@ async def refresh_statistics(pool) -> None:
     await pool.execute(_REFRESH_CALIBRATION)
     await pool.execute(_REFRESH_PAYOFF)
     if isinstance(pool, Pool):
-        _last_refresh[id(pool)] = datetime.now(UTC)
+        key = id(pool)
+        _last_refresh[key] = (datetime.now(UTC), pool)
+        _last_refresh.move_to_end(key)
+        while len(_last_refresh) > _MAX_TRACKED:
+            _last_refresh.popitem(last=False)
 
 
 async def refresh_statistics_if_due(pool) -> bool:
     """Refresh when this pool has not refreshed within the staleness bound.
 
-    Returns whether a refresh ran. The per-pool key means the production
-    scheduler (one pool for its lifetime) throttles to one refresh per
-    interval, while a test's newly created pool always refreshes on its first
-    resolve -- resolve-then-read assertions stay deterministic without any
-    test-only hook.
+    Returns whether a refresh ran. The throttle is per pool OBJECT, not per
+    id(): CPython recycles ids after GC, and keying by bare id() let a fresh
+    test pool inherit a dead pool's recent-refresh stamp and skip its refresh
+    -- the test then read a stale calibration_bucket (decile counts from the
+    previous test) and failed, only on machines whose GC happened to reuse
+    the address within the throttle window (CI, observed 2026-08-26). The
+    stored pool reference makes the identity check exact; it is retained
+    (bounded above) so the id cannot be reused while the entry exists.
     """
-    key = id(pool) if isinstance(pool, Pool) else 0
-    last = _last_refresh.get(key)
+    if not isinstance(pool, Pool):
+        # Not a pool (a bare connection): always refresh. The only callers
+        # pass pools; this path exists so a non-pool never silently inherits
+        # a throttle stamp it cannot be identified by.
+        await refresh_statistics(pool)
+        return True
+    key = id(pool)
+    entry = _last_refresh.get(key)
     now = datetime.now(UTC)
-    if last is not None and now - last < _THROTTLE:
+    if entry is not None and entry[1] is pool and now - entry[0] < _THROTTLE:
         return False
     await refresh_statistics(pool)
     return True
