@@ -638,19 +638,72 @@
 .map-canvas {
   position: relative;
   margin-top: 18px;
-  overflow: auto;
-  max-height: 84vh;
+  overflow: hidden;
+  height: 84vh;
   border: 1px solid var(--d-line);
   border-radius: 10px;
   background: rgba(7, 10, 18, 0.5);
+  cursor: grab;
+  touch-action: none;
 }
+.map-canvas:active { cursor: grabbing; }
+/* The stage is what moves: flex-centering keeps the 1500px content centered
+   at rest, the transform pans/zooms it under the cursor. Content larger
+   than the pane centers instead of left-anchoring because the pane is a
+   flex container with safe centering. */
+.map-stage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  justify-content: safe center;
+  align-items: safe center;
+  will-change: transform;
+}
+.map-canvas-inner { width: max-content; }
 .map-svg {
-  /* Vectors: rendered large and scrolled, never shrunk to fit. */
+  /* Vectors: rendered large, panned and zoomed, never shrunk to fit. */
   width: 1500px;
   min-width: 1500px;
   height: auto;
   display: block;
-  margin: 0 auto;
+}
+.map-controls {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--d-line);
+  border-radius: 10px;
+  background: rgba(11, 17, 28, 0.92);
+}
+.map-ctl {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--d-dim);
+  font: 600 16px inherit;
+  cursor: pointer;
+}
+.map-ctl:hover { background: rgba(147, 167, 196, 0.15); color: var(--d-ink); }
+.map-ctl-reset {
+  width: auto;
+  padding: 0 10px;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+}
+.map-zoom-readout {
+  min-width: 42px;
+  text-align: center;
+  font: 600 11px var(--mono);
+  color: var(--d-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 /* The hover card: full measured breakdown, HTML so it ignores the canvas

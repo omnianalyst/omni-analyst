@@ -369,6 +369,61 @@ export function MapView() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [pop, setPop] = useState<{ chip: Chip; x: number; y: number } | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  // Canvas navigation: pan by drag or plain wheel, zoom with ctrl/cmd+wheel
+  // or the buttons, always anchored at the cursor. No scrollbars anywhere.
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 });
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const dragRef = useRef<{ startX: number; startY: number; baseX: number; baseY: number; moved: boolean } | null>(null);
+  const lastDragRef = useRef(false);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const cx = event.clientX - rect.left;
+      const cy = event.clientY - rect.top;
+      const { x, y, k } = viewRef.current;
+      if (event.ctrlKey || event.metaKey) {
+        const next = Math.min(3, Math.max(0.35, k * Math.exp(-event.deltaY * 0.0022)));
+        setView({
+          k: next,
+          x: cx - ((cx - x) * next) / k,
+          y: cy - ((cy - y) * next) / k,
+        });
+      } else {
+        setView({ x: x - event.deltaX, y: y - event.deltaY, k });
+      }
+      setPop(null);
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const centerView = () => {
+    const canvas = canvasRef.current;
+    setView({ x: 0, y: 0, k: 1 });
+    if (canvas !== null) {
+      canvas.style.setProperty("--map-initial", "1");
+    }
+  };
+
+  const zoomBy = (factor: number) => {
+    const canvas = canvasRef.current;
+    if (canvas === null) return;
+    const rect = canvas.getBoundingClientRect();
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    const { x, y, k } = viewRef.current;
+    const next = Math.min(3, Math.max(0.35, k * factor));
+    setView({
+      k: next,
+      x: cx - ((cx - x) * next) / k,
+      y: cy - ((cy - y) * next) / k,
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -405,11 +460,51 @@ export function MapView() {
     const rect = canvas.getBoundingClientRect();
     const W = 292;
     const H = chip.asset ? 428 : 240;
-    let x = event.clientX - rect.left + canvas.scrollLeft + 14;
-    let y = event.clientY - rect.top + canvas.scrollTop + 14;
-    if (x + W > canvas.scrollWidth) x = event.clientX - rect.left + canvas.scrollLeft - W - 8;
-    if (y + H > canvas.scrollHeight) y = Math.max(8, canvas.scrollHeight - H - 8);
+    let x = event.clientX - rect.left + 14;
+    let y = event.clientY - rect.top + 14;
+    if (x + W > rect.width) x = event.clientX - rect.left - W - 8;
+    if (y + H > rect.height) y = Math.max(8, rect.height - H - 8);
     setPop({ chip, x, y });
+  };
+
+  const onDragStart = (event: MouseEvent) => {
+    if (event.button !== 0) return;
+    dragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      baseX: viewRef.current.x,
+      baseY: viewRef.current.y,
+      moved: false,
+    };
+  };
+
+  const onDragMove = (event: MouseEvent) => {
+    const drag = dragRef.current;
+    if (drag === null) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    drag.moved = true;
+    setPop(null);
+    setView((v) => ({ ...v, x: drag.baseX + dx, y: drag.baseY + dy }));
+  };
+
+  const onDragEnd = () => {
+    // Keep the record through the synthetic click that follows mouseup --
+    // it is what tells the click handler the gesture was a drag. Cleared
+    // after one click or replaced by the next drag.
+    const drag = dragRef.current;
+    if (drag !== null && drag.moved) lastDragRef.current = true;
+    dragRef.current = null;
+  };
+
+  // A drag that crossed a chip must not become that chip's click.
+  const swallowDragClick = (event: Event) => {
+    if (lastDragRef.current) {
+      lastDragRef.current = false;
+      event.preventDefault();
+      event.stopPropagation();
+    }
   };
 
   return (
@@ -421,8 +516,8 @@ export function MapView() {
             Every measured group as a pyramid touching one point: the apex is its best
             name, deeper ranks sit further out along the widening wedge. Stocks, defensive
             assets and crypto rank by balanced score; companies rank within sector by{" "}
-            {data.sector_coverage.window_sessions}-session return. Hover a name for its
-            measured facts; the tables carry the precision.
+            {data.sector_coverage.window_sessions}-session return. Drag or scroll to move,
+            ctrl/cmd+scroll or the buttons to zoom, hover a name for its measured facts.
           </p>
         </div>
         <div class="discover-compact-meta">
@@ -431,8 +526,21 @@ export function MapView() {
         </div>
       </header>
 
-      <div class="map-canvas" ref={canvasRef} onScroll={() => setPop(null)}>
+      <div
+        class="map-canvas"
+        ref={canvasRef}
+        onMouseDown={onDragStart}
+        onMouseMove={onDragMove}
+        onMouseUp={onDragEnd}
+        onMouseLeave={onDragEnd}
+        onClickCapture={swallowDragClick}
+      >
         {pop ? <MapPopover chip={pop.chip} x={pop.x} y={pop.y} /> : null}
+        <div
+          class="map-stage"
+          style={`transform:translate(${view.x}px,${view.y}px) scale(${view.k})`}
+        >
+        <div class="map-canvas-inner">
         <svg
           viewBox={`0 0 ${SIZE} ${SIZE}`}
           class="map-svg"
@@ -527,6 +635,14 @@ export function MapView() {
             </text>
           )}
         </svg>
+        </div>
+        </div>
+        <div class="map-controls" role="toolbar" aria-label="Map navigation">
+          <button type="button" class="map-ctl" onClick={() => zoomBy(1 / 1.25)} aria-label="Zoom out">−</button>
+          <span class="map-zoom-readout">{Math.round(view.k * 100)}%</span>
+          <button type="button" class="map-ctl" onClick={() => zoomBy(1.25)} aria-label="Zoom in">+</button>
+          <button type="button" class="map-ctl map-ctl-reset" onClick={centerView}>Reset</button>
+        </div>
       </div>
 
       <p class="map-foot">

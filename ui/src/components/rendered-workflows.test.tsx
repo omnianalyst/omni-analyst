@@ -895,6 +895,25 @@ describe("the Discover map", () => {
     container.remove();
   });
 
+  it("zooms the canvas from the controls and resets", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json(mapPayload())));
+    const container = root();
+    render(<MapView />, container);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".map-svg > g").length).toBe(6),
+    );
+
+    const stage = () => container.querySelector(".map-stage")?.getAttribute("style") ?? "";
+    expect(stage()).toContain("scale(1)");
+    await act(() => button(container, "+").click());
+    expect(stage()).toContain("scale(1.25)");
+    expect(container.querySelector(".map-zoom-readout")?.textContent).toBe("125%");
+    await act(() => button(container, "−").click());
+    await act(() => button(container, "Reset").click());
+    expect(stage()).toContain("scale(1)");
+    container.remove();
+  });
+
   it("orders sector wedges by their own leader, hottest first", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => json(mapPayload())));
     const container = root();
