@@ -46,6 +46,15 @@ MAX_ATTEMPTS = 6
 #: that window while freeing ~80% of the rate limit for productive fills.
 NO_NEW_DATA_COOLDOWN_SECONDS = 6 * 3600
 
+#: An `unverified` gap closes only when a SECOND source corroborates the claim.
+#: When the single registered source answers "all already held", it has just
+#: re-supplied its own data -- self-corroboration is impossible, and the gap
+#: cannot close by waiting (a new source arrives as a code change, not a clock
+#: expiry). Live 2026-08-26: ~530 such gaps re-querying on every 6h expiry was
+#: the bulk of the unfillable count (~500/day). A day is long enough to catch a
+#: newly registered corroborating source promptly without the daily churn.
+UNVERIFIED_RECHECK_COOLDOWN_SECONDS = 24 * 3600
+
 # A capability takes the gap's target and returns drafts. Anything that cannot
 # answer raises Unavailable with a reason a human can act on.
 Capability = Callable[..., Awaitable[Sequence[ClaimDraft]]]
@@ -277,9 +286,12 @@ async def fill_gap(
                 f"(all {len(drafts)} already held)"
             )
             await _record(pool, gap_id, registration.name, "unfillable", None, reason)
-            await pool.execute(
-                _COOLDOWN, gap_id, str(NO_NEW_DATA_COOLDOWN_SECONDS)
+            cooldown = (
+                UNVERIFIED_RECHECK_COOLDOWN_SECONDS
+                if gap["gap_class"] == "unverified"
+                else NO_NEW_DATA_COOLDOWN_SECONDS
             )
+            await pool.execute(_COOLDOWN, gap_id, str(cooldown))
             return FillResult(gap_id, "unfillable", registration.name, [], reason)
 
         first = claim_ids[0]

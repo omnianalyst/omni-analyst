@@ -18,7 +18,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from omni.capability.registry import Callability, Capability, Maturity, Registry
-from omni.fill.pipeline import MAX_ATTEMPTS, NO_NEW_DATA_COOLDOWN_SECONDS, run_once
+from omni.fill.pipeline import (
+    MAX_ATTEMPTS,
+    NO_NEW_DATA_COOLDOWN_SECONDS,
+    UNVERIFIED_RECHECK_COOLDOWN_SECONDS,
+    run_once,
+)
 from omni.ingest.protocol import ClaimDraft, Unavailable
 
 NOW = datetime(2026, 7, 27, tzinfo=UTC)
@@ -220,6 +225,58 @@ class TestNoNewDataCooldown:
         delta = (gap["next_attempt_at"].replace(tzinfo=UTC)
                  - datetime.now(UTC)).total_seconds()
         assert NO_NEW_DATA_COOLDOWN_SECONDS - 600 < delta < NO_NEW_DATA_COOLDOWN_SECONDS + 600
+
+    async def test_unverified_gap_gets_the_daylong_recheck_cooldown(self, db):
+        """The 2026-08-26 live finding: ~530 price_snapshot/unverified gaps,
+        each re-queried on every 6h expiry -- a source being asked to
+        corroborate its own claims, ~500 provider calls a day that cannot
+        close the gap. An unverified 'all already held' must cool down for a
+        day, not six hours; anything shorter keeps the churn.
+        """
+        entity_id = await _entity(db)
+        await db.pool.execute(
+            "INSERT INTO claim (entity_id, claim_type, key, value, source, "
+            "event_date, knowledge_date, confidence, redistributable, "
+            "audience_user_id, derivation) "
+            "VALUES ($1,'macro_series_point'::claim_type,'GDP',"
+            "'{\"amount\": 1}'::jsonb,'fred',$2,$3,1.0,'allowed',NULL,'ingested')",
+            entity_id,
+            NOW - timedelta(days=1),
+            NOW,
+        )
+        gap_id = await db.pool.fetchval(
+            "INSERT INTO gap (entity_id, claim_type, key, gap_class, score) "
+            "VALUES ($1, 'macro_series_point'::claim_type, $2, 'unverified', 1.0) "
+            "RETURNING id",
+            entity_id,
+            "GDP",
+        )
+
+        rec = Recorder([_draft("macro_series_point", "GDP")])
+        registry = Registry()
+        registry.add(_cap("fred", ("macro_series_point",), rec))
+
+        result = await run_once(db.pool, registry=registry, worker_id="w1")
+        assert result.outcome == "unfillable"
+        assert result.reason is not None and "already held" in result.reason
+
+        gap = await db.pool.fetchrow(
+            "SELECT attempts, resolved_at, next_attempt_at FROM gap WHERE id = $1",
+            gap_id,
+        )
+        assert gap["attempts"] == 0
+        assert gap["resolved_at"] is None
+        delta = (gap["next_attempt_at"].replace(tzinfo=UTC)
+                 - datetime.now(UTC)).total_seconds()
+        # The discriminating band, written against the SEPARATION from the
+        # 6h default rather than against the imported constant (importing it
+        # would let a regression to 6h mutate the expectation and still pass).
+        # A day out, and strictly more than 12h beyond the six-hour default.
+        assert (
+            NO_NEW_DATA_COOLDOWN_SECONDS + 12 * 3600
+            < delta
+            < UNVERIFIED_RECHECK_COOLDOWN_SECONDS + 600
+        ), f"expected ~24h cooldown, got {delta / 3600:.1f}h"
 
 
 class TestUnreachableSourceExhaustsAndResolves:
