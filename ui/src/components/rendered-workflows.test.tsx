@@ -20,6 +20,7 @@ import { CommandPalette, OPEN_COMMAND_PALETTE } from "./CommandPalette";
 import { DiscoverView } from "./DiscoverView";
 import { MapView } from "./MapView";
 import { ScannerView } from "./ScannerView";
+import { VerdictView } from "./VerdictView";
 import { LoginView } from "./LoginView";
 import { PortfolioView } from "./PortfolioView";
 import { SetupView } from "./SetupView";
@@ -949,5 +950,50 @@ describe("the Discover map", () => {
       expect(container.querySelector(".error-state, .quiet-state, [class*=error]")).toBeTruthy(),
     );
     container.remove();
+  });
+});
+
+describe("the verdict page", () => {
+  it("states the two surviving mixes with their measured numbers, and the dominated shapes beneath", () => {
+    const container = root();
+    render(<VerdictView />, container);
+
+    const cards = container.querySelectorAll(".verdict-card");
+    expect(cards.length).toBe(2);
+    // The Pareto pair, with their measured numbers and the as-of stated.
+    expect(cards[0].textContent).toContain("Steady");
+    expect(cards[0].textContent).toContain("6.9%");
+    expect(cards[0].textContent).toContain("-11.8%");
+    expect(cards[1].textContent).toContain("41.3%");
+    expect(cards[1].textContent).toContain("-23.2%");
+    expect(container.querySelector(".verdict-head p")?.textContent).toContain("2026-08-26");
+
+    // Beaten but not hidden: both dominated shapes named with their numbers.
+    const dominated = container.querySelectorAll(".verdict-dominated p");
+    expect(dominated.length).toBe(2);
+    expect(dominated[1].textContent).toContain("Mag 7");
+    expect(dominated[1].textContent).toContain("-47.3%");
+
+    // The way out: full rankings and the map, one click each.
+    const links = Array.from(container.querySelectorAll(".verdict-links a")).map(
+      (a) => (a as HTMLAnchorElement).getAttribute("href"),
+    );
+    expect(links).toEqual(["/rankings", "/map"]);
+    container.remove();
+  });
+
+  it("serves the full tables on /rankings and the verdict on Discover", () => {
+    const verdict = root();
+    render(<DiscoverView />, verdict);
+    expect(verdict.querySelector(".verdict-view")).not.toBeNull();
+    expect(verdict.querySelector(".scanner-view")).toBeNull();
+    verdict.remove();
+
+    const rankings = root();
+    render(<DiscoverView body="rankings" />, rankings);
+    expect(rankings.querySelector(".verdict-view")).toBeNull();
+    // The old deep links still open overlays over the tables.
+    expect(rankings.querySelector(".portfolio-header-actions")?.textContent).toContain("Saved");
+    rankings.remove();
   });
 });

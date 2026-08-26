@@ -3,6 +3,7 @@ import { ScannerView } from "./ScannerView";
 import { SearchView } from "./SearchView";
 import { AlertsView } from "./AlertsView";
 import { WatchlistView } from "./WatchlistView";
+import { VerdictView } from "./VerdictView";
 
 // The page IS the ranked overview. Its actions -- Saved, Alerts, Ask -- sit
 // top-right, the same pattern Portfolio uses; Ask opens the objective page
@@ -18,7 +19,7 @@ function overlayFromUrl(): "search" | "watchlist" | "alerts" | null {
   return null;
 }
 
-export function DiscoverView() {
+export function DiscoverView({ body = "verdict" }: { body?: "verdict" | "rankings" }) {
   const [overlay, setOverlay] = useState<
     "search" | "watchlist" | "alerts" | null
   >(null);
@@ -106,7 +107,7 @@ export function DiscoverView() {
         </Overlay>
       ) : null}
 
-      <ScannerView />
+      {body === "rankings" ? <ScannerView /> : <VerdictView />}
     </div>
   );
 }

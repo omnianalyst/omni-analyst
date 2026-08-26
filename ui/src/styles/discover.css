@@ -880,3 +880,115 @@
   font-size: 11px;
   color: var(--d-faint);
 }
+
+/* ============================================================
+   The verdict page: Discover's front door. Two mixes that
+   survived the comparison on every axis, the beaten shapes
+   stated beneath, nothing to configure.
+   ============================================================ */
+.verdict-view {
+  margin-top: 30px;
+}
+.verdict-head {
+  border-top: 1px solid var(--d-line);
+  padding-top: 22px;
+}
+.verdict-head h1 {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--d-ink);
+}
+.verdict-head p {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--d-faint);
+  max-width: 62ch;
+}
+.verdict-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--s-7);
+  margin-top: 22px;
+}
+.verdict-card {
+  border-top: 2px solid var(--d-line);
+  padding-top: 14px;
+}
+.verdict-card header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.verdict-card header span {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.verdict-card header small {
+  font-size: 11px;
+  color: var(--d-faint);
+}
+.verdict-mix {
+  margin: 12px 0 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--d-ink);
+  line-height: 1.5;
+}
+.verdict-facts {
+  display: flex;
+  gap: var(--s-7);
+  margin: 14px 0 0;
+  flex-wrap: wrap;
+}
+.verdict-facts dt {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--d-faint);
+}
+.verdict-facts dd {
+  margin: 2px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--d-ink);
+}
+.verdict-dominated {
+  margin-top: 42px;
+  border-top: 1px solid var(--d-line);
+  padding-top: 18px;
+}
+.verdict-dominated h2 {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--d-dim);
+}
+.verdict-dominated p {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--d-dim);
+  max-width: 72ch;
+}
+.verdict-dominated strong {
+  color: var(--d-ink);
+  font-weight: 600;
+}
+.verdict-links {
+  margin-top: 34px;
+  display: flex;
+  gap: var(--s-4);
+}
+@media (max-width: 860px) {
+  .verdict-grid {
+    grid-template-columns: 1fr;
+    gap: var(--s-6);
+  }
+}
