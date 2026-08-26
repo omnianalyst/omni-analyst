@@ -1005,3 +1005,87 @@ describe("the verdict page", () => {
     rankings.remove();
   });
 });
+
+describe("manual holdings removal", () => {
+  // The file-level beforeEach installs the token; authedGetJson refuses to
+  // fetch without it, so it must stay present here.
+  beforeEach(() => {
+    localStorage.setItem(AUTH_TOKEN_KEY, "test-token");
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const holding = {
+    id: "fb701657-365b-4e2e-a092-ed5e757ceee7",
+    symbol: "BTC",
+    quantity: 198.2,
+    cost_basis: null,
+    currency: "USD",
+    note: null,
+    created_at: "2026-08-26T23:00:00Z",
+    updated_at: "2026-08-26T23:00:00Z",
+    last_price: null,
+    price_as_of: null,
+    value: null,
+    unrealized_pnl: null,
+  };
+  const emptyRecord = {
+    holdings: [],
+    summary: { positions: 0, priced: 0, total_value: null, total_pnl: null, currency: "USD" },
+  };
+
+  it("treats a 404 on remove as already gone: refreshes, shows no error", async () => {
+    const calls: string[] = [];
+    let deletedOnce = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      const path = new URL(input).pathname;
+      calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/holdings") {
+        return json(deletedOnce ? emptyRecord : {
+          holdings: [holding],
+          summary: { positions: 1, priced: 0, total_value: null, total_pnl: null, currency: "USD" },
+        });
+      }
+      if (path.startsWith("/holdings/") && init?.method === "DELETE") {
+        deletedOnce = true;
+        return json({ detail: "no holding for this account" }, 404);
+      }
+      return json({}, 503);
+    }));
+    const container = root();
+    const { HoldingsTable } = await import("./ManualHoldings");
+    render(<HoldingsTable refreshKey={0} />, container);
+    await waitFor(() => expect(button(container, "Remove").textContent).toContain("Remove"));
+
+    await act(() => button(container, "Remove").click());
+    await waitFor(() =>
+      expect(container.textContent).toContain("Nothing is tracked yet"),
+    );
+    // The 404 was consumed as success: a delete was attempted, the list
+    // reloaded, and no error line appeared.
+    expect(calls.filter((c) => c.startsWith("DELETE")).length).toBe(1);
+    expect(container.textContent).not.toContain("not here");
+    container.remove();
+  });
+
+  it("still reports real failures and never leaves the button stuck busy", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      const path = new URL(input).pathname;
+      if (path === "/holdings") return json({ holdings: [holding], summary: { positions: 1, priced: 0, total_value: null, total_pnl: null, currency: "USD" } });
+      if (init?.method === "DELETE") return json({ detail: "upstream broke" }, 503);
+      return json({}, 503);
+    }));
+    const container = root();
+    const { HoldingsTable } = await import("./ManualHoldings");
+    render(<HoldingsTable refreshKey={0} />, container);
+    await waitFor(() => expect(button(container, "Remove").textContent).toContain("Remove"));
+
+    await act(() => button(container, "Remove").click());
+    await waitFor(() => expect(container.textContent).toContain("The server could not answer."));
+    // busy reset in finally: the button accepts another click.
+    const removeButton = button(container, "Remove");
+    expect(removeButton.disabled).toBe(false);
+    container.remove();
+  });
+});

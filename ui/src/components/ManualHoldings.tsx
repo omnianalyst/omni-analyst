@@ -1,6 +1,6 @@
 import type * as preact from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { describeError } from "../lib/api";
+import { ApiHttpError, describeError } from "../lib/api";
 import {
   addHolding,
   describeHoldings,
@@ -141,11 +141,20 @@ function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => 
 
   async function remove() {
     setBusy(true);
+    setError(null);
     try {
       await removeHolding(holding.id);
       onChanged();
     } catch (cause) {
+      // A 404 on delete means the holding is already gone -- a second click,
+      // or another tab's stale list. The asked-for outcome has happened, so
+      // refresh and stay quiet rather than reporting "that is not here".
+      if (cause instanceof ApiHttpError && cause.status === 404) {
+        onChanged();
+        return;
+      }
       setError(describeError(cause).message);
+    } finally {
       setBusy(false);
     }
   }
