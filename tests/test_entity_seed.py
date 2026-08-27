@@ -16,6 +16,7 @@ import json
 import pytest
 
 from omni.entities._seed_data import (
+    EXTRA_COMPANIES,
     ALLOCATION_ETFS,
     INDICES,
     SECTOR_ETFS,
@@ -64,7 +65,7 @@ class TestSeed:
     async def test_creates_companies_etfs_and_indices_with_right_kinds(self, db):
         report = await seed_market_universe(db.pool)
 
-        assert report.companies == len(SP500_CONSTITUENTS)
+        assert report.companies == len(SP500_CONSTITUENTS) + len(EXTRA_COMPANIES)
         assert report.sector_etfs == len(SECTOR_ETFS)
         assert report.allocation_etfs == len(ALLOCATION_ETFS)
         assert report.indices == len(INDICES)
@@ -76,7 +77,7 @@ class TestSeed:
                 "SELECT kind, count(*)::int AS n FROM entity GROUP BY kind"
             )
         }
-        assert kinds[COMPANY_KIND] == len(SP500_CONSTITUENTS)
+        assert kinds[COMPANY_KIND] == len(SP500_CONSTITUENTS) + len(EXTRA_COMPANIES)
         assert kinds[SECTOR_ETF_KIND] == len(SECTOR_ETFS)
         assert kinds[ETF_KIND] == len(ALLOCATION_ETFS)
         assert kinds[INDEX_KIND] == len(INDICES)
@@ -195,7 +196,11 @@ class TestSeed:
         report = await seed_market_universe(db.pool)
 
         sectors_with_etf = {s for _, _, s in SECTOR_ETFS}
-        expected = sum(1 for _, _, s, _ in SP500_CONSTITUENTS if s in sectors_with_etf)
+        expected = sum(
+            1
+            for _, _, s, _ in SP500_CONSTITUENTS + EXTRA_COMPANIES
+            if s in sectors_with_etf
+        )
         assert report.edges == expected
         assert report.unlinked == ()
 
@@ -286,10 +291,10 @@ class TestEntryPoint:
         with caplog.at_level(logging.INFO, logger="omni.entities.seed"):
             report = await run(db.pool)
 
-        assert report.companies == len(SP500_CONSTITUENTS)
+        assert report.companies == len(SP500_CONSTITUENTS) + len(EXTRA_COMPANIES)
         assert report.sector_etfs == len(SECTOR_ETFS)
         summary = [
             r for r in caplog.records if "market universe seeded" in r.message
         ]
         assert summary, "run() logged no summary line"
-        assert str(len(SP500_CONSTITUENTS)) in summary[0].message
+        assert str(len(SP500_CONSTITUENTS) + len(EXTRA_COMPANIES)) in summary[0].message
