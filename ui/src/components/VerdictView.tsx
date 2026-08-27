@@ -154,11 +154,6 @@ export function VerdictView() {
           </p>
         ))}
       </section>
-
-      <nav class="verdict-links">
-        <a class="btn-secondary compact-button" href="/rankings">Every measured asset</a>
-        <a class="btn-secondary compact-button" href="/map">The map</a>
-      </nav>
     </div>
   );
 }

@@ -982,11 +982,9 @@ describe("the verdict page", () => {
     expect(dominated[1].textContent).toContain("Mag 7");
     expect(dominated[1].textContent).toContain("-45.7%");
 
-    // The way out: full rankings and the map, one click each.
-    const links = Array.from(container.querySelectorAll(".verdict-links a")).map(
-      (a) => (a as HTMLAnchorElement).getAttribute("href"),
-    );
-    expect(links).toEqual(["/rankings", "/map"]);
+    // The page body carries no footer nav -- the way out lives in the top
+    // bar, which DiscoverView renders (asserted in the DiscoverView test).
+    expect(container.querySelector(".verdict-links")).toBeNull();
     container.remove();
   });
 
@@ -1002,7 +1000,17 @@ describe("the verdict page", () => {
     expect(rankings.querySelector(".verdict-view")).toBeNull();
     // The old deep links still open overlays over the tables.
     expect(rankings.querySelector(".portfolio-header-actions")?.textContent).toContain("Saved");
+    // On rankings the bar hides the self-link; on the verdict it shows it.
+    expect(rankings.querySelector('.portfolio-header-actions a[href="/rankings"]')).toBeNull();
     rankings.remove();
+
+    const top = root();
+    render(<DiscoverView />, top);
+    const bar = top.querySelector(".portfolio-header-actions");
+    expect(bar?.textContent).toContain("Rankings");
+    expect(top.querySelector('.portfolio-header-actions a[href="/map"]')).not.toBeNull();
+    expect(bar?.textContent).toContain("Saved");
+    top.remove();
   });
 });
 

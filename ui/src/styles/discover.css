@@ -1005,11 +1005,6 @@
   color: var(--d-ink);
   font-weight: 600;
 }
-.verdict-links {
-  margin-top: 40px;
-  display: flex;
-  gap: var(--s-4);
-}
 @media (max-width: 760px) {
   .v-verdict {
     grid-template-columns: 1fr;
