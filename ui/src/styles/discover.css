@@ -650,25 +650,20 @@
   touch-action: none;
 }
 .map-canvas:active { cursor: grabbing; }
-/* The stage is what moves: flex-centering keeps the 1500px content centered
-   at rest, the transform pans/zooms it under the cursor. Content larger
-   than the pane centers instead of left-anchoring because the pane is a
-   flex container with safe centering. */
+/* The stage is what moves: transform-origin 0 0 so screen = t + k*p holds
+   exactly, and the component centers the fan by computing t -- flex
+   centering (`safe center`) degrades to start when the 1500px stage
+   overflows the pane, which opened the map on its top-left quadrant. */
 .map-stage {
   width: 100%;
   height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  justify-content: safe center;
-  align-items: safe center;
+  transform-origin: 0 0;
   will-change: transform;
 }
 .map-canvas-inner { width: max-content; }
 .map-svg {
   /* Vectors: rendered large, panned and zoomed, never shrunk to fit. */
   width: 1500px;
-  min-width: 1500px;
   height: auto;
   display: block;
 }

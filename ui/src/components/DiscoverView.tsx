@@ -58,6 +58,15 @@ export function DiscoverView({ body = "verdict" }: { body?: "verdict" | "ranking
     <div class="discover-view">
       <div class="discover-overlay-bar">
         <div class="portfolio-header-actions">
+          {body === "rankings" ? (
+            <a
+              class="btn-secondary compact-button"
+              href="/search"
+              title="The verdict -- the mixes the measured decade rewarded"
+            >
+              Verdict
+            </a>
+          ) : null}
           {body === "verdict" ? (
             <a
               class="btn-secondary compact-button"

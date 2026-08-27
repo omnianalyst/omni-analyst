@@ -402,13 +402,29 @@ export function MapView() {
     return () => canvas.removeEventListener("wheel", onWheel);
   }, []);
 
+  // The fan's center in stage coordinates: the SVG renders at 1500px for a
+  // 1000-unit viewBox, so the center sits at 750px. Centering places that
+  // point at the pane's center via the transform -- flex centering cannot be
+  // trusted here (`safe center` degrades to start on overflow, which opened
+  // the map on its top-left quadrant).
+  const STAGE_RENDER = 1500;
+
   const centerView = () => {
     const canvas = canvasRef.current;
-    setView({ x: 0, y: 0, k: 1 });
-    if (canvas !== null) {
-      canvas.style.setProperty("--map-initial", "1");
-    }
+    if (canvas === null) return;
+    const rect = canvas.getBoundingClientRect();
+    setView({
+      x: rect.width / 2 - STAGE_RENDER / 2,
+      y: rect.height / 2 - STAGE_RENDER / 2,
+      k: 1,
+    });
   };
+
+  // Center once the canvas exists (it renders after the payload arrives).
+  useEffect(() => {
+    if (state.kind === "ok") centerView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.kind]);
 
   const zoomBy = (factor: number) => {
     const canvas = canvasRef.current;
@@ -526,8 +542,13 @@ export function MapView() {
           </p>
         </div>
         <div class="discover-compact-meta">
-          <a class="btn-secondary compact-button" href="/search">Verdict</a>
-          <a class="btn-secondary compact-button" href="/rankings">Tables</a>
+          <div class="portfolio-header-actions">
+            <a class="btn-secondary compact-button" href="/search">Verdict</a>
+            <a class="btn-secondary compact-button" href="/rankings">Rankings</a>
+            <a class="btn-secondary compact-button" href="/objective" title="Ask the system a question">Ask</a>
+            <a class="btn-secondary compact-button" href="/search?tab=watchlist">Saved</a>
+            <a class="btn-secondary compact-button" href="/search?tab=alerts">Alerts</a>
+          </div>
           <time dateTime={data.as_of}>Updated {new Date(data.as_of).toLocaleString()}</time>
         </div>
       </header>

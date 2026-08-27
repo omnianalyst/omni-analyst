@@ -988,7 +988,7 @@ describe("the verdict page", () => {
     container.remove();
   });
 
-  it("serves the full tables on /rankings and the verdict on Discover", () => {
+  it("serves the full tables on /rankings and the verdict on Discover", async () => {
     const verdict = root();
     render(<DiscoverView />, verdict);
     expect(verdict.querySelector(".verdict-view")).not.toBeNull();
@@ -1000,8 +1000,10 @@ describe("the verdict page", () => {
     expect(rankings.querySelector(".verdict-view")).toBeNull();
     // The old deep links still open overlays over the tables.
     expect(rankings.querySelector(".portfolio-header-actions")?.textContent).toContain("Saved");
-    // On rankings the bar hides the self-link; on the verdict it shows it.
+    // On rankings the bar hides the self-link and shows Verdict instead;
+    // on the verdict it shows Rankings. Same cluster everywhere.
     expect(rankings.querySelector('.portfolio-header-actions a[href="/rankings"]')).toBeNull();
+    expect(rankings.querySelector('.portfolio-header-actions a[href="/search"]')?.textContent).toContain("Verdict");
     rankings.remove();
 
     const top = root();
@@ -1011,6 +1013,26 @@ describe("the verdict page", () => {
     expect(top.querySelector('.portfolio-header-actions a[href="/map"]')).not.toBeNull();
     expect(bar?.textContent).toContain("Saved");
     top.remove();
+
+    // The map carries the same cluster (Saved/Alerts deep-link to the
+    // overlays Discover already opens from ?tab=), minus its own link.
+    const mapHolder = root();
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      category_rankings: { stocks: [], defensive: [], crypto: [] },
+      sectors: [],
+      sector_coverage: { available: 0, total: 11, window_sessions: 30 },
+      as_of: "2026-08-24T22:00:00Z",
+    })));
+    render(<MapView />, mapHolder);
+    await waitFor(() =>
+      expect(mapHolder.querySelector(".map-heading")).not.toBeNull(),
+    );
+    const mapBar = mapHolder.querySelector(".portfolio-header-actions");
+    expect(mapBar?.textContent).toContain("Verdict");
+    expect(mapBar?.textContent).toContain("Rankings");
+    expect(mapBar?.textContent).toContain("Saved");
+    expect(mapHolder.querySelector('.portfolio-header-actions a[href="/map"]')).toBeNull();
+    mapHolder.remove();
   });
 });
 
