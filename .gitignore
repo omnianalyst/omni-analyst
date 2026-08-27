@@ -18,3 +18,13 @@ docs/NEXT_SESSION.md
 _orchestrator/
 docs/research/calls_ledger.jsonl
 ops/call_tracker.config.json
+
+# Defensive: transient operator/agent context must never land in a public
+# history. NEXT_SESSION.md above is the deliberate private file; these catch
+# the filenames a future session might invent for the same purpose.
+SESSION_NOTES.md
+*_NOTES.md
+HANDOFF*.md
+*HANDOFF*.md
+.claude/
+.opencode/
