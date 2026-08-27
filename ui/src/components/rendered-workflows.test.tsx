@@ -841,8 +841,12 @@ describe("the Discover map", () => {
     await waitFor(() =>
       expect(container.querySelector(".map-center-symbol")?.textContent).toContain("SPY"),
     );
+    // The caption states the ordinal fact without crowning: the centered
+    // name holds the top balanced score, and scores rank within a class.
     expect(container.querySelector(".map-center-caption")?.textContent)
-      .toContain("balanced 72");
+      .toContain("top balanced score");
+    expect(container.querySelector(".map-center-caption")?.textContent)
+      .toContain("within its class");
     // NEWP carries balanced 99 but incomplete evidence; it never enters.
     expect(container.textContent).not.toContain("NEWP");
 
@@ -1027,7 +1031,7 @@ describe("the verdict page", () => {
     await waitFor(() =>
       expect(mapHolder.querySelector(".map-heading")).not.toBeNull(),
     );
-    const mapBar = mapHolder.querySelector(".portfolio-header-actions");
+    const mapBar = mapHolder.querySelector(".discover-overlay-bar .portfolio-header-actions");
     expect(mapBar?.textContent).toContain("Verdict");
     expect(mapBar?.textContent).toContain("Rankings");
     expect(mapBar?.textContent).toContain("Saved");

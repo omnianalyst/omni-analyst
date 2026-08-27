@@ -530,6 +530,15 @@ export function MapView() {
 
   return (
     <div class="map-view product-page">
+      <div class="discover-overlay-bar">
+        <div class="portfolio-header-actions">
+          <a class="btn-secondary compact-button" href="/search">Verdict</a>
+          <a class="btn-secondary compact-button" href="/rankings">Rankings</a>
+          <a class="btn-secondary compact-button" href="/objective" title="Ask the system a question">Ask</a>
+          <a class="btn-secondary compact-button" href="/search?tab=watchlist">Saved</a>
+          <a class="btn-secondary compact-button" href="/search?tab=alerts">Alerts</a>
+        </div>
+      </div>
       <header class="map-heading">
         <div>
           <h1>Map</h1>
@@ -542,13 +551,6 @@ export function MapView() {
           </p>
         </div>
         <div class="discover-compact-meta">
-          <div class="portfolio-header-actions">
-            <a class="btn-secondary compact-button" href="/search">Verdict</a>
-            <a class="btn-secondary compact-button" href="/rankings">Rankings</a>
-            <a class="btn-secondary compact-button" href="/objective" title="Ask the system a question">Ask</a>
-            <a class="btn-secondary compact-button" href="/search?tab=watchlist">Saved</a>
-            <a class="btn-secondary compact-button" href="/search?tab=alerts">Alerts</a>
-          </div>
           <time dateTime={data.as_of}>Updated {new Date(data.as_of).toLocaleString()}</time>
         </div>
       </header>
@@ -653,7 +655,7 @@ export function MapView() {
                 </text>
               </a>
               <text class="map-center-caption" x={C} y={C + 58} text-anchor="middle">
-                best measured · balanced {best.scores.balanced?.toFixed(0)}
+                top balanced score · ranks within its class
               </text>
             </>
           ) : (

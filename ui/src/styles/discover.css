@@ -626,6 +626,12 @@
   color: var(--d-dim);
   max-width: 68ch;
 }
+/* The same action bar every Discover page uses, so the nav sits flush right
+   here too -- the bar is global CSS (.discover-overlay-bar) and inherits its
+   flex-end alignment from there. */
+.map-view .discover-overlay-bar {
+  padding: 10px 2px 0;
+}
 .map-heading .discover-compact-meta {
   color: var(--d-faint);
   font-size: 11px;
