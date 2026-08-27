@@ -16,8 +16,8 @@ import json
 import pytest
 
 from omni.entities._seed_data import (
-    EXTRA_COMPANIES,
     ALLOCATION_ETFS,
+    EXTRA_COMPANIES,
     INDICES,
     SECTOR_ETFS,
     SP500_CONSTITUENTS,
