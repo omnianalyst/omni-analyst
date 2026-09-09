@@ -71,6 +71,16 @@ type RuleRow = {
 const TABS = ["overview", "transactions", "budget", "schedules", "rules", "import", "bank", "reports"] as const;
 type Tab = (typeof TABS)[number];
 
+function openPicker(e: Event) {
+  const el = e.target as HTMLInputElement;
+  try {
+    el.showPicker();
+  } catch {
+    // Browser without showPicker or without user activation: the
+    // indicator stays the fallback entry point.
+  }
+}
+
 function money(cents: number, currency: string = "USD"): string {
   return (cents / 100).toLocaleString(undefined, {
     style: "currency",
@@ -145,6 +155,7 @@ export function FinanceView() {
           type="month"
           value={month}
           onInput={(e) => setMonth((e.target as HTMLInputElement).value)}
+          onClick={openPicker}
           aria-label="Month"
         />
         <nav class="finance-tabs">
@@ -340,6 +351,7 @@ function Transactions({
             type="date"
             value={form.date}
             onInput={(e) => setForm({ ...form, date: (e.target as HTMLInputElement).value })}
+            onClick={openPicker}
           />
           <input
             placeholder="payee"
@@ -868,7 +880,7 @@ function ActualMigration({ onChanged }: { onChanged(): void }) {
 
   return (
     <div class="finance-form">
-      <label>
+      <label class="finance-file-button">
         <input
           type="file"
           accept=".zip"
@@ -877,8 +889,8 @@ function ActualMigration({ onChanged }: { onChanged(): void }) {
             const file = (e.target as HTMLInputElement).files?.[0];
             if (file) void upload(file);
           }}
-        />{" "}
-        Actual Budget backup
+        />
+        <span>{busy ? "Importing…" : "Upload Actual Budget backup (.zip)"}</span>
       </label>
       {report ? (
         <small>

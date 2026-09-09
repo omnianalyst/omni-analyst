@@ -6767,7 +6767,9 @@ main:not(main main) {
 }
 .finance-form input,
 .finance-form select,
-.finance-form textarea {
+.finance-form textarea,
+.finance-head input[type="month"] {
+  color-scheme: dark;
   min-width: 130px;
   padding: 7px 9px;
   border: 1px solid var(--border);
@@ -6830,4 +6832,36 @@ main:not(main main) {
 .finance-card p small,
 .finance-card small {
   color: var(--muted);
+}
+.finance-form input[type="date"]::-webkit-calendar-picker-indicator,
+.finance-form input[type="month"]::-webkit-calendar-picker-indicator,
+.finance-head input[type="month"]::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(1.6);
+  opacity: 0.75;
+  cursor: pointer;
+}
+.finance-form input[type="date"]::-webkit-calendar-picker-indicator:hover,
+.finance-head input[type="month"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
+.finance-file-button input[type="file"] {
+  display: none;
+}
+.finance-file-button span {
+  display: inline-block;
+  padding: 7px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.finance-file-button:hover span {
+  border-color: var(--accent);
+}
+.finance-file-button input[type="file"]:disabled + span {
+  opacity: 0.55;
+  cursor: default;
 }
