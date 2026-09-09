@@ -130,7 +130,16 @@ export function FinanceView() {
   if (accounts === null || categories === null) return <Loading />;
 
   return (
-    <section class="finance">
+    <div class="finance-view product-page">
+      <header class="settings-page-heading">
+        <div>
+          <h1>Finance</h1>
+          <p>Envelope budgeting, bank sync, and reports. Your data, your account.</p>
+        </div>
+        <div class="settings-summary">
+          <span>Opt-in page · amounts in your base currency</span>
+        </div>
+      </header>
       <div class="finance-head">
         <input
           type="month"
@@ -164,7 +173,7 @@ export function FinanceView() {
       ) : null}
       {tab === "bank" ? <BankTab onChanged={reload} /> : null}
       {tab === "reports" ? <ReportsTab month={month} /> : null}
-    </section>
+    </div>
   );
 }
 
@@ -179,7 +188,10 @@ function Overview({ accounts, month }: { accounts: Account[]; month: string }) {
   if (err) return <ErrorState message={err} />;
   if (!body) return <Loading />;
   return (
-    <div>
+    <section class="surface-card settings-card finance-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">Ledger</p><h2>Accounts</h2></div>
+      </div>
       <table class="coverage">
         <thead>
           <tr>
@@ -203,7 +215,7 @@ function Overview({ accounts, month }: { accounts: Account[]; month: string }) {
         budgeted {money(body.budgeted, body.base_currency)} ·
         available to budget <strong>{money(body.available_to_budget, body.base_currency)}</strong>
       </p>
-    </div>
+    </section>
   );
 }
 
@@ -300,7 +312,10 @@ function Transactions({
   if (!txs) return <Loading />;
 
   return (
-    <div>
+    <section class="surface-card settings-card finance-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">{month}</p><h2>Transactions</h2></div>
+      </div>
       <div class="finance-form">
         <input
           placeholder="search payee / notes"
@@ -438,7 +453,7 @@ function Transactions({
           ))}
         </tbody>
       </table>
-    </div>
+    </section>
   );
 }
 
@@ -497,7 +512,10 @@ function Budget({
   if (!body) return <Loading />;
 
   return (
-    <div>
+    <section class="surface-card settings-card finance-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">{month} · {body.base_currency}</p><h2>Budget</h2></div>
+      </div>
       <table class="coverage">
         <thead>
           <tr>
@@ -594,7 +612,7 @@ function Budget({
         </label>
         <button onClick={() => void addCategory()}>Add</button>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -648,7 +666,10 @@ function Rules({ onChanged }: { onChanged(): void }) {
   if (!rules) return <Loading />;
 
   return (
-    <div>
+    <section class="surface-card settings-card finance-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">Automation</p><h2>Rules</h2></div>
+      </div>
       <table class="coverage">
         <thead>
           <tr>
@@ -694,7 +715,7 @@ function Rules({ onChanged }: { onChanged(): void }) {
         </select>
         <button onClick={() => void add()}>Add rule</button>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -756,7 +777,10 @@ function Importer({
   };
 
   return (
-    <div>
+    <section class="surface-card settings-card finance-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">Files</p><h2>Import</h2></div>
+      </div>
       <div class="finance-form">
         <select
           value={accountId}
@@ -810,7 +834,7 @@ function Importer({
       {result ? <p>{result}</p> : null}
       {err ? <ErrorState message={err} /> : null}
       <ActualMigration onChanged={onChanged} />
-    </div>
+    </section>
   );
 }
 
@@ -1074,7 +1098,10 @@ function BankTab({ onChanged }: { onChanged(): void }) {
   const sf = providers.find((p) => p.key === "simplefin");
 
   return (
-    <div>
+    <section class="surface-card settings-card finance-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">Connections</p><h2>Bank sync</h2></div>
+      </div>
       {err ? <p class="empty">{err}</p> : null}
       {msg ? <p>{msg}</p> : null}
 
@@ -1200,7 +1227,7 @@ function BankTab({ onChanged }: { onChanged(): void }) {
           </button>
         </div>
       ) : null}
-    </div>
+    </section>
   );
 }
 
@@ -1282,7 +1309,10 @@ function SchedulesTab() {
   if (!rows) return <Loading />;
 
   return (
-    <div>
+    <section class="surface-card settings-card finance-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">Recurring</p><h2>Schedules</h2></div>
+      </div>
       <table class="coverage">
         <thead>
           <tr>
@@ -1342,7 +1372,7 @@ function SchedulesTab() {
           Add monthly schedule
         </button>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -1370,7 +1400,10 @@ function ReportsTab({ month }: { month: string }) {
   const latestWorth = [...(worth?.months ?? [])].reverse().find((m) => m.net_worth !== null);
 
   return (
-    <div>
+    <section class="surface-card settings-card finance-card">
+      <div class="section-heading">
+        <div><p class="eyebrow">Ledger</p><h2>Reports</h2></div>
+      </div>
       {latestWorth ? (
         <p>
           Ledger net worth: <strong>{money(latestWorth.net_worth ?? 0)}</strong> (all
@@ -1424,6 +1457,6 @@ function ReportsTab({ month }: { month: string }) {
           </tbody>
         </table>
       ) : null}
-    </div>
+    </section>
   );
 }

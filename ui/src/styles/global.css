@@ -6719,25 +6719,44 @@ main:not(main main) {
   display: flex;
   align-items: center;
   gap: 16px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
   flex-wrap: wrap;
+}
+.finance-head input[type="month"] {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
 }
 .finance-tabs {
   display: flex;
   gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
 }
 .finance-tab {
   border: none;
   background: none;
   color: var(--muted);
-  padding: 6px 12px;
-  border-radius: 6px;
+  padding: 6px 14px;
+  border-radius: 7px;
   cursor: pointer;
+  font: inherit;
   font-size: 13px;
+}
+.finance-tab:hover {
+  color: var(--text);
 }
 .finance-tab.active {
   color: var(--text);
-  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+  background: var(--surface-2, rgba(127, 127, 127, 0.14));
+}
+.finance-card .section-heading {
+  margin-bottom: 14px;
 }
 .finance-form {
   display: flex;
@@ -6745,4 +6764,70 @@ main:not(main main) {
   align-items: center;
   margin-top: 12px;
   flex-wrap: wrap;
+}
+.finance-form input,
+.finance-form select,
+.finance-form textarea {
+  min-width: 130px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.finance-form input:focus,
+.finance-form select:focus,
+.finance-form textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.finance-form input[type="checkbox"] {
+  min-width: 0;
+}
+.finance-form textarea {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+}
+.finance-card table.coverage button,
+.finance-card > button,
+.finance-form button,
+.finance-card p button {
+  padding: 7px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.finance-card table.coverage button:hover:not(:disabled),
+.finance-card > button:hover:not(:disabled),
+.finance-form button:hover:not(:disabled),
+.finance-card p button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.finance-card table.coverage button:disabled,
+.finance-form button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.finance-card table.coverage input[type="number"],
+.finance-card table.coverage select {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.finance-card p small,
+.finance-card small {
+  color: var(--muted);
 }
