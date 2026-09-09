@@ -18,6 +18,17 @@ Two properties are load-bearing and deliberately non-negotiable:
 Bring your own keys. The system is honest about what it cannot see: unfillable
 gaps are a feature, because they are the truthful state of your coverage.
 
+## Personal finance
+
+An opt-in `/finance` page turns the same honesty into envelope budgeting:
+integer-cents ledger, BYO bank sync (GoCardless/SimpleFIN, credentials
+encrypted at rest), CSV/OFX/QIF/CAMT import with three-pass reconciliation,
+ranked rules, schedules, goals, rollover modes, and multi-currency accounts
+that never sum across currencies without a rate. A whole history imports
+from another budgeting app's backup in one upload. Finance data is
+user-scoped and private by construction — it is deliberately not part of
+the shared claim network.
+
 ## Running it
 
 ```bash
