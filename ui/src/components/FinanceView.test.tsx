@@ -175,4 +175,44 @@ describe("FinanceView", () => {
     });
     window.history.replaceState(null, "", "/finance");
   });
+
+  it("the import tab's account dropdown defaults to the first open account, not blank", async () => {
+    mockApi({
+      "/finance/accounts": ACCOUNTS,
+      "/finance/categories": CATEGORIES,
+    });
+    const view = render(h(FinanceView, {}));
+
+    await waitFor(() => view.getByText("import"));
+    fireEvent.click(view.getByText("import"));
+
+    await waitFor(() => {
+      const selects = Array.from(
+        view.container.querySelectorAll("select")
+      ) as HTMLSelectElement[];
+      const accountSelect = selects.find((s) =>
+        Array.from(s.options).some((o) => o.textContent === "Checking")
+      );
+      expect(accountSelect).toBeTruthy();
+      expect(accountSelect!.value).toBe("acc-1");
+    });
+  });
+
+  it("Import and Preview stay disabled until an account exists and CSV text is pasted", async () => {
+    mockApi({
+      "/finance/accounts": ACCOUNTS,
+      "/finance/categories": CATEGORIES,
+    });
+    const view = render(h(FinanceView, {}));
+
+    await waitFor(() => view.getByText("import"));
+    fireEvent.click(view.getByText("import"));
+
+    await waitFor(() => {
+      const preview = view.getByRole("button", { name: "Preview" }) as HTMLButtonElement;
+      expect(preview.disabled).toBe(true);
+    });
+    const importBtn = view.getByRole("button", { name: "Import" }) as HTMLButtonElement;
+    expect(importBtn.disabled).toBe(true);
+  });
 });

@@ -338,7 +338,11 @@ function Transactions({
       {adding ? (
         <div class="finance-form">
           <select
-            value={form.account}
+            value={
+              openAccounts.some((a) => a.id === form.account) || openAccounts.length === 0
+                ? form.account
+                : openAccounts[0].id
+            }
             onChange={(e) => setForm({ ...form, account: (e.target as HTMLSelectElement).value })}
           >
             {openAccounts.map((a) => (
@@ -381,7 +385,12 @@ function Transactions({
           >
             Add split
           </button>
-          <button onClick={() => void submit()}>Save</button>
+          <button
+            disabled={!form.date || !form.amount}
+            onClick={() => void submit()}
+          >
+            Save
+          </button>
           {formErr ? <small>{formErr}</small> : null}
           {splits.map((split, idx) => (
             <div class="finance-form" key={idx}>
@@ -622,7 +631,7 @@ function Budget({
           />{" "}
           income
         </label>
-        <button onClick={() => void addCategory()}>Add</button>
+        <button disabled={!newCat.trim()} onClick={() => void addCategory()}>Add</button>
       </div>
     </section>
   );
@@ -725,7 +734,9 @@ function Rules({ onChanged }: { onChanged(): void }) {
             </option>
           ))}
         </select>
-        <button onClick={() => void add()}>Add rule</button>
+        <button disabled={!payee.trim() || !category} onClick={() => void add()}>
+          Add rule
+        </button>
       </div>
     </section>
   );
@@ -741,7 +752,11 @@ function Importer({
   onChanged(): void;
 }) {
   const open = useMemo(() => accounts.filter((a) => !a.closed), [accounts]);
-  const [accountId, setAccountId] = useState(open[0]?.id ?? "");
+  const [pickedAccount, setPickedAccount] = useState("");
+  const accountId =
+    open.some((a) => a.id === pickedAccount) || open.length === 0
+      ? pickedAccount
+      : open[0].id;
   const [csv, setCsv] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
@@ -784,7 +799,7 @@ function Importer({
       body: JSON.stringify({ name: newAccount.trim(), type: newType }),
     });
     setNewAccount("");
-    setAccountId(body.id);
+    setPickedAccount(body.id);
     onChanged();
   };
 
@@ -796,7 +811,7 @@ function Importer({
       <div class="finance-form">
         <select
           value={accountId}
-          onChange={(e) => setAccountId((e.target as HTMLSelectElement).value)}
+          onChange={(e) => setPickedAccount((e.target as HTMLSelectElement).value)}
         >
           {open.map((a) => (
             <option key={a.id} value={a.id}>
@@ -836,12 +851,15 @@ function Importer({
         onInput={(e) => setCsv((e.target as HTMLTextAreaElement).value)}
       />
       <div class="finance-form">
-        <button disabled={busy} onClick={() => void run(true)}>
+        <button disabled={busy || !accountId || !csv.trim()} onClick={() => void run(true)}>
           Preview
         </button>
-        <button disabled={busy} onClick={() => void run(false)}>
+        <button disabled={busy || !accountId || !csv.trim()} onClick={() => void run(false)}>
           Import
         </button>
+        {!open.length ? (
+          <small>add an account above before importing</small>
+        ) : null}
       </div>
       {result ? <p>{result}</p> : null}
       {err ? <ErrorState message={err} /> : null}
@@ -1133,7 +1151,10 @@ function BankTab({ onChanged }: { onChanged(): void }) {
               value={gcKey}
               onInput={(e) => setGcKey((e.target as HTMLInputElement).value)}
             />
-            <button disabled={busy} onClick={() => void saveGocardless()}>
+            <button
+              disabled={busy || !gcId.trim() || !gcKey.trim()}
+              onClick={() => void saveGocardless()}
+            >
               Save GoCardless
             </button>
           </>
@@ -1198,7 +1219,10 @@ function BankTab({ onChanged }: { onChanged(): void }) {
               value={sfPassword}
               onInput={(e) => setSfPassword((e.target as HTMLInputElement).value)}
             />
-            <button disabled={busy} onClick={() => void saveSimplefin()}>
+            <button
+              disabled={busy || !sfEmail.trim() || !sfPassword.trim()}
+              onClick={() => void saveSimplefin()}
+            >
               Link SimpleFIN
             </button>
           </>
@@ -1380,7 +1404,7 @@ function SchedulesTab() {
           value={day}
           onInput={(e) => setDay((e.target as HTMLInputElement).value)}
         />
-        <button disabled={busy} onClick={() => void add()}>
+        <button disabled={busy || !name.trim()} onClick={() => void add()}>
           Add monthly schedule
         </button>
       </div>
