@@ -40,7 +40,7 @@
 		/mcp /mcp/* \
 		/objective/* /watchlists /watchlists/* \
 		/portfolio /portfolio/* /research/* /scanner/* \
-		/settings/* /system/* /trading /trading/* /wallets /wallets/*
+		/settings/* /system/* /trading /trading/* /wallets /wallets/* /finance/*
 	# Framework route-data fetches (SPA navigation) carry X-Neutron-Data and
 	# expect JSON; the SPA fallback would hand them index.html, the client's
 	# response.json() throws, and the framework silently falls back to a full
