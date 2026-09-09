@@ -77,6 +77,9 @@ export function SettingsView() {
   const [dataKeys, setDataKeys] = useState<DataKeyProvider[] | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupNote, setBackupNote] = useState<string | null>(null);
+  const [financeOn, setFinanceOn] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem("omni.finance") === "on"
+  );
 
   async function downloadBackup() {
     setBackupBusy(true);
@@ -376,6 +379,33 @@ export function SettingsView() {
             />
           ))}
         </div>
+      </section>
+
+      <section class="surface-card settings-card">
+        <div class="section-heading">
+          <div><p class="eyebrow">Instance</p><h2>Personal finance</h2></div>
+        </div>
+        <Row
+          label="Finance page"
+          hint="Envelope budgeting with CSV import and reconciliation. Opt-in; your data stays under your account."
+          state={financeOn ? "enabled" : "off"}
+        >
+          <button
+            type="button"
+            class="btn-secondary compact-button"
+            onClick={() => {
+              if (financeOn) {
+                window.localStorage.removeItem("omni.finance");
+              } else {
+                window.localStorage.setItem("omni.finance", "on");
+              }
+              window.dispatchEvent(new Event("omni-finance-changed"));
+              setFinanceOn(!financeOn);
+            }}
+          >
+            {financeOn ? "Disable" : "Enable"}
+          </button>
+        </Row>
       </section>
 
       <section class="surface-card settings-card">

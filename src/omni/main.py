@@ -50,6 +50,7 @@ def create_app(database_url: str | None = None) -> App:
     from omni.api.coverage import build_router as coverage_router
     from omni.api.export import build_router as export_router
     from omni.api.exposure import build_router as exposure_router
+    from omni.api.finance import build_router as finance_router
     from omni.api.holdings import build_router as holdings_router
     from omni.api.mcp import build_mount as mcp_mount
     from omni.api.objective import build_router as objective_router
@@ -84,6 +85,7 @@ def create_app(database_url: str | None = None) -> App:
     app.include_router(profile_router(app))
     app.include_router(companies_router(app))
     app.include_router(settings_router(app))
+    app.include_router(finance_router(app))
     app.include_router(wallets_router(app))
     app.include_router(mcp_mount(app))
     return app

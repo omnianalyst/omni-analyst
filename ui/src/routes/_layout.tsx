@@ -50,6 +50,15 @@ const NAV = [
   { href: "/system", label: "System" },
 ];
 
+// The finance page is opt-in from Settings; the nav link exists only for
+// those who turned it on. localStorage is the toggle's store -- the data
+// itself lives behind /finance/* per-user, so this gates nothing but chrome.
+const FINANCE_ENABLED_EVENT = "omni-finance-changed";
+
+function financeEnabled(): boolean {
+  return typeof window !== "undefined" && window.localStorage.getItem("omni.finance") === "on";
+}
+
 // The palette is search-only: the topbar owns navigation, and a palette
 // listing the same routes read as a second nav bar. Ask stays reachable from
 // Discover's Ask button (and /objective directly).
@@ -138,6 +147,13 @@ export default function Layout({
   }, []);
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [financeOn, setFinanceOn] = useState(financeEnabled);
+
+  useEffect(() => {
+    const sync = () => setFinanceOn(financeEnabled());
+    window.addEventListener(FINANCE_ENABLED_EVENT, sync);
+    return () => window.removeEventListener(FINANCE_ENABLED_EVENT, sync);
+  }, []);
 
   // The app's own SPA interceptor. The framework registers a global click
   // interceptor during hydrate init, but in the static production build it
@@ -238,6 +254,11 @@ export default function Layout({
                 {item.label}
               </a>
             ))}
+            {financeOn ? (
+              <a href="/finance" class={`topnav-link ${pathname === "/finance" ? "topnav-link-active" : ""}`}>
+                Finance
+              </a>
+            ) : null}
           </nav>
         </div>
         <div class="topbar-center">

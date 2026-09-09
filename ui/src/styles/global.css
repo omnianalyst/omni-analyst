@@ -6713,3 +6713,36 @@ main:not(main main) {
 .rank-worst-critical {
   color: #f87171;
 }
+
+/* Finance page */
+.finance-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.finance-tabs {
+  display: flex;
+  gap: 4px;
+}
+.finance-tab {
+  border: none;
+  background: none;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.finance-tab.active {
+  color: var(--text);
+  background: var(--surface-2, rgba(127, 127, 127, 0.12));
+}
+.finance-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}

@@ -5,6 +5,7 @@ declare module "@neutron-build/core" {
     | "/"
     | "/console"
     | `/entity/${string}`
+    | "/finance"
     | "/login"
     | "/map"
     | "/objective"
