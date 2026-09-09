@@ -32,14 +32,37 @@ the carry book is not diminished by the failed hypotheses.
 ### Product surface
 
 Four pages, deliberately small. The backend is broad; the user funnel is narrow,
-ranked, legible, and candid about what was measured.
+ranked, legible, and candid about what was measured. One opt-in page exists
+outside the funnel (Finance, below).
 
 | Route | Page | Shows |
 |---|---|---|
 | `/` | Portfolio | Trading NAV, carry APR, delta-neutrality, pair tags, positions, cycle history, cash. External read-only wallet balances shown **separately**, never added to NAV. |
 | `/search` | Discover | Ranked stocks/ETFs, defensive assets, crypto, sector leaders, entity search, watchlists, alerts, explicit coverage audit. |
 | `/system` | System | Engine health, loop status, demand, fills, provider state. |
-| `/settings` | Settings | Venue toggles, data-provider configuration. Still more status screen than control centre — see §8 P1. |
+| `/settings` | Settings | Venue toggles, data-provider configuration, the Finance opt-in toggle. Still more status screen than control centre — see §8 P1. |
+| `/finance` | Finance (opt-in) | Personal envelope budgeting: accounts, transactions, budget with rollover/reset/hold and goals, schedules, rules, CSV/OFX/QIF/CAMT import, goCardless + SimpleFIN BYO bank sync, reports, Actual Budget backup importer. Hidden until enabled in Settings; nav link appears only then. |
+
+#### Personal finance domain
+
+`src/omni/finance/`, migration 071. User-scoped tables (the `wallet_account`
+precedent — BYO by construction, user_id is the access key, the shared claim
+network never sees it; it is deliberately **not** claims). Reconciliation,
+payee normalisation, rules, schedules and budget semantics are ports from
+Actual Budget (MIT, attribution in module headers); telemetry-free judgment
+calls and deltas are documented in the module docstrings. Bank credentials
+live encrypted in `user_settings.finance_bank_keys` (the data_keys pattern).
+Known limits: first live bank sync is still fixture-tested only; formula
+actions cover the practical subset, not HyperFormula's full library.
+
+Deploy notes: the shared Caddy `@api` matcher carries `/finance/*` on both
+the public and Tailscale blocks (added 2026-09-08, backup at
+`/deployments/caddy/Caddyfile.bak-pre-finance`); pre-071 dump at
+`/tmp/pre-071-20260908-1940.dump` on the host; `NEUTRON_REVISION` in the
+host `.env` moved to `ed5be29c...` with `OMNI_REVISION=cfab313...`.
+Public `app.omnianalyst.com` was already 308-looping on every path before
+this deploy (Cloudflare↔origin condition, unfixed); the Tailscale `:8080`
+route serves correctly.
 
 Header carries brand and nav left; search (Cmd+K), the bulletin pin, and a gear
 dropdown right.
