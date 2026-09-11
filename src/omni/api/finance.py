@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import asyncpg
 from neutron import App, Router
 from neutron.error import bad_request, not_found, unauthorized
 from pydantic import BaseModel
@@ -31,6 +32,8 @@ async def _run(coro):
         return await coro
     except (FinanceError, ImportRowError, ScheduleError) as exc:
         raise bad_request(str(exc))
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise bad_request(f"referenced finance record does not belong to this user: {exc.constraint_name}")
 
 
 class AccountIn(BaseModel):
@@ -224,12 +227,17 @@ def build_router(app: App) -> Router:
     @router.patch("/finance/transactions/{tx_id}")
     async def patch_transaction(request: Request, tx_id: str, body: TransactionPatch) -> dict:
         user = _require_user(request)
+        fields = body.model_fields_set
         await _run(service.update_transaction(
             app.db.pool,
             user,
             _uuid(tx_id),
-            category_id=_uuid(body.category_id) if body.category_id else None,
-            notes=body.notes,
+            category_id=(
+                _uuid(body.category_id)
+                if "category_id" in fields and body.category_id
+                else None
+            ) if "category_id" in fields else service.UNSET,
+            notes=body.notes if "notes" in fields else service.UNSET,
             cleared=body.cleared,
             reconciled=body.reconciled,
         ))

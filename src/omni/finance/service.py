@@ -20,6 +20,7 @@ from omni.finance.normalisation import (
 )
 from omni.finance.reconcile import reconcile
 from omni.finance.transfers import create_transfer_side
+from omni.finance.writer import finance_write
 
 ACCOUNT_TYPES = frozenset(
     {"checking", "savings", "credit", "loan", "cash", "investment", "other"}
@@ -40,6 +41,32 @@ class FinanceError(ValueError):
     pass
 
 
+class _Unset:
+    """Marks a field the caller did not send, distinct from explicit null."""
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = _Unset()
+
+
+async def _require_owned_category(pool, user_id: UUID, category_id) -> None:
+    if category_id in (None, ""):
+        return
+    try:
+        cid = _uuid_or_none(category_id)
+    except ValueError:
+        raise FinanceError("category not found") from None
+    if cid is None:
+        return
+    owner = await pool.fetchval(
+        "SELECT user_id FROM finance_category WHERE id = $1", cid
+    )
+    if owner != user_id:
+        raise FinanceError("category not found")
+
+
 async def list_accounts(pool, user_id: UUID) -> list[dict]:
     rows = await pool.fetch(
         """
@@ -47,7 +74,8 @@ async def list_accounts(pool, user_id: UUID) -> list[dict]:
                a.balance_current, a.balance_as_of,
                coalesce((
                    SELECT sum(t.amount) FROM finance_transaction t
-                   WHERE t.account_id = a.id AND NOT t.deleted
+                   WHERE t.account_id = a.id AND t.user_id = a.user_id
+                     AND NOT t.deleted AND NOT t.is_parent
                ), 0) AS ledger_balance
         FROM finance_account a
         WHERE a.user_id = $1
@@ -71,6 +99,7 @@ async def list_accounts(pool, user_id: UUID) -> list[dict]:
     return out
 
 
+@finance_write
 async def create_account(
     pool,
     user_id: UUID,
@@ -274,6 +303,7 @@ async def list_transactions(
     ]
 
 
+@finance_write
 async def create_manual_transaction(
     pool,
     user_id: UUID,
@@ -294,6 +324,9 @@ async def create_manual_transaction(
     )
     if owner != user_id:
         raise FinanceError("account not found")
+    await _require_owned_category(pool, user_id, category_id)
+    for split in splits or []:
+        await _require_owned_category(pool, user_id, split.get("category_id"))
     tx_date = date_type.fromisoformat(str(date)[:10])
     payee_id = await resolve_payee(pool, user_id, payee_name)
     transfer_acct = None
@@ -415,16 +448,23 @@ async def _apply_rules_to_manual(
     return tx.get("notes"), UUID(str(applied_category)) if applied_category else None
 
 
+@finance_write
 async def update_transaction(
     pool,
     user_id: UUID,
     tx_id: UUID,
     *,
-    category_id: UUID | None = None,
-    notes: str | None = None,
+    category_id: UUID | None | _Unset = UNSET,
+    notes: str | None | _Unset = UNSET,
     cleared: bool | None = None,
     reconciled: bool | None = None,
 ) -> None:
+    """Patch a transaction.
+
+    `UNSET` means the caller did not send the field; an explicit `None` clears
+    it. `cleared`/`reconciled` keep their null-means-omitted coalesce, which
+    is correct for flags that have no meaningful null.
+    """
     locked = await pool.fetchval(
         "SELECT reconciled FROM finance_transaction WHERE id = $1 AND user_id = $2",
         tx_id,
@@ -433,32 +473,112 @@ async def update_transaction(
     if locked is None:
         raise FinanceError("transaction not found")
     if locked and reconciled is not False and (
-        category_id is not None or notes is not None or cleared is not None
+        category_id is not UNSET or notes is not UNSET or cleared is not None
     ):
         raise FinanceError("a reconciled transaction is locked")
+    if category_id is not UNSET and category_id is not None:
+        await _require_owned_category(pool, user_id, category_id)
     await pool.execute(
         """
         UPDATE finance_transaction SET
-            category_id = coalesce($3, category_id),
-            notes = coalesce($4, notes),
-            cleared = coalesce($5, cleared),
-            reconciled = coalesce($6, reconciled),
+            category_id = CASE WHEN $3 THEN $4::uuid ELSE category_id END,
+            notes = CASE WHEN $5 THEN $6::text ELSE notes END,
+            cleared = coalesce($7, cleared),
+            reconciled = coalesce($8, reconciled),
             updated_at = now()
         WHERE id = $1 AND user_id = $2
         """,
         tx_id,
         user_id,
-        category_id,
-        notes,
+        category_id is not UNSET,
+        category_id if category_id is not UNSET else None,
+        notes is not UNSET,
+        notes if notes is not UNSET else None,
         cleared,
         reconciled,
     )
 
 
+@finance_write
 async def delete_transaction(pool, user_id: UUID, tx_id: UUID) -> None:
-    await pool.execute(
-        "UPDATE finance_transaction SET deleted = true, updated_at = now() WHERE id = $1 AND user_id = $2",
+    """Soft-delete a transaction together with everything linked to it.
+
+    A split is one economic unit: deleting the parent and leaving the children
+    active keeps them polluting budgets and reports, which filter on
+    `is_parent` but not on orphaned children. A transfer is one movement of
+    money: deleting one side changes combined wealth. So the linked group --
+    parent and children, plus the transfer partner and its own children --
+    goes together or not at all, and a reconciled member locks the group.
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT parent_id, transfer_id FROM finance_transaction
+        WHERE id = $1 AND user_id = $2 AND NOT deleted
+        """,
         tx_id,
+        user_id,
+    )
+    if row is None:
+        raise FinanceError("transaction not found")
+    if row["parent_id"] is not None:
+        raise FinanceError("delete the split parent, not a child")
+
+    ids = {tx_id}
+    children = await pool.fetch(
+        """
+        SELECT id FROM finance_transaction
+        WHERE parent_id = $1 AND user_id = $2 AND NOT deleted
+        """,
+        tx_id,
+        user_id,
+    )
+    ids.update(child["id"] for child in children)
+
+    partners = await pool.fetch(
+        """
+        SELECT t.id FROM finance_transaction t
+        WHERE t.user_id = $1 AND NOT t.deleted
+          AND t.transfer_id IS NOT NULL
+          AND (
+              t.transfer_id = ANY($2::uuid[])
+              OR t.id IN (
+                  SELECT transfer_id FROM finance_transaction
+                  WHERE id = ANY($2::uuid[]) AND transfer_id IS NOT NULL
+              )
+          )
+        """,
+        user_id,
+        list(ids),
+    )
+    ids.update(partner["id"] for partner in partners)
+
+    partner_children = await pool.fetch(
+        """
+        SELECT c.id FROM finance_transaction c
+        JOIN finance_transaction p ON c.parent_id = p.id
+        WHERE p.id = ANY($1::uuid[]) AND c.user_id = $2 AND NOT c.deleted
+        """,
+        [partner["id"] for partner in partners],
+        user_id,
+    )
+    ids.update(child["id"] for child in partner_children)
+
+    if await pool.fetchval(
+        """
+        SELECT bool_or(reconciled) FROM finance_transaction
+        WHERE id = ANY($1::uuid[]) AND user_id = $2
+        """,
+        list(ids),
+        user_id,
+    ):
+        raise FinanceError("a reconciled transaction is locked")
+
+    await pool.execute(
+        """
+        UPDATE finance_transaction SET deleted = true, updated_at = now()
+        WHERE id = ANY($1::uuid[]) AND user_id = $2
+        """,
+        list(ids),
         user_id,
     )
 
@@ -563,6 +683,7 @@ async def load_rules(pool, user_id: UUID) -> list[rules_mod.Rule]:
     return rules
 
 
+@finance_write
 async def import_transactions(
     pool,
     user_id: UUID,
