@@ -108,6 +108,14 @@ RESTING = frozenset({"open"})
 CANCELLED = frozenset({"canceled", "cancelled", "expired"})
 FILLED = frozenset({"closed", "filled"})
 
+# Venues where a timeInForce=IOC limit has been verified to fill-what-it-can
+# and cancel the rest rather than rest. The emulated market path is an
+# aggressive limit, and on a venue without verified IOC support that limit can
+# rest -- an intent nobody chose to leave live. Extending this set requires a
+# measured run, not a ccxt feature flag: the flag says the venue accepts the
+# parameter, not that it honours the semantics.
+_IOC_TIF_VENUES = frozenset({"hyperliquid"})
+
 _MARKET_FLAG = {
     MarketType.SPOT: "spot",
     MarketType.MARGIN: "margin",
@@ -412,6 +420,10 @@ def _rejected_fill(
         external_id=None,
         raw={"rejected": reason, "requested_quantity": str(intent.quantity)},
     )
+
+
+def _exchange_id(exchange: Any) -> str:
+    return (getattr(exchange, "id", "") or "").lower()
 
 
 def _venue_cloid(key: str) -> str:
@@ -992,6 +1004,7 @@ class CCXTVenue:
         amount = self._rounded_amount(intent.symbol, intent.quantity)
         price: Decimal | None = None
         eff_kind = intent.order_kind.value
+        emulated_market = False
         if intent.order_kind is OrderKind.LIMIT:
             assert intent.limit_price is not None  # TradeIntent.__post_init__
             price = self._rounded_price(intent.symbol, intent.limit_price)
@@ -1027,6 +1040,7 @@ class CCXTVenue:
                     raw = min(raw, bound) if intent.side is Side.BUY else max(raw, bound)
             price = self._rounded_price(intent.symbol, raw)
             eff_kind = OrderKind.LIMIT.value
+            emulated_market = True
 
         notional = amount * (price if price is not None else intent.reference_price)
         minimum = self.min_notional_for(intent.symbol)
@@ -1046,6 +1060,13 @@ class CCXTVenue:
         }
         if intent.reduce_only and intent.market_type is not MarketType.SPOT:
             params["reduceOnly"] = True
+        if emulated_market and _exchange_id(self._exchange) in _IOC_TIF_VENUES:
+            # A market intent is an aggressive limit, and an aggressive limit
+            # that does not cross can rest -- an order nobody asked to leave
+            # live. IOC makes the venue cancel whatever the bound could not
+            # fill, so the order the caller must reconcile is never a resting
+            # one on a venue that honours it.
+            params["timeInForce"] = "IOC"
 
         try:
             order = await self._exchange.create_order(
@@ -1170,16 +1191,29 @@ class CCXTVenue:
         except Exception:  # noqa: BLE001 - the cancel already decided
             final = None
         if final is not None:
-            confirmed = self._fill_from_order(
+            reread = self._fill_from_order(
                 final, intent, submitted=submitted,
                 recovered_from="terse submit response",
             )
-            if not confirmed.is_empty:
-                return confirmed
+            if not reread.is_empty:
+                return reread
+            if not reread.raw.get("resting", False):
+                # The order reads back finished with nothing filled: the
+                # cancellation is an observation, not a hope.
+                return reread
 
-        fill.raw["resting_order_cancelled"] = external_id
+        # The cancellation could not be confirmed -- it failed outright, the
+        # post-cancel read-back failed, or the order still reads resting.
+        # Asserting a cancellation that was not observed would license a
+        # resubmission against a possibly-live order.
+        fill.raw["cancellation_confirmed"] = False
         if cancel_failed is not None:
             fill.raw["cancel_failed"] = cancel_failed
+        elif final is None:
+            fill.raw["cancel_failed"] = (
+                "the post-cancel read-back failed, so the resting order's "
+                "state is unverified"
+            )
         fill.raw["venue_state"] = fetched
         return fill
 

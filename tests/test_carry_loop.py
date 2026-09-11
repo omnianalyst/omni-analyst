@@ -51,7 +51,8 @@ from omni.trading.carry_loop import (
     _unpaired,
     run_carry_cycle,
 )
-from omni.venue.paper_venue import Bar, PaperVenue, RecordedBars
+from omni.trading.order_safety import ExecutionUncertain
+from omni.venue.paper_venue import Bar, PaperVenue, RecordedBars, _empty_fill
 from omni.venue.protocol import (
     Capabilities,
     MarketType,
@@ -217,7 +218,41 @@ class _RefusingVenue:
 
     async def execute(self, intent: TradeIntent):
         if self._refuse(intent):
-            raise VenueUnavailable(f"refused {intent.market_type.value} {intent.side.value}")
+            # A clean refusal: the venue answered and the order is dead with
+            # nothing filled. (An uncertain outcome raises VenueUnavailable,
+            # which since B01 halts the cycle instead of unwinding.)
+            return _empty_fill(
+                intent,
+                self._inner.name,
+                NOW,
+                reason=f"refused {intent.market_type.value} {intent.side.value}",
+            )
+        return await self._inner.execute(intent)
+
+
+class _UncertainVenue:
+    """Raises VenueUnavailable on chosen legs: the outcome is unknown."""
+
+    def __init__(self, inner, uncertain):
+        self._inner = inner
+        self._uncertain = uncertain
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    @property
+    def capabilities(self) -> Capabilities:
+        return self._inner.capabilities
+
+    async def execute(self, intent: TradeIntent):
+        if self._uncertain(intent):
+            raise VenueUnavailable(
+                f"no answer for {intent.market_type.value} {intent.side.value}"
+            )
         return await self._inner.execute(intent)
 
 
@@ -471,6 +506,35 @@ class TestThePairIsOneUnit:
         assert perp is not None
         assert perp.quantity == -(NOTIONAL / PRICE)
         assert spot is None
+
+    async def test_a_leg_with_an_unknown_outcome_halts_without_unwinding(
+        self, db, owner, portfolio_id, venue
+    ):
+        """B01: a leg that may be live is never recorded rejected, and the
+        unwind is withheld -- unwinding it would trade against a leg whose
+        existence is unknown, manufacturing a naked position in the opposite
+        direction. The uncertain order stays acknowledged for the operator.
+        """
+        ids = await _world(db, owner)
+        uncertain = _UncertainVenue(
+            venue, lambda intent: intent.market_type is MarketType.SPOT
+        )
+
+        with pytest.raises(ExecutionUncertain):
+            await _run(
+                db, venue=uncertain, portfolio_id=portfolio_id, ids=ids, owner=owner,
+                as_of=NOW, since=NOW - timedelta(days=1),
+            )
+
+        statuses = await db.pool.fetch(
+            "SELECT status FROM trade_order WHERE portfolio_id = $1", portfolio_id
+        )
+        assert [row["status"] for row in statuses] == ["filled", "acknowledged"]
+        assert "rejected" not in [row["status"] for row in statuses]
+        opened_legs = [
+            symbol for symbol in RATES if (await _legs(db, portfolio_id, symbol))[1] is not None
+        ]
+        assert len(opened_legs) == 1, "the filled perp stays; nothing is unwound blindly"
 
     async def test_a_book_already_holding_a_naked_leg_halts_before_it_trades(
         self, db, owner, portfolio_id, venue

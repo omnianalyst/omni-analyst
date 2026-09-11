@@ -1194,8 +1194,33 @@ class TestTerseSubmitResponse:
 
         assert fill.is_empty
         assert ("520001506296", intent.symbol) in exchange.cancelled
-        assert fill.raw["resting_order_cancelled"] == "520001506296"
-        assert fill.raw["venue_state"]["status"] == "open"
+        assert "canceled" in fill.raw["rejected"]
+        assert fill.external_id == "520001506296"
+        assert "resting_order_cancelled" not in fill.raw
+        assert "cancellation_confirmed" not in fill.raw
+
+    async def test_an_unconfirmable_cancel_never_claims_the_order_is_gone(self):
+        ccxt = pytest.importorskip("ccxt")
+        intent = _intent()
+        exchange = FakeExchange(
+            order=_order(filled=None, average=None, status=None,
+                         order_id="520001506296"),
+            fetch_error=ccxt.NetworkError("by-oid read is down"),
+            open_orders=[
+                {"id": "520001506296", "symbol": intent.symbol,
+                 "status": "open", "filled": 0.0},
+            ],
+            cancel_error=ccxt.NetworkError("cancel request timed out"),
+        )
+
+        fill = await _live(exchange).execute(intent)
+
+        assert fill.is_empty
+        assert ("520001506296", intent.symbol) in exchange.cancelled
+        assert fill.raw["resting"] is True
+        assert fill.raw["cancellation_confirmed"] is False
+        assert "cancel request timed out" in fill.raw["cancel_failed"]
+        assert "resting_order_cancelled" not in fill.raw
 
     async def test_a_fill_that_lands_during_the_cancel_race_is_returned(self):
         ccxt = pytest.importorskip("ccxt")
@@ -1364,7 +1389,9 @@ class TestTradeTapeRecovery:
 
         assert fill.is_empty
         assert ("520013570942", intent.symbol) in exchange.cancelled
-        assert fill.raw["resting_order_cancelled"] == "520013570942"
+        assert fill.raw["resting"] is True
+        assert fill.raw["cancellation_confirmed"] is False
+        assert "resting_order_cancelled" not in fill.raw
 
     async def test_an_order_no_path_can_find_still_refuses_naming_the_key(self):
         ccxt = pytest.importorskip("ccxt")
