@@ -550,6 +550,41 @@ class _UnavailableVenue:
         return False
 
 
+class _BracketRefusingVenue:
+    """Mirrors the live adapter's B04 contract: an intent carrying a barrier
+    instruction is refused before anything is placed, by name."""
+
+    def __init__(self, inner: PaperVenue) -> None:
+        self.name = inner.name
+        self.capabilities = inner.capabilities
+        self._inner = inner
+
+    async def quote(self, intent):
+        return await self._inner.quote(intent)
+
+    async def execute(self, intent):
+        if (
+            intent.stop_price is not None
+            or intent.take_profit_price is not None
+            or intent.expires_at is not None
+        ):
+            raise VenueUnavailable(
+                f"{self.name} refuses {intent.symbol}: the intent carries a "
+                f"stop/target/expiry instruction and no exit manager exists to "
+                f"honour it; an unattended position is not a bounded trade"
+            )
+        return await self._inner.execute(intent)
+
+    async def positions(self):
+        return await self._inner.positions()
+
+    async def balances(self):
+        return await self._inner.balances()
+
+    async def cancel(self, external_id):
+        return False
+
+
 class TestUncertainExecutionsAreNotRejections:
     """B01: a possibly-live order must never be recorded as a terminal one."""
 
@@ -594,6 +629,27 @@ class TestUncertainExecutionsAreNotRejections:
 
         (order,) = await _orders(db, portfolio)
         assert order["status"] == "acknowledged"
+
+    async def test_a_bridged_prediction_intent_is_refused_by_name(self, db, portfolio):
+        """B04: the bridge populates stop/target/expiry from the prediction,
+        and an intent carrying them must be refused by name rather than opened
+        as an unattended position."""
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+
+        result = await _cycle(db, portfolio, _BracketRefusingVenue(_venue(symbol)))
+
+        assert result.halted
+        assert "no exit manager" in (result.halt_reason or "")
+        assert result.executed == 0
+        assert result.refused[LoopRefusal.EXECUTION_UNCERTAIN.value] == 1
+
+        (order,) = await _orders(db, portfolio)
+        assert order["status"] == "acknowledged"
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM position WHERE portfolio_id = $1", portfolio
+        ) == 0
 
     async def test_an_unsettled_order_gates_the_whole_cycle(self, db, portfolio):
         entity_id, symbol = await _entity(db)

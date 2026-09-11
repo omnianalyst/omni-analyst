@@ -59,6 +59,8 @@ SPOT_BTC = {
     "margin": True,
     "swap": False,
     "active": True,
+    "base": "BTC",
+    "quote": "USDT",
     "precision": {"amount": 5, "price": 2},
     "limits": {"amount": {"min": 0.00001}, "cost": {"min": 5.0}},
 }
@@ -69,6 +71,11 @@ PERP_BTC = {
     "margin": False,
     "swap": True,
     "active": True,
+    "linear": True,
+    "inverse": False,
+    "contractSize": 1,
+    "settle": "USDT",
+    "quote": "USDT",
     "precision": {"amount": 3, "price": 1},
     "limits": {"amount": {"min": 0.001}, "cost": {"min": 50.0}},
 }
@@ -79,6 +86,11 @@ PERP_SOL = {
     "margin": False,
     "swap": True,
     "active": True,
+    "linear": True,
+    "inverse": False,
+    "contractSize": 1,
+    "settle": "USDT",
+    "quote": "USDT",
     "precision": {"amount": 0, "price": 4},
     "limits": {"amount": {"min": 1.0}, "cost": {"min": 5.0}},
 }
@@ -1406,3 +1418,161 @@ class TestTradeTapeRecovery:
             await _live(exchange).execute(intent)
 
         assert len(exchange.created) == 1
+
+
+class TestContractUnitsAreNotAssumed:
+    """Quantities are base assets here; a market whose contracts are not 1x1
+    linear quote-settled units would be traded at a wrong size."""
+
+    async def test_a_fractional_contract_size_is_refused_on_execute(self):
+        exchange = FakeExchange(
+            markets={
+                **MARKETS,
+                "BTC/USDC:USDC": {
+                    "symbol": "BTC/USDC:USDC", "type": "swap", "spot": False,
+                    "margin": False, "swap": True, "active": True,
+                    "linear": True, "inverse": False, "contractSize": "0.001",
+                    "settle": "USDC", "quote": "USDC",
+                    "precision": {"amount": 3, "price": 1},
+                    "limits": {"amount": {"min": 0.001}, "cost": {"min": 1.0}},
+                },
+            }
+        )
+
+        with pytest.raises(VenueUnavailable, match="contractSize"):
+            await _live(exchange).execute(
+                _intent(symbol="BTC/USDC:USDC", market_type=MarketType.PERPETUAL)
+            )
+
+    async def test_an_inverse_market_is_refused_on_execute(self):
+        exchange = FakeExchange(
+            markets={
+                **MARKETS,
+                "BTC/USD:BTC": {
+                    "symbol": "BTC/USD:BTC", "type": "swap", "spot": False,
+                    "margin": False, "swap": True, "active": True,
+                    "linear": False, "inverse": True, "contractSize": 100,
+                    "settle": "BTC", "quote": "USD",
+                    "precision": {"amount": 3, "price": 1},
+                    "limits": {"amount": {"min": 0.001}, "cost": {"min": 1.0}},
+                },
+            }
+        )
+
+        with pytest.raises(VenueUnavailable, match="linear quote-settled"):
+            await _live(exchange).execute(
+                _intent(symbol="BTC/USD:BTC", market_type=MarketType.PERPETUAL)
+            )
+
+    async def test_a_fractional_contract_size_is_refused_on_positions(self):
+        exchange = FakeExchange(
+            markets={
+                **MARKETS,
+                "BTC/USDC:USDC": {
+                    "symbol": "BTC/USDC:USDC", "type": "swap", "spot": False,
+                    "margin": False, "swap": True, "active": True,
+                    "linear": True, "inverse": False, "contractSize": "0.001",
+                    "settle": "USDC", "quote": "USDC",
+                    "precision": {"amount": 3, "price": 1},
+                    "limits": {"amount": {"min": 0.001}, "cost": {"min": 1.0}},
+                },
+            },
+            positions=[
+                {"symbol": "BTC/USDC:USDC", "contracts": 0.4, "side": "long",
+                 "entryPrice": 61000.0, "timestamp": TS},
+            ],
+        )
+
+        with pytest.raises(VenueUnavailable, match="contractSize"):
+            await _venue(exchange).positions()
+
+    async def test_unit_contracts_still_trade(self):
+        intent = _intent(
+            symbol="SOL/USDT:USDT", market_type=MarketType.PERPETUAL,
+            quantity="2", reference_price="140",
+        )
+        exchange = FakeExchange()
+
+        fill = await _live(exchange).execute(intent)
+
+        assert fill.filled_quantity == Decimal(2)
+
+
+class TestBarrierInstructionsAreRefused:
+    """Nothing closes a position when a barrier breaks; an entry carrying one
+    is refused rather than opened as unbounded risk."""
+
+    async def test_a_stop_price_is_refused_by_name(self):
+        intent = _intent(stop_price=Decimal(9500), take_profit_price=Decimal(10500))
+
+        with pytest.raises(VenueUnavailable, match="no exit manager"):
+            await _live(FakeExchange()).execute(intent)
+
+    async def test_an_expiry_is_refused_too(self):
+        intent = _intent(expires_at=datetime(2026, 1, 1, tzinfo=UTC))
+
+        with pytest.raises(VenueUnavailable, match="no exit manager"):
+            await _live(FakeExchange()).execute(intent)
+
+    async def test_a_carry_shaped_intent_is_unaffected(self):
+        fill = await _live(FakeExchange()).execute(_intent())
+
+        assert fill.filled_quantity == Decimal("0.001")
+
+
+class TestFeesAreQuoteDenominated:
+    """A fee in another asset is not a number to subtract from quote cash."""
+
+    async def test_a_single_quote_fee_is_returned(self):
+        from omni.venue.ccxt_venue import _reported_fee
+
+        order = {"fee": {"cost": "0.01", "currency": "USDC"}}
+        assert _reported_fee(order, quote_currency="USDC") == (
+            Decimal("0.01"), "USDC"
+        )
+
+    async def test_mixed_currency_fees_are_refused_not_summed(self):
+        from omni.venue.ccxt_venue import _reported_fee
+
+        order = {
+            "fees": [
+                {"cost": "0.01", "currency": "USDC"},
+                {"cost": "0.001", "currency": "BTC"},
+            ]
+        }
+        with pytest.raises(VenueUnavailable, match="not denominated"):
+            _reported_fee(order, quote_currency="USDC")
+
+    async def test_a_foreign_single_fee_is_refused(self):
+        from omni.venue.ccxt_venue import _reported_fee
+
+        order = {"fee": {"cost": "0.001", "currency": "BTC"}}
+        with pytest.raises(VenueUnavailable, match="not denominated"):
+            _reported_fee(order, quote_currency="USDC")
+
+    async def test_a_negative_fee_is_refused_not_zeroed(self):
+        from omni.venue.ccxt_venue import _reported_fee
+
+        order = {"fee": {"cost": "-0.01", "currency": "USDC"}}
+        with pytest.raises(VenueUnavailable, match="rebate"):
+            _reported_fee(order, quote_currency="USDC")
+
+    async def test_a_zero_fee_with_an_unknown_currency_is_tolerated(self):
+        from omni.venue.ccxt_venue import _reported_fee
+
+        order = {"fee": {"cost": "0", "currency": None}}
+        assert _reported_fee(order, quote_currency="USDC") == (Decimal(0), None)
+
+    async def test_an_unlabelled_fee_is_refused(self):
+        from omni.venue.ccxt_venue import _reported_fee
+
+        order = {"fee": {"cost": "0.01"}}
+        with pytest.raises(VenueUnavailable, match="not denominated"):
+            _reported_fee(order, quote_currency="USDC")
+
+    async def test_a_filled_order_with_a_foreign_fee_stays_unresolved(self):
+        order = _order(filled=0.001, fee={"cost": 0.001, "currency": "BTC"})
+        exchange = FakeExchange(order=order, fetched_order=order)
+
+        with pytest.raises(VenueUnavailable, match="not denominated"):
+            await _live(exchange).execute(_intent())

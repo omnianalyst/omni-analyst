@@ -275,29 +275,57 @@ def _is_duplicate_id(exc: BaseException) -> bool:
     return isinstance(exc, ccxt.DuplicateOrderId)
 
 
-def _reported_fee(order: dict[str, Any]) -> tuple[Decimal | None, str | None]:
+def _reported_fee(
+    order: dict[str, Any], *, quote_currency: str | None
+) -> tuple[Decimal | None, str | None]:
+    """The order's fee, in the market's quote currency, or None.
+
+    A fee the venue reports in another asset cannot be subtracted from quote
+    cash: 0.001 BTC booked as 0.001 USDC is a fabricated ledger entry. A
+    negative fee is a rebate the ledger has no credit entry for; zeroing it
+    books nothing where a credit belongs. Both are refused, as is a measured
+    non-zero fee with no currency label -- a zero-cost fee with an unknown
+    currency books zero either way and is tolerated.
+    """
+
+    def _measured(cost: Decimal | None, currency: str | None) -> Decimal | None:
+        if cost is None:
+            return None
+        if cost < 0:
+            raise VenueUnavailable(
+                f"a negative fee ({cost} {currency!r}) is a rebate this ledger "
+                f"has no credit entry for; refusing to book zero where a "
+                f"credit belongs"
+            )
+        if cost > 0 and currency != quote_currency:
+            raise VenueUnavailable(
+                f"a fee of {cost} {currency!r} is not denominated in the "
+                f"settlement currency {quote_currency!r} and cannot be "
+                f"subtracted from it"
+            )
+        return cost
+
     fee = order.get("fee")
     if isinstance(fee, dict):
-        cost = _decimal(fee.get("cost"))
+        currency = _text(fee.get("currency"))
+        cost = _measured(_decimal(fee.get("cost")), currency)
         if cost is not None:
-            return cost, _text(fee.get("currency"))
+            return cost, currency
     fees = order.get("fees")
     if isinstance(fees, list):
         total = Decimal(0)
-        currency: str | None = None
         seen = False
         for entry in fees:
             if not isinstance(entry, dict):
                 continue
-            cost = _decimal(entry.get("cost"))
+            currency = _text(entry.get("currency"))
+            cost = _measured(_decimal(entry.get("cost")), currency)
             if cost is None:
                 continue
             total += cost
             seen = True
-            if currency is None:
-                currency = _text(entry.get("currency"))
         if seen:
-            return total, currency
+            return total, quote_currency
     return None, None
 
 
@@ -761,6 +789,9 @@ class CCXTVenue:
         cost = Decimal(0)
         fee = Decimal(0)
         at: datetime | None = None
+        market = self._market(intent.symbol)
+        self._require_supported_contract_units(market)
+        quote_currency = _text(market.get("quote"))
         for trade in trades:
             t_amount = _decimal(trade.get("amount"))
             t_price = _decimal(trade.get("price"))
@@ -781,8 +812,23 @@ class CCXTVenue:
                 if isinstance(trade.get("fee"), dict)
                 else None
             )
-            if fee_part is not None and fee_currency not in (None, "USDC", "USDT"):
-                fee_part = None
+            if fee_part is not None and fee_part < 0:
+                raise VenueUnavailable(
+                    f"{self.name} recorded a negative fee ({fee_part} "
+                    f"{fee_currency!r}) on a {intent.symbol} trade; a rebate "
+                    f"with no credit entry is not a fee of zero"
+                )
+            if (
+                fee_part is not None
+                and fee_part > 0
+                and fee_currency != quote_currency
+            ):
+                raise VenueUnavailable(
+                    f"{self.name} recorded a fee of {fee_part} "
+                    f"{fee_currency!r} on a {intent.symbol} trade; it is not "
+                    f"denominated in the settlement currency "
+                    f"{quote_currency!r} and cannot be booked against it"
+                )
             amount += t_amount
             cost += t_amount * t_price
             fee += fee_part or Decimal(0)
@@ -834,6 +880,36 @@ class CCXTVenue:
                 f"{intent.symbol} is a {actual} market at {self.name}, not "
                 f"{intent.market_type.value}; refusing to trade a different "
                 f"instrument from the one the intent named"
+            )
+
+    def _require_supported_contract_units(self, market: dict[str, Any]) -> None:
+        """Contract sizes are not base-asset quantities until converted.
+
+        Intents are sized in base assets, and this adapter sends that number
+        as the order amount. On a market whose contracts are anything other
+        than 1 unit of the base, settled in the quote (linear), the venue
+        reads a different size and exposure than the intent named. No
+        conversion exists here, so such a market is refused rather than
+        traded at a wrong size.
+        """
+        if not (market.get("swap") or market.get("future")):
+            return
+        size = _decimal(market.get("contractSize"))
+        settle = _text(market.get("settle"))
+        quote = _text(market.get("quote"))
+        if (
+            not market.get("linear")
+            or size is None
+            or size != Decimal(1)
+            or (settle is not None and quote is not None and settle != quote)
+        ):
+            raise VenueUnavailable(
+                f"{_text(market.get('symbol')) or 'a contract market'} at "
+                f"{self.name} does not trade 1x1 linear quote-settled contracts "
+                f"(linear={market.get('linear')!r}, contractSize="
+                f"{market.get('contractSize')!r}, settle={settle!r}, quote="
+                f"{quote!r}); this adapter sizes in base assets and refuses a "
+                f"contract unit it does not convert"
             )
 
     def _rounded_amount(self, symbol: str, quantity: Decimal) -> Decimal:
@@ -990,6 +1066,21 @@ class CCXTVenue:
                 f"orders; construct it with mode=TradingMode.LIVE to trade "
                 f"real capital"
             )
+        if (
+            intent.stop_price is not None
+            or intent.take_profit_price is not None
+            or intent.expires_at is not None
+        ):
+            # A directional intent carries barriers defining its bounded risk,
+            # and nothing downstream closes the position when one breaks. An
+            # entry that ignores them is unbounded risk wearing a bounded
+            # prediction's name, so the entry itself is refused until a durable
+            # bracket/exit manager exists. Carry intents set none of these.
+            raise VenueUnavailable(
+                f"{self.name} refuses {intent.symbol}: the intent carries a "
+                f"stop/target/expiry instruction and no exit manager exists to "
+                f"honour it; an unattended position is not a bounded trade"
+            )
         if not self.capabilities.supports(intent.market_type):
             raise VenueUnavailable(
                 f"{self.name} does not support {intent.market_type.value} for "
@@ -1000,6 +1091,7 @@ class CCXTVenue:
 
         market = self._market(intent.symbol)
         self._require_market_type(market, intent)
+        self._require_supported_contract_units(market)
 
         amount = self._rounded_amount(intent.symbol, intent.quantity)
         price: Decimal | None = None
@@ -1302,6 +1394,9 @@ class CCXTVenue:
                 f"order for {intent.symbol} (client order id {key}); what "
                 f"happened to it is unknown"
             )
+        market = self._market(intent.symbol)
+        self._require_supported_contract_units(market)
+        quote_currency = _text(market.get("quote"))
 
         reported_status = _text(order.get("status"))
         status = reported_status.lower() if reported_status is not None else None
@@ -1342,7 +1437,7 @@ class CCXTVenue:
                     f"usable price; a fill priced from the intent is a "
                     f"fabricated P&L"
                 )
-            fee, currency = _reported_fee(order)
+            fee, currency = _reported_fee(order, quote_currency=quote_currency)
             if fee is None:
                 # The venue acknowledged the execution but not its fee. The
                 # position is real, so refusing the fill would lose it; the
@@ -1351,11 +1446,6 @@ class CCXTVenue:
                 # cost measured against this trade.
                 fee = average * filled * self.capabilities.taker_fee_bps / BPS
                 raw["fee_estimated"] = True
-            elif fee < 0:
-                # A rebate. `Fill` forbids a negative fee_paid, so the credit is
-                # recorded rather than booked.
-                raw["fee_rebate"] = str(-fee)
-                fee = Decimal(0)
             if currency is not None:
                 raw["fee_currency"] = currency
             raw["partial"] = filled < submitted
@@ -1476,6 +1566,8 @@ class CCXTVenue:
             )
 
         market = self._markets.get(symbol)
+        if isinstance(market, dict):
+            self._require_supported_contract_units(market)
         market_type = MarketType.PERPETUAL
         if isinstance(market, dict) and not market.get("swap") and market.get("margin"):
             market_type = MarketType.MARGIN
