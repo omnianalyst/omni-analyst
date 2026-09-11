@@ -272,4 +272,4 @@ async def test_readding_a_symbol_updates_it_instead_of_duplicating(
         )
         listing = await client.get("/holdings", headers=headers)
     assert len(listing.json()["holdings"]) == 1
-        assert listing.json()["holdings"][0]["quantity"] == "4"
+    assert listing.json()["holdings"][0]["quantity"] == "4"
