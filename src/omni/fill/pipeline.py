@@ -18,7 +18,7 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from omni.capability.registry import Registry
 from omni.coverage.writer import (
@@ -73,7 +73,8 @@ WHERE id = (
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
-RETURNING id, entity_id, claim_type, key, gap_class, audience_user_id, score
+RETURNING id, entity_id, claim_type, key, gap_class, audience_user_id, score,
+          lease_owner
 """
 
 _RECORD_ATTEMPT = """
@@ -91,9 +92,15 @@ FROM entity
 WHERE id = $1
 """
 
+# Completion statements are fenced on the acquisition token AND a live lease:
+# a worker that outlives its lease (slow provider, retries) must not resolve,
+# cool down or release a gap a replacement worker has since re-leased. The
+# token is per attempt (worker_id/uuid), so a stale worker's own token no
+# longer matches the row the moment someone else claims it.
 _RESOLVE = """
 UPDATE gap SET resolved_at = now(), lease_owner = NULL, lease_expires_at = NULL
-WHERE id = $1
+WHERE id = $1 AND lease_owner = $2
+  AND lease_expires_at > clock_timestamp() AND resolved_at IS NULL
 """
 
 # Cooldown for "source answered but had nothing new". Unlike _RELEASE this is
@@ -106,7 +113,8 @@ WHERE id = $1
 _COOLDOWN = """
 UPDATE gap SET lease_owner = NULL, lease_expires_at = NULL,
                next_attempt_at = now() + ($2 || ' seconds')::interval
-WHERE id = $1
+WHERE id = $1 AND lease_owner = $3
+  AND lease_expires_at > clock_timestamp() AND resolved_at IS NULL
 """
 
 # Release with backoff. attempts is incremented so repeated failures wait
@@ -123,7 +131,8 @@ UPDATE gap SET
         ELSE now() + ($3 * power(2, attempts)) * interval '1 second'
     END,
     resolved_at = CASE WHEN attempts + 1 >= $2 THEN now() ELSE NULL END
-WHERE id = $1
+WHERE id = $1 AND lease_owner = $4
+  AND lease_expires_at > clock_timestamp() AND resolved_at IS NULL
 """
 
 
@@ -139,8 +148,16 @@ class FillResult:
 async def claim_next_gap(
     pool, *, worker_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS
 ) -> dict | None:
-    """Lease the highest-scoring open gap, or None if there is nothing to do."""
-    row = await pool.fetchrow(_CLAIM_GAP, worker_id, str(lease_seconds))
+    """Lease the highest-scoring open gap, or None if there is nothing to do.
+
+    The lease_owner stored (and returned) is a per-attempt token,
+    ``worker_id/uuid``: completion statements require it plus a live lease, so
+    a worker whose lease expired cannot mutate a gap a replacement took over.
+    """
+    if lease_seconds <= 0:
+        raise ValueError("lease_seconds must be positive")
+    token = f"{worker_id}/{uuid4().hex}"
+    row = await pool.fetchrow(_CLAIM_GAP, token, str(lease_seconds))
     return dict(row) if row else None
 
 
@@ -159,7 +176,7 @@ async def fill_gap(
     if not candidates:
         reason = f"no capability registered for claim type {gap['claim_type']}"
         await _record(pool, gap_id, None, "unfillable", None, reason)
-        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
+        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS, gap["lease_owner"])
         return FillResult(gap_id, "unfillable", None, [], reason)
 
     failures: list[str] = []
@@ -210,7 +227,7 @@ async def fill_gap(
             except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
                 reason = f"{registration.name} raised {type(exc).__name__}: {exc}"
                 await _record(pool, gap_id, registration.name, "error", None, reason)
-                await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
+                await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS, gap["lease_owner"])
                 return FillResult(gap_id, "error", registration.name, [], reason)
 
         try:
@@ -249,7 +266,7 @@ async def fill_gap(
         except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
             reason = f"{registration.name} raised {type(exc).__name__}: {exc}"
             await _record(pool, gap_id, registration.name, "error", None, reason)
-            await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
+            await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS, gap["lease_owner"])
             return FillResult(gap_id, "error", registration.name, [], reason)
 
         if not drafts:
@@ -257,7 +274,7 @@ async def fill_gap(
             # target. Recording it stops the gap being re-attempted forever.
             reason = f"{registration.name} returned no observations"
             await _record(pool, gap_id, registration.name, "unfillable", None, reason)
-            await pool.execute(_RESOLVE, gap_id)
+            await pool.execute(_RESOLVE, gap_id, gap["lease_owner"])
             return FillResult(gap_id, "unfillable", registration.name, [], reason)
 
         try:
@@ -291,17 +308,17 @@ async def fill_gap(
                 if gap["gap_class"] == "unverified"
                 else NO_NEW_DATA_COOLDOWN_SECONDS
             )
-            await pool.execute(_COOLDOWN, gap_id, str(cooldown))
+            await pool.execute(_COOLDOWN, gap_id, str(cooldown), gap["lease_owner"])
             return FillResult(gap_id, "unfillable", registration.name, [], reason)
 
         first = claim_ids[0]
         await _record(pool, gap_id, registration.name, "filled", first, None)
-        await pool.execute(_RESOLVE, gap_id)
+        await pool.execute(_RESOLVE, gap_id, gap["lease_owner"])
         return FillResult(gap_id, "filled", registration.name, claim_ids, None)
 
     reason = "; ".join(failures)
     await _record(pool, gap_id, candidates[0].name, "unfillable", None, reason)
-    await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
+    await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS, gap["lease_owner"])
     return FillResult(gap_id, "unfillable", candidates[0].name, [], reason)
 
 

@@ -110,7 +110,7 @@ async def _fill_declared(pool, gap, capability: DerivedCapability) -> FillResult
             + "; ".join(a.reason for a in abstentions)
         )
         await _record(pool, gap_id, cap_name, "unfillable", None, reason)
-        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
+        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS, gap["lease_owner"])
         return FillResult(gap_id, "unfillable", cap_name, [], reason)
 
     computed = await capability.compute(pool, gap, **materialized)
@@ -122,7 +122,7 @@ async def _fill_declared(pool, gap, capability: DerivedCapability) -> FillResult
             f"{count} input claim(s)"
         )
         await _record(pool, gap_id, cap_name, "unfillable", None, reason)
-        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
+        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS, gap["lease_owner"])
         return FillResult(gap_id, "unfillable", cap_name, [], reason)
 
     draft = computed
@@ -146,7 +146,7 @@ async def _fill_declared(pool, gap, capability: DerivedCapability) -> FillResult
     )
 
     await _record(pool, gap_id, cap_name, "filled", claim_id, None)
-    await pool.execute(_RESOLVE, gap_id)
+    await pool.execute(_RESOLVE, gap_id, gap["lease_owner"])
     return FillResult(gap_id, "filled", cap_name, [claim_id], None)
 
 
@@ -171,7 +171,7 @@ async def _fill_injected(pool, gap, capability: DerivedCapability) -> FillResult
             f"{len(all_inputs)} input claim(s)"
         )
         await _record(pool, gap_id, cap_name, "unfillable", None, reason)
-        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS)
+        await pool.execute(_RELEASE, gap_id, MAX_ATTEMPTS, RETRY_BASE_SECONDS, gap["lease_owner"])
         return FillResult(gap_id, "unfillable", cap_name, [], reason)
 
     draft, input_claim_ids = computed
@@ -191,5 +191,5 @@ async def _fill_injected(pool, gap, capability: DerivedCapability) -> FillResult
     )
 
     await _record(pool, gap_id, cap_name, "filled", claim_id, None)
-    await pool.execute(_RESOLVE, gap_id)
+    await pool.execute(_RESOLVE, gap_id, gap["lease_owner"])
     return FillResult(gap_id, "filled", cap_name, [claim_id], None)
