@@ -11,6 +11,7 @@ always returns a number is how hallucinated coverage enters the store.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import numpy as np
@@ -236,7 +237,9 @@ class TestCalculatePrice:
             settlement_date=date(2025, 1, 1),
             day_count=DayCountConvention.ACTUAL_ACTUAL,
         )
-        with pytest.raises(Unavailable, match="before start_date"):
+        # A matured bond has no flows after settlement; the old message came
+        # from time_to_maturity tripping on the first historical coupon.
+        with pytest.raises(Unavailable, match="no cash flows after settlement"):
             calculate_price(bond)
 
     def test_missing_settlement_date_raises(self):
@@ -748,3 +751,57 @@ class TestAnalyzeCreditMigration:
         spreads = {"AAA": 0.0, "AA": 0.005}
         out = analyze_credit_migration(bond, tm, spreads)
         assert out["downgrade_probability"] == pytest.approx(0.0)
+
+
+class TestSeasonedBondValuation:
+    """B09: already-paid coupons must not fail valuation. A 2020-issued bond
+    valued years later prices off its remaining flows."""
+
+    def _bond(self, **kw):
+        base = Bond(
+            cusip="S", isin="S", issuer="T",
+            issue_date=date(2020, 1, 15), maturity_date=date(2030, 1, 15),
+            coupon_rate=0.06, coupon_frequency=CouponFrequency.SEMI_ANNUAL,
+            face_value=100.0, price=None, yield_to_maturity=0.05,
+            settlement_date=date(2026, 9, 11),
+            day_count=DayCountConvention.ACTUAL_ACTUAL,
+        )
+        return replace(base, **kw) if kw else base
+
+    def test_a_seasoned_bond_prices_off_remaining_coupons(self):
+        bond = self._bond()
+        price = calculate_price(bond)
+
+        flows = [
+            (d, a) for d, a in generate_cash_flows(bond)
+            if d > bond.settlement_date
+        ]
+        expected = sum(
+            a / (1 + bond.yield_to_maturity) ** ((d - bond.settlement_date).days / 365.25)
+            for d, a in flows
+        )
+        assert price == pytest.approx(expected)
+        assert price > 0
+
+    def test_yield_duration_convexity_z_spread_no_longer_raise(self):
+        bond = self._bond(yield_to_maturity=None, price=107.0)
+        curve = YieldCurve(
+            curve_date=date(2026, 9, 11), currency="USD",
+            tenors=[0.5, 1, 2, 5, 10], yields=[0.04, 0.042, 0.045, 0.048, 0.05],
+        )
+        ytm = calculate_yield(bond)
+        assert 0.0 < ytm < 0.10
+        durations = calculate_duration(bond)
+        assert durations["macaulay_duration"] > 0
+        assert calculate_convexity(self._bond()) > 0
+        assert abs(calculate_z_spread(self._bond(price=105.0), curve)) < 0.05
+
+    def test_accrued_interest_still_uses_the_full_schedule(self):
+        bond = self._bond()
+        accrued = calculate_accrued_interest(bond, bond.settlement_date)
+        assert accrued > 0
+
+    def test_a_fully_matured_bond_still_refuses(self):
+        bond = self._bond(maturity_date=date(2021, 1, 15))
+        with pytest.raises(Unavailable, match="no cash flows after settlement"):
+            calculate_price(bond)

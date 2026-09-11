@@ -212,11 +212,27 @@ def generate_cash_flows(bond: Bond) -> list[tuple[date, float]]:
     return sorted(cash_flows)
 
 
-def calculate_price(bond: Bond, discount_curve: YieldCurve | None = None) -> float:
-    cash_flows = generate_cash_flows(bond)
-    if not cash_flows:
-        raise Unavailable("empty cash-flow schedule")
+def _future_cash_flows(bond: Bond) -> list[tuple[date, float]]:
+    """The schedule filtered to flows after settlement.
 
+    Valuation PVs only what the buyer still receives; a seasoned bond's
+    already-paid coupons are not part of its price. The full schedule stays
+    with `generate_cash_flows` (accrued interest needs the prior coupon
+    date).
+    """
+    settle = _settle(bond)
+    flows = [
+        (cf_date, amount)
+        for cf_date, amount in generate_cash_flows(bond)
+        if cf_date > settle
+    ]
+    if not flows:
+        raise Unavailable("no cash flows after settlement date")
+    return flows
+
+
+def calculate_price(bond: Bond, discount_curve: YieldCurve | None = None) -> float:
+    cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
 
     if bond.yield_to_maturity is not None:
@@ -253,10 +269,7 @@ def calculate_yield(bond: Bond, price: float | None = None) -> float:
     if price < 0:
         raise Unavailable(f"negative price: {price}")
 
-    cash_flows = generate_cash_flows(bond)
-    if not cash_flows:
-        raise Unavailable("empty cash-flow schedule")
-
+    cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
 
     def objective(ytm: float) -> float:
@@ -278,10 +291,7 @@ def calculate_yield(bond: Bond, price: float | None = None) -> float:
 def calculate_duration(
     bond: Bond, yield_change: float = 0.0001
 ) -> dict[str, Any]:
-    cash_flows = generate_cash_flows(bond)
-    if not cash_flows:
-        raise Unavailable("empty cash-flow schedule")
-
+    cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
     ytm = bond.yield_to_maturity if bond.yield_to_maturity is not None else calculate_yield(bond)
 
@@ -296,7 +306,7 @@ def calculate_duration(
     bond_down = _bond_with_ytm(bond, ytm + yield_change)
     price_up = calculate_price(bond_up)
     price_down = calculate_price(bond_down)
-    price_base = bond.price if bond.price > 0 else calculate_price(bond)
+    price_base = bond.price if (bond.price or 0) > 0 else calculate_price(bond)
 
     # v1 computed (price_down - price_up) / (2 * dy * P_0), omitting the
     # leading negative sign in the definition of effective duration. The
@@ -316,13 +326,10 @@ def calculate_duration(
 
 
 def calculate_convexity(bond: Bond) -> float:
-    cash_flows = generate_cash_flows(bond)
-    if not cash_flows:
-        raise Unavailable("empty cash-flow schedule")
-
+    cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
     ytm = bond.yield_to_maturity if bond.yield_to_maturity is not None else calculate_yield(bond)
-    price = bond.price if bond.price > 0 else calculate_price(bond)
+    price = bond.price if (bond.price or 0) > 0 else calculate_price(bond)
 
     weighted_sum = 0.0
     for cf_date, cf_amount in cash_flows:
@@ -339,10 +346,7 @@ def calculate_convexity(bond: Bond) -> float:
 
 
 def calculate_z_spread(bond: Bond, risk_free_curve: YieldCurve) -> float:
-    cash_flows = generate_cash_flows(bond)
-    if not cash_flows:
-        raise Unavailable("empty cash-flow schedule")
-
+    cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
 
     def objective(z_spread: float) -> float:
@@ -491,7 +495,7 @@ def calculate_spread_duration(bond: Bond, risk_free_curve: YieldCurve) -> float:
     current_spread = calculate_z_spread(bond, risk_free_curve)
     wider_spread = current_spread + 0.0001
 
-    cash_flows = generate_cash_flows(bond)
+    cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
 
     price_wider = 0.0

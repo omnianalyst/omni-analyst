@@ -779,3 +779,96 @@ def test_comparison_empty_raises():
     # v1 returned {} on an empty list; an empty comparison has no leaders.
     with pytest.raises(Unavailable):
         portfolio_comparison_metrics([])
+
+
+class TestCovarianceLabelAlignment:
+    """B07: a DataFrame whose columns are permuted relative to its index must
+    yield the same labeled weights as the canonical ordering."""
+
+    def _cov(self):
+        rng = np.random.default_rng(7)
+        a = rng.normal(size=(600, 3))
+        cov = np.cov(a, rowvar=False)
+        labels = ["SPY", "TLT", "GLD"]
+        return pd.DataFrame(cov, index=labels, columns=labels)
+
+    def test_column_permutation_does_not_change_weights(self):
+        canonical = self._cov()
+        permuted = canonical[["TLT", "GLD", "SPY"]]
+        for fn in (hrp_weights, risk_parity_weights, min_variance_weights):
+            base = fn(canonical)
+            flipped = fn(permuted)
+            for label in base.index:
+                assert flipped[label] == pytest.approx(base[label], abs=1e-9), (
+                    f"{fn.__name__} weights moved for {label} under a column "
+                    f"permutation: {base[label]} vs {flipped[label]}"
+                )
+
+    def test_mismatched_label_sets_raise(self):
+        bad = self._cov()
+        bad.columns = ["SPY", "TLT", "QQQ"]
+        for fn in (hrp_weights, risk_parity_weights, min_variance_weights):
+            with pytest.raises(Unavailable, match="labels must match"):
+                fn(bad)
+
+    def test_duplicate_labels_raise(self):
+        bad = self._cov()
+        bad.columns = ["SPY", "SPY", "GLD"]
+        with pytest.raises(Unavailable, match="unique"):
+            hrp_weights(bad)
+
+    def test_asymmetric_matrix_raises(self):
+        bad = self._cov().to_numpy()
+        bad[0, 1] = bad[0, 1] * 2
+        with pytest.raises(Unavailable, match="symmetric"):
+            hrp_weights(bad)
+
+
+class TestRiskParityConvergesOrRaises:
+    """B08: the solver must never return an unconverged portfolio."""
+
+    def _counterexamples(self):
+        # Positive-definite matrices with negative correlations -- the shape
+        # that collapsed the multiplicative iteration to zero weights.
+        yield np.array([
+            [1.0, -0.7, 0.2],
+            [-0.7, 1.0, -0.6],
+            [0.2, -0.6, 1.0],
+        ])
+        yield np.array([
+            [4.0, -1.9, -1.9],
+            [-1.9, 4.0, -1.2],
+            [-1.9, -1.2, 4.0],
+        ])
+        yield np.array([
+            [1.0, -0.5, 0.0, 0.0],
+            [-0.5, 1.0, -0.5, 0.0],
+            [0.0, -0.5, 1.0, -0.5],
+            [0.0, 0.0, -0.5, 1.0],
+        ])
+
+    def test_negative_correlation_matrices_reach_equal_contributions(self):
+        n_runs = 0
+        for cov in self._counterexamples():
+            w = risk_parity_weights(cov)
+            rc = risk_contributions(cov, w)
+            target = 1.0 / len(w)
+            assert np.max(np.abs(rc.to_numpy() - target)) < 1e-6, (
+                f"risk contributions not equal: {rc.to_numpy()}"
+            )
+            n_runs += 1
+        assert n_runs == 3
+
+    def test_a_non_converging_run_raises_rather_than_returning(self):
+        cov = np.array([
+            [1.0, -0.7, 0.2],
+            [-0.7, 1.0, -0.6],
+            [0.2, -0.6, 1.0],
+        ])
+        with pytest.raises(Unavailable, match="did not converge"):
+            risk_parity_weights(cov, max_iter=2)
+
+    def test_a_non_pd_matrix_is_refused(self):
+        singular = np.ones((3, 3))
+        with pytest.raises(Unavailable):
+            risk_parity_weights(singular)
