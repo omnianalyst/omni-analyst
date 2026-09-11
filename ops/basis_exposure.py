@@ -261,32 +261,45 @@ def describe(basis_bps: np.ndarray) -> dict:
 
 
 def hold_changes(
-    dates: Sequence[date], basis_bps: np.ndarray, hold_days: int
+    dates: Sequence[date],
+    basis_bps: np.ndarray,
+    hold_days: int,
+    *,
+    spot: dict[date, tuple[float, float]],
 ) -> tuple[np.ndarray, int]:
-    """Change in basis over a hold, matched on the CALENDAR date, not the row offset.
+    """Fixed-quantity hedge loss in bps of initial spot notional; positive is loss.
 
-    Offsetting by `hold_days` rows assumes the series has no gaps. It does have
-    gaps -- a missing session on either leg drops the day -- and an offset walk
-    would silently compare pairs of dates further apart than the hold, reporting
-    a wider distribution as if it were the six-week one.
+    A pair holding Q units loses Q * (b1*S1 - b0*S0) when basis richens, so
+    measuring b1 - b0 alone (the old behaviour) silently assumes the spot
+    price never moved -- spot doubling under an unchanged 1% basis is a full
+    1%-of-notional loss the change-based number reported as zero. The loss is
+    expressed against the OPENING spot, the notional actually committed.
 
-    Returns the changes and the count of entry dates whose exit date was absent.
+    Entry/exit dates are matched on the CALENDAR date, not the row offset:
+    the series has gaps, and an offset walk would silently compare dates
+    further apart than the hold. Returns the losses and the count of entry
+    dates whose exit date (or its price) was absent.
     """
-    lookup = {d: float(v) for d, v in zip(dates, basis_bps, strict=True)}
-    changes: list[float] = []
+    if hold_days <= 0:
+        raise Unfillable("hold_days must be positive")
+    lookup = dict(zip(dates, basis_bps, strict=True))
+    losses: list[float] = []
     unmatched = 0
-    for d in dates:
-        exit_date = d + timedelta(days=hold_days)
-        exit_basis = lookup.get(exit_date)
-        if exit_basis is None:
+    for opened in dates:
+        closed = opened + timedelta(days=hold_days)
+        if closed not in lookup or opened not in spot or closed not in spot:
             unmatched += 1
             continue
-        changes.append(exit_basis - lookup[d])
-    return np.asarray(changes, dtype=float), unmatched
+        s0, s1 = spot[opened][0], spot[closed][0]
+        b0, b1 = float(lookup[opened]), float(lookup[closed])
+        if not np.isfinite([s0, s1, b0, b1]).all() or min(s0, s1) <= 0:
+            raise Unfillable("holding-period economics need two finite positive prices")
+        losses.append((b1 * s1 - b0 * s0) / s0)
+    return np.asarray(losses, dtype=float), unmatched
 
 
 def describe_changes(changes: np.ndarray) -> dict:
-    """Statistics on the six-week basis change. Adverse is a POSITIVE change."""
+    """Statistics of hedge loss in bps of initial spot notional; positive is adverse."""
     n = int(changes.size)
     if n < MIN_ALIGNED_DAYS:
         raise Unfillable(
@@ -366,16 +379,16 @@ def vol_link(
 def pair_economics(
     *, notional: float, carry_pct_yr: float, hold_days: int, adverse_bps: float
 ) -> dict:
-    """What a pair earns over the hold against what an adverse basis move costs it.
+    """What a pair earns over the hold against what an adverse move costs it.
 
     `notional` is the size of ONE leg -- a $10k pair is $10k long spot against
-    $10k short perp. Carry accrues on the perp notional; the basis move applies
-    to the same notional, so the two are directly comparable in dollars.
+    $10k short perp. `adverse_bps` is measured hedge loss / initial spot
+    notional * 10,000 -- the unit `hold_changes` emits.
     """
-    if notional <= 0.0:
-        raise Unfillable("notional must be positive; a zero-size pair earns and risks nothing")
-    if hold_days <= 0:
-        raise Unfillable("hold_days must be positive")
+    if not np.isfinite([notional, carry_pct_yr, adverse_bps]).all():
+        raise Unfillable("economics inputs must be finite")
+    if notional <= 0.0 or hold_days <= 0:
+        raise Unfillable("notional and holding period must be positive")
 
     earned = notional * (carry_pct_yr / 100.0) * (hold_days / 365.0)
     cost = notional * (adverse_bps / 10000.0)
@@ -463,10 +476,14 @@ def measure_asset(
 
     result["levels"] = describe(basis)
     result["levels_raw"] = describe(raw["basis_bps"])
-    changes, unmatched = hold_changes(dates, basis, hold_days)
+    changes, unmatched = hold_changes(
+        dates, basis, hold_days, spot=spot_by_date
+    )
     result["unmatched_exits"] = unmatched
     result["changes"] = describe_changes(changes)
-    raw_changes, _ = hold_changes(raw["dates"], raw["basis_bps"], hold_days)
+    raw_changes, _ = hold_changes(
+        raw["dates"], raw["basis_bps"], hold_days, spot=spot_by_date
+    )
     result["changes_raw"] = describe_changes(raw_changes)
 
     # The recent window, on the same discipline the research harness applies to
@@ -479,7 +496,9 @@ def measure_asset(
     recent_basis = basis[recent_idx]
     try:
         result["recent_levels"] = describe(recent_basis)
-        recent_changes, _ = hold_changes(recent_dates, recent_basis, hold_days)
+        recent_changes, _ = hold_changes(
+            recent_dates, recent_basis, hold_days, spot=spot_by_date
+        )
         result["recent_changes"] = describe_changes(recent_changes)
     except Unfillable as exc:
         result["recent_levels"] = None
@@ -553,9 +572,10 @@ def _print_asset(
 
     ch = r["changes"]
     print(
-        f"    {hold_days}d change    n {ch['n']:4d}   mean {ch['mean_bps']:+7.2f}"
-        f"   sd {ch['sd_bps']:6.2f}   worst adverse {ch['worst_adverse_bps']:+7.2f}"
-        f"   p99 adverse {ch['p99_adverse_bps']:+6.2f}"
+        f"    {hold_days}d hedge loss n {ch['n']:4d}   mean {ch['mean_bps']:+7.2f}"
+        f"   sd {ch['sd_bps']:6.2f}   worst hedge loss {ch['worst_adverse_bps']:+7.2f}"
+        f"   p99 {ch['p99_adverse_bps']:+6.2f}"
+        f"   (bps of initial spot notional)"
     )
 
     rl, rc = r.get("recent_levels"), r.get("recent_changes")
@@ -566,7 +586,7 @@ def _print_asset(
             f"    last {recent_days}d      n {rl['n']:4d}   mean {rl['mean_bps']:+7.2f}"
             f"   sd {rl['sd_bps']:6.2f}   max|b| {rl['max_abs_bps']:7.2f}"
             f"   p99|b| {rl['p99_abs_bps']:6.2f}"
-            f"   | {hold_days}d worst adverse {rc['worst_adverse_bps']:+7.2f}"
+            f"   | {hold_days}d worst hedge loss {rc['worst_adverse_bps']:+7.2f}"
         )
 
     vl = r.get("vol_link")
@@ -602,7 +622,7 @@ def _print_asset(
         verdict = "EXCEEDS" if econ["adverse_cost_usd"] > econ["earned_usd"] else "under"
         print(
             f"    on ${notional:,.0f}     earns ${econ['earned_usd']:,.2f} over {hold_days}d"
-            f"   worst {hold_days}d move ({label}) costs ${econ['adverse_cost_usd']:,.2f}"
+            f"   worst {hold_days}d hedge loss ({label}) costs ${econ['adverse_cost_usd']:,.2f}"
             f"   -> {verdict} the carry ({econ['cost_over_earned']:.2f}x)"
         )
     print()
@@ -637,7 +657,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="trailing window reported beside the full sample; recent decides here",
     )
     parser.add_argument("--notional", type=float, default=10000.0)
-    parser.add_argument("--adverse-bps", type=float, default=180.0)
+    parser.add_argument(
+        "--adverse-bps", type=float, default=180.0,
+        help="Assumed hedge loss in bps of initial spot notional, not raw basis change",
+    )
     parser.add_argument("--carry-pct-yr", type=float, default=HYPERLIQUID_NET_PCT_YR)
     args = parser.parse_args(argv)
 
@@ -706,10 +729,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  {label}")
         print(
             f"    earns ${econ['earned_usd']:,.2f} over {args.hold_days}d"
-            f"   = {econ['breakeven_bps']:.1f} bps of basis absorbed before the hold is flat"
+            f"   = {econ['breakeven_bps']:.1f} bps of initial spot notional absorbed before the hold is flat"
         )
         print(
-            f"    a {args.adverse_bps:.0f} bps adverse move costs ${econ['adverse_cost_usd']:,.2f}"
+            f"    a {args.adverse_bps:.0f} bps hedge loss costs ${econ['adverse_cost_usd']:,.2f}"
             f"   = {econ['cost_over_earned']:.2f}x the hold's carry"
         )
     print()
@@ -723,7 +746,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             worst = max(pool, key=lambda r: r[key]["worst_adverse_bps"])
             bps = worst[key]["worst_adverse_bps"]
             print(
-                f"  worst {args.hold_days}d adverse move in the universe, {label}:"
+                f"  worst {args.hold_days}d hedge loss in the universe, {label}:"
                 f" {worst['asset']} at {bps:+.1f} bps"
                 f" (${args.notional * bps / 10000.0:,.2f} on a ${args.notional:,.0f} pair)"
             )

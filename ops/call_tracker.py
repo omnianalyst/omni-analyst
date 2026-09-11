@@ -42,12 +42,17 @@ ship in the public tree; the committed tree ships the tool only).
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import html as _html
 import json
+import os
 import re
 import sys
+import tempfile
+from contextlib import ExitStack
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
 
 import httpx
@@ -234,6 +239,64 @@ async def _recover_entry(
     return None
 
 
+def exclusive_ledger(fn):
+    """Hold a non-blocking writer lock over the whole read-modify-publish run.
+
+    The observations are the forward record that cannot be backfilled, and the
+    default output IS the input file: two overlapping runs would silently
+    clobber each other's additions. Locking both names covers the
+    separate-output cron path too.
+    """
+    @wraps(fn)
+    async def wrapped(*args, **kwargs):
+        names = sorted({str(LEDGER.resolve()), str(LEDGER_OUT.resolve())})
+        with ExitStack() as stack:
+            for name in names:
+                path = Path(name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                handle = stack.enter_context(
+                    open(str(path) + ".lock", "a+b")  # noqa: ASYNC230 - ops script
+                )
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise RuntimeError(
+                        "another call-tracker writer is active"
+                    ) from exc
+            return await fn(*args, **kwargs)
+    return wrapped
+
+
+def write_ledger_atomic(path: Path, records) -> None:
+    """Publish the ledger as one durable, atomic replacement.
+
+    Truncating the destination in place (the old open("w")) destroyed the
+    record on any crash or disk-full between truncate and the final write.
+    A temp file is fsynced, renamed over the destination, and the directory
+    entry fsynced; the previous complete file survives any failure here.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".calls-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, allow_nan=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+@exclusive_ledger
 async def run() -> int:
     now = datetime.now(UTC)
     ledger: dict[str, dict] = {}
@@ -305,10 +368,7 @@ async def run() -> int:
             await asyncio.sleep(1.2)
 
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    LEDGER_OUT.parent.mkdir(parents=True, exist_ok=True)
-    with LEDGER_OUT.open("w") as fh:  # noqa: ASYNC230 - ops script, not the app
-        for rec in ledger.values():
-            fh.write(json.dumps(rec) + "\n")
+    write_ledger_atomic(LEDGER_OUT, ledger.values())
 
     print(f"ledger: {len(ledger)} calls ({new_calls} new) -> {LEDGER_OUT}")
     third = [r for r in ledger.values() if r["classification"] == "third_party"]

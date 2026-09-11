@@ -31,9 +31,9 @@ DATA REQUIREMENT:
     confident t-stat from two overlapping holds, which is noise.
 
 Run:
-    python ops/hold_length_probe.py
-    python ops/hold_length_probe.py --enter-rank 2 --cost-bps 28
-    python ops/hold_length_probe.py --venue hyperliquid
+    python ops/hold_length_probe.py --settlement-hours 1
+    python ops/hold_length_probe.py --settlement-hours 1 --enter-rank 2 --cost-bps 28
+    python ops/hold_length_probe.py --settlement-hours 8 --venue other-venue
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ import numpy as np
 logger = logging.getLogger("omni.ops.hold_length_probe")
 
 CARRY_UNIVERSE = ["BTC", "ETH", "SOL", "HYPE", "PENGU", "PURR"]
-SETTLEMENTS_PER_YEAR = Decimal(24 * 365)
 
 _QUERY = """
 SELECT
@@ -106,103 +105,109 @@ async def load_funding_panel(pool, *, venue: str, assets: list[str], start: date
     return panel, found
 
 
+def _sample_statistics(values: np.ndarray) -> tuple[float, float | None, float | None]:
+    """Mean, std, t-stat; the t-stat is None when the sample cannot define one.
+
+    A constant or singleton sample has no t-statistic -- reporting a made-up
+    zero would present noise as a measurement, the exact failure this probe
+    exists to avoid.
+    """
+    mean = float(values.mean())
+    if values.size < 2:
+        return mean, None, None
+    std = float(values.std(ddof=1))
+    scale = float(np.max(np.abs(values)))
+    if np.ptp(values) == 0 or std <= 1e-12 * scale:
+        return mean, std, None
+    return mean, std, mean / (std / np.sqrt(values.size))
+
+
 def simulate(
     panel,
     *,
     hold_days: int,
+    settlement_hours: int,
     lookback_days: int = 7,
     enter_rank: int = 2,
     cost_bps: Decimal = Decimal(28),
 ) -> dict:
     """Simulate the carry basket at one hold length.
 
-    Returns a dict with mean_pct_yr, std, t_stat, n_periods, and the per-period
-    returns. The simulation is a vectorised walk over the panel: at each
-    rebalance point (spaced hold_days apart), it ranks by trailing mean funding,
-    selects the top names, and sums the realised funding over the hold window.
+    The settlement cadence is an explicit input, not an assumed 24/day: the
+    panel's timestamp grid is validated against it, so a gapped or irregular
+    history is refused rather than silently read as row slots. An all-missing
+    held window yields no funding (min_count), never a fabricated zero, and
+    the final exactly-complete holding window is included.
+
+    Returns a dict with mean_pct_yr, std, t_stat, n_periods, and the
+    per-period returns; t-stat keys are None when undefined.
     """
-    if panel.empty or len(panel) < 2:
-        return {"n_periods": 0, "mean_pct_yr": None, "t_stat": None}
+    import pandas as pd
 
-    lookback_settlements = int(lookback_days * 24)
-    hold_settlements = int(hold_days * 24)
+    empty = {"n_periods": 0, "mean_pct_yr": None, "t_stat": None}
+    if settlement_hours not in (1, 2, 3, 4, 6, 8, 12, 24):
+        raise ValueError("settlement_hours must divide a 24-hour day")
+    if hold_days <= 0 or lookback_days <= 0 or enter_rank <= 0:
+        raise ValueError("holding, lookback and selection sizes must be positive")
+    if not cost_bps.is_finite() or cost_bps < 0:
+        raise ValueError("cost must be finite and non-negative")
+    if panel.empty:
+        return empty
+    if not isinstance(panel.index, pd.DatetimeIndex) or panel.index.tz is None:
+        raise ValueError("funding timestamps must be timezone-aware")
+    if not panel.index.is_unique or not panel.index.is_monotonic_increasing:
+        raise ValueError("funding timestamps must be unique and ordered")
+    if not panel.columns.is_unique or len(panel.columns) < enter_rank:
+        raise ValueError("not enough uniquely identified assets")
+    expected = pd.date_range(
+        panel.index[0], panel.index[-1],
+        freq=pd.Timedelta(hours=settlement_hours),
+    )
+    if not panel.index.equals(expected):
+        raise ValueError("funding grid has missing or irregular settlements")
+    if not np.isfinite(panel.to_numpy(dtype=float)).all():
+        raise ValueError("funding panel has missing or non-finite measurements")
 
-    if len(panel) < lookback_settlements + hold_settlements:
-        return {"n_periods": 0, "mean_pct_yr": None, "t_stat": None}
-
-    rebalance_points = range(lookback_settlements, len(panel) - hold_settlements, hold_settlements)
-    rebalance_points = list(rebalance_points)
-
-    if not rebalance_points:
-        return {"n_periods": 0, "mean_pct_yr": None, "t_stat": None}
-
-    period_returns: list[float] = []
-    for t in rebalance_points:
-        trailing = panel.iloc[t - lookback_settlements : t]
-        mean_trailing = trailing.mean()
-        eligible = mean_trailing.dropna()
-        if len(eligible) < enter_rank:
-            continue
-
-        top = eligible.nlargest(enter_rank).index
-
-        hold_window = panel.iloc[t : t + hold_settlements]
-        held = hold_window[top].sum()
-        per_asset_total = held.mean()
-
-        # per_asset_total is the SUM of per-settlement rates over the hold.
-        # Annualising: mean_rate_per_settlement * settlements_per_year.
-        # mean_rate = sum / hold_settlements, so the annualisation factor is
-        # settlements_per_year / hold_settlements.
-        annualisation = SETTLEMENTS_PER_YEAR / Decimal(hold_settlements)
-        funding_annualised = float(
-            Decimal(str(per_asset_total)) * annualisation * Decimal(100)
-        )
-        cost_annualised = float(cost_bps) / 100 * (365.0 / hold_days)
-
-        period_returns.append(funding_annualised - cost_annualised)
-
+    per_day = 24 // settlement_hours
+    lookback = lookback_days * per_day
+    holding = hold_days * per_day
+    period_returns = []
+    for t in range(lookback, len(panel) - holding + 1, holding):
+        trailing = panel.iloc[t - lookback:t].mean()
+        selected = trailing.nlargest(enter_rank).index
+        measured = panel.iloc[t:t + holding][selected]
+        funding = float(measured.sum(min_count=holding).mean())
+        annual_return = (
+            funding - float(cost_bps) / 10000.0
+        ) * (365.0 / hold_days) * 100.0
+        period_returns.append(annual_return)
     if not period_returns:
-        return {"n_periods": 0, "mean_pct_yr": None, "t_stat": None}
+        return empty
 
-    arr = np.array(period_returns, dtype=float)
-    mean = float(arr.mean())
-    std = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
-    se = std / np.sqrt(len(arr)) if len(arr) > 0 else 0.0
-    t_stat = mean / se if se > 0 else 0.0
-
-    third = max(1, len(arr) // 3)
-    recent = arr[-third:]
-    recent_mean = float(recent.mean())
-    recent_std = float(recent.std(ddof=1)) if len(recent) > 1 else 0.0
-    recent_se = recent_std / np.sqrt(len(recent)) if len(recent) > 0 else 0.0
-    recent_t = recent_mean / recent_se if recent_se > 0 else 0.0
-
+    values = np.asarray(period_returns, dtype=float)
+    mean, std, t_stat = _sample_statistics(values)
+    recent = values[-max(1, len(values) // 3):]
+    recent_mean, _, recent_t = _sample_statistics(recent)
     return {
-        "n_periods": len(arr),
-        "mean_pct_yr": mean,
-        "std_pct_yr": std,
-        "t_stat": t_stat,
-        "recent_third_mean": recent_mean,
-        "recent_third_t": recent_t,
+        "n_periods": len(values), "mean_pct_yr": mean,
+        "std_pct_yr": std, "t_stat": t_stat,
+        "recent_third_mean": recent_mean, "recent_third_t": recent_t,
         "returns": period_returns,
     }
 
 
-def _format_result(label: str, r: dict) -> str:
-    if r["n_periods"] == 0:
+def _format_result(label: str, result: dict) -> str:
+    if result["n_periods"] == 0:
         return f"  {label:12s}  n=0 (insufficient data)"
 
-    mean = r["mean_pct_yr"]
-    t = r["t_stat"]
-    n = r["n_periods"]
-    recent_mean = r.get("recent_third_mean", 0.0)
-    recent_t = r.get("recent_third_t", 0.0)
+    def fmt(value):
+        return "n/a" if value is None else f"{value:+.2f}"
 
     return (
-        f"  {label:12s}  n={n:>4d}  "
-        f"mean {mean:>+7.2f}%/yr  t {t:>+6.2f}  | "
-        f"recent 1/3 {recent_mean:>+7.2f}%/yr  t {recent_t:>+6.2f}"
+        f"  {label:12s} n={result['n_periods']} "
+        f"mean {fmt(result['mean_pct_yr'])}%/yr t {fmt(result['t_stat'])} | "
+        f"recent 1/3 {fmt(result['recent_third_mean'])}%/yr "
+        f"t {fmt(result['recent_third_t'])}"
     )
 
 
@@ -222,6 +227,11 @@ async def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--enter-rank", type=int, default=2)
     parser.add_argument("--cost-bps", type=str, default="28")
     parser.add_argument("--lookback-days", type=int, default=7)
+    parser.add_argument(
+        "--settlement-hours", type=int, required=True,
+        choices=(1, 2, 3, 4, 6, 8, 12, 24),
+        help="Measured settlement cadence for every asset in the panel",
+    )
     parser.add_argument("--universe", nargs="*", default=CARRY_UNIVERSE)
     parser.add_argument("--audience", default=None, help="UUID of the BYO credential owner for private funding claims")
     args = parser.parse_args(argv)
@@ -230,7 +240,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
     end = datetime.now(UTC)
     start = end - timedelta(days=365 * 3)
 
-    logger.info("connecting to %s", settings.database_url[:50] + "...")
+    logger.info("connecting to the configured database")
     client = await connect(settings.database_url)
     try:
         logger.info("loading funding history for %s on %s", args.universe, args.venue)
@@ -279,6 +289,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
         r6 = simulate(
             panel,
             hold_days=42,
+            settlement_hours=args.settlement_hours,
             lookback_days=args.lookback_days,
             enter_rank=args.enter_rank,
             cost_bps=cost_bps,
@@ -286,6 +297,7 @@ async def main(argv: Sequence[str] | None = None) -> int:
         r12 = simulate(
             panel,
             hold_days=84,
+            settlement_hours=args.settlement_hours,
             lookback_days=args.lookback_days,
             enter_rank=args.enter_rank,
             cost_bps=cost_bps,
