@@ -113,10 +113,8 @@ function AddForm({ onAdded }: { onAdded: () => void }) {
 
 function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => void }) {
   const [editing, setEditing] = useState(false);
-  const [quantity, setQuantity] = useState(String(holding.quantity));
-  const [basis, setBasis] = useState(
-    holding.cost_basis === null ? "" : String(holding.cost_basis),
-  );
+  const [quantity, setQuantity] = useState(holding.quantity);
+  const [basis, setBasis] = useState(holding.cost_basis === null ? "" : holding.cost_basis);
   const [note, setNote] = useState(holding.note ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -186,7 +184,7 @@ function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => 
             aria-label={`Quantity of ${holding.symbol}`}
           />
         ) : (
-          holding.quantity.toLocaleString()
+          holding.quantity
         )}
       </td>
       <td>
@@ -220,8 +218,8 @@ function Row({ holding, onChanged }: { holding: ManualHolding; onChanged: () => 
               type="button"
               class="btn-secondary"
               onClick={() => {
-                setQuantity(String(holding.quantity));
-                setBasis(holding.cost_basis === null ? "" : String(holding.cost_basis));
+                setQuantity(holding.quantity);
+                setBasis(holding.cost_basis === null ? "" : holding.cost_basis);
                 setNote(holding.note ?? "");
                 setEditing(true);
               }}

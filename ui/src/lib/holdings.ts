@@ -3,8 +3,8 @@ import { authedGetJson, authedSendJson } from "./auth";
 export interface ManualHolding {
   id: string;
   symbol: string;
-  quantity: number;
-  cost_basis: number | null;
+  quantity: string;
+  cost_basis: string | null;
   currency: string;
   note: string | null;
   created_at: string;

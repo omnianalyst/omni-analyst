@@ -271,3 +271,27 @@ async def test_date_rules_month_approx_and_between(db, database_url):
             "/finance/transactions", params={"month": "2026-02"}, headers=headers
         )).json()["transactions"]
         assert feb[0]["notes"] == "february"
+
+
+async def test_listed_rules_carry_arrays_whatever_the_codec(db, database_url):
+    """U21: GET /finance/rules must return conditions/actions as arrays of
+    objects. Under asyncpg's default JSONB codec the raw columns are strings,
+    and the UI indexing r.conditions[0] would get a character."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client)
+        r = await client.post("/finance/rules", json={
+            "conditions": [{"field": "amount", "op": "lt", "value": 0}],
+            "actions": [{"field": "notes", "value": "neg"}],
+        }, headers=headers)
+        assert r.status_code in (200, 201), r.text
+
+        r = await client.get("/finance/rules", headers=headers)
+        assert r.status_code == 200, r.text
+        rules = r.json()["rules"]
+        assert len(rules) == 1
+        assert isinstance(rules[0]["conditions"], list)
+        assert isinstance(rules[0]["conditions"][0], dict)
+        assert rules[0]["conditions"][0]["field"] == "amount"
+        assert isinstance(rules[0]["actions"], list)
+        assert rules[0]["actions"][0]["value"] == "neg"

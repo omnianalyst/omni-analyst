@@ -3,6 +3,7 @@ data is BYO by construction and never crosses users."""
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 import asyncpg
@@ -417,8 +418,8 @@ def build_router(app: App) -> Router:
                 {
                     "id": str(r["id"]),
                     "rank": r["rank"],
-                    "conditions": r["conditions"],
-                    "actions": r["actions"],
+                    "conditions": _rule_array(r["conditions"]),
+                    "actions": _rule_array(r["actions"]),
                     "enabled": r["enabled"],
                 }
                 for r in rows
@@ -642,6 +643,14 @@ async def run_gc(pool, user):
 
 
 def _dumps(value) -> str:
-    import json
-
     return value if isinstance(value, str) else json.dumps(value)
+
+
+def _rule_array(value) -> list[dict]:
+    """One wire shape for rule payloads, whatever the pool's JSONB codec
+    returns: under asyncpg's default codec jsonb columns arrive as strings,
+    and the UI indexes them as arrays."""
+    decoded = json.loads(value) if isinstance(value, (str, bytes, bytearray)) else value
+    if not isinstance(decoded, list) or any(not isinstance(item, dict) for item in decoded):
+        raise RuntimeError("stored finance rule has invalid structure")
+    return decoded

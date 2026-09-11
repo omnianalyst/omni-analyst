@@ -207,13 +207,42 @@ async def test_an_edit_updates_quantity_and_a_delete_removes(db, database_url):
             json={"quantity": "3", "cost_basis": "250"},
             headers=headers,
         )
-        assert edited.json()["quantity"] == pytest.approx(3.0)
+        assert edited.json()["quantity"] == "3"
         assert edited.json()["unrealized_pnl"] == pytest.approx(50.0)
 
         gone = await client.delete(f"/holdings/{holding_id}", headers=headers)
         assert gone.status_code == 204
         listing = await client.get("/holdings", headers=headers)
         assert listing.json()["holdings"] == []
+
+
+async def test_precision_survives_a_note_only_edit(db, database_url):
+    """U25: the payload carries the exact numeric text. The UI seeds its edit
+    fields from these strings and resubmits them, so a float here permanently
+    rounded stored precision on every note-only edit."""
+    await _seed_price(db, "AAPL", 100.0)
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client)
+        exact = "0.1234567890123456789"
+        created = await client.post(
+            "/holdings",
+            json={"symbol": "AAPL", "quantity": exact, "cost_basis": exact},
+            headers=headers,
+        )
+        holding_id = created.json()["id"]
+        assert created.json()["quantity"] == exact
+
+        edited = await client.patch(
+            f"/holdings/{holding_id}", json={"note": "long-term"}, headers=headers
+        )
+        assert edited.json()["quantity"] == exact
+        assert edited.json()["cost_basis"] == exact
+
+        listing = await client.get("/holdings", headers=headers)
+        row = next(h for h in listing.json()["holdings"] if h["id"] == holding_id)
+        assert row["quantity"] == exact
+        assert row["cost_basis"] == exact
 
 
 async def test_a_nonpositive_or_nonnumeric_quantity_is_refused(db, database_url):
@@ -243,4 +272,4 @@ async def test_readding_a_symbol_updates_it_instead_of_duplicating(
         )
         listing = await client.get("/holdings", headers=headers)
     assert len(listing.json()["holdings"]) == 1
-    assert listing.json()["holdings"][0]["quantity"] == pytest.approx(4.0)
+        assert listing.json()["holdings"][0]["quantity"] == "4"

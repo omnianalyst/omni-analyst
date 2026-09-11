@@ -106,8 +106,11 @@ def _holding_payload(row) -> dict:
     payload = {
         "id": str(row["id"]),
         "symbol": row["symbol"],
-        "quantity": float(quantity),
-        "cost_basis": float(basis) if basis is not None else None,
+        # Exact numeric text, never float-rounded: the UI seeds its edit fields
+        # from these and writes them back, so a float here permanently rounded
+        # stored precision on every note-only edit.
+        "quantity": str(quantity),
+        "cost_basis": str(basis) if basis is not None else None,
         "currency": row["currency"],
         "note": row["note"],
         "created_at": row["created_at"].isoformat(),
