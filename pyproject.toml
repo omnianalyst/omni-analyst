@@ -9,6 +9,10 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "httpx>=0.27.0",
+    # Webhook delivery (alerts/notify.py): aiohttp's connector takes a
+    # validating resolver, which closes the DNS-rebinding window an httpx
+    # transport-level check leaves open.
+    "aiohttp>=3.9",
     # Neutron's auth tier requires a password-hashing backend; neutron.auth
     # .password raises ImportError without one. PyJWT[crypto] backs token
     # signing for the same reason.

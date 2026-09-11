@@ -74,6 +74,11 @@ LABEL org.opencontainers.image.revision=${OMNI_REVISION} \
 
 RUN useradd --create-home --uid 10001 --shell /sbin/nologin omni
 
+# The credential-key volume mounts here. Provisioned in the image so a fresh
+# named volume (mounted empty, root-owned by default) still leaves uid 10001
+# able to create credential.key inside it on first boot.
+RUN install -d -m 0700 -o omni -g omni /var/lib/omni
+
 WORKDIR /app
 
 COPY --from=builder --chown=omni:omni /app/.venv      /app/.venv

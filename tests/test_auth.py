@@ -519,3 +519,38 @@ async def test_change_password_requires_auth(db, database_url):
             json={"old_password": "x", "new_password": "y" * 16},
         )
     assert r.status_code == 401
+
+
+async def test_password_hashing_leaves_the_event_loop_and_wrong_stays_wrong(
+    db, database_url
+):
+    """B23: argon2 runs on a worker thread, not the request loop, and the
+    executor path keeps the none-for-wrong-password contract."""
+    from omni.auth import users
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        await _setup_first_user(client, password="correct-horse-battery")
+
+        ticks: list[int] = []
+
+        async def _ticker():
+            for _ in range(5):
+                ticks.append(1)
+                await asyncio.sleep(0)
+
+        row = await db.pool.fetchrow(
+            "SELECT id FROM users WHERE email = 'op@example.com'"
+        )
+        ticker = asyncio.ensure_future(_ticker())
+        ok = await users.authenticate_user(
+            db.pool, email="op@example.com", password="correct-horse-battery"
+        )
+        wrong = await users.authenticate_user(
+            db.pool, email="op@example.com", password="battery-horse-correct"
+        )
+        await ticker
+
+        assert ok is not None and ok["id"] == row["id"]
+        assert wrong is None
+        assert ticks, "the loop was expected to progress while argon2 ran"

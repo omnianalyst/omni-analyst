@@ -14,6 +14,9 @@ system where data access is licensed per user it is worse than usual.
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any
 from uuid import UUID
 
@@ -22,6 +25,18 @@ from neutron.auth.password import hash_password, verify_password
 from neutron.error import conflict
 
 MIN_PASSWORD_LENGTH = 12
+
+# Argon2 is deliberately expensive, and it runs inside async request paths.
+# Called inline it stalls that worker's event loop for tens to hundreds of
+# milliseconds on login, setup and password change, delaying every concurrent
+# request. One worker: hashing is also serialised, which blunts parallel CPU
+# abuse through the same endpoints.
+_password_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="omni-pw")
+
+
+async def _password_call(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_password_pool, partial(func, *args))
 
 
 class PasswordTooShort(Exception):
@@ -49,7 +64,7 @@ async def create_user(pool: asyncpg.Pool, *, email: str, password: str) -> Any:
             RETURNING id, email, created_at, active, role
             """,
             canonical,
-            hash_password(password),
+            await _password_call(hash_password, password),
         )
     except asyncpg.UniqueViolationError:
         raise conflict("email already registered")
@@ -70,7 +85,7 @@ async def create_initial_operator(
             RETURNING id, email, created_at, active, role
             """,
             canonical,
-            hash_password(password),
+            await _password_call(hash_password, password),
         )
     except asyncpg.UniqueViolationError:
         raise conflict("setup is already complete")
@@ -96,7 +111,7 @@ async def authenticate_user(
     )
     if row is None:
         return None
-    if not verify_password(password, row["password_hash"]):
+    if not await _password_call(verify_password, password, row["password_hash"]):
         return None
     if not row["active"]:
         return None
@@ -124,11 +139,13 @@ async def change_password(
     row = await pool.fetchrow(
         "SELECT password_hash FROM users WHERE id = $1", user_id
     )
-    if row is None or not verify_password(old_password, row["password_hash"]):
+    if row is None or not await _password_call(
+        verify_password, old_password, row["password_hash"]
+    ):
         return False
     await pool.execute(
         "UPDATE users SET password_hash = $1 WHERE id = $2",
-        hash_password(new_password),
+        await _password_call(hash_password, new_password),
         user_id,
     )
     return True

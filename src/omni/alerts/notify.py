@@ -26,17 +26,142 @@ because the relay is infrastructure.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import smtplib
+import ssl
 from email.message import EmailMessage
 from typing import Any
+from urllib.parse import urlsplit
 
 from omni.config import settings
 
 logger = logging.getLogger("omni.alerts.notify")
 
 _NOTIFY_SETTINGS = "SELECT data FROM user_settings WHERE user_id = $1"
+
+
+def _destination_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True only for global unicast addresses a webhook may be sent to.
+
+    The embedded-address forms are unwrapped or rejected explicitly because
+    their parent /8 or /32 prefixes read as global: an IPv4-mapped address is
+    judged by the IPv4 it carries, and 6to4/teredo are refused outright --
+    their embedded payload is attacker-chosen and not worth unwinding.
+    """
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return _destination_allowed(ip.ipv4_mapped)
+        if ip.sixtofour is not None or ip.teredo is not None:
+            return False
+    return (
+        ip.is_global
+        and not ip.is_private
+        and not ip.is_multicast
+        and not ip.is_reserved
+        and not ip.is_loopback
+        and not ip.is_link_local
+        and not ip.is_unspecified
+    )
+
+
+def _validated_webhook_url(url: str) -> str:
+    """Accept only an https URL on port 443 whose host is a public destination.
+
+    The webhook target is member-supplied input that the deployment's API
+    process will make a network request to, so it is treated as an SSRF
+    vector, not as a convenience: no userinfo, no fragment, no redirects, no
+    proxy env, and every address the host resolves to must be global unicast
+    before a connection is opened.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError as exc:
+        raise RuntimeError(f"webhook url is not parseable: {exc}") from exc
+    if parts.scheme != "https":
+        raise RuntimeError(f"webhook url must be https, got scheme {parts.scheme!r}")
+    if parts.username is not None or parts.password is not None:
+        raise RuntimeError("webhook url must not carry credentials in the host")
+    if parts.fragment:
+        raise RuntimeError("webhook url must not carry a fragment")
+    if parts.port is not None and parts.port != 443:
+        raise RuntimeError(
+            f"webhook url must use port 443, got {parts.port}"
+        )
+    if not parts.hostname:
+        raise RuntimeError("webhook url has no host")
+    try:
+        literal = ipaddress.ip_address(parts.hostname)
+    except ValueError:
+        return url
+    if not _destination_allowed(literal):
+        raise RuntimeError(
+            f"webhook host {parts.hostname} is not a public destination"
+        )
+    return url
+
+
+async def _post_webhook(session, url: str, payload: dict) -> None:
+    """POST once, never follow a redirect, and raise on anything but 2xx.
+
+    Extracted from `_send_webhook` so the status contract is testable without
+    a network: a delivery that the endpoint did not accept is a failure, not
+    a logged footnote.
+    """
+    async with session.post(
+        url,
+        json=payload,
+        headers={"content-type": "application/json"},
+        allow_redirects=False,
+    ) as response:
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"alert webhook returned HTTP {response.status}")
+
+
+async def _send_webhook(url: str, payload: dict) -> None:
+    import aiohttp
+
+    url = _validated_webhook_url(url)
+
+    class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
+        """Resolves through the default resolver and keeps public answers only.
+
+        The connector connects to exactly the addresses returned here, so a
+        hostname that answers with any non-public address is refused before a
+        socket is opened, and DNS rebinding between check and connect has no
+        window: there is only one resolution.
+        """
+
+        def __init__(self) -> None:
+            self._inner = aiohttp.DefaultResolver()
+
+        async def resolve(self, host, port=0, family=0):
+            answers = await self._inner.resolve(host, port, family)
+            allowed = []
+            for answer in answers:
+                ip = ipaddress.ip_address(answer["host"])
+                if not _destination_allowed(ip):
+                    raise RuntimeError(
+                        f"webhook host {host} resolves to the non-public "
+                        f"address {answer['host']}"
+                    )
+                allowed.append(answer)
+            return allowed
+
+        async def close(self) -> None:
+            await self._inner.close()
+
+    connector = aiohttp.TCPConnector(
+        resolver=_PublicOnlyResolver(),
+        use_dns_cache=False,
+        ssl=ssl.create_default_context(),
+    )
+    timeout = aiohttp.ClientTimeout(total=5.0)
+    async with aiohttp.ClientSession(
+        connector=connector, timeout=timeout, trust_env=False
+    ) as session:
+        await _post_webhook(session, url, payload)
 
 
 def _describe_condition(condition) -> str:
@@ -117,20 +242,7 @@ def _email_body(alert, firings: list, entity_symbol: str | None) -> str:
     return "\n".join(lines)
 
 
-async def _send_webhook(url: str, payload: dict) -> None:
-    import httpx
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.post(
-            url, json=payload, headers={"content-type": "application/json"}
-        )
-        if response.status_code >= 400:
-            logger.warning(
-                "alert webhook returned HTTP %d", response.status_code
-            )
-
-
-def _send_email(to_address: str, alert, firings: list, entity_symbol) -> None:
+async def _send_email(to_address: str, alert, firings: list, entity_symbol) -> None:
     """Blocking SMTP send; called via to_thread from dispatch."""
     subject_name = entity_symbol or str(alert["entity_id"])[:8]
     msg = EmailMessage()
@@ -197,7 +309,11 @@ async def send_test(pool, user_id) -> dict:
 
 def _send_email_message(to_address: str, msg: EmailMessage) -> None:
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
-        smtp.starttls()
+        # A verifying context, never the stdlib fallback: an unverified
+        # STARTTLS hands the relay credentials and every alert body to whoever
+        # is between the process and the relay.
+        smtp.starttls(context=ssl.create_default_context())
+        smtp.ehlo()
         if settings.smtp_user:
             smtp.login(settings.smtp_user, settings.smtp_password)
         smtp.send_message(msg)

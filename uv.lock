@@ -1254,6 +1254,7 @@ name = "omni-analyst-v2"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "argon2-cffi" },
     { name = "asyncpg" },
     { name = "ccxt" },
@@ -1285,6 +1286,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9" },
     { name = "argon2-cffi", specifier = ">=23.1" },
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "ccxt", specifier = ">=4.0,<5" },

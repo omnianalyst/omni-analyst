@@ -103,6 +103,11 @@ RUN apt-get update \
 # Non-root user. uid 10001 avoids colliding with any host uid bind-mounted in.
 RUN useradd --create-home --uid 10001 --shell /sbin/nologin omni
 
+# The credential-key volume mounts here. Provisioned in the image so a fresh
+# named volume (mounted empty, root-owned by default) still leaves uid 10001
+# able to create credential.key inside it on first boot.
+RUN install -d -m 0700 -o omni -g omni /var/lib/omni
+
 WORKDIR /app
 
 # Copy only the venv and the source/migrations the app needs to run.
