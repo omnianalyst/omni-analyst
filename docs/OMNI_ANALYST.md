@@ -590,16 +590,30 @@ and `/docs`. Do not hand-write them.
 
 `pyproject.toml` declares `neutron-py` as an editable path dependency at
 `../../Neutron/python`, outside the repo, so Docker cannot COPY it. Build the
-wheel on the host first, from the repository root:
+wheel on the host first, from the repository root. The Dockerfiles verify the
+wheel's `X-Neutron-Revision` stamp and compose requires both revision
+variables, so use the stamping helper rather than a plain `uv build`:
 
 ```bash
-uv build --wheel --project ../../Neutron/python --out-dir vendor
-docker compose -f docker-compose.prod.yml build
+set -euo pipefail
+export OMNI_REVISION=$(git rev-parse HEAD)
+export NEUTRON_REVISION=$(git -C ../../Neutron/python rev-parse HEAD)
+out="vendor/$NEUTRON_REVISION"
+python3 ops/build_neutron_wheel.py build --project ../../Neutron/python --out-dir "$out"
+shopt -s nullglob
+wheels=("$out"/neutron_py-*.whl)
+[[ ${#wheels[@]} -eq 1 ]] || { echo 'Expected exactly one Neutron wheel' >&2; exit 1; }
+export NEUTRON_WHEEL="${wheels[0]}"
+python3 ops/build_neutron_wheel.py verify \
+  --wheel "$NEUTRON_WHEEL" --expected "$NEUTRON_REVISION"
+npm --prefix ui run build
+docker compose -f docker-compose.prod.yml config --quiet
+docker compose -f docker-compose.prod.yml build api scheduler
 ```
 
-`vendor/` is operator-created and untracked, like `.env`. If that dependency
-moves again, CI breaks the same way and the failure reads as a uv error rather
-than a layout problem.
+`vendor/` is operator-created and untracked, like `.env`. The helper refuses
+dirty Neutron source. If that dependency moves again, CI breaks the same way
+and the failure reads as a uv error rather than a layout problem.
 
 ### Required configuration
 
@@ -641,23 +655,32 @@ The host at `/srv/omni` is an rsync target, not a git checkout (its
 `.git` is an empty repo on `master`), so the deploy is:
 
 ```bash
-# from the repo root, with the suite and the UI green
-uv build --wheel --project ../../Neutron/python --out-dir vendor
+# from the repo root, with the suite and the UI green; the section-7 block
+# above has already produced $NEUTRON_WHEEL and both revision variables
 npm --prefix ui run build
 
 rsync -az --delete --exclude='__pycache__' --exclude='*.pyc' src/ deployment-host:/srv/omni/src/
 rsync -az --delete migrations/ deployment-host:/srv/omni/migrations/
 rsync -az --delete ui/dist/   deployment-host:/srv/omni/ui/dist/
-rsync -az vendor/neutron_py-*.whl deployment-host:/srv/omni/vendor/
+rsync -az --relative "$NEUTRON_WHEEL" deployment-host:/srv/omni/
 rsync -az pyproject.toml uv.lock Dockerfile Dockerfile.scheduler \
           docker-compose.prod.yml Caddyfile .dockerignore AGENTS.md \
           deployment-host:/srv/omni/
 rsync -az --exclude='__pycache__' --exclude='*.log' ops/ deployment-host:/srv/omni/ops/
 
-ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml build'
-ssh deployment-host 'docker tag omni-api:latest omni-api:<sha>; docker tag omni-scheduler:latest omni-scheduler:<sha>'
+ssh deployment-host bash -s -- \
+  "$OMNI_REVISION" "$NEUTRON_REVISION" "$NEUTRON_WHEEL" <<'REMOTE_BUILD'
+set -euo pipefail
+cd /srv/omni
+export OMNI_REVISION="$1" NEUTRON_REVISION="$2" NEUTRON_WHEEL="$3"
+docker compose -f docker-compose.prod.yml config --quiet
+docker compose -f docker-compose.prod.yml build api scheduler
+REMOTE_BUILD
 ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml up -d --no-build api scheduler'
 ```
+
+The revision variables are passed from the LOCAL checkout on the ssh command
+line -- the host's `.git` is an empty repo, so its history cannot supply them.
 
 Three things that will bite:
 

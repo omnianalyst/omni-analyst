@@ -31,32 +31,47 @@ registry without a source edit.
 
 The operator therefore builds the Neutron wheel on the host, once, before
 building the images. From the **repository root** (so that `../../Neutron/python`
-resolves to the checked-out framework):
+resolves to the checked-out framework). The Dockerfiles verify the wheel's
+`X-Neutron-Revision` stamp, and compose requires both revision variables --
+a plain `uv build` wheel fails that verification, so use the helper:
 
 ```bash
-uv build --wheel --project ../../Neutron/python --out-dir vendor
+set -euo pipefail
+export OMNI_REVISION=$(git rev-parse HEAD)
+export NEUTRON_REVISION=$(git -C ../../Neutron/python rev-parse HEAD)
+out="vendor/$NEUTRON_REVISION"
+python3 ops/build_neutron_wheel.py build --project ../../Neutron/python --out-dir "$out"
+shopt -s nullglob
+wheels=("$out"/neutron_py-*.whl)
+[[ ${#wheels[@]} -eq 1 ]] || { echo 'Expected exactly one Neutron wheel' >&2; exit 1; }
+export NEUTRON_WHEEL="${wheels[0]}"
+python3 ops/build_neutron_wheel.py verify \
+  --wheel "$NEUTRON_WHEEL" --expected "$NEUTRON_REVISION"
 ```
 
-This writes `vendor/neutron_py-0.1.0-py3-none-any.whl` (~100 KB). The
-Dockerfiles find it there by default. If the Neutron version differs, pass its
-filename explicitly:
+`vendor/<revision>/` is operator-created, like `.env`. It is not tracked. The
+helper deliberately refuses dirty Neutron source. If you build the images
+directly rather than through compose, pass the wheel path explicitly:
 
 ```bash
-docker build -f Dockerfile          --build-arg NEUTRON_WHEEL=vendor/<your-wheel>.whl -t omni-api .
-docker build -f Dockerfile.scheduler --build-arg NEUTRON_WHEEL=vendor/<your-wheel>.whl -t omni-scheduler .
+docker build -f Dockerfile          --build-arg NEUTRON_WHEEL="$NEUTRON_WHEEL" \
+  --build-arg NEUTRON_REVISION="$NEUTRON_REVISION" --build-arg OMNI_REVISION="$OMNI_REVISION" -t omni-api .
+docker build -f Dockerfile.scheduler --build-arg NEUTRON_WHEEL="$NEUTRON_WHEEL" \
+  --build-arg NEUTRON_REVISION="$NEUTRON_REVISION" --build-arg OMNI_REVISION="$OMNI_REVISION" -t omni-scheduler .
 ```
-
-`vendor/` is operator-created, like `.env`. It is not tracked. Add it to
-`.gitignore` if you keep the wheel around.
 
 ## Building and running
 
 ```bash
-# 1. produce the Neutron wheel (once, and after any Neutron change)
-uv build --wheel --project ../../Neutron/python --out-dir vendor
+# 1. produce and verify the stamped Neutron wheel (once, and after any
+#    Neutron change) -- the block above, which also exports OMNI_REVISION,
+#    NEUTRON_REVISION and NEUTRON_WHEEL
+#    ... build_neutron_wheel.py build/verify ...
 
-# 2. build both images
-docker compose -f docker-compose.prod.yml build
+# 2. build the UI and both images (compose carries the revision variables)
+npm --prefix ui run build
+docker compose -f docker-compose.prod.yml config --quiet
+docker compose -f docker-compose.prod.yml build api scheduler
 
 # 3. set the two required secrets, then bring the stack up
 export POSTGRES_PASSWORD='...'
