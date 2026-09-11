@@ -478,11 +478,16 @@ def build_router(app: App) -> Router:
     async def put_bank_credentials(request: Request, body: BankCredentialsIn) -> dict:
         user = _require_user(request)
         if body.provider == "simplefin":
-            email = (body.fields.get("email") or "").strip()
-            password = (body.fields.get("password") or "").strip()
-            if not email or not password:
-                raise bad_request("simplefin needs email and password")
-            access_url = await banksync.simplefin_claim(email, password)
+            setup_token = (body.fields.get("setup_token") or "").strip()
+            if not setup_token:
+                raise bad_request(
+                    "simplefin needs a one-time setup token from SimpleFIN's "
+                    "access page"
+                )
+            try:
+                access_url = await banksync.simplefin_claim(setup_token)
+            except banksync.BankSyncError as exc:
+                raise bad_request(str(exc))
             await _run(bankcreds.put_bank_key(
                 app.db.pool, user, "simplefin", {"access_url": access_url}
             ))

@@ -16,17 +16,21 @@ account's oldest transaction. Dropped: per-account custom field mappings
 from __future__ import annotations
 
 import base64
-from datetime import date, timedelta
+import binascii
+import os
+from datetime import date, datetime, timedelta, UTC
 from typing import Any
-from uuid import UUID, uuid4
+from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 
+from omni.config import settings
 from omni.finance import service
 from omni.finance.bankcreds import get_bank_keys
+from omni.finance.writer import finance_write
 
 GOCARDLESS_BASE = "https://bankaccountdata.gocardless.com/api/v2"
-SIMPLEFIN_AUTH = "https://beta-bridge.simplefin.org/auth"
 SYNC_WINDOW_DAYS = 90
 
 
@@ -69,19 +73,33 @@ def normalize_gocardless(transactions: list[dict], account_ref: str) -> list[dic
 
 
 def normalize_simplefin(transactions: list[dict]) -> list[dict]:
+    """SimpleFIN reports timestamps as integer epochs and flags pending."""
     rows = []
     for trans in transactions:
         amount = trans.get("amount")
         if amount is None:
             raise BankSyncError("simplefin", "transaction without amount")
-        posted = (trans.get("posted") or trans.get("transacted_at") or "")[:10]
+        stamp = trans.get("posted") or trans.get("transacted_at")
+        if isinstance(stamp, bool) or not isinstance(stamp, int) or stamp <= 0:
+            raise BankSyncError(
+                "simplefin",
+                f"transaction {trans.get('id')!r} has no usable posted epoch "
+                f"({stamp!r}); refusing to guess its date",
+            )
+        pending = trans.get("pending", False)
+        if not isinstance(pending, bool):
+            raise BankSyncError(
+                "simplefin",
+                f"transaction {trans.get('id')!r} has a non-boolean pending "
+                f"flag ({pending!r})",
+            )
         rows.append({
-            "date": posted or None,
+            "date": datetime.fromtimestamp(stamp, UTC).date().isoformat(),
             "payee_name": trans.get("description") or None,
             "amount": str(amount),
             "notes": trans.get("memo") or None,
             "imported_id": trans.get("id"),
-            "cleared": True,
+            "cleared": not pending,
             "raw": {"provider": "simplefin", "transaction": trans},
         })
     return rows
@@ -247,28 +265,79 @@ class GoCardlessClient(_Client):
         )
 
 
-async def simplefin_claim(email: str, password: str) -> str:
-    """The two-step SimpleFIN handshake: bank password -> claim URL ->
-    access URL (the persistent credential)."""
-    async with httpx.AsyncClient(timeout=30.0) as http:
-        basic = base64.b64encode(f"{email}:{password}".encode()).decode()
-        r = await http.post(
-            SIMPLEFIN_AUTH, headers={"Authorization": f"Basic {basic}"}
+def _simplefin_hosts() -> tuple[str, ...]:
+    raw = os.environ.get("OMNI_SIMPLEFIN_HOSTS", "") or settings.simplefin_hosts
+    return tuple(h.strip().lower() for h in raw.split(",") if h.strip())
+
+
+def _simplefin_url_allowed(url: str, *, require_path: str | None = None) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme != "https" or parts.port not in (None, 443):
+        return False
+    if (parts.hostname or "").lower() not in _simplefin_hosts():
+        return False
+    return require_path is None or require_path in parts.path
+
+
+async def simplefin_claim(setup_token: str) -> str:
+    """Exchange the one-time setup token for the persistent access URL.
+
+    SimpleFIN's documented bridge protocol has no email/password exchange:
+    the user generates a base64 one-time setup token in their SimpleFIN
+    account; it decodes to a claim URL, which is POSTed once to receive the
+    access URL that embeds its own user:pass. The account password is
+    precisely what setup tokens exist to avoid collecting.
+    """
+    setup_token = setup_token.strip()
+    if not setup_token:
+        raise BankSyncError("simplefin", "a setup token is required")
+    try:
+        claim_url = base64.b64decode(setup_token, validate=True).decode("utf-8").strip()
+    except (binascii.Error, UnicodeDecodeError):
+        raise BankSyncError(
+            "simplefin", "the setup token is not base64; copy it from SimpleFIN's access page"
+        ) from None
+    if not _simplefin_url_allowed(claim_url, require_path="/claim/"):
+        raise BankSyncError(
+            "simplefin",
+            f"the setup token does not name an allowed claim URL; expected "
+            f"https://{' or '.join(_simplefin_hosts())}/claim/...",
         )
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as http:
+        r = await http.post(claim_url)
         if r.status_code != 200 or not r.text.strip().startswith("https://"):
             raise BankSyncError(
-                "simplefin", f"claim failed ({r.status_code}): {r.text[:200]}"
+                "simplefin",
+                f"claim exchange failed ({r.status_code}); setup tokens are "
+                f"one-use -- obtain a new one and retry",
             )
-        claim_url = r.text.strip()
-        r2 = await http.post(claim_url)
-        if r2.status_code != 200 or not r2.text.strip().startswith("https://"):
-            raise BankSyncError(
-                "simplefin", f"access exchange failed ({r2.status_code})"
-            )
-        return r2.text.strip()
+    access_url = r.text.strip()
+    parts = urlsplit(access_url)
+    if not _simplefin_url_allowed(access_url) or not parts.username or not parts.password:
+        raise BankSyncError(
+            "simplefin", "the access URL the bridge returned is not a valid SimpleFIN credential"
+        )
+    return access_url
+
+
+def _simplefin_currency(code) -> str:
+    text = str(code or "").strip().upper()
+    if len(text) != 3 or not text.isascii() or not text.isalpha():
+        raise BankSyncError(
+            "simplefin", f"account reports unusable currency {code!r}"
+        )
+    return text
 
 
 async def simplefin_fetch_accounts(access_url: str) -> list[dict]:
+    parts = urlsplit(access_url)
+    if not _simplefin_url_allowed(access_url) or not parts.username or not parts.password:
+        raise BankSyncError(
+            "simplefin", "the stored access URL is not a valid SimpleFIN credential"
+        )
     async with httpx.AsyncClient(timeout=60.0) as http:
         r = await http.get(f"{access_url.rstrip('/')}/accounts")
         if r.status_code != 200:
@@ -282,6 +351,7 @@ async def simplefin_fetch_accounts(access_url: str) -> list[dict]:
         out.append({
             "provider_account_id": str(account.get("id")),
             "name": account.get("name") or account.get("org") or "Bank account",
+            "currency": _simplefin_currency(account.get("currency")),
             "balance": account.get("balance"),
             "transactions": account.get("transactions") or [],
         })
@@ -404,11 +474,28 @@ async def sync_bank_account(
         raise BankSyncError(provider, str(exc)[:500]) from exc
 
 
+def _gocardless_currency(code) -> str:
+    text = str(code or "").strip().upper()
+    if len(text) != 3 or not text.isascii() or not text.isalpha():
+        raise BankSyncError(
+            "gocardless", f"account reports unusable currency {code!r}"
+        )
+    return text
+
+
 async def complete_gocardless_link(
     pool, user_id: UUID, client: GoCardlessClient, link_id: UUID
 ) -> dict:
     """Poll the requisition; once the bank approved, create local accounts
-    for every provider account that came back."""
+    for every provider account that came back.
+
+    Provider reads (requisition, per-account details) happen first, so the
+    mapping transaction below holds no lock across HTTP. The whole
+    link-and-map then commits as one unit: two overlapping pollers both
+    serialise on the per-user writer lock and re-check existing mappings
+    inside, so a UNIQUE race can no longer leave an orphan finance_account
+    behind.
+    """
     link = await pool.fetchrow(
         "SELECT * FROM finance_bank_link WHERE id = $1 AND user_id = $2",
         link_id,
@@ -418,103 +505,160 @@ async def complete_gocardless_link(
         raise BankSyncError("gocardless", "link not found")
     requisition = await client.requisition(link["requisition_id"])
     status = requisition.get("status", "unknown")
-    await pool.execute(
-        "UPDATE finance_bank_link SET status = $2 WHERE id = $1", link_id, status
-    )
     if status != "LN":
+        await pool.execute(
+            "UPDATE finance_bank_link SET status = $2 WHERE id = $1", link_id, status
+        )
         return {"status": status, "accounts": []}
 
-    created = []
+    details_by_id = {}
     for provider_account_id in requisition.get("accounts", []):
-        existing = await pool.fetchval(
-            """
-            SELECT id FROM finance_bank_account
-            WHERE user_id = $1 AND provider = 'gocardless'
-              AND provider_account_id = $2
-            """,
-            user_id,
-            provider_account_id,
+        details_by_id[provider_account_id] = await client.account_details(
+            provider_account_id
         )
-        if existing:
-            continue
-        details = await client.account_details(provider_account_id)
-        name = (
-            (details.get("name") if isinstance(details, dict) else None)
-            or link["institution_name"]
-            or "Bank account"
-        )
-        iban = details.get("iban") if isinstance(details, dict) else None
-        display = f"{name} {iban[-4:]}" if iban else name
-        local = await service.create_account(
-            pool, user_id, name=display, type="checking"
-        )
-        bank_account = await pool.fetchval(
-            """
-            INSERT INTO finance_bank_account
-                (user_id, bank_link_id, account_id, provider, provider_account_id)
-            VALUES ($1, $2, $3, 'gocardless', $4) RETURNING id
-            """,
-            user_id,
-            link_id,
-            UUID(local["id"]),
-            provider_account_id,
-        )
-        created.append({
-            "bank_account_id": str(bank_account),
-            "account_id": local["id"],
-            "name": display,
-        })
+
+    created = await _map_gocardless_accounts(
+        pool,
+        user_id,
+        link_id=link_id,
+        institution_name=link["institution_name"],
+        details_by_id=details_by_id,
+        status=status,
+    )
     return {"status": status, "accounts": created}
+
+
+@finance_write
+async def _map_gocardless_accounts(
+    pool,
+    user_id: UUID,
+    *,
+    link_id: UUID,
+    institution_name: str | None,
+    details_by_id: dict[str, dict],
+    status: str,
+) -> list[dict]:
+    async with pool.acquire() as conn:
+        locked = await conn.fetchrow(
+            "SELECT status FROM finance_bank_link WHERE id = $1 AND user_id = $2 FOR UPDATE",
+            link_id,
+            user_id,
+        )
+        if locked is None:
+            raise BankSyncError("gocardless", "link not found")
+        await conn.execute(
+            "UPDATE finance_bank_link SET status = $2 WHERE id = $1", link_id, status
+        )
+        created = []
+        for provider_account_id, details in details_by_id.items():
+            existing = await conn.fetchval(
+                """
+                SELECT id FROM finance_bank_account
+                WHERE user_id = $1 AND provider = 'gocardless'
+                  AND provider_account_id = $2
+                """,
+                user_id,
+                provider_account_id,
+            )
+            if existing:
+                continue
+            name = (
+                (details.get("name") if isinstance(details, dict) else None)
+                or institution_name
+                or "Bank account"
+            )
+            iban = details.get("iban") if isinstance(details, dict) else None
+            display = f"{name} {iban[-4:]}" if iban else name
+            currency = _gocardless_currency(
+                details.get("currency") if isinstance(details, dict) else None
+            )
+            local = await service.create_account(
+                pool, user_id, name=display, type="checking", currency=currency
+            )
+            bank_account = await conn.fetchval(
+                """
+                INSERT INTO finance_bank_account
+                    (user_id, bank_link_id, account_id, provider, provider_account_id)
+                VALUES ($1, $2, $3, 'gocardless', $4) RETURNING id
+                """,
+                user_id,
+                link_id,
+                UUID(local["id"]),
+                provider_account_id,
+            )
+            created.append({
+                "bank_account_id": str(bank_account),
+                "account_id": local["id"],
+                "name": display,
+            })
+        return created
 
 
 async def link_simplefin_accounts(pool, user_id: UUID) -> list[dict]:
     """SimpleFIN has no redirect handshake: claim once (credential), then
-    every account the bridge exposes gets a local counterpart."""
+    every account the bridge exposes gets a local counterpart.
+
+    The bridge read happens first; the link row, the local accounts and the
+    mappings then commit as one unit under the per-user writer lock, so an
+    overlapping retry cannot double-link or leave an orphan account.
+    """
     keys = await get_bank_keys(pool, user_id)
     access_url = (keys.get("simplefin") or {}).get("access_url")
     if access_url is None:
         raise BankSyncError("simplefin", "credentials not configured")
     fetched = await simplefin_fetch_accounts(access_url)
 
-    link_id = await pool.fetchval(
-        """
-        INSERT INTO finance_bank_link (user_id, provider, institution_name, status)
-        VALUES ($1, 'simplefin', 'SimpleFIN', 'LN') RETURNING id
-        """,
-        user_id,
-    )
-    created = []
-    for account in fetched:
-        existing = await pool.fetchval(
+    return await _map_simplefin_accounts(pool, user_id, fetched=fetched)
+
+
+@finance_write
+async def _map_simplefin_accounts(
+    pool, user_id: UUID, *, fetched: list[dict]
+) -> list[dict]:
+    async with pool.acquire() as conn:
+        link_id = await conn.fetchval(
             """
-            SELECT id FROM finance_bank_account
-            WHERE user_id = $1 AND provider = 'simplefin'
-              AND provider_account_id = $2
+            INSERT INTO finance_bank_link (user_id, provider, institution_name, status)
+            VALUES ($1, 'simplefin', 'SimpleFIN', 'LN') RETURNING id
             """,
             user_id,
-            account["provider_account_id"],
         )
-        if existing:
-            continue
-        local = await service.create_account(
-            pool, user_id, name=account["name"], type="checking"
-        )
-        bank_account = await pool.fetchval(
-            """
-            INSERT INTO finance_bank_account
-                (user_id, bank_link_id, account_id, provider, provider_account_id)
-            VALUES ($1, $2, $3, 'simplefin', $4) RETURNING id
-            """,
-            user_id,
-            link_id,
-            UUID(local["id"]),
-            account["provider_account_id"],
-        )
-        created.append({
-            "bank_account_id": str(bank_account),
-            "account_id": local["id"],
-            "name": account["name"],
-        })
-    if not created:
-        await pool.execute("DELETE FROM finance_bank_link WHERE id = $1", link_id)
-    return created
+        created = []
+        for account in fetched:
+            existing = await conn.fetchval(
+                """
+                SELECT id FROM finance_bank_account
+                WHERE user_id = $1 AND provider = 'simplefin'
+                  AND provider_account_id = $2
+                """,
+                user_id,
+                account["provider_account_id"],
+            )
+            if existing:
+                continue
+            local = await service.create_account(
+                pool,
+                user_id,
+                name=account["name"],
+                type="checking",
+                currency=account["currency"],
+            )
+            bank_account = await conn.fetchval(
+                """
+                INSERT INTO finance_bank_account
+                    (user_id, bank_link_id, account_id, provider, provider_account_id)
+                VALUES ($1, $2, $3, 'simplefin', $4) RETURNING id
+                """,
+                user_id,
+                link_id,
+                UUID(local["id"]),
+                account["provider_account_id"],
+            )
+            created.append({
+                "bank_account_id": str(bank_account),
+                "account_id": local["id"],
+                "name": account["name"],
+            })
+        if not created:
+            await conn.execute("DELETE FROM finance_bank_link WHERE id = $1", link_id)
+        return created

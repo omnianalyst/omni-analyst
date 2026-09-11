@@ -947,8 +947,7 @@ function BankTab({ onChanged }: { onChanged(): void }) {
   const [busy, setBusy] = useState(false);
   const [gcId, setGcId] = useState("");
   const [gcKey, setGcKey] = useState("");
-  const [sfEmail, setSfEmail] = useState("");
-  const [sfPassword, setSfPassword] = useState("");
+  const [sfToken, setSfToken] = useState("");
   const [country, setCountry] = useState("");
   const [institutions, setInstitutions] = useState<Array<{ id: string; name: string }> | null>(null);
   const [linkUrl, setLinkUrl] = useState<string | null>(null);
@@ -973,35 +972,47 @@ function BankTab({ onChanged }: { onChanged(): void }) {
   }, [load]);
 
   // The bank's approval flow redirects back to /finance?link=<id>; pick
-  // the id up and poll the requisition automatically.
+  // the id up and poll the requisition automatically. A setTimeout chain,
+  // not setInterval: each poll waits for the previous one, so overlapping
+  // calls cannot race the link into duplicate accounts.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const link = params.get("link");
     if (!link) return;
     setLinkId(link);
     let tries = 0;
-    const timer = window.setInterval(async () => {
+    let disposed = false;
+    let timer = 0;
+    const tick = async () => {
+      if (disposed) return;
       tries += 1;
       try {
         const body = await api<{ status: string; accounts: unknown[] }>(
           `/finance/bank/link/${link}`
         );
+        if (disposed) return;
         if (body.status === "LN" || tries >= 10) {
-          window.clearInterval(timer);
           setMsg(
             body.status === "LN"
               ? `Bank linked (${body.accounts.length} accounts)`
               : `Bank link still ${body.status}`
           );
           await load();
+          if (body.status === "LN") onChanged();
           window.history.replaceState(null, "", "/finance");
+          return;
         }
       } catch {
-        if (tries >= 10) window.clearInterval(timer);
+        if (tries >= 10) return;
       }
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, []);
+      timer = window.setTimeout(() => void tick(), 3000);
+    };
+    timer = window.setTimeout(() => void tick(), 3000);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [load, onChanged]);
 
   const saveGocardless = async () => {
     setBusy(true);
@@ -1031,11 +1042,10 @@ function BankTab({ onChanged }: { onChanged(): void }) {
         method: "PUT",
         body: JSON.stringify({
           provider: "simplefin",
-          fields: { email: sfEmail, password: sfPassword },
+          fields: { setup_token: sfToken },
         }),
       });
-      setSfEmail("");
-      setSfPassword("");
+      setSfToken("");
       setMsg("SimpleFIN linked.");
       await load();
       await api("/finance/bank/simplefin/link", { method: "POST" });
@@ -1209,18 +1219,13 @@ function BankTab({ onChanged }: { onChanged(): void }) {
         ) : (
           <>
             <input
-              placeholder="SimpleFIN email"
-              value={sfEmail}
-              onInput={(e) => setSfEmail((e.target as HTMLInputElement).value)}
-            />
-            <input
               type="password"
-              placeholder="password"
-              value={sfPassword}
-              onInput={(e) => setSfPassword((e.target as HTMLInputElement).value)}
+              placeholder="SimpleFIN setup token (one-time, from SimpleFIN's access page)"
+              value={sfToken}
+              onInput={(e) => setSfToken((e.target as HTMLInputElement).value)}
             />
             <button
-              disabled={busy || !sfEmail.trim() || !sfPassword.trim()}
+              disabled={busy || !sfToken.trim()}
               onClick={() => void saveSimplefin()}
             >
               Link SimpleFIN
