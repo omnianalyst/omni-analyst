@@ -219,10 +219,18 @@ recovery.
 ### Moving machines
 
 Settings has a **Download backup** button (operator account): one click
-produces the same custom-format dump the nightly script takes. Moving an
-instance to a new computer is then three steps:
+produces the custom-format dump. **That dump alone is not a complete
+backup**: saved bank/provider/venue credentials are Fernet-encrypted under a
+key that lives outside PostgreSQL (the `omni_keys` volume or
+`OMNI_CREDENTIAL_KEY`). Restoring the dump onto a host with a different or
+missing key leaves every stored credential undecryptable. The nightly
+`ops/backup.sh` pairs every dump with `<name>.key.age` -- the same key,
+encrypted to an offline `age` recipient -- and moving machines needs both
+halves.
 
-1. On the old machine: Settings -> Download backup (or run `ops/backup.sh`).
+1. On the old machine: run `ops/backup.sh` (it takes the dump AND the
+   encrypted key; the Settings button takes only the dump), or use Settings
+   -> Download backup and separately export the key.
 2. Install the stack on the new machine (this document), bring it up once
    with a fresh database, then stop the api and scheduler.
 3. Restore the dump into the new postgres container:
@@ -233,6 +241,18 @@ instance to a new computer is then three steps:
    docker exec omni_postgres createdb -U postgres omni_v2
    docker exec omni_postgres pg_restore -U postgres -d omni_v2 /tmp/restore.dump
    ```
+
+4. Restore the credential key onto the new machine, from the `.key.age`
+   archive, with the offline identity that matches the backup recipient:
+
+   ```
+   age --decrypt -i /path/to/offline-identity omni-backup-YYYYMMDD.key.age |
+     docker compose -f docker-compose.prod.yml run --rm --no-deps -T --user root api \
+       sh -eu -c 'umask 077; mkdir -p /var/lib/omni; cat > /var/lib/omni/credential.key; chown -R 10001:10001 /var/lib/omni; chmod 700 /var/lib/omni; chmod 600 /var/lib/omni/credential.key'
+   ```
+
+   The file is named `credential.key` with mode 600 under `/var/lib/omni`
+   (owner 10001) -- the same location and modes the application itself uses.
 
    Then start the stack. Restore is deliberately not a UI button: it writes
    over a live database, and a browser-upload path to that action is a

@@ -25,6 +25,8 @@ def _environment(tmp_path: Path, *, target: str = "backup-host:/srv/omni") -> di
         f"OMNI_BACKUP_DIR={tmp_path / 'backups'}\n"
         "OMNI_BACKUP_RETENTION=14\n"
         "OMNI_PG_CONTAINER=test_postgres\n"
+        "OMNI_BACKUP_API_CONTAINER=test_api\n"
+        "OMNI_BACKUP_AGE_RECIPIENT=age1testrecipient\n"
         "PGUSER=postgres\n"
         "PGDATABASE=omni_v2\n"
     )
@@ -32,7 +34,7 @@ def _environment(tmp_path: Path, *, target: str = "backup-host:/srv/omni") -> di
         bin_dir / "docker",
         """#!/usr/bin/env bash
 set -u
-printf 'docker %s\n' "$*" >> "$COMMAND_LOG"
+printf 'docker %s\\n' "$*" >> "$COMMAND_LOG"
 if [[ "$*" == *" pg_dump "* ]]; then
   printf 'PGDMP test archive'
   exit "${DUMP_EXIT:-0}"
@@ -45,7 +47,11 @@ if [[ "$*" == *"pg_restore --exit-on-error"* ]]; then
   exit "${RESTORE_EXIT:-0}"
 fi
 if [[ "$*" == *" psql "* ]]; then
-  printf '%s\n' "${MIGRATION_VERSION:-60}"
+  printf '%s\\n' "${MIGRATION_VERSION:-60}"
+fi
+if [[ "$*" == *" python"* ]]; then
+  printf 'test-fernet-key-bytes'
+  exit "${KEY_EXPORT_EXIT:-0}"
 fi
 exit 0
 """,
@@ -53,8 +59,22 @@ exit 0
     _write_executable(
         bin_dir / "rsync",
         """#!/usr/bin/env bash
-printf 'rsync %s\n' "$*" >> "$COMMAND_LOG"
+printf 'rsync %s\\n' "$*" >> "$COMMAND_LOG"
 exit "${RSYNC_EXIT:-0}"
+""",
+    )
+    _write_executable(
+        bin_dir / "age",
+        """#!/usr/bin/env bash
+# stands in for the real age: pass through, recording the invocation
+cat
+""",
+    )
+    _write_executable(
+        bin_dir / "flock",
+        """#!/usr/bin/env bash
+# macOS hosts have no flock; the script only needs the lock attempt to succeed
+exit 0
 """,
     )
     return {
@@ -75,21 +95,62 @@ def _run(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_backup_validates_archive_then_requires_successful_replication(tmp_path):
+def test_backup_validates_then_pairs_dump_with_encrypted_key(tmp_path):
     env = _environment(tmp_path)
 
     result = _run(env, "backup")
 
     assert result.returncode == 0, result.stderr
-    dumps = list((tmp_path / "backups").glob("omni_v2-*.dump"))
+    backups = tmp_path / "backups"
+    dumps = list(backups.glob("omni_v2-*.dump"))
+    keys = list(backups.glob("omni_v2-*.key.age"))
     assert len(dumps) == 1
-    assert not list((tmp_path / "backups").glob("*.partial"))
+    assert len(keys) == 1
+    assert keys[0].name == f"{dumps[0].stem}.key.age"
+    assert keys[0].read_bytes() == b"test-fernet-key-bytes"
+    assert not list(backups.glob("*.partial"))
     commands = (tmp_path / "commands.log").read_text()
     assert commands.index("pg_dump -Fc") < commands.index("pg_restore --list")
-    assert commands.index("pg_restore --list") < commands.index("rsync -a --delete")
-    assert "backup-host:/srv/omni/" in commands
-    assert "created catalog-readable custom archive" in result.stdout
-    assert "replicated" in result.stdout
+    rsync_line = next(line for line in commands.splitlines() if line.startswith("rsync "))
+    assert "--delete" not in rsync_line, (
+        "replication must publish named archives, never mirror local absence"
+    )
+    assert "backup-host:/srv/omni/" in rsync_line
+    assert "database/key recovery pair" in result.stdout
+
+
+def test_backup_files_and_directory_are_private(tmp_path):
+    env = _environment(tmp_path)
+
+    result = _run(env, "backup")
+
+    assert result.returncode == 0, result.stderr
+    backups = tmp_path / "backups"
+    assert (backups.stat().st_mode & 0o777) == 0o700
+    for archive in list(backups.glob("omni_v2-*")):
+        assert (archive.stat().st_mode & 0o777) == 0o600
+
+
+def test_two_runs_in_one_minute_do_not_collide(tmp_path):
+    env = _environment(tmp_path)
+
+    assert _run(env, "backup").returncode == 0
+    assert _run(env, "backup").returncode == 0
+
+    assert len(list((tmp_path / "backups").glob("omni_v2-*.dump"))) == 2
+    assert len(list((tmp_path / "backups").glob("omni_v2-*.key.age"))) == 2
+
+
+def test_backup_refuses_when_the_key_cannot_be_exported(tmp_path):
+    env = {**_environment(tmp_path), "KEY_EXPORT_EXIT": "3"}
+
+    result = _run(env, "backup")
+
+    assert result.returncode != 0
+    assert "could not export the existing credential key" in result.stderr
+    assert not list((tmp_path / "backups").glob("omni_v2-*.dump"))
+    commands = (tmp_path / "commands.log").read_text()
+    assert "rsync" not in commands, "a keyless backup must not replicate"
 
 
 @pytest.mark.parametrize("target", ["", "/srv/local", "localhost:/srv/omni"])
@@ -121,7 +182,10 @@ def test_backup_rejects_archive_when_pg_restore_cannot_read_catalog(tmp_path):
 
     assert result.returncode == 9
     assert "pg_restore could not read the custom archive catalog" in result.stderr
-    assert not list((tmp_path / "backups").glob("*"))
+    backups = tmp_path / "backups"
+    assert not list(backups.glob("*.dump"))
+    assert not list(backups.glob("*.key.age"))
+    assert not list(backups.glob("*.partial"))
     assert "rsync" not in (tmp_path / "commands.log").read_text()
 
 
