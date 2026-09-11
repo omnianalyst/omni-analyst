@@ -216,3 +216,95 @@ describe("FinanceView", () => {
     expect(importBtn.disabled).toBe(true);
   });
 });
+
+describe("FinanceView month scoping (U16/U19)", () => {
+  it("shows the second month's rows when an earlier month's response lands last", async () => {
+    const now = new Date();
+    const pad = (n: number) => String(n + 1).padStart(2, "0");
+    const firstMonth = `${now.getFullYear()}-${pad(now.getMonth())}`;
+    const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const secondMonth = `${next.getFullYear()}-${pad(next.getMonth())}`;
+    const rowFor = (label: string) => ({
+      month: `${label}-01`, base_currency: "USD", income: 1, budgeted: 1,
+      available_to_budget: 0,
+      categories: [{ id: "cat-1", name: label, is_income: false, budgeted: 1, activity: 0, available: 1, rollover: 0, rollover_mode: "rollover", goal: null }],
+    });
+    const budgetByMonth: Record<string, unknown> = {
+      [firstMonth]: rowFor("SEP-ROW"),
+      [secondMonth]: rowFor("OCT-ROW"),
+    };
+    const pendingFirst: Array<() => void> = [];
+    let budgetCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/finance/budget") {
+        const month = url.searchParams.get("month") ?? "";
+        budgetCalls += 1;
+        if (budgetCalls === 1) {
+          // The first month's response is held until after the second
+          // month's has landed -- the reversed-order race.
+          await new Promise<void>((resolve) => { pendingFirst.push(resolve); });
+        }
+        return new Response(JSON.stringify(budgetByMonth[month] ?? budgetByMonth[secondMonth]), { status: 200 });
+      }
+      if (url.pathname === "/finance/accounts") return new Response(JSON.stringify(ACCOUNTS), { status: 200 });
+      if (url.pathname === "/finance/categories") return new Response(JSON.stringify(CATEGORIES), { status: 200 });
+      return new Response(JSON.stringify({ detail: "not found" }), { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText, queryByText, getByText } = render(h(FinanceView, {}));
+    await waitFor(() => getByText("budget"));
+    fireEvent.click(getByText("budget"));
+    // The first month's budget request is in flight (held) when the month
+    // switches; the second month's response lands first.
+    await waitFor(() => { expect(pendingFirst).toHaveLength(1); });
+
+    const monthInput = document.querySelector('input[type="month"]') as HTMLInputElement;
+    monthInput.value = secondMonth;
+    fireEvent.input(monthInput);
+
+    // The second month's fetch resolves while the first month's is still held.
+    expect(await findByText("OCT-ROW")).toBeTruthy();
+    pendingFirst.pop()?.();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(queryByText("SEP-ROW")).toBeNull();
+  });
+
+  it("a double-clicked manual submit posts exactly one transaction (U19)", async () => {
+    const posts: unknown[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname === "/finance/transactions" && init?.method === "POST") {
+        posts.push(JSON.parse(String(init.body)));
+        await new Promise((r) => setTimeout(r, 30));
+        return new Response("{}", { status: 200 });
+      }
+      if (url.pathname === "/finance/transactions") {
+        return new Response(JSON.stringify(TRANSACTIONS), { status: 200 });
+      }
+      if (url.pathname === "/finance/accounts") return new Response(JSON.stringify(ACCOUNTS), { status: 200 });
+      if (url.pathname === "/finance/categories") return new Response(JSON.stringify(CATEGORIES), { status: 200 });
+      return new Response(JSON.stringify({ detail: "not found" }), { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { findByText, getByText } = render(h(FinanceView, {}));
+    await waitFor(() => getByText("transactions"));
+    fireEvent.click(getByText("transactions"));
+    fireEvent.click(await findByText("Add transaction"));
+
+    const dateInput = document.querySelector('input[type="date"]') as HTMLInputElement;
+    fireEvent.input(dateInput, { target: { value: "2026-09-11" } });
+    const numberInputs = Array.from(document.querySelectorAll('input[type="number"]')) as HTMLInputElement[];
+    fireEvent.input(numberInputs[0], { target: { value: "12.34" } });
+
+    const save = await findByText("Save");
+    fireEvent.click(save);
+    fireEvent.click(save);
+    await waitFor(() => {
+      expect(posts).toHaveLength(1);
+    });
+    expect(posts[0]).toMatchObject({ amount: 1234 });
+  });
+});

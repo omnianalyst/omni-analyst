@@ -176,8 +176,10 @@ def build_router(app: App) -> Router:
     async def change_pw(body: ChangePasswordIn, request: Request) -> None:
         # Rotate the signed-in operator's own password. Requires the current
         # password (re-verification) so a stolen token alone cannot lock the
-        # operator out. The old-password failure renders identically to a wrong
-        # login, so the endpoint cannot be used to confirm a guess.
+        # operator out. A wrong current password answers 400, not 401: the
+        # bearer session IS valid, and a 401 here would make the client clear
+        # it -- one typo logging the operator out. Guessing still requires a
+        # working session, so nothing is enumerated that was not already.
         audience = resolve_audience_from_request(request)
         if audience is None:
             raise unauthorized("Authentication required")
@@ -193,7 +195,7 @@ def build_router(app: App) -> Router:
                 f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
         if not ok:
-            raise unauthorized("Current password is incorrect")
+            raise bad_request("Current password is incorrect")
 
     return router
 

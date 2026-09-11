@@ -147,8 +147,8 @@ export const getNotifications = (): Promise<NotificationsState> =>
   authedGetJson<NotificationsState>("/settings/notifications");
 
 export const putNotifications = (body: {
-  webhook_url?: string;
-  email?: string;
+  webhook_url?: string | null;
+  email?: string | null;
 }): Promise<NotificationsState> =>
   authedSendJson<NotificationsState>("PUT", "/settings/notifications", body);
 

@@ -133,3 +133,32 @@ describe("start / stop polling", () => {
     expect(fetchStatus).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("refresh across a session switch", () => {
+  it("does not apply a response that started under a replaced token (U13)", async () => {
+    token.mockReturnValue("token-a");
+    let release!: (value: typeof OK) => void;
+    fetchStatus.mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    const pending = refresh();
+    token.mockReturnValue("token-b");
+    release(OK);
+    await pending;
+    expect(status.value).toBeNull();
+    expect(state.value).toBe("loading");
+  });
+
+  it("does not record an error for a request whose session was replaced (U13)", async () => {
+    token.mockReturnValue("token-a");
+    let rejectIt!: (cause: Error) => void;
+    fetchStatus.mockImplementation(
+      () => new Promise((_resolve, reject) => { rejectIt = reject; }),
+    );
+    const pending = refresh();
+    token.mockReturnValue("token-b");
+    rejectIt(new Error("abandoned"));
+    await pending;
+    expect(state.value).not.toBe("error");
+  });
+});

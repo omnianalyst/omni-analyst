@@ -35,20 +35,22 @@ export function clearAuthToken(): void {
   notifyAuthState(null);
 }
 
-// A request that carried a token and came back 401 means the session is dead
+// A request that carried a token and came back 401 means that session is dead
 // (expired or rejected). Left unhandled, every authed panel fills with 401
 // errors and the app reads as broken; clearing the stale token lets the layout
-// immediately hide private content and redirect to /login. Anonymous 401s --
-// a request that sent no token -- are left alone, because "auth required" there
-// is a real condition (e.g. a wrong password on /auth/login), not a stale
-// session, and redirecting would loop or mask it.
-function handleStaleSession(status: number, headers: Record<string, string>): void {
+// immediately hide private content and redirect to /login. Only the token that
+// was ACTUALLY SENT is cleared: a slow request carrying expired token A can
+// resolve after re-login installed token B, and clearing "whatever is stored"
+// would kill the newer session. Anonymous 401s -- a request that sent no
+// token -- are left alone, because "auth required" there is a real condition
+// (e.g. a wrong password on /auth/login), not a stale session.
+function handleStaleSession(status: number, headers: HeadersInit): void {
   if (status !== 401) return;
-  const hadToken = Boolean(
-    headers["authorization"] || headers["Authorization"],
-  );
-  if (!hadToken) return;
-  clearAuthToken();
+  const sent = new Headers(headers).get("authorization");
+  const current = getAuthToken();
+  if (current !== null && sent === `Bearer ${current}`) {
+    clearAuthToken();
+  }
 }
 
 export class ApiUnavailableError extends Error {
@@ -70,6 +72,22 @@ export class ApiHttpError extends Error {
     super(`API responded ${status} from ${url}`);
     this.name = "ApiHttpError";
   }
+}
+
+export class AuthSessionChangedError extends Error {
+  constructor() {
+    super("Authentication changed while the request was running");
+  }
+}
+
+// A 204/205 success carries no body (e.g. password change). Parsing it as
+// JSON rejects and reports a failure AFTER the server already acted -- the
+// user retries an operation that succeeded.
+export async function readJsonResponse<T>(response: Response): Promise<T> {
+  if (response.status === 204 || response.status === 205) {
+    return undefined as T;
+  }
+  return response.json() as Promise<T>;
 }
 
 export interface Entity {
@@ -133,23 +151,49 @@ export interface ClaimsResponse {
   claims: Claim[];
 }
 
+// One transport for every API call: same-origin path discipline, API-base
+// awareness, default accept, JSON content-type only when a body exists, and
+// the token-specific 401 handler. `apiResponse` also serves non-JSON callers
+// (downloads) that need the same base and status handling.
+export async function apiResponse(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  if (!path.startsWith("/") || path.startsWith("//")) {
+    throw new Error("API paths must be same-service absolute paths");
+  }
+  const url = API_BASE_URL + path;
+  const headers = new Headers(init.headers);
+  if (!headers.has("accept")) headers.set("accept", "application/json");
+  if (typeof init.body === "string" && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+  const sent = headers.get("authorization");
+  let response: Response;
+  try {
+    response = await fetch(url, { ...init, headers });
+  } catch (cause) {
+    if (init.signal?.aborted) throw cause;
+    throw new ApiUnavailableError(url, cause);
+  }
+  if (sent !== null && sent !== `Bearer ${getAuthToken()}`) {
+    // The session was replaced while this request ran; applying its success
+    // would populate another session's state.
+    throw new AuthSessionChangedError();
+  }
+  if (!response.ok) {
+    handleStaleSession(response.status, headers);
+    const body = await response.text().catch(() => "");
+    throw new ApiHttpError(response.status, url, body);
+  }
+  return response;
+}
+
 export async function request<T>(
   path: string,
   headers: Record<string, string> = {},
 ): Promise<T> {
-  const url = API_BASE_URL + path;
-  let res: Response;
-  try {
-    res = await fetch(url, { headers: { accept: "application/json", ...headers } });
-  } catch (err) {
-    throw new ApiUnavailableError(url, err);
-  }
-  if (!res.ok) {
-    handleStaleSession(res.status, headers);
-    const body = await res.text().catch(() => "");
-    throw new ApiHttpError(res.status, url, body);
-  }
-  return res.json() as Promise<T>;
+  return readJsonResponse<T>(await apiResponse(path, { headers }));
 }
 
 export async function sendJson<T>(
@@ -158,33 +202,18 @@ export async function sendJson<T>(
   body?: unknown,
   headers: Record<string, string> = {},
 ): Promise<T> {
-  const url = API_BASE_URL + path;
   // A bodiless request must not declare a JSON content-type: the server
   // parses a request that claims a body, and a DELETE with content-type
   // but no body is malformed before the route ever runs (observed as
   // every DELETE returning 400 while the same call at the HTTP level
   // succeeded -- bulletin removal, 2026-08-22).
-  const hasBody = body !== undefined;
-  let res: Response;
-  try {
-    res = await fetch(url, {
+  return readJsonResponse<T>(
+    await apiResponse(path, {
       method,
-      headers: {
-        accept: "application/json",
-        ...(hasBody ? { "content-type": "application/json" } : {}),
-        ...headers,
-      },
-      body: hasBody ? JSON.stringify(body) : undefined,
-    });
-  } catch (err) {
-    throw new ApiUnavailableError(url, err);
-  }
-  if (!res.ok) {
-    handleStaleSession(res.status, headers);
-    const text = await res.text().catch(() => "");
-    throw new ApiHttpError(res.status, url, text);
-  }
-  return res.json() as Promise<T>;
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }),
+  );
 }
 
 export function authHeaderIfPresent(): Record<string, string> {

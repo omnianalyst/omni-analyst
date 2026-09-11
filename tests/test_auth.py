@@ -484,8 +484,9 @@ async def test_change_password_rotates_then_new_password_logs_in(db, database_ur
 
 async def test_change_password_wrong_old_password_is_refused(db, database_url):
     # A stolen token alone must not be enough to lock the operator out: the
-    # current password is re-verified. The failure is indistinguishable from a
-    # wrong login so the endpoint cannot confirm a password guess.
+    # current password is re-verified. The bearer session is valid, so the
+    # refusal is 400 -- a 401 made the client clear a live session on a typo
+    # (U12). Guessing still requires a working session.
     app = _make_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
         token = await _setup_first_user(client, password="real-old-pass-1")
@@ -495,7 +496,12 @@ async def test_change_password_wrong_old_password_is_refused(db, database_url):
             json={"old_password": "wrong-old-pass-1", "new_password": "newpass123456"},
             headers=_bearer(token),
         )
-    assert r.status_code == 401
+        assert r.status_code == 400
+        assert "Current password is incorrect" in r.text
+
+        # The session survives the typo.
+        me = await client.get("/auth/me", headers=_bearer(token))
+        assert me.status_code == 200
 
 
 async def test_change_password_weak_new_password_refused(db, database_url):

@@ -3,6 +3,7 @@ declare module "@neutron-build/core" {
   interface NeutronGeneratedRouteMap {
     paths:
     | "/"
+    | "/book"
     | "/console"
     | `/entity/${string}`
     | "/finance"

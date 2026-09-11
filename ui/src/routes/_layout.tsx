@@ -46,6 +46,7 @@ function isPublicPath(pathname: string): boolean {
 // route now redirects.
 const NAV = [
   { href: "/", label: "Portfolio" },
+  { href: "/book", label: "Trading book" },
   { href: "/search", label: "Discover" },
   { href: "/system", label: "System" },
 ];
@@ -102,45 +103,59 @@ export default function Layout({
   });
 
   useEffect(() => {
+    let token = getAuthToken();
+    let disposed = false;
+    let leaving = false;
+
+    // Identity, not just signed-in-ness: replacing token A with token B keeps
+    // every boolean true while the mounted views still hold A's private state
+    // and the module stores A's snapshot. A boundary like that is a reload --
+    // it clears component tree and singletons both.
     const syncAuth = () => {
-      const nextSignedIn = getAuthToken() !== null;
-      setSignedIn(nextSignedIn);
-      if (nextSignedIn) {
-        setAllowed(true);
+      if (disposed || leaving) return;
+      const next = getAuthToken();
+      if (token !== null && next !== token) {
+        leaving = true;
+        setAllowed(false);
+        setSignedIn(false);
+        if (next === null) window.location.replace("/login");
+        else window.location.reload();
         return;
       }
-      if (!isPublicPath(window.location.pathname)) {
-        setAllowed(false);
-        window.setTimeout(() => window.location.replace("/login"), 0);
-      }
+      token = next;
+      setSignedIn(next !== null);
+      setAllowed(isPublicPath(window.location.pathname) || next !== null);
     };
+    // event.key === null covers localStorage.clear(), which wipes the token
+    // without naming its key.
     const syncStoredAuth = (event: StorageEvent) => {
-      if (event.key === AUTH_TOKEN_KEY) syncAuth();
+      if (event.key === AUTH_TOKEN_KEY || event.key === null) syncAuth();
     };
     window.addEventListener(AUTH_STATE_EVENT, syncAuth);
     window.addEventListener("storage", syncStoredAuth);
+    syncAuth();
 
-    setSignedIn(getAuthToken() !== null);
-    const path = window.location.pathname;
-    const tokenPresent = getAuthToken() !== null;
-    if (isPublicPath(path)) {
-      setAllowed(true);
-    } else if (tokenPresent) {
-      setAllowed(true);
-    } else {
-      // No token on a protected route: send the visitor where they can get one.
-      // First-run (zero users) -> /setup; otherwise -> /login. replace() so the
-      // guarded page is not retained in history (back button does not re-land
-      // on a page that will immediately bounce them again).
-      fetchSetupStatus()
-        .then((s) => {
-          window.location.replace(s.setup_required ? "/setup" : "/login");
+    // No token on a protected route: send the visitor where they can get one.
+    // First-run (zero users) -> /setup; otherwise -> /login. The redirect is
+    // re-checked at resolution time so a user who signed in while the setup
+    // probe was in flight is not bounced off the page they just unlocked.
+    if (token === null && !isPublicPath(window.location.pathname)) {
+      void fetchSetupStatus()
+        .then((result) => {
+          if (!disposed && !leaving && getAuthToken() === null
+              && !isPublicPath(window.location.pathname)) {
+            window.location.replace(result.setup_required ? "/setup" : "/login");
+          }
         })
         .catch(() => {
-          window.location.replace("/login");
+          if (!disposed && !leaving && getAuthToken() === null
+              && !isPublicPath(window.location.pathname)) {
+            window.location.replace("/login");
+          }
         });
     }
     return () => {
+      disposed = true;
       window.removeEventListener(AUTH_STATE_EVENT, syncAuth);
       window.removeEventListener("storage", syncStoredAuth);
     };

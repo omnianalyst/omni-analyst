@@ -37,7 +37,8 @@ outside the funnel (Finance, below).
 
 | Route | Page | Shows |
 |---|---|---|
-| `/` | Portfolio | Trading NAV, carry APR, delta-neutrality, pair tags, positions, cycle history, cash. External read-only wallet balances shown **separately**, never added to NAV. |
+| `/` | Portfolio | Manually tracked holdings and separately labeled read-only external wallets. |
+| `/book` | Trading book | Managed trading NAV, positions, order history, reconciliation, schedule and exposure. Read-only; no live-order enablement. |
 | `/search` | Discover | Ranked stocks/ETFs, defensive assets, crypto, sector leaders, entity search, watchlists, alerts, explicit coverage audit. |
 | `/system` | System | Engine health, loop status, demand, fills, provider state. |
 | `/settings` | Settings | Venue toggles, data-provider configuration, the Finance opt-in toggle. Still more status screen than control centre — see §8 P1. |

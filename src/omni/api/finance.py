@@ -12,10 +12,10 @@ from neutron.error import bad_request, not_found, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
-from omni.finance import bankcreds, banksync, parsers, rules, schedules_service, service
-from omni.finance import reports as service_reports
-from omni.finance import budget as budget_mod
 from omni.auth import resolve_audience_from_request
+from omni.finance import bankcreds, banksync, parsers, rules, schedules_service, service
+from omni.finance import budget as budget_mod
+from omni.finance import reports as service_reports
 from omni.finance.normalisation import ImportRowError
 from omni.finance.schedules import ScheduleError
 from omni.finance.service import FinanceError
@@ -325,10 +325,14 @@ def build_router(app: App) -> Router:
     @router.get("/finance/reports/spending")
     async def report_spending(request: Request, month: str) -> dict:
         user = _require_user(request)
+        base = await budget_mod.base_currency(app.db.pool, user)
         return {
             "month": month[:7],
+            "base_currency": base,
             "categories": await _run(
-                service_reports.spending_by_category(app.db.pool, user, month)
+                service_reports.spending_by_category(
+                    app.db.pool, user, month, currency=base
+                )
             ),
         }
 
@@ -397,7 +401,7 @@ def build_router(app: App) -> Router:
         user = _require_user(request)
         try:
             archive = _b64.b64decode(body.zip_base64, validate=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise bad_request("zip_base64 is not valid base64") from exc
         from omni.finance import migrate_actual
 

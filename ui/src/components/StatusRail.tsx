@@ -1,31 +1,51 @@
-import { useEffect } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { engineStatusWord, worstScheduledTier } from "../lib/system";
-import { start, state, status, stop } from "../lib/systemStore";
+import { start, state, status, stop, lastOkAt } from "../lib/systemStore";
 
 export function StatusRail() {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     start();
-    return () => stop();
+    const clock = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => {
+      window.clearInterval(clock);
+      stop();
+    };
   }, []);
 
   const snapshot = status.value;
-  const storeState = state.value;
+  const last = lastOkAt.value;
+  const failed = state.value === "error";
+  // A snapshot older than a minute (two missed 30s polls) is stale even if no
+  // poll has errored yet; the local clock ages hung requests out too.
+  const stale = last !== null && now - last > 60_000;
+  const healthy =
+    snapshot !== null &&
+    !failed &&
+    !stale &&
+    engineStatusWord(worstScheduledTier(snapshot.loops)) === "nominal";
+  const label = failed
+    ? "System unavailable"
+    : stale
+      ? "System status stale"
+      : snapshot === null
+        ? "Checking system"
+        : healthy
+          ? "System healthy"
+          : "System needs attention";
+  const detail =
+    last === null
+      ? "No successful status reading"
+      : `Last successful reading: ${new Date(last).toLocaleString()}`;
 
-  if (snapshot === null) {
-    return (
-      <a class={`system-pill ${storeState === "error" ? "system-pill-attention" : ""}`} href="/system">
-        <span class="status-dot-simple" aria-hidden="true" />
-        {storeState === "error" ? "System unavailable" : "Checking system"}
-      </a>
-    );
-  }
-
-  const word = engineStatusWord(worstScheduledTier(snapshot.loops));
-  const healthy = word === "nominal";
   return (
-    <a class={`system-pill ${healthy ? "" : "system-pill-attention"}`} href="/system">
+    <a
+      href="/system"
+      title={detail}
+      class={`system-pill ${healthy ? "" : "system-pill-attention"}`}
+    >
       <span class="status-dot-simple" aria-hidden="true" />
-      {healthy ? "System healthy" : "System needs attention"}
+      {label}
     </a>
   );
 }
