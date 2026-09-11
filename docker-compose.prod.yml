@@ -112,6 +112,15 @@ services:
       # Optional. Absent, Omni generates a key into omni_keys on first use.
       # Supplying one here overrides the file (12-factor / secrets manager).
       OMNI_CREDENTIAL_KEY: ${OMNI_CREDENTIAL_KEY:-}
+      # Outbound email for alert delivery, the API process too: it computes
+      # smtp_available and runs the test delivery in-process (Settings), so
+      # without these a deployment whose scheduler email works still shows
+      # "email unavailable" and the test button cannot send.
+      OMNI_SMTP_HOST: ${OMNI_SMTP_HOST:-}
+      OMNI_SMTP_PORT: ${OMNI_SMTP_PORT:-587}
+      OMNI_SMTP_USER: ${OMNI_SMTP_USER:-}
+      OMNI_SMTP_PASSWORD: ${OMNI_SMTP_PASSWORD:-}
+      OMNI_SMTP_FROM: ${OMNI_SMTP_FROM:-omni@localhost}
     volumes:
       # Durable home for the credential key. Without this the key would be
       # generated into a container filesystem and lost on the next deploy,
@@ -189,6 +198,12 @@ services:
       # call, so these being set does not by itself let anything trade.
       HYPERLIQUID_WALLET_ADDRESS: ${HYPERLIQUID_WALLET_ADDRESS:-}
       HYPERLIQUID_PRIVATE_KEY: ${HYPERLIQUID_PRIVATE_KEY:-}
+      # Which book the ops scripts (cycle/nav) may touch. Explicit, not
+      # LIMIT 1: a multi-portfolio install must never have a script pick an
+      # arbitrary row and operate it under another owner's audience. Unset
+      # means the scripts refuse to run, which is the honest default.
+      OMNI_TRADING_PORTFOLIO_ID: ${OMNI_TRADING_PORTFOLIO_ID:-}
+      OMNI_TRADING_OWNER_ID: ${OMNI_TRADING_OWNER_ID:-}
       # Conviction gate bar: surface only confidence buckets historically right
       # at least this often. 0.65 = "high conviction" (~7-in-10), tuned from the
       # trend.sma calibration buckets. Raise for stricter/more silence, lower

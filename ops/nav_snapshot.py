@@ -12,18 +12,17 @@ never places an order, and the venue is constructed so that it could not.
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import UUID
 
 from omni.config import settings
 from omni.db import connect
 from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS, record_loop_health
 from omni.trading.carry_health import Verdict, assess
 from omni.trading.nav_job import Unmarkable, snapshot
+from omni.trading.ops_scope import configured_book
 from omni.trading.tradeable import affordability, affordable_ids
 from omni.venue.ccxt_venue import CCXTVenue, TradingMode
 from omni.venue.credentials import wallet_credentials
 
-OWNER = UUID("97e7737f-cad3-439a-b8b3-3ae4536a7eac")
 UNIVERSE = ["BTC", "ETH", "SOL", "HYPE", "PENGU", "PURR"]
 
 
@@ -36,17 +35,7 @@ async def main() -> int:
             credentials=wallet_credentials(settings, "hyperliquid"),
             mode=TradingMode.READ_ONLY,
         )
-        pid = await c.pool.fetchval("SELECT id FROM portfolio LIMIT 1")
-        if pid is None:
-            print("no portfolio; nothing to mark")
-            await record_loop_health(
-                c.pool,
-                loop_name="nav",
-                ok=True,
-                result="no portfolio; nothing to mark",
-                expected_interval_seconds=EXPECTED_OPERATION_INTERVALS["nav"],
-            )
-            return 0
+        pid, _, owner = await configured_book(c.pool)
         rows = await c.pool.fetch(
             "SELECT id, symbol FROM entity WHERE symbol = ANY($1::text[])", UNIVERSE
         )
@@ -54,7 +43,7 @@ async def main() -> int:
             nav = await snapshot(
                 c.pool, venue=v, portfolio_id=pid,
                 entity_ids=[r["id"] for r in rows],
-                audience_user_id=OWNER, at=datetime.now(UTC),
+                audience_user_id=owner, at=datetime.now(UTC),
             )
         except Unmarkable as exc:
             # A partial NAV reads as authoritative while understating exactly
@@ -91,7 +80,7 @@ async def main() -> int:
         health = await assess(
             c.pool,
             assets={t: assets[t] for t in tradeable},
-            audience_user_id=OWNER,
+            audience_user_id=owner,
             funding_venue="hyperliquid",
             as_of=datetime.now(UTC),
             enter_rank=2,
