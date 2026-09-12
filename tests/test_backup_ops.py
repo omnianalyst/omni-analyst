@@ -108,7 +108,9 @@ def test_backup_validates_then_pairs_dump_with_encrypted_key(tmp_path):
     assert len(keys) == 1
     assert keys[0].name == f"{dumps[0].stem}.key.age"
     assert keys[0].read_bytes() == b"test-fernet-key-bytes"
-    assert not list(backups.glob("*.partial"))
+    assert sorted(p.name for p in backups.iterdir()) == sorted(
+        [dumps[0].name, keys[0].name, ".backup.lock"]
+    )
     commands = (tmp_path / "commands.log").read_text()
     assert commands.index("pg_dump -Fc") < commands.index("pg_restore --list")
     rsync_line = next(line for line in commands.splitlines() if line.startswith("rsync "))
@@ -137,8 +139,12 @@ def test_two_runs_in_one_minute_do_not_collide(tmp_path):
     assert _run(env, "backup").returncode == 0
     assert _run(env, "backup").returncode == 0
 
-    assert len(list((tmp_path / "backups").glob("omni_v2-*.dump"))) == 2
-    assert len(list((tmp_path / "backups").glob("omni_v2-*.key.age"))) == 2
+    backups = tmp_path / "backups"
+    assert len(list(backups.glob("omni_v2-*.dump"))) == 2
+    assert len(list(backups.glob("omni_v2-*.key.age"))) == 2
+    assert sorted(p.name for p in backups.iterdir()) == sorted(
+        [p.name for p in backups.glob("omni_v2-*")] + [".backup.lock"]
+    )
 
 
 def test_backup_refuses_when_the_key_cannot_be_exported(tmp_path):

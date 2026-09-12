@@ -143,9 +143,9 @@ run_backup() (
   flock -n 9 || { fail 'another backup is running'; exit 1; }
   local stamp temporary dest key_archive status
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
-  temporary=$(mktemp "$BACKUP_DIR/${PGDATABASE}-${stamp}-XXXXXX.partial")
-  dest="${temporary%.partial}.dump"
-  key_archive="${temporary%.partial}.key.age"
+  temporary=$(mktemp "$BACKUP_DIR/${PGDATABASE}-${stamp}-XXXXXX")
+  dest="${temporary}.dump"
+  key_archive="${temporary}.key.age"
   trap 'rm -f -- "$temporary" "${key_archive}.partial"' EXIT
   if ! docker exec "$PG_CONTAINER" pg_dump -Fc -U "$PGUSER" "$PGDATABASE" > "$temporary"; then
     status=$?
@@ -175,7 +175,8 @@ run_backup() (
   find "$BACKUP_DIR" -maxdepth 1 -type f \
     \( -name "${PGDATABASE}-*.dump" -o -name "${PGDATABASE}-*.key.age" \) \
     -mtime +"$RETENTION_DAYS" -delete
-  find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.partial' -mtime +1 -delete
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name "${PGDATABASE}-*" \
+    ! -name '*.dump' ! -name '*.key.age' -mtime +1 -delete
 )
 
 restore_database() {
