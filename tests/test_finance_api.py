@@ -272,7 +272,7 @@ async def test_transfer_mirrors_and_clears_category(db, database_url):
         user_row = await pool.fetchrow(
             "SELECT id FROM users WHERE email = $1", "op@example.com"
         )
-        payee_id = await pool.fetchval(
+        await pool.fetchval(
             "INSERT INTO finance_payee (user_id, name, transfer_acct) "
             "VALUES ($1, 'Transfer to Savings', $2) RETURNING id",
             user_row["id"],

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
-from typing import Any
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from omni.finance import schedules as engine
@@ -25,7 +24,7 @@ async def list_schedules(pool, user_id: UUID) -> list[dict]:
         """,
         user_id,
     )
-    today = date.today()
+    today = datetime.now(UTC).date()
     out = []
     for r in rows:
         config = r["config"]
@@ -111,7 +110,7 @@ async def create_schedule(
         json.dumps(config),
         notes,
     )
-    next_date = engine.next_occurrence(rec, date.today())
+    next_date = engine.next_occurrence(rec, datetime.now(UTC).date())
     return {"id": str(row["id"]), "name": name, "next": next_date.isoformat() if next_date else None}
 
 

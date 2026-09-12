@@ -3,6 +3,8 @@ starting balances, search, tombstone-by-rule on import."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from neutron.test import TestClient
 
@@ -83,9 +85,8 @@ async def test_opening_balance_books_under_starting_balances(db, database_url):
 
 
 def date_month() -> str:
-    from datetime import date
 
-    return f"{date.today().year}-{str(date.today().month).zfill(2)}"
+    return f"{datetime.now(UTC).date().year}-{str(datetime.now(UTC).date().month).zfill(2)}"
 
 
 async def test_rollover_modes_reset_and_hold(db, database_url):
@@ -98,8 +99,8 @@ async def test_rollover_modes_reset_and_hold(db, database_url):
         from datetime import date
 
         next_m = date(
-            date.today().year + (date.today().month == 12),
-            date.today().month % 12 + 1,
+            datetime.now(UTC).date().year + (datetime.now(UTC).date().month == 12),
+            datetime.now(UTC).date().month % 12 + 1,
             1,
         ).strftime("%Y-%m")
 
@@ -152,7 +153,7 @@ async def test_schedules_crud_and_status(db, database_url):
     app = create_app(database_url)
     async with _Lifespan(app), TestClient(app) as client:
         headers = await _operator(client)
-        ids = await _setup(client, headers)
+        await _setup(client, headers)
 
         r = await client.post("/finance/schedules", json={
             "name": "Rent",

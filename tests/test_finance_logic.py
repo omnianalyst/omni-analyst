@@ -134,11 +134,11 @@ def test_rule_outflow_direction_and_approx():
     resolve = {"category": {"rent": {"id": "rent", "valid": True}}, "payee": {}}
     names = {"imported_payee": None, "payee": None, "notes": None}
 
-    tx, applied = apply_rules([rule], {"amount": -4800}, names=names, resolve=resolve)
+    _, applied = apply_rules([rule], {"amount": -4800}, names=names, resolve=resolve)
     assert applied == ["r1"]
-    tx, applied = apply_rules([rule], {"amount": 4800}, names=names, resolve=resolve)
+    _, applied = apply_rules([rule], {"amount": 4800}, names=names, resolve=resolve)
     assert applied == []
-    tx, applied = apply_rules([rule], {"amount": -6000}, names=names, resolve=resolve)
+    _, applied = apply_rules([rule], {"amount": -6000}, names=names, resolve=resolve)
     assert applied == []
 
 

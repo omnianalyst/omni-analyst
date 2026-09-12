@@ -52,7 +52,7 @@ class Recurrence:
             raise ScheduleError(f"unsupported weekendSolveMode {self.weekend_solve_mode!r}")
 
     @classmethod
-    def from_config(cls, config: dict) -> "Recurrence":
+    def from_config(cls, config: dict) -> Recurrence:
         try:
             return cls(
                 frequency=config["frequency"],

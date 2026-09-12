@@ -6,7 +6,7 @@ import io
 import json
 import sqlite3
 import zipfile
-from datetime import date
+from datetime import UTC, datetime
 
 import pytest
 from neutron.test import TestClient
@@ -57,7 +57,7 @@ async def _operator(client, email="op@example.com") -> dict:
 
 
 def this_month() -> str:
-    return f"{date.today().year}-{str(date.today().month).zfill(2)}"
+    return f"{datetime.now(UTC).date().year}-{str(datetime.now(UTC).date().month).zfill(2)}"
 
 
 async def _setup(client, headers) -> dict:
@@ -115,7 +115,8 @@ async def test_save_by_date_goal_spreads_target(db, database_url):
         ids = await _setup(client, headers)
         from datetime import date as d
 
-        horizon = d(d.today().year + 1, d.today().month, 1).isoformat()[:10]
+        _today = datetime.now(UTC).date()
+        horizon = d(_today.year + 1, _today.month, 1).isoformat()[:10]
         r = await client.put(
             f"/finance/categories/{ids['groceries']}/goal",
             json={"goal_type": "save_by_date", "goal_amount": 120000, "goal_date": horizon},

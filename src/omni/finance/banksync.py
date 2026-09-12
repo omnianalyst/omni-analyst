@@ -18,7 +18,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
-from datetime import date, datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -376,7 +376,7 @@ async def _sync_start(pool, user_id: UUID, account_id: UUID) -> str:
         """,
         account_id,
     )
-    window = date.today() - timedelta(days=SYNC_WINDOW_DAYS - 1)
+    window = datetime.now(UTC).date() - timedelta(days=SYNC_WINDOW_DAYS - 1)
     if oldest is not None and oldest < window:
         return oldest.isoformat()
     return window.isoformat()

@@ -14,9 +14,8 @@ from uuid import UUID, uuid4
 from omni.finance import budget as budget_mod
 from omni.finance import rules as rules_mod
 from omni.finance.normalisation import (
-    ImportRowError,
-    normalised_string,
     normalise_import_row,
+    normalised_string,
 )
 from omni.finance.reconcile import reconcile
 from omni.finance.transfers import create_transfer_side
@@ -26,13 +25,13 @@ ACCOUNT_TYPES = frozenset(
     {"checking", "savings", "credit", "loan", "cash", "investment", "other"}
 )
 
-DATE_HEADER_RE = re.compile(r"date|posted|transaction date", re.I)
-PAYEE_HEADER_RE = re.compile(r"payee|description|merchant|name|detail", re.I)
-AMOUNT_HEADER_RE = re.compile(r"amount|value", re.I)
-DEBIT_HEADER_RE = re.compile(r"debit|withdraw|money_out", re.I)
-CREDIT_HEADER_RE = re.compile(r"credit|deposit|money_in", re.I)
-NOTES_HEADER_RE = re.compile(r"notes|memo|comment", re.I)
-ID_HEADER_RE = re.compile(r"fitid|reference|ref|id", re.I)
+DATE_HEADER_RE = re.compile(r"date|posted|transaction date", re.IGNORECASE)
+PAYEE_HEADER_RE = re.compile(r"payee|description|merchant|name|detail", re.IGNORECASE)
+AMOUNT_HEADER_RE = re.compile(r"amount|value", re.IGNORECASE)
+DEBIT_HEADER_RE = re.compile(r"debit|withdraw|money_out", re.IGNORECASE)
+CREDIT_HEADER_RE = re.compile(r"credit|deposit|money_in", re.IGNORECASE)
+NOTES_HEADER_RE = re.compile(r"notes|memo|comment", re.IGNORECASE)
+ID_HEADER_RE = re.compile(r"fitid|reference|ref|id", re.IGNORECASE)
 
 DATE_PATTERNS = ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%m/%d/%y", "%d.%m.%Y", "%Y/%m/%d")
 
@@ -593,7 +592,7 @@ def _parse_date(value: str) -> str:
     text = value.strip()
     for pattern in DATE_PATTERNS:
         try:
-            return datetime.strptime(text, pattern).date().isoformat()
+            return datetime.strptime(text, pattern).date().isoformat()  # noqa: DTZ007 - date-only parse of a bank export string
         except ValueError:
             continue
     raise FinanceError(f"unrecognised date {text!r}")
@@ -634,7 +633,7 @@ def parse_csv(text: str) -> list[dict]:
     for line in rows[1:]:
         if not any(cell.strip() for cell in line):
             continue
-        def pick(field):
+        def pick(field, line=line):
             idx = mapping.get(field)
             return line[idx].strip() if idx is not None and idx < len(line) else None
         amount = pick("amount")

@@ -67,7 +67,7 @@ def normalise_notes(notes: str | None) -> str | None:
     return trimmed.replace("#", "##")
 
 
-def amount_to_cents(value: str | float | int) -> int:
+def amount_to_cents(value: str | float) -> int:
     """Actual stores integer minor units and rejects anything else; a
     float like 12.34 that is not exactly representable must round-trip
     through string parsing, never through float arithmetic."""

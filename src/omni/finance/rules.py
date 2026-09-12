@@ -35,11 +35,11 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
-from omni.finance.normalisation import normalised_string
 from omni.finance import schedules as schedules_mod
+from omni.finance.normalisation import normalised_string
 
 APPROX_THRESHOLD = 0.10
 
@@ -210,7 +210,8 @@ def _schedule_matches(op: str, value, tx: dict) -> bool:
     tx_day = str(tx.get("date") or "")[:10]
     if not tx_day:
         return False
-    from datetime import date as date_cls, timedelta as timedelta_cls
+    from datetime import date as date_cls
+    from datetime import timedelta as timedelta_cls
 
     rec = schedules_mod.Recurrence.from_config(value.get("schedule") or {})
     day = date_cls.fromisoformat(tx_day)
@@ -322,26 +323,25 @@ def evaluate_formula(formula: str, context: dict) -> int | str:
         else:
             scope[name] = 0
     try:
-        result = eval(  # noqa: S307 - AST-whitelisted arithmetic only
+        result = eval(
             compile(tree, "<formula>", "eval"),
             {"__builtins__": {}},
             scope,
         )
     except ZeroDivisionError:
         raise RuleError("formula divided by zero") from None
-    except Exception as exc:  # noqa: BLE001 - surfaced as a rule error
+    except Exception as exc:
         raise RuleError(f"formula error: {exc}") from exc
     if isinstance(result, str):
         return result
     if isinstance(result, bool) or not isinstance(result, (int, float)):
         raise RuleError("formula must produce a number or a string")
-    return int(round(float(result) * 100))
+    return round(float(result) * 100)
 
 
 def _formula_context(tx: dict, names: dict) -> dict:
-    from omni.finance.normalisation import amount_to_cents
 
-    today = date.today().isoformat()
+    today = datetime.now(UTC).date().isoformat()
     return {
         "amount": (tx.get("amount") or 0) / 100.0,
         "today": today,

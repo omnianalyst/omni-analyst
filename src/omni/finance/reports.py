@@ -4,7 +4,7 @@ estimated balances, no extrapolation past the last posted day."""
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from omni.finance.budget import month_of
@@ -19,7 +19,7 @@ async def cash_flow(pool, user_id: UUID, months: int = 6, end: date | None = Non
     from omni.finance.budget import base_currency
 
     base = await base_currency(pool, user_id)
-    end = month_of(end or date.today())
+    end = month_of(end or datetime.now(UTC).date())
     start = _shift(end, -(months - 1))
     rows = await pool.fetch(
         """
@@ -111,7 +111,7 @@ async def net_worth(pool, user_id: UUID, months: int = 12) -> dict:
     from omni.finance.budget import base_currency
 
     base = await base_currency(pool, user_id)
-    today = date.today()
+    today = datetime.now(UTC).date()
     window_start = _shift(month_of(today), -(months - 1))
     window_end = _shift(month_of(today), 1)
     rows = await pool.fetch(

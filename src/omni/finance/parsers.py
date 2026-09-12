@@ -39,7 +39,7 @@ def parse_any(text: str, fmt: str | None = None) -> list[dict]:
 
 
 def _sgml_tag(block: str, tag: str) -> str | None:
-    m = re.search(rf"<{tag}>([^<\r\n>]*)", block, re.I)
+    m = re.search(rf"<{tag}>([^<\r\n>]*)", block, re.IGNORECASE)
     return m.group(1).strip() if m else None
 
 
@@ -51,9 +51,9 @@ def _ofx_date(value: str) -> str:
 
 
 def parse_ofx(text: str) -> list[dict]:
-    blocks = re.findall(r"<STMTTRN>(.*?)</STMTTRN>", text, re.I | re.S)
+    blocks = re.findall(r"<STMTTRN>(.*?)</STMTTRN>", text, re.IGNORECASE | re.DOTALL)
     if not blocks:
-        blocks = re.findall(r"<STMTTRN>(.*?)(?=<STMTTRN>|$)", text, re.I | re.S)
+        blocks = re.findall(r"<STMTTRN>(.*?)(?=<STMTTRN>|$)", text, re.IGNORECASE | re.DOTALL)
     rows = []
     for block in blocks:
         posted = _sgml_tag(block, "DTPOSTED")
@@ -79,7 +79,7 @@ def _qif_date(value: str) -> str:
     cleaned = value.strip().strip("'").replace("'", "/")
     for pattern in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%d/%m/%Y"):
         try:
-            return datetime.strptime(cleaned.split("[")[0].strip(), pattern).date().isoformat()
+            return datetime.strptime(cleaned.split("[")[0].strip(), pattern).date().isoformat()  # noqa: DTZ007 - date-only parse of a bank export string
         except ValueError:
             continue
     raise FinanceError(f"unrecognised QIF date {value!r}")
@@ -131,7 +131,6 @@ def parse_camt(text: str) -> list[dict]:
         root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise FinanceError(f"invalid CAMT.053 XML: {exc}") from exc
-    ns = {"c": root.tag.split("}")[0].strip("{")} if root.tag.startswith("{") else {}
     rows = []
     for entry in root.iter():
         if not entry.tag.endswith("Ntry"):

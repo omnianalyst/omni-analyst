@@ -200,7 +200,7 @@ async def import_actual_backup(
                 try:
                     rule = json.loads(row["rule"]) if isinstance(row["rule"], str) else row["rule"]
                     config = _rule_to_recurrence(rule)
-                except Exception:  # noqa: BLE001 - unparseable schedule: skip, report
+                except Exception:  # noqa: BLE001, S112 - unparseable schedule: skip, report
                     continue
                 if config is None:
                     continue
@@ -487,7 +487,6 @@ def _map_action(action: dict, category_map: dict, payee_map: dict) -> dict | Non
     op = action.get("op", "set")
     value = action.get("value")
     if op == "set" and field in ("category", "payee"):
-        source = category_map if field == "category" else payee_map
         return {"op": "set", "field": field, "value": value}
     if op in ("set", "prepend-notes", "append-notes", "delete-transaction", "link-schedule", "set-split-amount"):
         return {"op": op, "field": field, "value": value, **({"options": action["options"]} if action.get("options") else {})}
