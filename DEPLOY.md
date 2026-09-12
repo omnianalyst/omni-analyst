@@ -31,32 +31,47 @@ registry without a source edit.
 
 The operator therefore builds the Neutron wheel on the host, once, before
 building the images. From the **repository root** (so that `../../Neutron/python`
-resolves to the checked-out framework):
+resolves to the checked-out framework). The Dockerfiles verify the wheel's
+`X-Neutron-Revision` stamp, and compose requires both revision variables --
+a plain `uv build` wheel fails that verification, so use the helper:
 
 ```bash
-uv build --wheel --project ../../Neutron/python --out-dir vendor
+set -euo pipefail
+export OMNI_REVISION=$(git rev-parse HEAD)
+export NEUTRON_REVISION=$(git -C ../../Neutron/python rev-parse HEAD)
+out="vendor/$NEUTRON_REVISION"
+python3 ops/build_neutron_wheel.py build --project ../../Neutron/python --out-dir "$out"
+shopt -s nullglob
+wheels=("$out"/neutron_py-*.whl)
+[[ ${#wheels[@]} -eq 1 ]] || { echo 'Expected exactly one Neutron wheel' >&2; exit 1; }
+export NEUTRON_WHEEL="${wheels[0]}"
+python3 ops/build_neutron_wheel.py verify \
+  --wheel "$NEUTRON_WHEEL" --expected "$NEUTRON_REVISION"
 ```
 
-This writes `vendor/neutron_py-0.1.0-py3-none-any.whl` (~100 KB). The
-Dockerfiles find it there by default. If the Neutron version differs, pass its
-filename explicitly:
+`vendor/<revision>/` is operator-created, like `.env`. It is not tracked. The
+helper deliberately refuses dirty Neutron source. If you build the images
+directly rather than through compose, pass the wheel path explicitly:
 
 ```bash
-docker build -f Dockerfile          --build-arg NEUTRON_WHEEL=vendor/<your-wheel>.whl -t omni-api .
-docker build -f Dockerfile.scheduler --build-arg NEUTRON_WHEEL=vendor/<your-wheel>.whl -t omni-scheduler .
+docker build -f Dockerfile          --build-arg NEUTRON_WHEEL="$NEUTRON_WHEEL" \
+  --build-arg NEUTRON_REVISION="$NEUTRON_REVISION" --build-arg OMNI_REVISION="$OMNI_REVISION" -t omni-api .
+docker build -f Dockerfile.scheduler --build-arg NEUTRON_WHEEL="$NEUTRON_WHEEL" \
+  --build-arg NEUTRON_REVISION="$NEUTRON_REVISION" --build-arg OMNI_REVISION="$OMNI_REVISION" -t omni-scheduler .
 ```
-
-`vendor/` is operator-created, like `.env`. It is not tracked. Add it to
-`.gitignore` if you keep the wheel around.
 
 ## Building and running
 
 ```bash
-# 1. produce the Neutron wheel (once, and after any Neutron change)
-uv build --wheel --project ../../Neutron/python --out-dir vendor
+# 1. produce and verify the stamped Neutron wheel (once, and after any
+#    Neutron change) -- the block above, which also exports OMNI_REVISION,
+#    NEUTRON_REVISION and NEUTRON_WHEEL
+#    ... build_neutron_wheel.py build/verify ...
 
-# 2. build both images
-docker compose -f docker-compose.prod.yml build
+# 2. build the UI and both images (compose carries the revision variables)
+npm --prefix ui run build
+docker compose -f docker-compose.prod.yml config --quiet
+docker compose -f docker-compose.prod.yml build api scheduler
 
 # 3. set the two required secrets, then bring the stack up
 export POSTGRES_PASSWORD='...'
@@ -219,10 +234,18 @@ recovery.
 ### Moving machines
 
 Settings has a **Download backup** button (operator account): one click
-produces the same custom-format dump the nightly script takes. Moving an
-instance to a new computer is then three steps:
+produces the custom-format dump. **That dump alone is not a complete
+backup**: saved bank/provider/venue credentials are Fernet-encrypted under a
+key that lives outside PostgreSQL (the `omni_keys` volume or
+`OMNI_CREDENTIAL_KEY`). Restoring the dump onto a host with a different or
+missing key leaves every stored credential undecryptable. The nightly
+`ops/backup.sh` pairs every dump with `<name>.key.age` -- the same key,
+encrypted to an offline `age` recipient -- and moving machines needs both
+halves.
 
-1. On the old machine: Settings -> Download backup (or run `ops/backup.sh`).
+1. On the old machine: run `ops/backup.sh` (it takes the dump AND the
+   encrypted key; the Settings button takes only the dump), or use Settings
+   -> Download backup and separately export the key.
 2. Install the stack on the new machine (this document), bring it up once
    with a fresh database, then stop the api and scheduler.
 3. Restore the dump into the new postgres container:
@@ -233,6 +256,18 @@ instance to a new computer is then three steps:
    docker exec omni_postgres createdb -U postgres omni_v2
    docker exec omni_postgres pg_restore -U postgres -d omni_v2 /tmp/restore.dump
    ```
+
+4. Restore the credential key onto the new machine, from the `.key.age`
+   archive, with the offline identity that matches the backup recipient:
+
+   ```
+   age --decrypt -i /path/to/offline-identity omni-backup-YYYYMMDD.key.age |
+     docker compose -f docker-compose.prod.yml run --rm --no-deps -T --user root api \
+       sh -eu -c 'umask 077; mkdir -p /var/lib/omni; cat > /var/lib/omni/credential.key; chown -R 10001:10001 /var/lib/omni; chmod 700 /var/lib/omni; chmod 600 /var/lib/omni/credential.key'
+   ```
+
+   The file is named `credential.key` with mode 600 under `/var/lib/omni`
+   (owner 10001) -- the same location and modes the application itself uses.
 
    Then start the stack. Restore is deliberately not a UI button: it writes
    over a live database, and a browser-upload path to that action is a

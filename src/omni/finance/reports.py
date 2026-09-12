@@ -68,17 +68,20 @@ async def cash_flow(pool, user_id: UUID, months: int = 6, end: date | None = Non
     return {"base_currency": base, "months": series, "other_currencies": other}
 
 
-async def spending_by_category(pool, user_id: UUID, month: str) -> list[dict]:
+async def spending_by_category(
+    pool, user_id: UUID, month: str, *, currency: str | None = None
+) -> list[dict]:
     from omni.finance.budget import base_currency
 
+    base = currency if currency is not None else await base_currency(pool, user_id)
     month_date = month_of(month)
     rows = await pool.fetch(
         """
         SELECT c.name AS category, coalesce(sum(t.amount), 0) AS total,
                count(*) AS tx_count
         FROM finance_transaction t
-        JOIN finance_category c ON c.id = t.category_id
-        JOIN finance_account a ON a.id = t.account_id
+        JOIN finance_category c ON c.id = t.category_id AND c.user_id = t.user_id
+        JOIN finance_account a ON a.id = t.account_id AND a.user_id = t.user_id
         WHERE t.user_id = $1 AND NOT t.deleted AND NOT t.is_parent
           AND NOT c.is_income AND a.offbudget = false AND a.currency = $4
           AND t.date >= $2 AND t.date < $3
@@ -87,7 +90,7 @@ async def spending_by_category(pool, user_id: UUID, month: str) -> list[dict]:
         user_id,
         month_date,
         _shift(month_date, 1),
-        await base_currency(pool, user_id),
+        base,
     )
     return [
         {

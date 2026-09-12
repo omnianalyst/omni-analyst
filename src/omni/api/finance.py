@@ -3,17 +3,19 @@ data is BYO by construction and never crosses users."""
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
+import asyncpg
 from neutron import App, Router
 from neutron.error import bad_request, not_found, unauthorized
 from pydantic import BaseModel
 from starlette.requests import Request
 
-from omni.finance import bankcreds, banksync, parsers, rules, schedules_service, service
-from omni.finance import reports as service_reports
-from omni.finance import budget as budget_mod
 from omni.auth import resolve_audience_from_request
+from omni.finance import bankcreds, banksync, parsers, rules, schedules_service, service
+from omni.finance import budget as budget_mod
+from omni.finance import reports as service_reports
 from omni.finance.normalisation import ImportRowError
 from omni.finance.schedules import ScheduleError
 from omni.finance.service import FinanceError
@@ -31,6 +33,8 @@ async def _run(coro):
         return await coro
     except (FinanceError, ImportRowError, ScheduleError) as exc:
         raise bad_request(str(exc))
+    except asyncpg.ForeignKeyViolationError as exc:
+        raise bad_request(f"referenced finance record does not belong to this user: {exc.constraint_name}")
 
 
 class AccountIn(BaseModel):
@@ -224,12 +228,17 @@ def build_router(app: App) -> Router:
     @router.patch("/finance/transactions/{tx_id}")
     async def patch_transaction(request: Request, tx_id: str, body: TransactionPatch) -> dict:
         user = _require_user(request)
+        fields = body.model_fields_set
         await _run(service.update_transaction(
             app.db.pool,
             user,
             _uuid(tx_id),
-            category_id=_uuid(body.category_id) if body.category_id else None,
-            notes=body.notes,
+            category_id=(
+                _uuid(body.category_id)
+                if "category_id" in fields and body.category_id
+                else None
+            ) if "category_id" in fields else service.UNSET,
+            notes=body.notes if "notes" in fields else service.UNSET,
             cleared=body.cleared,
             reconciled=body.reconciled,
         ))
@@ -316,10 +325,14 @@ def build_router(app: App) -> Router:
     @router.get("/finance/reports/spending")
     async def report_spending(request: Request, month: str) -> dict:
         user = _require_user(request)
+        base = await budget_mod.base_currency(app.db.pool, user)
         return {
             "month": month[:7],
+            "base_currency": base,
             "categories": await _run(
-                service_reports.spending_by_category(app.db.pool, user, month)
+                service_reports.spending_by_category(
+                    app.db.pool, user, month, currency=base
+                )
             ),
         }
 
@@ -388,7 +401,7 @@ def build_router(app: App) -> Router:
         user = _require_user(request)
         try:
             archive = _b64.b64decode(body.zip_base64, validate=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise bad_request("zip_base64 is not valid base64") from exc
         from omni.finance import migrate_actual
 
@@ -409,8 +422,8 @@ def build_router(app: App) -> Router:
                 {
                     "id": str(r["id"]),
                     "rank": r["rank"],
-                    "conditions": r["conditions"],
-                    "actions": r["actions"],
+                    "conditions": _rule_array(r["conditions"]),
+                    "actions": _rule_array(r["actions"]),
                     "enabled": r["enabled"],
                 }
                 for r in rows
@@ -470,11 +483,16 @@ def build_router(app: App) -> Router:
     async def put_bank_credentials(request: Request, body: BankCredentialsIn) -> dict:
         user = _require_user(request)
         if body.provider == "simplefin":
-            email = (body.fields.get("email") or "").strip()
-            password = (body.fields.get("password") or "").strip()
-            if not email or not password:
-                raise bad_request("simplefin needs email and password")
-            access_url = await banksync.simplefin_claim(email, password)
+            setup_token = (body.fields.get("setup_token") or "").strip()
+            if not setup_token:
+                raise bad_request(
+                    "simplefin needs a one-time setup token from SimpleFIN's "
+                    "access page"
+                )
+            try:
+                access_url = await banksync.simplefin_claim(setup_token)
+            except banksync.BankSyncError as exc:
+                raise bad_request(str(exc))
             await _run(bankcreds.put_bank_key(
                 app.db.pool, user, "simplefin", {"access_url": access_url}
             ))
@@ -629,6 +647,14 @@ async def run_gc(pool, user):
 
 
 def _dumps(value) -> str:
-    import json
-
     return value if isinstance(value, str) else json.dumps(value)
+
+
+def _rule_array(value) -> list[dict]:
+    """One wire shape for rule payloads, whatever the pool's JSONB codec
+    returns: under asyncpg's default codec jsonb columns arrive as strings,
+    and the UI indexes them as arrays."""
+    decoded = json.loads(value) if isinstance(value, (str, bytes, bytearray)) else value
+    if not isinstance(decoded, list) or any(not isinstance(item, dict) for item in decoded):
+        raise RuntimeError("stored finance rule has invalid structure")
+    return decoded

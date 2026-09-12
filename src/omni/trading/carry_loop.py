@@ -101,6 +101,8 @@ from omni.portfolio.orders import OrderStatus
 from omni.portfolio.reconcile import reconcile
 from omni.portfolio.state import FundingAccrual, FundingOutcome, PortfolioState
 from omni.trading import pretrade
+from omni.trading.fill_commit import record_and_apply_fill
+from omni.trading.order_safety import execute_or_halt, require_settled_orders
 from omni.venue.costs import BPS, entry_cost
 from omni.venue.protocol import (
     Fill,
@@ -108,7 +110,6 @@ from omni.venue.protocol import (
     Side,
     TradeIntent,
     Venue,
-    VenueUnavailable,
 )
 
 # Perp first on the way in: perpetuals typically have coarser amount precision
@@ -835,16 +836,11 @@ class _Cycle:
         """
         order_id = await orders.record_intent(self.pool, self.portfolio_id, intent)
         await orders.transition(self.pool, order_id, OrderStatus.SUBMITTED)
-        try:
-            fill = await self.venue.execute(intent)
-        except VenueUnavailable as exc:
-            await orders.transition(
-                self.pool,
-                order_id,
-                OrderStatus.REJECTED,
-                payload={"venue_unavailable": str(exc)},
-            )
-            return None
+        # An uncertain outcome here raises ExecutionUncertain and carries out
+        # of the cycle: unwinding it would mean trading against a leg whose
+        # existence is unknown, which is how a naked position is manufactured
+        # in the opposite direction.
+        fill = await execute_or_halt(self.pool, order_id, intent, self.venue)
         self.modelled_cost += _leg_cost(
             intent, fill, venue=self.venue, spread_bps=self.config.spread_bps
         )
@@ -858,8 +854,9 @@ class _Cycle:
             )
             return fill
         self.fees_paid += fill.fee_paid
-        await orders.record_fill(self.pool, order_id, fill)
-        await state.apply_fill(self.pool, self.portfolio_id, fill, intent.market_type)
+        await record_and_apply_fill(
+            self.pool, order_id, self.portfolio_id, fill, intent.market_type
+        )
         return fill
 
     async def unwind(
@@ -1312,6 +1309,8 @@ async def run_carry_cycle(
     closed: list[PairExecution] = []
     opened: list[PairExecution] = []
     halt_reason: str | None = None
+
+    await require_settled_orders(pool, portfolio_id)
 
     for entity_id in sorted(decision.exited, key=str):
         symbols = by_entity.get(entity_id)

@@ -968,3 +968,58 @@ class TestNotifySettings:
 
             reread = await client.get("/settings/notifications", headers=headers)
             assert reread.json()["webhook_configured"] is True
+
+
+class TestNotifySettingsMerge:
+    """U22: omission preserves a stored webhook; explicit null removes it."""
+
+    async def test_an_email_only_save_keeps_the_webhook(self, db, database_url):
+        from omni.api.settings import build_router as build_settings_router
+
+        user = await _user(db, "notify-merge@example.com")
+        app = create_app(database_url)
+        app.include_router(build_settings_router(app))
+        async with _Lifespan(app), TestClient(app) as client:
+            headers = _token(user)
+            put = await client.put(
+                "/settings/notifications",
+                json={"webhook_url": "https://hooks.example.com/x/SECRET",
+                      "email": "me@example.com"},
+                headers=headers,
+            )
+            assert put.status_code == 200
+
+            # The UI's email-only edit: webhook_url field ABSENT.
+            email_only = await client.put(
+                "/settings/notifications",
+                json={"email": "other@example.com"},
+                headers=headers,
+            )
+            assert email_only.status_code == 200
+            assert email_only.json()["webhook_configured"] is True
+            assert email_only.json()["email"] == "other@example.com"
+
+            reread = await client.get("/settings/notifications", headers=headers)
+            assert reread.json()["webhook_configured"] is True
+
+    async def test_an_explicit_null_removes_the_webhook(self, db, database_url):
+        from omni.api.settings import build_router as build_settings_router
+
+        user = await _user(db, "notify-null@example.com")
+        app = create_app(database_url)
+        app.include_router(build_settings_router(app))
+        async with _Lifespan(app), TestClient(app) as client:
+            headers = _token(user)
+            await client.put(
+                "/settings/notifications",
+                json={"webhook_url": "https://hooks.example.com/x/SECRET"},
+                headers=headers,
+            )
+
+            removed = await client.put(
+                "/settings/notifications",
+                json={"webhook_url": None},
+                headers=headers,
+            )
+            assert removed.status_code == 200
+            assert removed.json()["webhook_configured"] is False

@@ -302,7 +302,52 @@ class TestLeasing:
         )
         reclaimed = await claim_next_gap(db.pool, worker_id="alive")
         assert reclaimed is not None
-        assert await db.pool.fetchval("SELECT lease_owner FROM gap") == "alive"
+        owner = await db.pool.fetchval("SELECT lease_owner FROM gap")
+        assert owner.startswith("alive/")
+
+    async def test_an_expired_worker_cannot_fence_a_replacement_lease(self, db):
+        """B24: A outlives its lease, B re-leases the gap; A's late resolve
+        must change nothing and B's lease must survive it."""
+        entity_id = await _entity(db)
+        await direct_attention(
+            db.pool, entity_id=entity_id, claim_type="macro_series_point", key="GDP"
+        )
+        await persist_gaps(db.pool, await detect_gaps(db.pool))
+
+        stale = await claim_next_gap(db.pool, worker_id="A", lease_seconds=1)
+        await db.pool.execute(
+            "UPDATE gap SET lease_expires_at = now() - interval '1 second'"
+        )
+        fresh = await claim_next_gap(db.pool, worker_id="B")
+        assert fresh is not None
+
+        from omni.fill.pipeline import _RELEASE, _RESOLVE
+
+        await db.pool.execute(_RESOLVE, stale["id"], stale["lease_owner"])
+        row = await db.pool.fetchrow(
+            "SELECT resolved_at, lease_owner, attempts FROM gap WHERE id = $1",
+            fresh["id"],
+        )
+        assert row["resolved_at"] is None, "a stale worker must not resolve the gap"
+        assert row["lease_owner"] == fresh["lease_owner"]
+
+        released = await db.pool.execute(
+            _RELEASE, stale["id"], 6, 30, stale["lease_owner"]
+        )
+        assert released is not None
+        row = await db.pool.fetchrow(
+            "SELECT lease_owner, attempts, next_attempt_at FROM gap WHERE id = $1",
+            fresh["id"],
+        )
+        assert row["lease_owner"] == fresh["lease_owner"]
+        assert row["attempts"] == 0
+        assert row["next_attempt_at"] is None
+
+        # The live token still completes.
+        await db.pool.execute(_RESOLVE, fresh["id"], fresh["lease_owner"])
+        assert await db.pool.fetchval(
+            "SELECT resolved_at IS NOT NULL FROM gap WHERE id = $1", fresh["id"]
+        )
 
     async def test_the_highest_scoring_gap_is_worked_first(self, db):
         a = await _entity(db, "AAA")

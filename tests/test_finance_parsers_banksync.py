@@ -3,8 +3,13 @@ ported from Actual's expectations (MIT)."""
 
 from __future__ import annotations
 
+import base64
+from types import SimpleNamespace
+
+import httpx
 import pytest
 
+from omni.finance import banksync
 from omni.finance.banksync import (
     BankSyncError,
     gocardless_transactions_to_rows,
@@ -154,7 +159,7 @@ def test_gocardless_normalization_follows_actual():
 SIMPLEFIN_TXS = [
     {
         "id": "SF-1",
-        "posted": "2026-01-05T12:00:00+00:00",
+        "posted": 1767614400,
         "amount": "-42.10",
         "description": "Kroger",
         "memo": "card purchase",
@@ -172,6 +177,115 @@ def test_simplefin_normalization():
     assert rows[0]["cleared"] is True
 
 
+def test_simplefin_pending_rows_are_not_cleared():
+    rows = normalize_simplefin(
+        [dict(SIMPLEFIN_TXS[0], id="SF-2", pending=True)]
+    )
+    assert rows[0]["cleared"] is False
+
+
+def test_simplefin_refuses_a_non_epoch_stamp():
+    with pytest.raises(BankSyncError, match="posted epoch"):
+        normalize_simplefin([dict(SIMPLEFIN_TXS[0], posted="2026-01-05")])
+    with pytest.raises(BankSyncError, match="posted epoch"):
+        normalize_simplefin([dict(SIMPLEFIN_TXS[0], posted=None)])
+
+
 def test_simplefin_refuses_transactions_without_amount():
     with pytest.raises(BankSyncError):
         normalize_simplefin([{"id": "SF-x", "posted": "2026-01-05"}])
+
+
+def _patch_http(monkeypatch, handler):
+    def factory(*args, **kwargs):
+        kwargs.pop("timeout", None)
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(banksync, "httpx", SimpleNamespace(AsyncClient=factory))
+
+
+def _token_for(url: str) -> str:
+    return base64.b64encode(url.encode()).decode()
+
+
+ACCESS_URL = "https://smith:beacon@bridge.simplefin.org/v1"
+
+
+async def test_simplefin_claim_exchanges_a_setup_token(monkeypatch):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, text=ACCESS_URL)
+
+    _patch_http(monkeypatch, handler)
+    token = _token_for("https://bridge.simplefin.org/claim/abc123")
+    assert await banksync.simplefin_claim(token) == ACCESS_URL
+    assert seen == ["https://bridge.simplefin.org/claim/abc123"]
+
+
+async def test_simplefin_claim_refuses_a_foreign_claim_host(monkeypatch):
+    _patch_http(monkeypatch, lambda request: httpx.Response(200, text=ACCESS_URL))
+    token = _token_for("https://evil.example/claim/abc123")
+    with pytest.raises(BankSyncError, match="allowed claim URL"):
+        await banksync.simplefin_claim(token)
+
+
+async def test_simplefin_claim_refuses_a_non_base64_token():
+    with pytest.raises(BankSyncError, match="not base64"):
+        await banksync.simplefin_claim("not base64 !!")
+
+
+async def test_simplefin_claim_reports_one_use_failure(monkeypatch):
+    _patch_http(monkeypatch, lambda request: httpx.Response(404, text="gone"))
+    token = _token_for("https://bridge.simplefin.org/claim/abc123")
+    with pytest.raises(BankSyncError, match="obtain a new one"):
+        await banksync.simplefin_claim(token)
+
+
+async def test_simplefin_claim_refuses_a_bad_access_url(monkeypatch):
+    _patch_http(
+        monkeypatch,
+        lambda request: httpx.Response(200, text="https://bridge.simplefin.org/no-creds"),
+    )
+    token = _token_for("https://bridge.simplefin.org/claim/abc123")
+    with pytest.raises(BankSyncError, match="not a valid SimpleFIN credential"):
+        await banksync.simplefin_claim(token)
+
+
+async def test_simplefin_fetch_validates_the_stored_access_url():
+    with pytest.raises(BankSyncError, match="not a valid SimpleFIN credential"):
+        await banksync.simplefin_fetch_accounts("https://evil.example/x")
+
+
+async def test_simplefin_fetch_keeps_provider_currency(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"accounts": [{
+            "id": "sf-1",
+            "name": "Chequing",
+            "currency": "CAD",
+            "balance": "12.00",
+            "transactions": [],
+        }]})
+
+    _patch_http(monkeypatch, handler)
+    accounts = await banksync.simplefin_fetch_accounts(ACCESS_URL)
+    assert accounts[0]["currency"] == "CAD"
+
+
+def test_simplefin_currency_validator():
+    assert banksync._simplefin_currency("cad") == "CAD"
+    with pytest.raises(BankSyncError, match="unusable currency"):
+        banksync._simplefin_currency("CA")
+    with pytest.raises(BankSyncError, match="unusable currency"):
+        banksync._simplefin_currency("C4D")
+    with pytest.raises(BankSyncError, match="unusable currency"):
+        banksync._simplefin_currency(None)
+
+
+def test_gocardless_currency_validator():
+    assert banksync._gocardless_currency(" EUR ") == "EUR"
+    with pytest.raises(BankSyncError, match="unusable currency"):
+        banksync._gocardless_currency("euros")
+    with pytest.raises(BankSyncError, match="unusable currency"):
+        banksync._gocardless_currency(None)

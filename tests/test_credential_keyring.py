@@ -149,3 +149,42 @@ def test_the_default_key_path_is_outside_the_application_image():
     """It must live on a mounted volume, not in the container filesystem."""
     assert not str(keyring.DEFAULT_KEY_PATH).startswith("/app")
     assert os.path.dirname(str(keyring.DEFAULT_KEY_PATH)) == "/var/lib/omni"
+
+
+def test_generation_that_loses_the_race_uses_the_on_disk_key(tmp_path, monkeypatch):
+    """B22: the final path is linked into place, never opened for writing.
+
+    A pre-existing valid key is what a concurrent winner leaves behind, and a
+    losing `_generate` must return exactly that key, not mint a second one.
+    """
+    from cryptography.fernet import Fernet
+
+    path = tmp_path / "credential.key"
+    on_disk = Fernet.generate_key()
+    path.write_bytes(on_disk)
+
+    assert keyring._generate(path) == on_disk
+    assert path.read_bytes() == on_disk
+
+
+def test_generation_leaves_no_temp_files_and_a_private_final_mode(tmp_path):
+    """B22: the publish is an atomic link from a fsynced temp file."""
+    path = tmp_path / "credential.key"
+
+    key = keyring._generate(path)
+
+    assert path.read_bytes() == key
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600
+    leftovers = [p for p in tmp_path.iterdir() if p.name != path.name]
+    assert leftovers == [], f"temp files left behind: {leftovers}"
+
+
+def test_a_crashed_writer_cannot_leave_an_empty_final_key(tmp_path):
+    """B22: an empty key file must remain an investigated state, and only a
+    deliberate one can produce it -- `_generate` itself never can."""
+    path = tmp_path / "credential.key"
+    path.write_bytes(b"")
+
+    with pytest.raises(Unavailable, match="empty"):
+        keyring._generate(path)

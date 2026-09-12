@@ -10,7 +10,6 @@ import asyncio
 import sys
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import UUID
 
 from omni.config import settings
 from omni.db import connect
@@ -21,10 +20,10 @@ from omni.trading.carry_runner import (
     carry_cycle_ownership,
     run_due_cycle,
 )
+from omni.trading.ops_scope import configured_book
 from omni.venue.ccxt_venue import CCXTVenue, TradingMode
 from omni.venue.credentials import wallet_credentials
 
-OWNER = UUID("97e7737f-cad3-439a-b8b3-3ae4536a7eac")
 UNIVERSE = ["BTC", "ETH", "SOL", "HYPE", "PENGU", "PURR"]
 VENUE = "hyperliquid"
 LIVE = "--live" in sys.argv
@@ -33,10 +32,7 @@ LIVE = "--live" in sys.argv
 async def main() -> int:
     c = await connect(settings.database_url)
     try:
-        pid = await c.pool.fetchval("SELECT id FROM portfolio LIMIT 1")
-        inception = await c.pool.fetchval(
-            "SELECT created_at FROM portfolio WHERE id = $1", pid
-        )
+        pid, inception, owner = await configured_book(c.pool)
         rows = await c.pool.fetch(
             "SELECT id, symbol FROM entity WHERE symbol = ANY($1::text[])", UNIVERSE
         )
@@ -80,7 +76,7 @@ async def main() -> int:
                     portfolio_id=pid,
                     config=config,
                     entity_ids=list(assets),
-                    audience_user_id=OWNER,
+                    audience_user_id=owner,
                     now=now,
                     inception=inception,
                     ignore_cadence=True,

@@ -96,11 +96,31 @@ def _check_cov(C: np.ndarray, *, require_pd: bool = False) -> None:
 # Optimiser (ported from optimizer.py)
 # =========================================================================== #
 def _as_cov_df(cov) -> pd.DataFrame:
+    """A covariance DataFrame aligned so positional math matches its labels.
+
+    A DataFrame whose columns are permuted relative to its index would
+    otherwise pair weights with the wrong covariance entries silently --
+    the labels say one portfolio, the math computes another.
+    """
     if isinstance(cov, pd.DataFrame):
-        return cov
-    cov = np.asarray(cov, dtype=float)
-    idx = [f"A{i}" for i in range(cov.shape[0])]
-    return pd.DataFrame(cov, index=idx, columns=idx)
+        if not cov.index.is_unique or not cov.columns.is_unique:
+            raise Unavailable("covariance labels must be unique")
+        if len(cov.index) != len(cov.columns) or set(cov.index) != set(cov.columns):
+            raise Unavailable("covariance row and column labels must match")
+        result = cov.reindex(columns=cov.index).astype(float)
+    else:
+        array = np.asarray(cov, dtype=float)
+        if array.ndim != 2 or array.shape[0] != array.shape[1]:
+            raise Unavailable("covariance must be square")
+        labels = [f"A{i}" for i in range(array.shape[0])]
+        result = pd.DataFrame(array, index=labels, columns=labels)
+    values = result.to_numpy()
+    if not np.isfinite(values).all():
+        raise Unavailable("covariance contains non-finite values")
+    scale = max(float(np.max(np.abs(values))) if values.size else 0.0, 1e-300)
+    if not np.allclose(values, values.T, rtol=1e-10, atol=1e-12 * scale):
+        raise Unavailable("covariance must be symmetric after label alignment")
+    return result
 
 
 def _cov_to_corr(cov: np.ndarray) -> np.ndarray:
@@ -270,37 +290,43 @@ def risk_parity_weights(
     max_iter: int = 10000,
     tol: float = 1e-12,
 ) -> pd.Series:
-    """Equal-risk-contribution weights via the standard fixed-point iteration.
+    """Equal-risk-contribution weights via cyclical coordinate descent.
 
-    Each asset's risk contribution RC_i = w_i (Sigma w)_i is driven toward equal
-    across assets. Long-only; the cyclical multiplicative update converges for
-    PSD covariance.
+    Each asset's risk contribution RC_i = w_i (Sigma w)_i is driven toward
+    1/n across assets. The multiplicative fixed-point iteration this replaces
+    clamped negative risk contributions (negative correlations produce them)
+    to 1e-300 and returned whatever it landed on after max_iter -- a silently
+    unconverged portfolio. Coordinate descent on a positive-definite
+    covariance converges or raises; it never returns an unconverged answer.
+    Long-only; cap/turnover adjustments still apply afterwards.
     """
-    cov_df = _as_cov_df(cov)
-    assets = list(cov_df.index)
-    C = cov_df.to_numpy(dtype=float)
-    n = C.shape[0]
+    frame = _as_cov_df(cov)
+    assets = list(frame.index)
+    C = frame.to_numpy(dtype=float)
+    n = len(assets)
     if n == 0:
         raise Unavailable("empty universe: covariance has 0 assets")
-    _check_cov(C)
+    if max_iter < 1 or not np.isfinite(tol) or tol <= 0:
+        raise Unavailable("positive solver bounds required")
     if n == 1:
         return pd.Series([1.0], index=assets)
-
-    target = 1.0 / n
-    w = 1.0 / np.sqrt(np.diag(C))
-    w = w / w.sum()
-
+    _check_cov(C, require_pd=True)
+    C = C / np.max(np.diag(C))
+    target = np.full(n, 1.0 / n)
+    x = 1.0 / np.sqrt(np.diag(C))
     for _ in range(max_iter):
-        sigma_w = C @ w
-        port_var = float(w @ sigma_w)
-        rc = w * sigma_w / port_var
-        w = w * (target / np.maximum(rc, 1e-300)) ** 0.5
-        w = np.clip(w, 0.0, None)
-        w = w / w.sum()
-        if np.max(np.abs(rc - target)) < tol:
-            break
-
-    return _finalize(w, assets, cap, prior_weights, turnover_penalty)
+        for i in range(n):
+            cross = C[i] @ x - C[i, i] * x[i]
+            root = np.sqrt(cross * cross + 4 * C[i, i] * target[i])
+            x[i] = (
+                2 * target[i] / (root + cross) if cross >= 0
+                else (root - cross) / (2 * C[i, i])
+            )
+        variance = float(x @ C @ x)
+        rc = x * (C @ x) / variance
+        if np.isfinite(rc).all() and np.max(np.abs(rc - target)) <= tol:
+            return _finalize(x / x.sum(), assets, cap, prior_weights, turnover_penalty)
+    raise Unavailable("risk-parity solver did not converge")
 
 
 # --------------------------------------------------------------------------- #

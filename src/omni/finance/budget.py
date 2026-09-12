@@ -48,12 +48,14 @@ async def set_base_currency(pool, user_id: UUID, code: str) -> None:
     await pool.execute(
         """
         INSERT INTO user_settings (user_id, data)
-        VALUES ($1, jsonb_build_object('finance', jsonb_build_object('base_currency', $2::text)))
+        VALUES ($1, jsonb_build_object(
+            'finance', jsonb_build_object('base_currency', $2::text)))
         ON CONFLICT (user_id) DO UPDATE SET
             data = jsonb_set(
                 user_settings.data,
-                '{finance,base_currency}',
-                to_jsonb($2::text),
+                '{finance}',
+                coalesce(user_settings.data->'finance', '{}'::jsonb)
+                    || jsonb_build_object('base_currency', $2::text),
                 true
             ),
             updated_at = now()
@@ -118,10 +120,14 @@ async def _income_total(pool, user_id: UUID, month: date, next_month: date) -> i
 async def _first_activity_month(pool, user_id: UUID) -> date | None:
     value = await pool.fetchval(
         """
-        SELECT min(t.date)
-        FROM finance_transaction t
-        JOIN finance_account a ON a.id = t.account_id
-        WHERE t.user_id = $1 AND NOT t.deleted AND a.offbudget = false
+        SELECT min(day) FROM (
+            SELECT t.date AS day
+            FROM finance_transaction t
+            JOIN finance_account a ON a.id = t.account_id
+            WHERE t.user_id = $1 AND NOT t.deleted AND NOT a.offbudget
+            UNION ALL
+            SELECT month AS day FROM finance_budget WHERE user_id = $1
+        ) history
         """,
         user_id,
     )
@@ -155,6 +161,7 @@ async def month_view(pool, user_id: UUID, month: date) -> dict[str, Any]:
     activity = await _category_activity(pool, user_id, month, next_month)
     income = await _income_total(pool, user_id, month, next_month)
     rollover: dict[UUID, int] = {}
+    unassigned_carry = 0
     if first is not None and month > first:
         chain_month = first
         balance: dict[UUID, int] = {}
@@ -166,18 +173,26 @@ async def month_view(pool, user_id: UUID, month: date) -> dict[str, Any]:
             )
             chain_budgets = await _budget_rows(pool, user_id, chain_month)
             chain_activity = await _category_activity(pool, user_id, chain_month, chain_next)
+            # Unassigned cash carries like a category envelope: income adds,
+            # assignments subtract, and a reset-mode leftover returns to the
+            # pool while a hold-mode leftover stays consumed by its category.
+            unassigned_carry += await _income_total(pool, user_id, chain_month, chain_next)
             for cat in categories:
-                cid = cat["id"]
                 if cat["is_income"]:
                     continue
+                cid = cat["id"]
                 budgeted, mode = chain_budgets.get(cid, (0, "rollover"))
-                leftover = budgeted + chain_activity.get(cid, 0)
+                opening = balance.get(cid, 0)
+                ending = opening + budgeted + chain_activity.get(cid, 0)
                 if mode == "reset":
-                    balance[cid] = 0
+                    carried = 0
                 elif mode == "hold":
-                    balance[cid] = balance.get(cid, 0)
+                    carried = opening
                 else:
-                    balance[cid] = balance.get(cid, 0) + leftover
+                    carried = ending
+                unassigned_carry -= budgeted
+                unassigned_carry += ending - carried
+                balance[cid] = carried
             chain_month = chain_next
         rollover = {cid: value for cid, value in balance.items() if value != 0}
 
@@ -218,7 +233,7 @@ async def month_view(pool, user_id: UUID, month: date) -> dict[str, Any]:
         "base_currency": base,
         "income": income,
         "budgeted": total_budgeted,
-        "available_to_budget": income - total_budgeted,
+        "available_to_budget": unassigned_carry + income - total_budgeted,
         "categories": rows,
     }
 

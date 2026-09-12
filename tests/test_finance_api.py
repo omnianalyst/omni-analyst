@@ -356,3 +356,338 @@ async def test_budget_never_invents_income_before_history(db, database_url):
         body = r.json()
         assert body["income"] == 0
         assert body["available_to_budget"] == 0
+
+
+async def test_unassigned_income_carries_across_months(db, database_url):
+    """B17: January's unassigned income must still be assignable in February.
+    100,000 in, 60,000 assigned in January, 30,000 assigned in February
+    leaves 10,000 -- not -30,000."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client)
+        ids = await _setup(client, headers)
+        r = await client.post("/finance/transactions", json={
+            "account_id": ids["account"],
+            "date": "2026-01-02",
+            "amount": 100000,
+            "payee": "Employer Inc",
+            "category_id": ids["income"],
+        }, headers=headers)
+        assert r.status_code in (200, 201)
+        for amount in (60000, 30000):
+            r = await client.put("/finance/budget", json={
+                "month": "2026-01" if amount == 60000 else "2026-02",
+                "category_id": ids["groceries"],
+                "amount": amount,
+            }, headers=headers)
+            assert r.status_code in (200, 201)
+
+        r = await client.get("/finance/budget", params={"month": "2026-01"}, headers=headers)
+        assert r.json()["available_to_budget"] == 100000 - 60000
+
+        r = await client.get("/finance/budget", params={"month": "2026-02"}, headers=headers)
+        assert r.json()["available_to_budget"] == 10000
+
+
+async def test_a_budget_row_predating_transactions_joins_the_walk(db, database_url):
+    """B17: assignments recorded before any transaction must participate in
+    rollover, not fall outside the walk's start month."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client)
+        ids = await _setup(client, headers)
+        r = await client.put("/finance/budget", json={
+            "month": "2026-01",
+            "category_id": ids["groceries"],
+            "amount": 5000,
+        }, headers=headers)
+        assert r.status_code in (200, 201)
+
+        r = await client.get("/finance/budget", params={"month": "2026-03"}, headers=headers)
+        body = r.json()
+        groceries = next(c for c in body["categories"] if c["name"] == "Groceries")
+        assert groceries["rollover"] == 5000
+        assert body["available_to_budget"] == -5000
+
+
+async def test_set_base_currency_on_a_settings_row_without_finance(db, database_url):
+    """B18: jsonb_set does not create the missing 'finance' object; the write
+    must build it explicitly or silently do nothing."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client)
+        r = await client.put("/settings/notifications", json={
+            "email": "ops@example.com",
+        }, headers=headers)
+        assert r.status_code in (200, 201), r.text
+
+        r = await client.put("/finance/base-currency", json={"currency": "EUR"}, headers=headers)
+        assert r.status_code in (200, 201), r.text
+        r = await client.get("/finance/base-currency", headers=headers)
+        assert r.json()["currency"] == "EUR"
+
+
+async def test_foreign_account_and_category_ids_are_refused(db, database_url):
+    """B10: existence is not ownership -- a foreign UUID must not link."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        alice = await _operator(client, "alice2@example.com")
+        await client.post(
+            "/auth/register",
+            json={"email": "bob2@example.com", "password": "a" * 16},
+            headers=alice,
+        )
+        r = await client.post(
+            "/auth/login", json={"email": "bob2@example.com", "password": "a" * 16}
+        )
+        bob = {"authorization": f"Bearer {r.json()['token']}"}
+
+        alice_ids = await _setup(client, alice)
+        await _setup(client, bob)
+
+        r = await client.post("/finance/transactions", json={
+            "account_id": alice_ids["account"],
+            "date": "2026-01-05",
+            "amount": -1000,
+            "payee": "Store",
+            "category_id": alice_ids["groceries"],
+        }, headers=bob)
+        assert r.status_code == 400
+
+        r = await client.post("/finance/schedules", json={
+            "name": "Rent",
+            "config": {"start": "2026-01-01", "frequency": "monthly"},
+            "account_id": alice_ids["account"],
+            "amount": -500,
+        }, headers=bob)
+        assert r.status_code == 400
+
+
+async def test_a_split_is_deleted_with_its_children(db, database_url):
+    """B13: soft-deleting a parent must not leave orphaned children active."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client, "split-op@example.com")
+        ids = await _setup(client, headers)
+        r = await client.post("/finance/transactions", json={
+            "account_id": ids["account"],
+            "date": "2026-01-05",
+            "amount": -10000,
+            "payee": "Big Store",
+            "splits": [
+                {"amount": -6000, "category_id": ids["groceries"]},
+                {"amount": -4000, "category_id": None},
+            ],
+        }, headers=headers)
+        assert r.status_code in (200, 201), r.text
+        parent_id = r.json()["id"]
+
+        r = await client.delete(f"/finance/transactions/{parent_id}", headers=headers)
+        assert r.status_code == 204
+
+        rows = await db.pool.fetch(
+            "SELECT deleted FROM finance_transaction WHERE account_id = $1",
+            _uuid(ids["account"]),
+        )
+        assert rows and all(row["deleted"] for row in rows)
+        accounts = (await client.get("/finance/accounts", headers=headers)).json()["accounts"]
+        assert accounts[0]["ledger_balance"] == 0
+
+
+async def test_a_reconciled_group_refuses_deletion_and_children_refuse_directly(
+    db, database_url
+):
+    """B13: reconciled locks the group; a child is deleted through its parent."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client, "locked-op@example.com")
+        ids = await _setup(client, headers)
+        r = await client.post("/finance/transactions", json={
+            "account_id": ids["account"],
+            "date": "2026-01-05",
+            "amount": -8000,
+            "payee": "Big Store",
+            "splits": [
+                {"amount": -5000, "category_id": ids["groceries"]},
+                {"amount": -3000, "category_id": None},
+            ],
+        }, headers=headers)
+        parent_id = r.json()["id"]
+        child_id = await db.pool.fetchval(
+            "SELECT id FROM finance_transaction WHERE parent_id = $1",
+            _uuid(parent_id),
+        )
+
+        r = await client.delete(f"/finance/transactions/{child_id}", headers=headers)
+        assert r.status_code == 400
+
+        await db.pool.execute(
+            "UPDATE finance_transaction SET reconciled = true WHERE id = $1",
+            _uuid(parent_id),
+        )
+        r = await client.delete(f"/finance/transactions/{parent_id}", headers=headers)
+        assert r.status_code == 400
+        alive = await db.pool.fetchval(
+            "SELECT count(*) FROM finance_transaction WHERE id = $1 AND NOT deleted",
+            _uuid(parent_id),
+        )
+        assert alive == 1
+
+
+async def test_a_transfer_deletes_both_sides_or_neither(db, database_url):
+    """B13: one side alive changes combined wealth."""
+    from omni.finance import service
+
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client, "xfer-op@example.com")
+        ids = await _setup(client, headers)
+        r = await client.post(
+            "/finance/accounts", json={"name": "Savings", "type": "savings"},
+            headers=headers,
+        )
+        savings = r.json()["id"]
+        pool = app.db.pool
+        user_id = await pool.fetchval(
+            "SELECT id FROM users WHERE email = $1", "xfer-op@example.com"
+        )
+        await pool.execute(
+            "INSERT INTO finance_payee (user_id, name, transfer_acct) "
+            "VALUES ($1, 'Transfer to Savings', $2)",
+            user_id,
+            _uuid(savings),
+        )
+        r = await client.post("/finance/transactions", json={
+            "account_id": ids["account"],
+            "date": "2026-01-10",
+            "amount": -50000,
+            "payee": "Transfer to Savings",
+        }, headers=headers)
+        assert r.status_code in (200, 201), r.text
+        one_side = await pool.fetchval(
+            "SELECT id FROM finance_transaction WHERE account_id = $1 AND transfer_id IS NOT NULL",
+            _uuid(ids["account"]),
+        )
+
+        await service.delete_transaction(pool, user_id, one_side)
+
+        both = await pool.fetch(
+            "SELECT count(*) FROM finance_transaction WHERE NOT deleted"
+        )
+        assert both[0]["count"] == 0
+
+
+async def test_split_ledger_balance_counts_children_only(db, database_url):
+    """B12: the parent row is bookkeeping, not money."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client, "balance-op@example.com")
+        ids = await _setup(client, headers)
+        r = await client.post("/finance/transactions", json={
+            "account_id": ids["account"],
+            "date": "2026-01-05",
+            "amount": -10000,
+            "payee": "Big Store",
+            "splits": [
+                {"amount": -6000, "category_id": ids["groceries"]},
+                {"amount": -4000, "category_id": None},
+            ],
+        }, headers=headers)
+        assert r.status_code in (200, 201), r.text
+
+        accounts = (await client.get("/finance/accounts", headers=headers)).json()["accounts"]
+        assert accounts[0]["ledger_balance"] == -10000
+
+
+async def test_explicit_null_clears_a_category_and_omission_keeps_it(
+    db, database_url
+):
+    """U18: `category_id: null` clears; a missing field preserves."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client, "patch-op@example.com")
+        ids = await _setup(client, headers)
+        r = await client.post("/finance/transactions", json={
+            "account_id": ids["account"],
+            "date": "2026-01-05",
+            "amount": -2500,
+            "payee": "Kroger",
+            "category_id": ids["groceries"],
+        }, headers=headers)
+        tx_id = r.json()["id"]
+
+        r = await client.patch(
+            f"/finance/transactions/{tx_id}", json={"notes": "weekly"},
+            headers=headers,
+        )
+        assert r.status_code == 200
+        txs = (await client.get(
+            "/finance/transactions", params={"month": "2026-01"}, headers=headers
+        )).json()["transactions"]
+        assert txs[0]["category"] == "Groceries"
+        assert txs[0]["notes"] == "weekly"
+
+        r = await client.patch(
+            f"/finance/transactions/{tx_id}", json={"category_id": None},
+            headers=headers,
+        )
+        assert r.status_code == 200
+        txs = (await client.get(
+            "/finance/transactions", params={"month": "2026-01"}, headers=headers
+        )).json()["transactions"]
+        assert txs[0]["category"] is None
+
+
+async def test_an_id_less_import_never_erases_the_stored_identity(db, database_url):
+    """B14: a fuzzy-matching row without imported_id must keep the stored one."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client, "identity-op@example.com")
+        ids = await _setup(client, headers)
+        r = await client.post("/finance/import", json={
+            "account_id": ids["account"],
+            "csv": "Date,Description,Amount,Fitid\n2026-01-05,KROGER,-42.10,BANK-XYZ\n",
+        }, headers=headers)
+        assert r.status_code in (200, 201)
+
+        r = await client.post("/finance/import", json={
+            "account_id": ids["account"],
+            "csv": _csv("2026-01-06,KROGER,-42.10,no id this time"),
+        }, headers=headers)
+        assert r.status_code in (200, 201)
+        updated = r.json()["updated"]
+        assert len(updated) == 1, "the stored row fuzzy-matches, not adds"
+
+        stored = await db.pool.fetchval(
+            """
+            SELECT imported_id FROM finance_transaction
+            WHERE account_id = $1 AND NOT deleted
+            """,
+            _uuid(ids["account"]),
+        )
+        assert stored == "BANK-XYZ"
+
+
+async def test_a_partial_split_failure_leaves_nothing_behind(db, database_url):
+    """B11: a split whose second child is invalid commits zero rows."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        headers = await _operator(client, "atomic-op@example.com")
+        ids = await _setup(client, headers)
+        r = await client.post("/finance/transactions", json={
+            "account_id": ids["account"],
+            "date": "2026-01-05",
+            "amount": -9000,
+            "payee": "Big Store",
+            "splits": [
+                {"amount": -5000, "category_id": ids["groceries"]},
+                {"amount": -4000, "category_id": "not-a-uuid"},
+            ],
+        }, headers=headers)
+        assert r.status_code == 400
+
+        count = await db.pool.fetchval(
+            "SELECT count(*) FROM finance_transaction WHERE account_id = $1",
+            _uuid(ids["account"]),
+        )
+        assert count == 0

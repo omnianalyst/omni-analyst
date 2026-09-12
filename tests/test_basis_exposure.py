@@ -221,18 +221,39 @@ class TestDescribe:
 
 
 class TestHoldChanges:
+    @staticmethod
+    def _spot(dates, price: float = 100.0) -> dict:
+        return {d: (price, 1000.0) for d in dates}
+
     def test_change_is_exit_minus_entry_so_a_rising_basis_is_positive(self):
         dates = [DAY0 + timedelta(days=i) for i in range(11)]
         basis = np.array([0.0] * 5 + [50.0] * 6)
 
-        changes, unmatched = hold_changes(dates, basis, 5)
+        changes, unmatched = hold_changes(dates, basis, 5, spot=self._spot(dates))
 
-        # Entry at day 0 (basis 0) exits at day 5 (basis 50): +50, adverse for
-        # long spot / short perp. Reversing the subtraction reports -50 and
-        # turns every loss into a gain.
+        # Entry at day 0 (basis 0) exits at day 5 (basis 50): +50 bps of
+        # notional at an unchanged spot, adverse for long spot / short perp.
+        # Reversing the subtraction reports -50 and turns every loss into a
+        # gain.
         assert changes[0] == pytest.approx(50.0)
         assert changes.max() == pytest.approx(50.0)
         assert unmatched == 5
+
+    def test_an_unchanged_basis_under_a_moved_spot_is_a_real_loss(self):
+        """U27: spot 100 -> 200 with the basis pinned at 100 bps costs 1% of
+        the initial notional. The change-based number reported 0 because it
+        assumed the spot never moved."""
+        opened, closed = DAY0, DAY0 + timedelta(days=42)
+        dates = [opened, closed]
+        basis = np.array([100.0, 100.0])
+        spot = {opened: (100.0, 1000.0), closed: (200.0, 1000.0)}
+
+        losses, unmatched = hold_changes(dates, basis, 42, spot=spot)
+
+        assert unmatched == 1  # the exit date has no exit of its own
+        assert losses[0] == pytest.approx(100.0), (
+            "100 bps of notional lost, not the change-based 0"
+        )
 
     def test_matching_is_by_calendar_date_not_row_offset(self):
         # Day 3 is missing from both legs. Offsetting by 5 ROWS pairs day 0 with
@@ -241,7 +262,7 @@ class TestHoldChanges:
         dates = [DAY0 + timedelta(days=i) for i in (0, 1, 2, 4, 5, 6, 7)]
         basis = np.array([0.0, 1.0, 2.0, 4.0, 10.0, 999.0, 7.0])
 
-        changes, unmatched = hold_changes(dates, basis, 5)
+        changes, unmatched = hold_changes(dates, basis, 5, spot=self._spot(dates))
 
         assert changes[0] == pytest.approx(10.0)
         assert 999.0 not in [pytest.approx(c) for c in changes]
@@ -254,10 +275,22 @@ class TestHoldChanges:
         dates = [DAY0 + timedelta(days=i) for i in range(3)]
         basis = np.array([0.0, 1.0, 2.0])
 
-        changes, unmatched = hold_changes(dates, basis, 42)
+        changes, unmatched = hold_changes(dates, basis, 42, spot=self._spot(dates))
 
         assert changes.size == 0
         assert unmatched == 3
+
+    def test_a_nonpositive_or_nonfinite_price_refuses(self):
+        dates = [DAY0, DAY0 + timedelta(days=5)]
+        basis = np.array([10.0, 10.0])
+
+        with pytest.raises(Unfillable, match="finite positive"):
+            hold_changes(dates, basis, 5, spot={dates[0]: (100.0, 1.0), dates[1]: (0.0, 1.0)})
+        with pytest.raises(Unfillable, match="finite positive"):
+            hold_changes(
+                dates, basis, 5,
+                spot={dates[0]: (100.0, 1.0), dates[1]: (float("nan"), 1.0)},
+            )
 
 
 class TestDescribeChanges:

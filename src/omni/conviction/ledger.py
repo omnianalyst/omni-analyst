@@ -433,13 +433,12 @@ async def resolve_due_predictions(
     for rec in due:
         if await _resolve_one(pool, rec["id"], now):
             resolved += 1
-    if resolved:
-        # The materialized statistics views only change when outcomes do, and
-        # this pass is the only writer of outcomes. Refresh is a full
-        # aggregate of the prediction table, so it is throttled -- a bucket
-        # moves by a fraction of a resolution and the scheduler resolves a
-        # few predictions a minute.
-        from omni.conviction.stats_refresh import refresh_statistics_if_due
+    # Unconditional: outcomes that landed inside the throttle window would
+    # otherwise never refresh -- a later pass with nothing due skips the call,
+    # and finding_payoff also changes when findings surface, not only when
+    # outcomes resolve. The throttle itself bounds the cost: this runs at most
+    # once per window no matter how often the pass ticks.
+    from omni.conviction.stats_refresh import refresh_statistics_if_due
 
-        await refresh_statistics_if_due(pool)
+    await refresh_statistics_if_due(pool)
     return resolved

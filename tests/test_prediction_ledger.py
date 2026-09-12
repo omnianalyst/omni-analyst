@@ -213,6 +213,22 @@ class TestRecordPrediction:
 
 
 class TestResolution:
+    async def test_an_empty_pass_still_checks_the_refresh(self, db, monkeypatch):
+        """B25: the refresh call must not hide behind `if resolved:` -- an
+        outcome that landed inside the throttle window is only picked up by a
+        later pass that resolves nothing."""
+        from omni.conviction import stats_refresh
+
+        refreshed: list[object] = []
+
+        async def _record_refresh(pool):
+            refreshed.append(pool)
+
+        monkeypatch.setattr(stats_refresh, "refresh_statistics", _record_refresh)
+        n = await resolve_due_predictions(db.pool)
+        assert n == 0
+        assert refreshed, "a pass with nothing due must still attempt the refresh"
+
     async def test_upper_crossed_before_horizon_resolves_upper(self, db):
         e = await _entity(db)
         cross = NOW - timedelta(days=5)

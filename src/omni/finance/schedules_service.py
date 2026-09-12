@@ -18,8 +18,8 @@ async def list_schedules(pool, user_id: UUID) -> list[dict]:
                s.payee_id, s.account_id, p.name AS payee_name,
                a.name AS account_name
         FROM finance_schedule s
-        LEFT JOIN finance_payee p ON p.id = s.payee_id
-        LEFT JOIN finance_account a ON a.id = s.account_id
+        LEFT JOIN finance_payee p ON p.id = s.payee_id AND p.user_id = s.user_id
+        LEFT JOIN finance_account a ON a.id = s.account_id AND a.user_id = s.user_id
         WHERE s.user_id = $1
         ORDER BY s.created_at
         """,
@@ -91,6 +91,12 @@ async def create_schedule(
             user_id,
             payee,
         )
+    if account_id is not None:
+        account_owner = await pool.fetchval(
+            "SELECT user_id FROM finance_account WHERE id = $1", account_id
+        )
+        if account_owner != user_id:
+            raise FinanceError("account not found")
     row = await pool.fetchrow(
         """
         INSERT INTO finance_schedule

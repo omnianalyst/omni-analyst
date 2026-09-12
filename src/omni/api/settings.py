@@ -236,26 +236,34 @@ def build_router(app: App) -> Router:
 
     @router.put("/settings/notifications")
     async def put_notifications(body: NotifyIn, request: Request) -> dict:
+        # A field the caller OMITTED must preserve the stored value: GET hides
+        # the webhook URL, so an email-only save arrives without webhook_url,
+        # and replacing the whole notify object silently disconnected the
+        # webhook. Explicit null removes.
         user = resolve_audience_from_request(request)
         if user is None:
             raise unauthorized("Authentication required")
-        notify = {
-            "webhook_url": (body.webhook_url or "").strip() or None,
-            "email": (body.email or "").strip() or None,
+        patch = {
+            key: (getattr(body, key) or "").strip() or None
+            for key in ("webhook_url", "email") if key in body.model_fields_set
         }
-        await app.db.pool.execute(
+        raw = await app.db.pool.fetchval(
             """
             INSERT INTO user_settings (user_id, data)
             VALUES ($1, jsonb_build_object('notify', $2::jsonb))
             ON CONFLICT (user_id) DO UPDATE SET
-                data = user_settings.data || jsonb_build_object('notify', $2::jsonb)
+                data = jsonb_set(user_settings.data, '{notify}',
+                    coalesce(user_settings.data->'notify', '{}'::jsonb) || $2::jsonb, true),
+                updated_at = now()
+            RETURNING data->'notify'
             """,
             user,
-            json.dumps(notify),
+            json.dumps(patch),
         )
+        notify = json.loads(raw) if isinstance(raw, str) else raw
         return {
-            "webhook_configured": notify["webhook_url"] is not None,
-            "email": notify["email"],
+            "webhook_configured": bool(notify.get("webhook_url")),
+            "email": notify.get("email"),
             "smtp_available": bool(settings.smtp_host),
         }
 

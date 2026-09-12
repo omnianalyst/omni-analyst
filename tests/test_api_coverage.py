@@ -476,3 +476,81 @@ async def test_summary_private_count_is_audience_scoped(db, database_url):
     assert group(r_b)["private_count"] == 0
     assert group(r_anon)["count"] == 1
     assert group(r_anon)["private_count"] == 0
+
+
+async def test_claim_pagination_walks_a_tie_without_skipping(db, database_url):
+    """B26: with one knowledge_date shared by many claims, paging with a limit
+    smaller than the tie must visit every row exactly once -- the cursor must
+    order ids the same direction the sort does."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        entity_id = await _entity(db, symbol="TIE")
+        ids = {
+            await _claim(db, entity_id, key=f"K{i:02d}", value='{"amount": 1}')
+            for i in range(7)
+        }
+
+        seen: set[str] = set()
+        before_kd, before_id = None, None
+        for _ in range(10):
+            params = {"limit": 3}
+            if before_id is not None:
+                params.update(
+                    before_knowledge_date=before_kd, before_id=before_id
+                )
+            r = await client.get(
+                f"/coverage/{entity_id}/claims",
+                params=params,
+                headers=_auth(uuid4()),
+            )
+            claims = r.json()["claims"]
+            if not claims:
+                break
+            for c in claims:
+                assert c["id"] not in seen, "pagination repeated a row"
+                seen.add(c["id"])
+            last = claims[-1]
+            before_kd, before_id = last["knowledge_date"], last["id"]
+
+        assert seen == {str(i) for i in ids}, (
+            "pagination must visit every tied row exactly once"
+        )
+
+
+async def test_as_of_pagination_advances(db, database_url):
+    """B26: a cursor on the point-in-time branch must move past the first
+    page; the old branch ignored it and returned the identical page."""
+    app = create_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        entity_id = await _entity(db, symbol="PIT")
+        as_of = NOW
+        ids = {
+            await _claim(db, entity_id, key=f"K{i:02d}", value='{"amount": 1}',
+                         knowledge_date=NOW - timedelta(days=i + 1))
+            for i in range(5)
+        }
+
+        r = await client.get(
+            f"/coverage/{entity_id}/claims",
+            params={"limit": 3, "as_of": as_of.date().isoformat()},
+            headers=_auth(uuid4()),
+        )
+        first = r.json()["claims"]
+        assert len(first) == 3
+        last = first[-1]
+        r = await client.get(
+            f"/coverage/{entity_id}/claims",
+            params={
+                "limit": 3,
+                "as_of": as_of.date().isoformat(),
+                "before_knowledge_date": last["knowledge_date"],
+                "before_id": last["id"],
+            },
+            headers=_auth(uuid4()),
+        )
+        second = r.json()["claims"]
+
+        first_ids = {c["id"] for c in first}
+        second_ids = {c["id"] for c in second}
+        assert first_ids | second_ids == {str(i) for i in ids}
+        assert not (first_ids & second_ids), "page two repeated page one"

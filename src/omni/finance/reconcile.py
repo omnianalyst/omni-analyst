@@ -15,7 +15,8 @@ The algorithm, kept exactly:
 3. Payee pass -- fuzzy match on payee id, then first-unmatched. The
    hasMatched set makes matching one-to-one across the whole batch.
 4. Merge -- reconciled rows are locked and ignored; existing values win
-   for payee/category/notes, incoming wins for imported_id/imported_payee,
+   for payee/category/notes, incoming wins for imported_id/imported_payee
+   when it carries one (a missing incoming id keeps the stored identity),
    cleared ORs, raw data keeps whichever exists. No write when nothing
    changed.
 """
@@ -140,10 +141,15 @@ async def match_transactions(
 
 def _merge_updates(match: dict, row: dict, *, update_dates: bool) -> dict:
     updates = {
-        "imported_id": row.get("imported_id") or None,
+        # An incoming row with no id must not erase the strongest dedup key
+        # the stored row has: nulling imported_id/imported_payee here would
+        # make the next bank sync unable to exact-match, so a missing incoming
+        # value keeps the stored one. Deliberate identity correction is a
+        # separate operation.
+        "imported_id": row.get("imported_id") or match.get("imported_id"),
         "payee_id": match["payee_id"] or row.get("payee_id") or None,
         "category_id": match["category_id"] or row.get("category_id") or None,
-        "imported_payee": row.get("imported_payee") or None,
+        "imported_payee": row.get("imported_payee") or match.get("imported_payee"),
         "notes": match["notes"] or row.get("notes") or None,
         "cleared": bool(match["cleared"]) or bool(row.get("cleared", True)),
     }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
@@ -102,49 +103,81 @@ validate_archive() {
   fi
 }
 
-run_backup() {
+backup_credential_key() {
+  local output=$1
+  local temporary="${output}.partial"
+  : "${OMNI_BACKUP_API_CONTAINER:?set the API container for this database}"
+  : "${OMNI_BACKUP_AGE_RECIPIENT:?set an offline recovery public recipient}"
+  command -v age >/dev/null || { fail 'age is required'; return 1; }
+  if docker exec -i "$OMNI_BACKUP_API_CONTAINER" python - <<'PYKEY' \
+      | age --encrypt -r "$OMNI_BACKUP_AGE_RECIPIENT" > "$temporary"
+import os
+import sys
+from cryptography.fernet import Fernet
+from omni.credentials.keyring import KEY_ENV, key_path
+raw = os.environ.get(KEY_ENV, '').strip().encode()
+if not raw:
+    raw = key_path().read_bytes().strip()  # never generate a replacement here
+Fernet(raw)  # validate, without printing the secret
+sys.stdout.buffer.write(raw)
+PYKEY
+  then
+    chmod 600 "$temporary"
+    mv -- "$temporary" "$output"
+  else
+    rm -f -- "$temporary"
+    fail 'could not export the existing credential key for recovery'
+    return 1
+  fi
+}
+
+run_backup() (
+  set -euo pipefail
+  umask 077
   local target=${OMNI_RSYNC_TARGET:-}
-  local stamp
-  local dest
-  local status
-
   validate_rsync_target "$target"
-  [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || fail "OMNI_BACKUP_RETENTION must be a non-negative integer"
-
-  mkdir -p "$BACKUP_DIR"
+  validate_database_name "$PGDATABASE"
+  [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || { fail 'invalid retention'; exit 1; }
+  install -d -m 0700 -- "$BACKUP_DIR"
+  exec 9>"$BACKUP_DIR/.backup.lock"
+  flock -n 9 || { fail 'another backup is running'; exit 1; }
+  local stamp temporary dest key_archive status
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
-  dest="$BACKUP_DIR/${PGDATABASE}-${stamp}.dump"
-
-  if docker exec "$PG_CONTAINER" pg_dump -Fc -U "$PGUSER" "$PGDATABASE" > "$dest.partial"; then
-    :
-  else
+  temporary=$(mktemp "$BACKUP_DIR/${PGDATABASE}-${stamp}-XXXXXX")
+  dest="${temporary}.dump"
+  key_archive="${temporary}.key.age"
+  trap 'rm -f -- "$temporary" "${key_archive}.partial"' EXIT
+  if ! docker exec "$PG_CONTAINER" pg_dump -Fc -U "$PGUSER" "$PGDATABASE" > "$temporary"; then
     status=$?
-    rm -f "$dest.partial"
     error "pg_dump failed"
-    return "$status"
+    exit $status
   fi
-
-  if validate_archive "$dest.partial"; then
+  if validate_archive "$temporary"; then
     :
   else
     status=$?
-    rm -f "$dest.partial"
-    return "$status"
+    exit $status
   fi
-
-  mv "$dest.partial" "$dest"
-  find "$BACKUP_DIR" -name "${PGDATABASE}-*.dump" -mtime +"$RETENTION_DAYS" -delete
-  find "$BACKUP_DIR" -name "*.partial" -mtime +1 -delete
-
-  echo "created catalog-readable custom archive $dest ($(du -h "$dest" | cut -f1))"
-  if rsync -a --delete "$BACKUP_DIR"/ "$target"/; then
-    echo "replicated $BACKUP_DIR -> $target"
+  backup_credential_key "$key_archive"
+  chmod 600 "$temporary" "$key_archive"
+  mv -- "$temporary" "$dest"
+  # No --delete: losing local files must never erase independent remote history.
+  if rsync -a -- "$dest" "$key_archive" "$target/"; then
+    :
   else
     status=$?
     error "off-box replication failed"
-    return "$status"
+    exit $status
   fi
-}
+  echo "created and replicated database/key recovery pair: $(basename -- "$dest")"
+  # Local retention only, after replication succeeds. Remote retention is
+  # a separate policy, tested by its own restore drill.
+  find "$BACKUP_DIR" -maxdepth 1 -type f \
+    \( -name "${PGDATABASE}-*.dump" -o -name "${PGDATABASE}-*.key.age" \) \
+    -mtime +"$RETENTION_DAYS" -delete
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name "${PGDATABASE}-*" \
+    ! -name '*.dump' ! -name '*.key.age' -mtime +1 -delete
+)
 
 restore_database() {
   local archive=$1

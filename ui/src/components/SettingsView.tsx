@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
-import { authHeaderIfPresent, describeError } from "../lib/api";
+import { apiResponse, authHeaderIfPresent, describeError } from "../lib/api";
 import { AuthRequiredError, changePassword } from "../lib/auth";
 import {
   deleteDataKey,
@@ -85,16 +85,9 @@ export function SettingsView() {
     setBackupBusy(true);
     setBackupNote("Preparing backup… this streams the whole store and can take a minute.");
     try {
-      const { getAuthToken } = await import("../lib/auth");
-      const token = getAuthToken();
-      const res = await fetch("/settings/backup", {
-        headers: token ? { authorization: `Bearer ${token}` } : {},
+      const res = await apiResponse("/settings/backup", {
+        headers: { ...authHeaderIfPresent(), accept: "application/octet-stream" },
       });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        setBackupNote(`Backup failed: ${text.slice(0, 120) || res.status}`);
-        return;
-      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -103,7 +96,7 @@ export function SettingsView() {
       a.click();
       URL.revokeObjectURL(url);
       setBackupNote(
-        "Downloaded. Restore is a documented two-command step (DEPLOY.md, Moving machines) -- deliberately not a button.",
+        "Database downloaded. Credential recovery also requires the matching encrypted key backup; see DEPLOY.md.",
       );
     } catch (err) {
       setBackupNote(`Backup failed: ${describeError(err).message}`);
@@ -137,9 +130,11 @@ export function SettingsView() {
     e.preventDefault();
     setNotifyMsg("Saving…");
     try {
+      // An empty webhook draft is OMITTED (a stored URL stays); an empty
+      // email is an explicit null (clears it).
       const saved = await putNotifications({
         webhook_url: webhookUrl.trim() || undefined,
-        email: notifyEmail.trim() || undefined,
+        email: notifyEmail.trim() || null,
       });
       setNotify({ kind: "ok", data: saved });
       setWebhookUrl("");
@@ -149,6 +144,17 @@ export function SettingsView() {
       } catch {
         setNotifyMsg("Saved. (Test delivery unavailable.)");
       }
+    } catch (err) {
+      setNotifyMsg(describeError(err).message);
+    }
+  }
+
+  async function clearWebhook() {
+    try {
+      const saved = await putNotifications({ webhook_url: null });
+      setNotify({ kind: "ok", data: saved });
+      setWebhookUrl("");
+      setNotifyMsg("Webhook removed.");
     } catch (err) {
       setNotifyMsg(describeError(err).message);
     }
@@ -345,7 +351,7 @@ export function SettingsView() {
                     onInput={(e) => setWebhookUrl((e.target as HTMLInputElement).value)}
                   />
                   {notify.kind === "ok" && notify.data.webhook_configured && webhookUrl.trim() === "" ? (
-                    <small>Empty on save removes the configured webhook.</small>
+                    <small>Configured. Leave empty on save to keep it; Remove disconnects it.</small>
                   ) : null}
                 </label>
                 <label>
@@ -358,6 +364,9 @@ export function SettingsView() {
                   />
                 </label>
                 <button class="btn-primary" type="submit">Save and send test</button>
+                {notify.kind === "ok" && notify.data.webhook_configured ? (
+                  <button type="button" onClick={() => void clearWebhook()}>Remove webhook</button>
+                ) : null}
                 {notifyMsg ? <p class="settings-row-note">{notifyMsg}</p> : null}
               </form>
             ) : null}

@@ -83,8 +83,14 @@ from omni.portfolio.reconcile import reconcile
 from omni.portfolio.risk import RiskLimits
 from omni.trading import pretrade
 from omni.trading.bridge import BridgeRefusal, BridgeResult, prediction_to_intent
+from omni.trading.fill_commit import record_and_apply_fill
+from omni.trading.order_safety import (
+    ExecutionUncertain,
+    execute_or_halt,
+    require_settled_orders,
+)
 from omni.trading.policy import Eligibility, TradingPhase, eligible
-from omni.venue.protocol import Fill, MarketType, Venue, VenueUnavailable
+from omni.venue.protocol import Fill, MarketType, Venue
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +119,7 @@ class LoopRefusal(str, Enum):
     ALREADY_ORDERED = "this_prediction_already_has_an_order_in_the_ledger"
     EMPTY_FILL = "the_venue_filled_nothing"
     VENUE_UNAVAILABLE = "the_venue_could_not_execute_the_intent"
+    EXECUTION_UNCERTAIN = "the_orders_outcome_is_unknown_so_the_cycle_halted"
 
 
 @dataclass(frozen=True)
@@ -274,6 +281,18 @@ async def run_cycle(
     recorded_peak = await pool.fetchval(_PEAK_NAV, portfolio_id)
     peak_nav = book.nav if recorded_peak is None else max(recorded_peak, book.nav)
 
+    try:
+        await require_settled_orders(pool, portfolio_id)
+    except ExecutionUncertain as exc:
+        return CycleResult(
+            considered=0,
+            executed=0,
+            refused={},
+            fills=(),
+            halted=True,
+            halt_reason=str(exc),
+        )
+
     rows = await pool.fetch(_PENDING, now)
 
     refused: dict[str, int] = {}
@@ -359,16 +378,21 @@ async def run_cycle(
         submitted += 1
 
         try:
-            fill = await venue.execute(intent)
-        except VenueUnavailable as exc:
-            await orders.transition(
-                pool,
-                order_id,
-                OrderStatus.REJECTED,
-                payload={"venue_unavailable": str(exc)},
+            fill = await execute_or_halt(pool, order_id, intent, venue)
+        except ExecutionUncertain as exc:
+            # An order whose outcome is unknown is recorded acknowledged and
+            # left open: a REJECTED here is a terminal lie about a possibly
+            # live order, and the next cycle halts on it through
+            # require_settled_orders until an operator resolves the book.
+            refuse(LoopRefusal.EXECUTION_UNCERTAIN.value)
+            return CycleResult(
+                considered=considered,
+                executed=len(fills),
+                refused=refused,
+                fills=tuple(fills),
+                halted=True,
+                halt_reason=str(exc),
             )
-            refuse(LoopRefusal.VENUE_UNAVAILABLE.value)
-            continue
 
         if fill.is_empty:
             await orders.transition(
@@ -381,8 +405,7 @@ async def run_cycle(
             refuse(LoopRefusal.EMPTY_FILL.value)
             continue
 
-        await orders.record_fill(pool, order_id, fill)
-        book = await state.apply_fill(pool, portfolio_id, fill, config.market_type)
+        book = await record_and_apply_fill(pool, order_id, portfolio_id, fill, config.market_type)
         peak_nav = max(peak_nav, book.nav)
         fills.append(fill)
 

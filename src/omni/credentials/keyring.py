@@ -80,35 +80,79 @@ def _read_existing(path: Path) -> bytes | None:
 
 
 def _generate(path: Path) -> bytes:
+    import tempfile
+
     from cryptography.fernet import Fernet
 
     key = Fernet.generate_key()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Written 0600 before anything is encrypted under it. A key readable by
-        # every process on the box is not meaningfully separated from the
-        # ciphertext it protects.
-        with os.fdopen(
-            os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR),
-            "wb",
-        ) as handle:
-            handle.write(key)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except FileExistsError:
-        # Another worker won the race. Its key is as good as ours, and using
-        # the one on disk is what keeps them agreeing.
-        existing = _read_existing(path)
-        if existing is None:
-            raise Unavailable(f"credential key at {path} vanished mid-write") from None
-        return existing
+        path.parent.mkdir(parents=True, exist_ok=True, mode=stat.S_IRWXU)
     except OSError as exc:
         raise Unavailable(
-            f"cannot persist a credential key at {path} ({exc.strerror}). Refusing "
-            f"to generate an ephemeral one: it would encrypt credentials that "
+            f"cannot persist a credential key at {path}: the directory "
+            f"{path.parent} cannot be created ({exc.strerror}). Refusing to "
+            f"generate an ephemeral one: it would encrypt credentials that "
             f"become unreadable as soon as this process is replaced. Mount a "
             f"writable volume there, or set {KEY_ENV}."
         ) from exc
+
+    # The final path is never opened for writing. A key published by creating
+    # it empty first is a key another process (the scheduler container starts
+    # alongside the api) can observe half-written, and a writer that dies
+    # before the write leaves a permanent empty file every later start refuses.
+    # A complete fsynced temp file is linked into place instead: the link is
+    # atomic, fails if another worker won the race, and the only states the
+    # final path ever holds are "absent" and "complete".
+    temp_name: str | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=".credential-", suffix=".tmp"
+        )
+        try:
+            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(key)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        try:
+            os.link(temp_name, path)
+        except FileExistsError:
+            # Another worker won the race. Its key is as good as ours, and
+            # using the one on disk is what keeps them agreeing.
+            existing = _read_existing(path)
+            if existing is None:
+                raise Unavailable(
+                    f"credential key at {path} vanished mid-write"
+                ) from None
+            return existing
+        except OSError as exc:
+            raise Unavailable(
+                f"cannot persist a credential key at {path} ({exc.strerror}). "
+                f"Refusing to generate an ephemeral one: it would encrypt "
+                f"credentials that become unreadable as soon as this process is "
+                f"replaced. Mount a writable volume there, or set {KEY_ENV}."
+            ) from exc
+        # Make the directory entry durable too: fsync of the file alone does
+        # not promise the link survives a crash.
+        dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError as exc:
+        raise Unavailable(f"cannot write a credential key near {path}: {exc}") from exc
+    finally:
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
 
     logger.warning(
         "generated a new credential key at %s -- back this file up; credentials "

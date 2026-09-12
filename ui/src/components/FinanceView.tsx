@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
-import { authHeaderIfPresent, describeError } from "../lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { apiResponse, authHeaderIfPresent, describeError, readJsonResponse } from "../lib/api";
+import { parseCents } from "../lib/cents";
 import { ErrorState } from "./ErrorState";
 import { Loading } from "./Loading";
 
@@ -93,17 +94,10 @@ function currentMonth(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaderIfPresent(),
-      ...(init?.headers ?? {}),
-    },
-  });
-  if (!r.ok) throw await describeError(r);
-  return (await r.json()) as T;
+async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  new Headers(authHeaderIfPresent()).forEach((value, key) => headers.set(key, value));
+  return readJsonResponse<T>(await apiResponse(path, { ...init, headers }));
 }
 
 export function FinanceView() {
@@ -154,7 +148,10 @@ export function FinanceView() {
         <input
           type="month"
           value={month}
-          onInput={(e) => setMonth((e.target as HTMLInputElement).value)}
+          onInput={(e) => {
+            const next = (e.target as HTMLInputElement).value;
+            if (next === "" || /^\d{4}-\d{2}$/.test(next)) setMonth(next);
+          }}
           onClick={openPicker}
           aria-label="Month"
         />
@@ -170,12 +167,16 @@ export function FinanceView() {
           ))}
         </nav>
       </div>
-      {tab === "overview" ? <Overview accounts={accounts} month={month} /> : null}
+      {/* key={month}: a new month is a new component, not old state with a
+          new heading -- otherwise an old month's rows and closures can answer
+          for the new one (a rollover change wrote the old budgeted amount
+          into the new month). */}
+      {tab === "overview" ? <Overview key={month} accounts={accounts} month={month} /> : null}
       {tab === "transactions" ? (
-        <Transactions month={month} accounts={accounts} categories={categories} />
+        <Transactions key={month} month={month} accounts={accounts} categories={categories} />
       ) : null}
       {tab === "budget" ? (
-        <Budget month={month} categories={categories} onChanged={reload} />
+        <Budget key={month} month={month} categories={categories} onChanged={reload} />
       ) : null}
       {tab === "schedules" ? <SchedulesTab /> : null}
       {tab === "rules" ? <Rules onChanged={reload} /> : null}
@@ -183,7 +184,7 @@ export function FinanceView() {
         <Importer accounts={accounts} categories={categories} onChanged={reload} />
       ) : null}
       {tab === "bank" ? <BankTab onChanged={reload} /> : null}
-      {tab === "reports" ? <ReportsTab month={month} /> : null}
+      {tab === "reports" ? <ReportsTab key={month} month={month} /> : null}
     </div>
   );
 }
@@ -243,6 +244,7 @@ function Transactions({
   const [err, setErr] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [adding, setAdding] = useState(false);
+  const loadVersion = useRef(0);
   const openAccounts = useMemo(
     () => accounts.filter((a) => !a.closed),
     [accounts]
@@ -250,8 +252,13 @@ function Transactions({
   const [form, setForm] = useState({ date: "", payee: "", amount: "", category: "", account: "" });
   const [splits, setSplits] = useState<Array<{ amount: string; category: string }>>([]);
   const [formErr, setFormErr] = useState<string | null>(null);
+  const submitting = useRef(false);
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
+    // Versioned so a slow earlier month/filter response cannot overwrite a
+    // faster later one: only the newest request's answer is applied.
+    const version = ++loadVersion.current;
     try {
       const search = new URLSearchParams();
       search.set("month", month);
@@ -259,9 +266,11 @@ function Transactions({
       const body = await api<{ transactions: Tx[] }>(
         `/finance/transactions?${search.toString()}`
       );
+      if (version !== loadVersion.current) return;
       setTxs(body.transactions);
       setErr(null);
     } catch (e) {
+      if (version !== loadVersion.current) return;
       setErr(describeError(e).message);
     }
   }, [month, filter]);
@@ -279,33 +288,38 @@ function Transactions({
   };
 
   const submit = async () => {
-    const accountId = form.account || openAccounts[0]?.id;
-    if (!accountId || !form.date || !form.amount) return;
+    // Immediate ref guard: each click issues a new POST and the backend mints
+    // a fresh UUID per call, so double-clicking duplicated transactions.
+    if (submitting.current) return;
+    submitting.current = true;
+    setSaving(true);
     setFormErr(null);
-    const amount = Math.round(Number(form.amount) * 100);
-    const payload: Record<string, unknown> = {
-      account_id: accountId,
-      date: form.date,
-      amount,
-      payee: form.payee || null,
-      category_id: form.category || null,
-    };
-    if (splits.length) {
-      const splitAmounts = splits
-        .filter((s) => s.amount && s.category)
-        .map((s) => ({
-          amount: Math.round(Number(s.amount) * 100),
-          category_id: s.category,
-        }));
-      const total = splitAmounts.reduce((acc, s) => acc + s.amount, 0);
-      if (total !== amount) {
-        setFormErr(`splits sum to ${(total / 100).toFixed(2)}, amount is ${form.amount}`);
-        return;
-      }
-      payload["splits"] = splitAmounts;
-      delete payload["category_id"];
-    }
     try {
+      const accountId = form.account || openAccounts[0]?.id;
+      if (!accountId || !form.date) throw new Error("Account and date are required");
+      const amount = parseCents(form.amount);
+      if (amount === 0) throw new Error("Transaction amount must be non-zero");
+      const payload: Record<string, unknown> = {
+        account_id: accountId,
+        date: form.date,
+        amount,
+        payee: form.payee || null,
+        category_id: form.category || null,
+      };
+      if (splits.length) {
+        const parts = splits.map((split) => {
+          if (!split.category) throw new Error("Every split needs a category");
+          const value = parseCents(split.amount);
+          if (value === 0) throw new Error("Every split must be non-zero");
+          return { amount: value, category_id: split.category };
+        });
+        const total = parts.reduce((sum, part) => sum + BigInt(part.amount), 0n);
+        if (total !== BigInt(amount)) {
+          throw new Error("Split amounts must sum to the transaction");
+        }
+        payload["splits"] = parts;
+        delete payload["category_id"];
+      }
       await api("/finance/transactions", {
         method: "POST",
         body: JSON.stringify(payload),
@@ -315,7 +329,10 @@ function Transactions({
       setAdding(false);
       await load();
     } catch (e) {
-      setFormErr(describeError(e).message);
+      setFormErr(e instanceof Error ? e.message : describeError(e).message);
+    } finally {
+      submitting.current = false;
+      setSaving(false);
     }
   };
 
@@ -336,7 +353,7 @@ function Transactions({
         <button onClick={() => setAdding(!adding)}>Add transaction</button>
       </div>
       {adding ? (
-        <div class="finance-form">
+        <fieldset class="finance-form" disabled={saving}>
           <select
             value={
               openAccounts.some((a) => a.id === form.account) || openAccounts.length === 0
@@ -386,10 +403,10 @@ function Transactions({
             Add split
           </button>
           <button
-            disabled={!form.date || !form.amount}
+            disabled={saving || !form.date || !form.amount}
             onClick={() => void submit()}
           >
-            Save
+            {saving ? "Saving…" : "Save"}
           </button>
           {formErr ? <small>{formErr}</small> : null}
           {splits.map((split, idx) => (
@@ -425,7 +442,7 @@ function Transactions({
               </button>
             </div>
           ))}
-        </div>
+        </fieldset>
       ) : null}
       <table class="coverage">
         <thead>
@@ -526,6 +543,9 @@ function Budget({
     });
     setNewCat("");
     setNewIncome(false);
+    // Budget's own rows must refresh too, not just the parent's lists --
+    // otherwise the new category is invisible until the month is switched.
+    await load();
     onChanged();
   };
 
@@ -551,7 +571,7 @@ function Budget({
         </thead>
         <tbody>
           {body.categories.map((c) => {
-            const known = categories.some((k) => k.id === c.id && k.is_income);
+            const known = c.is_income;
             return (
               <tr key={c.id}>
                 <td>{c.name}</td>
@@ -564,27 +584,26 @@ function Budget({
                       step="0.01"
                       value={(c.budgeted / 100).toFixed(2)}
                       onBlur={(e) => {
-                        const dollars = Number(
-                          (e.target as HTMLInputElement).value
-                        );
-                        if (Number.isFinite(dollars)) {
-                          void setAmount(
-                            c.id,
-                            Math.round(dollars * 100)
+                        try {
+                          const cents = parseCents((e.target as HTMLInputElement).value);
+                          void setAmount(c.id, cents).catch((cause) =>
+                            setErr(describeError(cause).message)
                           );
+                        } catch (cause) {
+                          setErr(cause instanceof Error ? cause.message : describeError(cause).message);
                         }
                       }}
                     />
                   )}
                 </td>
-                <td class="num">{money(c.activity)}</td>
-                <td class="num">{known ? "—" : money(c.rollover)}</td>
-                <td class="num">{known ? "—" : money(c.available)}</td>
+                <td class="num">{money(c.activity, body.base_currency)}</td>
+                <td class="num">{known ? "—" : money(c.rollover, body.base_currency)}</td>
+                <td class="num">{known ? "—" : money(c.available, body.base_currency)}</td>
                 <td>
                   {c.goal
                     ? c.goal.type === "monthly"
-                      ? `${money(c.goal.target)} / mo, need ${money(c.goal.needed ?? 0)}`
-                      : `${money(c.goal.target)} by ${Math.round((c.goal.progress ?? 0) * 100)}%`
+                      ? `${money(c.goal.target, body.base_currency)} / mo, need ${money(c.goal.needed ?? 0, body.base_currency)}`
+                      : `${money(c.goal.target, body.base_currency)} by ${Math.round((c.goal.progress ?? 0) * 100)}%`
                     : "—"}
                 </td>
                 <td>
@@ -947,8 +966,7 @@ function BankTab({ onChanged }: { onChanged(): void }) {
   const [busy, setBusy] = useState(false);
   const [gcId, setGcId] = useState("");
   const [gcKey, setGcKey] = useState("");
-  const [sfEmail, setSfEmail] = useState("");
-  const [sfPassword, setSfPassword] = useState("");
+  const [sfToken, setSfToken] = useState("");
   const [country, setCountry] = useState("");
   const [institutions, setInstitutions] = useState<Array<{ id: string; name: string }> | null>(null);
   const [linkUrl, setLinkUrl] = useState<string | null>(null);
@@ -973,35 +991,47 @@ function BankTab({ onChanged }: { onChanged(): void }) {
   }, [load]);
 
   // The bank's approval flow redirects back to /finance?link=<id>; pick
-  // the id up and poll the requisition automatically.
+  // the id up and poll the requisition automatically. A setTimeout chain,
+  // not setInterval: each poll waits for the previous one, so overlapping
+  // calls cannot race the link into duplicate accounts.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const link = params.get("link");
     if (!link) return;
     setLinkId(link);
     let tries = 0;
-    const timer = window.setInterval(async () => {
+    let disposed = false;
+    let timer = 0;
+    const tick = async () => {
+      if (disposed) return;
       tries += 1;
       try {
         const body = await api<{ status: string; accounts: unknown[] }>(
           `/finance/bank/link/${link}`
         );
+        if (disposed) return;
         if (body.status === "LN" || tries >= 10) {
-          window.clearInterval(timer);
           setMsg(
             body.status === "LN"
               ? `Bank linked (${body.accounts.length} accounts)`
               : `Bank link still ${body.status}`
           );
           await load();
+          if (body.status === "LN") onChanged();
           window.history.replaceState(null, "", "/finance");
+          return;
         }
       } catch {
-        if (tries >= 10) window.clearInterval(timer);
+        if (tries >= 10) return;
       }
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, []);
+      timer = window.setTimeout(() => void tick(), 3000);
+    };
+    timer = window.setTimeout(() => void tick(), 3000);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [load, onChanged]);
 
   const saveGocardless = async () => {
     setBusy(true);
@@ -1031,11 +1061,10 @@ function BankTab({ onChanged }: { onChanged(): void }) {
         method: "PUT",
         body: JSON.stringify({
           provider: "simplefin",
-          fields: { email: sfEmail, password: sfPassword },
+          fields: { setup_token: sfToken },
         }),
       });
-      setSfEmail("");
-      setSfPassword("");
+      setSfToken("");
       setMsg("SimpleFIN linked.");
       await load();
       await api("/finance/bank/simplefin/link", { method: "POST" });
@@ -1209,18 +1238,13 @@ function BankTab({ onChanged }: { onChanged(): void }) {
         ) : (
           <>
             <input
-              placeholder="SimpleFIN email"
-              value={sfEmail}
-              onInput={(e) => setSfEmail((e.target as HTMLInputElement).value)}
-            />
-            <input
               type="password"
-              placeholder="password"
-              value={sfPassword}
-              onInput={(e) => setSfPassword((e.target as HTMLInputElement).value)}
+              placeholder="SimpleFIN setup token (one-time, from SimpleFIN's access page)"
+              value={sfToken}
+              onInput={(e) => setSfToken((e.target as HTMLInputElement).value)}
             />
             <button
-              disabled={busy || !sfEmail.trim() || !sfPassword.trim()}
+              disabled={busy || !sfToken.trim()}
               onClick={() => void saveSimplefin()}
             >
               Link SimpleFIN
@@ -1309,7 +1333,7 @@ function SchedulesTab() {
         body: JSON.stringify({
           name: name.trim(),
           payee: payee.trim() || null,
-          amount: amount ? Math.round(Number(amount) * 100) : null,
+          amount: amount.trim() ? parseCents(amount) : null,
           config: {
             frequency: "monthly",
             start: new Date().toISOString().slice(0, 10),
@@ -1412,47 +1436,76 @@ function SchedulesTab() {
   );
 }
 
+type CashReport = {
+  base_currency: string;
+  months: Array<{ month: string; income: number; expense: number; net: number }>;
+  other_currencies: Record<string, { income: number; expense: number }>;
+};
+type SpendingReport = {
+  base_currency: string;
+  categories: Array<{ category: string; total: number; tx_count: number }>;
+};
+type WorthReport = {
+  base_currency: string;
+  months: Array<{ month: string; net_worth: number | null; change: number | null }>;
+  balances_by_currency: Record<string, number>;
+  accounts_without_history: string[];
+};
+
 function ReportsTab({ month }: { month: string }) {
-  const [cash, setCash] = useState<{ months: Array<{ month: string; income: number; expense: number; net: number }> } | null>(null);
-  const [spending, setSpending] = useState<{ categories: Array<{ category: string; total: number; tx_count: number }> } | null>(null);
-  const [worth, setWorth] = useState<{ months: Array<{ month: string; net_worth: number | null; change: number | null }>; accounts_without_history: string[] } | null>(null);
+  const [data, setData] = useState<{
+    cash: CashReport;
+    spending: SpendingReport;
+    worth: WorthReport;
+  } | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    api<{ months: Array<{ month: string; income: number; expense: number; net: number }> }>(
-      "/finance/reports/cash-flow?months=6"
-    ).then(setCash).catch((e) => setErr(describeError(e).message));
-    api<{ categories: Array<{ category: string; total: number; tx_count: number }> }>(
-      `/finance/reports/spending?month=${month}`
-    ).then(setSpending).catch(() => setSpending({ categories: [] }));
-    api<{ months: Array<{ month: string; net_worth: number | null; change: number | null }>; accounts_without_history: string[] }>(
-      "/finance/reports/net-worth?months=12"
-    ).then(setWorth).catch(() => {});
+    let cancelled = false;
+    setData(null);
+    setErr(null);
+    // One promise for all three: a failed report is an error state, never a
+    // silently empty table (missing is not zero).
+    void Promise.all([
+      api<CashReport>("/finance/reports/cash-flow?months=6"),
+      api<SpendingReport>(`/finance/reports/spending?month=${encodeURIComponent(month)}`),
+      api<WorthReport>("/finance/reports/net-worth?months=12"),
+    ])
+      .then(([cash, spending, worth]) => {
+        if (!cancelled) setData({ cash, spending, worth });
+      })
+      .catch((cause) => {
+        if (!cancelled) setErr(describeError(cause).message);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [month]);
 
   if (err) return <ErrorState message={err} />;
-  if (!cash) return <Loading />;
-
-  const latestWorth = [...(worth?.months ?? [])].reverse().find((m) => m.net_worth !== null);
+  if (!data) return <Loading />;
+  const { cash, spending, worth } = data;
 
   return (
     <section class="surface-card settings-card finance-card">
       <div class="section-heading">
         <div><p class="eyebrow">Ledger</p><h2>Reports</h2></div>
       </div>
-      {latestWorth ? (
-        <p>
-          Ledger net worth: <strong>{money(latestWorth.net_worth ?? 0)}</strong> (all
-          accounts, transactions only)
+      <h3>Ledger balances, separately by currency</h3>
+      <p>No currency conversion or combined household total is implied.</p>
+      {Object.entries(worth.balances_by_currency).map(([currency, balance]) => (
+        <p key={currency}>
+          {currency}: <strong>{money(balance, currency)}</strong>
         </p>
-      ) : null}
-      {worth?.accounts_without_history?.length ? (
+      ))}
+      {worth.accounts_without_history.length > 0 ? (
         <p>
           <small>
             no transaction history: {worth.accounts_without_history.join(", ")}
           </small>
         </p>
       ) : null}
+      <h3>Recent six-month cash flow ({cash.base_currency})</h3>
       <table class="coverage">
         <thead>
           <tr>
@@ -1466,33 +1519,40 @@ function ReportsTab({ month }: { month: string }) {
           {cash.months.map((m) => (
             <tr key={m.month}>
               <td>{m.month.slice(0, 7)}</td>
-              <td class="num">{money(m.income)}</td>
-              <td class="num">{money(m.expense)}</td>
-              <td class="num">{money(m.net)}</td>
+              <td class="num">{money(m.income, cash.base_currency)}</td>
+              <td class="num">{money(m.expense, cash.base_currency)}</td>
+              <td class="num">{money(m.net, cash.base_currency)}</td>
             </tr>
           ))}
         </tbody>
       </table>
-      {spending ? (
-        <table class="coverage">
-          <thead>
-            <tr>
-              <th>Category</th>
-              <th class="num">Spending ({month.slice(0, 7)})</th>
-              <th class="num">Transactions</th>
+      {Object.entries(cash.other_currencies).map(([currency, totals]) => (
+        <p key={currency}>
+          <small>
+            {currency} separately: income {money(totals.income, currency)},
+            expense {money(totals.expense, currency)}
+          </small>
+        </p>
+      ))}
+      <h3>Category activity: {month.slice(0, 7)} ({spending.base_currency})</h3>
+      <table class="coverage">
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th class="num">Spending</th>
+            <th class="num">Transactions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {spending.categories.map((c) => (
+            <tr key={c.category}>
+              <td>{c.category}</td>
+              <td class="num">{money(c.total, spending.base_currency)}</td>
+              <td class="num">{c.tx_count}</td>
             </tr>
-          </thead>
-          <tbody>
-            {spending.categories.map((c) => (
-              <tr key={c.category}>
-                <td>{c.category}</td>
-                <td class="num">{money(c.total)}</td>
-                <td class="num">{c.tx_count}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : null}
+          ))}
+        </tbody>
+      </table>
     </section>
   );
 }

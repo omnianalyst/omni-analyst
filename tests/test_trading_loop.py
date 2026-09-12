@@ -48,7 +48,7 @@ from omni.trading.bridge import BridgeRefusal
 from omni.trading.loop import CycleResult, LoopConfig, LoopRefusal, run_cycle
 from omni.trading.policy import Ineligible, TradingPhase
 from omni.venue.paper_venue import Bar, PaperVenue, RecordedBars
-from omni.venue.protocol import Capabilities, Fill, MarketType, Position
+from omni.venue.protocol import Capabilities, Fill, MarketType, Position, VenueUnavailable
 
 NOW = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
 HORIZON = NOW + timedelta(days=30)
@@ -487,6 +487,258 @@ class TestOverfillsStopBeforePortfolioMutation:
             order["id"],
         )
         assert [event["status"] for event in events] == ["intent", "submitted"]
+
+
+class _RestingVenue:
+    """Answers execute with a live resting order: empty fill, external id."""
+
+    def __init__(self, inner: PaperVenue) -> None:
+        self.name = inner.name
+        self.capabilities = inner.capabilities
+        self._inner = inner
+
+    async def quote(self, intent):
+        return await self._inner.quote(intent)
+
+    async def execute(self, intent):
+        return Fill(
+            intent_id=intent.idempotency_key,
+            venue=self.name,
+            symbol=intent.symbol,
+            side=intent.side,
+            filled_quantity=Decimal(0),
+            average_price=Decimal(0),
+            fee_paid=Decimal(0),
+            filled_at=NOW,
+            external_id="REST-1",
+            raw={"resting": True},
+        )
+
+    async def positions(self):
+        return await self._inner.positions()
+
+    async def balances(self):
+        return await self._inner.balances()
+
+    async def cancel(self, external_id):
+        return False
+
+
+class _UnavailableVenue:
+    """Raises on execute the way a placement whose response was lost does."""
+
+    def __init__(self, inner: PaperVenue) -> None:
+        self.name = inner.name
+        self.capabilities = inner.capabilities
+        self._inner = inner
+
+    async def quote(self, intent):
+        return await self._inner.quote(intent)
+
+    async def execute(self, intent):
+        raise VenueUnavailable(
+            f"{self.name} did not answer the {intent.symbol} order"
+        )
+
+    async def positions(self):
+        return await self._inner.positions()
+
+    async def balances(self):
+        return await self._inner.balances()
+
+    async def cancel(self, external_id):
+        return False
+
+
+class _BracketRefusingVenue:
+    """Mirrors the live adapter's B04 contract: an intent carrying a barrier
+    instruction is refused before anything is placed, by name."""
+
+    def __init__(self, inner: PaperVenue) -> None:
+        self.name = inner.name
+        self.capabilities = inner.capabilities
+        self._inner = inner
+
+    async def quote(self, intent):
+        return await self._inner.quote(intent)
+
+    async def execute(self, intent):
+        if (
+            intent.stop_price is not None
+            or intent.take_profit_price is not None
+            or intent.expires_at is not None
+        ):
+            raise VenueUnavailable(
+                f"{self.name} refuses {intent.symbol}: the intent carries a "
+                f"stop/target/expiry instruction and no exit manager exists to "
+                f"honour it; an unattended position is not a bounded trade"
+            )
+        return await self._inner.execute(intent)
+
+    async def positions(self):
+        return await self._inner.positions()
+
+    async def balances(self):
+        return await self._inner.balances()
+
+    async def cancel(self, external_id):
+        return False
+
+
+class TestUncertainExecutionsAreNotRejections:
+    """B01: a possibly-live order must never be recorded as a terminal one."""
+
+    async def test_a_resting_empty_fill_halts_and_leaves_the_order_acknowledged(
+        self, db, portfolio
+    ):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+
+        result = await _cycle(db, portfolio, _RestingVenue(_venue(symbol)))
+
+        assert result.halted
+        assert "resting" in (result.halt_reason or "")
+        assert result.considered == 1
+        assert result.executed == 0
+        assert result.refused[LoopRefusal.EXECUTION_UNCERTAIN.value] == 1
+
+        (order,) = await _orders(db, portfolio)
+        assert order["status"] == "acknowledged"
+        external_id = await db.pool.fetchval(
+            "SELECT external_id FROM trade_order WHERE id = $1", order["id"]
+        )
+        assert external_id == "REST-1"
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM position WHERE portfolio_id = $1", portfolio
+        ) == 0
+
+    async def test_a_venue_that_cannot_answer_halts_and_leaves_the_order_acknowledged(
+        self, db, portfolio
+    ):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+
+        result = await _cycle(db, portfolio, _UnavailableVenue(_venue(symbol)))
+
+        assert result.halted
+        assert result.considered == 1
+        assert result.executed == 0
+        assert result.refused[LoopRefusal.EXECUTION_UNCERTAIN.value] == 1
+
+        (order,) = await _orders(db, portfolio)
+        assert order["status"] == "acknowledged"
+
+    async def test_a_bridged_prediction_intent_is_refused_by_name(self, db, portfolio):
+        """B04: the bridge populates stop/target/expiry from the prediction,
+        and an intent carrying them must be refused by name rather than opened
+        as an unattended position."""
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+
+        result = await _cycle(db, portfolio, _BracketRefusingVenue(_venue(symbol)))
+
+        assert result.halted
+        assert "no exit manager" in (result.halt_reason or "")
+        assert result.executed == 0
+        assert result.refused[LoopRefusal.EXECUTION_UNCERTAIN.value] == 1
+
+        (order,) = await _orders(db, portfolio)
+        assert order["status"] == "acknowledged"
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM position WHERE portfolio_id = $1", portfolio
+        ) == 0
+
+    async def test_an_unsettled_order_gates_the_whole_cycle(self, db, portfolio):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+        await db.pool.execute(
+            """
+            INSERT INTO trade_order (portfolio_id, idempotency_key, venue, symbol,
+                                     side, market_type, order_kind, quantity,
+                                     reference_price, provenance, status)
+            VALUES ($1, 'stuck-key', 'paper', $2, 'buy', 'spot', 'market', 1, 100,
+                    '{}'::jsonb, 'submitted')
+            """,
+            portfolio,
+            symbol,
+        )
+        venue = _CountingVenue(_venue(symbol))
+
+        result = await _cycle(db, portfolio, venue)
+
+        assert result.halted
+        assert "non-terminal" in (result.halt_reason or "")
+        assert result.considered == 0
+        assert venue.execute_calls == 0
+        orders_since = await _orders(db, portfolio)
+        assert [o["idempotency_key"] for o in orders_since] == ["stuck-key"]
+
+
+class _CountingVenue:
+    """Wraps a venue and counts execute calls, so a gate can prove it held."""
+
+    def __init__(self, inner: PaperVenue) -> None:
+        self.name = inner.name
+        self.capabilities = inner.capabilities
+        self._inner = inner
+        self.execute_calls = 0
+
+    async def quote(self, intent):
+        return await self._inner.quote(intent)
+
+    async def execute(self, intent):
+        self.execute_calls += 1
+        return await self._inner.execute(intent)
+
+    async def positions(self):
+        return await self._inner.positions()
+
+    async def balances(self):
+        return await self._inner.balances()
+
+    async def cancel(self, external_id):
+        return False
+
+
+class TestTheFillAndItsPortfolioEffectCommitTogether:
+    """B02: the ledger row and the position/cash effect are one transaction."""
+
+    async def test_a_failure_applying_the_fill_rolls_back_the_ledger_row(
+        self, db, portfolio, monkeypatch
+    ):
+        entity_id, symbol = await _entity(db)
+        await _calibrate(db, entity_id)
+        await _pending(db, entity_id)
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("the cash leg died")
+
+        monkeypatch.setattr("omni.trading.fill_commit.state.apply_fill", _boom)
+
+        with pytest.raises(RuntimeError, match="cash leg"):
+            await _cycle(db, portfolio, _venue(symbol))
+
+        (order,) = await _orders(db, portfolio)
+        assert order["status"] == "submitted"
+        assert order["filled_quantity"] == Decimal(0)
+        assert order["average_fill_price"] is None
+        events = await db.pool.fetch(
+            "SELECT status FROM order_event WHERE order_id = $1 ORDER BY at, id",
+            order["id"],
+        )
+        assert [event["status"] for event in events] == ["intent", "submitted"]
+        assert await db.pool.fetchval(
+            "SELECT count(*) FROM position WHERE portfolio_id = $1", portfolio
+        ) == 0
+        assert await db.pool.fetchval(
+            "SELECT free FROM cash_balance "
+            "WHERE portfolio_id = $1 AND venue = 'paper' AND asset = 'USD'",
+            portfolio,
+        ) == NAV
 
 
 class TestReconciliationGatesTheCycle:

@@ -1,6 +1,10 @@
 services:
   postgres:
     container_name: ${OMNI_CI_POSTGRES_CONTAINER:?OMNI_CI_POSTGRES_CONTAINER is required}
+  api:
+    image: ${OMNI_CI_API_IMAGE:?OMNI_CI_API_IMAGE is required}
+  scheduler:
+    image: ${OMNI_CI_SCHEDULER_IMAGE:?OMNI_CI_SCHEDULER_IMAGE is required}
 
 networks:
   default:

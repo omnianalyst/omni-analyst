@@ -176,45 +176,31 @@ async def scorecard(pool, *, audience: UUID | None = None) -> list[dict]:
     """
     rows = await pool.fetch(
         """
-        SELECT h.method,
-               COALESCE(SUM(h.surfaced), 0)::bigint AS surfaced,
-               COALESCE(SUM(h.resolved), 0)::bigint AS resolved,
-               COALESCE(SUM(h.hits), 0)::bigint AS hits,
-               -- payoff accounting from the sibling view, same audience scoping
-               CASE WHEN COALESCE(SUM(y.resolved), 0) >= 10
-                    THEN (SELECT avg(r) FROM (
-                              SELECT y2.avg_realized_ratio AS r
-                              FROM finding_payoff y2
-                              WHERE y2.method = h.method
-                                AND (y2.audience_user_id IS NULL OR y2.audience_user_id = $1)
-                          ) ratios WHERE r IS NOT NULL)
-                    ELSE NULL
-               END AS payoff_ratio,
-               CASE WHEN COALESCE(SUM(y.resolved), 0) >= 10
-                    THEN (SELECT avg(g) FROM (
-                              SELECT y3.avg_risk_pct AS g
-                              FROM finding_payoff y3
-                              WHERE y3.method = h.method
-                                AND (y3.audience_user_id IS NULL OR y3.audience_user_id = $1)
-                          ) risks WHERE g IS NOT NULL)
-                    ELSE NULL
-               END AS avg_risk_pct,
-               CASE WHEN COALESCE(SUM(y.resolved), 0) >= 10
-                    THEN (SELECT avg(w) FROM (
-                              SELECT y4.avg_payoff_pct AS w
-                              FROM finding_payoff y4
-                              WHERE y4.method = h.method
-                                AND (y4.audience_user_id IS NULL OR y4.audience_user_id = $1)
-                          ) pays WHERE w IS NOT NULL)
-                    ELSE NULL
-               END AS avg_payoff_pct
-        FROM finding_hit_rate h
-        LEFT JOIN finding_payoff y
-            ON y.method = h.method
-           AND y.audience_user_id IS NOT DISTINCT FROM h.audience_user_id
-        WHERE h.audience_user_id IS NULL OR h.audience_user_id = $1
-        GROUP BY h.method
-        ORDER BY SUM(h.surfaced) DESC
+        WITH h AS (
+            SELECT method, sum(surfaced)::bigint AS surfaced,
+                   sum(resolved)::bigint AS resolved, sum(hits)::bigint AS hits
+            FROM finding_hit_rate
+            WHERE audience_user_id IS NULL OR audience_user_id = $1
+            GROUP BY method
+        ), y AS (
+            SELECT method, sum(geometry_n) AS geometry_n,
+                   sum(realized_n) AS realized_n,
+                   sum(avg_risk_pct * geometry_n) AS risk_sum,
+                   sum(avg_payoff_pct * geometry_n) AS payoff_sum,
+                   sum(avg_realized_ratio * realized_n) AS realized_sum
+            FROM finding_payoff
+            WHERE audience_user_id IS NULL OR audience_user_id = $1
+            GROUP BY method
+        )
+        SELECT h.*,
+               CASE WHEN y.realized_n >= 10
+                    THEN y.realized_sum / y.realized_n END AS payoff_ratio,
+               CASE WHEN y.geometry_n >= 10
+                    THEN y.risk_sum / y.geometry_n END AS avg_risk_pct,
+               CASE WHEN y.geometry_n >= 10
+                    THEN y.payoff_sum / y.geometry_n END AS avg_payoff_pct
+        FROM h LEFT JOIN y USING (method)
+        ORDER BY h.surfaced DESC, h.method
         """,
         audience,
     )

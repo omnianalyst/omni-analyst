@@ -411,3 +411,128 @@ class TestClaimlessFindings:
         assert row["status"] == "surfaced"
         assert row["claim_id"] is None
         assert row["prediction_id"] is not None
+
+
+class TestPayoffGeometry:
+    """B05: directional payoff accounting. Risk and reward distances are keyed
+    on direction, expiry exits use the recorded exit_price, and neutral calls
+    carry no directional payoff."""
+
+    async def _surfaced(self, db, method, *, direction, outcome, entry, upper,
+                        lower, exit_price=None, audience=None):
+        e = await _entity(db, symbol=f"{method}-{uuid4().hex[:8]}")
+        pid = await db.pool.fetchval(
+            """
+            INSERT INTO prediction (entity_id, method, direction, confidence,
+                                    entry_price, upper_barrier, lower_barrier,
+                                    horizon_ends_at, provenance, outcome,
+                                    resolved_at, exit_price, exit_at)
+            VALUES ($1,$2,$3,0.85,$4,$5,$6,now(),'{}'::jsonb,
+                    $7::prediction_outcome, now(), $8, $9)
+            RETURNING id
+            """,
+            e, method, direction, entry, upper, lower, outcome, exit_price,
+            NOW if exit_price is not None else None,
+        )
+        await db.pool.execute(
+            "INSERT INTO finding (claim_id, entity_id, prediction_id, status, "
+            "method, confidence, threshold, supporting, audience_user_id) "
+            "VALUES (NULL,$1,$2,'surfaced',$3,0.85,0.7,'[\"x\"]'::jsonb,$4)",
+            e, pid, method, audience,
+        )
+        return pid
+
+    async def _refresh(self, db):
+        from omni.conviction.stats_refresh import refresh_statistics
+
+        await refresh_statistics(db.pool)
+
+    async def test_short_geometry_is_scored_not_excluded(self, db):
+        """A short risks upper-entry and targets entry-lower. The 068 view
+        demanded lower>entry for shorts -- impossible under the straddle
+        constraint -- so every short silently vanished from payoff."""
+        await self._surfaced(db, "short.hit", direction="down",
+                             outcome="upper", entry=100, upper=110, lower=80)
+        await self._refresh(db)
+
+        row = await db.pool.fetchrow(
+            "SELECT * FROM finding_payoff WHERE method='short.hit'"
+        )
+        assert row is not None, "the short must be scored, not excluded"
+        assert float(row["avg_risk_pct"]) == pytest.approx(10.0)
+        assert float(row["avg_payoff_pct"]) == pytest.approx(20.0)
+        assert float(row["avg_realized_ratio"]) == pytest.approx(-1.0)
+        assert row["geometry_n"] == 1
+        assert row["realized_n"] == 1
+
+    async def test_a_profitable_expiry_is_measured_not_scored_minus_one(self, db):
+        """A long expiring at 105 with entry 100 / stop 90 is +0.5R. The 068
+        view scored every non-hit -1.0."""
+        await self._surfaced(db, "expiry.win", direction="up", outcome="expiry",
+                             entry=100, upper=110, lower=90, exit_price=105)
+        await self._refresh(db)
+
+        row = await db.pool.fetchrow(
+            "SELECT * FROM finding_payoff WHERE method='expiry.win'"
+        )
+        assert float(row["avg_realized_ratio"]) == pytest.approx(0.5)
+        assert row["realized_n"] == 1
+
+    async def test_an_unmeasured_expiry_has_no_realized_ratio(self, db):
+        """Legacy expiry rows with no exit_price stay out of the realized
+        average rather than being priced by invention."""
+        await self._surfaced(db, "expiry.blind", direction="up",
+                             outcome="expiry", entry=100, upper=110, lower=90)
+        await self._refresh(db)
+
+        row = await db.pool.fetchrow(
+            "SELECT * FROM finding_payoff WHERE method='expiry.blind'"
+        )
+        assert row["geometry_n"] == 1
+        assert row["realized_n"] == 0
+        assert row["avg_realized_ratio"] is None
+
+    async def test_a_neutral_call_carries_no_directional_payoff(self, db):
+        """A neutral expiry is a classification hit (calibration_bucket keeps
+        it) but has no risk leg; the 068 view gave it a directional payoff."""
+        await self._surfaced(db, "neutral.expiry", direction="neutral",
+                             outcome="expiry", entry=100, upper=110, lower=90)
+        await self._refresh(db)
+
+        row = await db.pool.fetchrow(
+            "SELECT * FROM finding_payoff WHERE method='neutral.expiry'"
+        )
+        assert row is None
+
+    async def test_a_long_stopout_scores_minus_one_r(self, db):
+        await self._surfaced(db, "long.stop", direction="up", outcome="lower",
+                             entry=100, upper=110, lower=90)
+        await self._refresh(db)
+
+        row = await db.pool.fetchrow(
+            "SELECT * FROM finding_payoff WHERE method='long.stop'"
+        )
+        assert float(row["avg_risk_pct"]) == pytest.approx(10.0)
+        assert float(row["avg_payoff_pct"]) == pytest.approx(10.0)
+        assert float(row["avg_realized_ratio"]) == pytest.approx(-1.0)
+
+    async def test_the_scorecard_weights_audiences_by_their_samples(self, db):
+        """B06: a 2-observation private row must not outweigh its share of a
+        100-observation shared row. Mean of means says 5.0; the weighted
+        answer is 118/102."""
+        for _ in range(100):
+            await self._surfaced(db, "weighted.mix", direction="up",
+                                 outcome="upper", entry=100, upper=110,
+                                 lower=90)
+        owner = uuid4()
+        for _ in range(2):
+            await self._surfaced(db, "weighted.mix", direction="up",
+                                 outcome="upper", entry=100, upper=190,
+                                 lower=90, audience=owner)
+        await self._refresh(db)
+
+        card = (await scorecard(db.pool, audience=owner))[0]
+        assert card["method"] == "weighted.mix"
+        assert card["payoff_ratio"] == pytest.approx(1.16, abs=0.005)
+        assert card["avg_risk_pct"] == 10.0
+        assert card["avg_payoff_pct"] == round((100 * 10.0 + 2 * 90.0) / 102, 2)

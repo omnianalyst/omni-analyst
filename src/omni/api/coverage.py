@@ -197,54 +197,53 @@ def build_router(app: App) -> Router:
         )
         visible = f"({visible_claims_cte('$1')}) v"
 
+        conditions = ["v.entity_id = $2"]
+        params: list[Any] = [audience, entity_id]
+        if claim_type is not None:
+            params.append(claim_type)
+            conditions.append(f"v.claim_type = ${len(params)}::claim_type")
+        if query.key is not None:
+            params.append(query.key)
+            conditions.append(f"v.key = ${len(params)}")
         if query.as_of is not None:
-            # Point-in-time: what was knowable at as_of, one vintage per period.
-            # "Period" is (claim_type, key, event_date); the latest knowable
-            # knowledge_date for each wins, which is what a backtest needs.
-            conditions = ["v.entity_id = $2", "v.knowledge_date <= $3"]
-            params: list[Any] = [audience, entity_id, query.as_of]
-            if claim_type is not None:
-                conditions.append(f"v.claim_type = ${len(params) + 1}::claim_type")
-                params.append(claim_type)
-            if query.key is not None:
-                conditions.append(f"v.key = ${len(params) + 1}")
-                params.append(query.key)
-            sql = f"""
-                WITH ranked AS (
+            params.append(query.as_of)
+            conditions.append(f"v.knowledge_date <= ${len(params)}")
+
+        if query.as_of is not None:
+            # Point-in-time: what was knowable at as_of, one vintage per
+            # period. "Period" is (claim_type, key, event_date); the latest
+            # knowable knowledge_date for each wins.
+            selected = f"""
+                SELECT * FROM (
                     SELECT {cols}, ROW_NUMBER() OVER (
                         PARTITION BY v.claim_type, v.key, v.event_date
                         ORDER BY v.knowledge_date DESC, v.id DESC
                     ) AS rn
-                    FROM {visible}
-                    WHERE {" AND ".join(conditions)}
-                )
-                SELECT * FROM ranked
-                WHERE rn = 1
-                ORDER BY knowledge_date DESC, id
-                LIMIT ${len(params) + 1}
+                    FROM {visible} WHERE {" AND ".join(conditions)}
+                ) ranked WHERE rn = 1
             """
         else:
-            conditions = ["v.entity_id = $2"]
-            params = [audience, entity_id]
-            if claim_type is not None:
-                conditions.append(f"v.claim_type = ${len(params) + 1}::claim_type")
-                params.append(claim_type)
-            if query.key is not None:
-                conditions.append(f"v.key = ${len(params) + 1}")
-                params.append(query.key)
-            if before_kd is not None:
-                conditions.append(
-                    f"(v.knowledge_date, v.id) < (${len(params) + 1},"
-                    f" ${len(params) + 2})"
-                )
-                params.extend([before_kd, before_id])
-            sql = (
-                f"SELECT {cols} FROM {visible} "
-                f"WHERE {' AND '.join(conditions)} "
-                f"ORDER BY v.knowledge_date DESC, v.id "
-                f"LIMIT ${len(params) + 1}"
+            selected = f"SELECT {cols} FROM {visible} WHERE {' AND '.join(conditions)}"
+
+        # The cursor applies AFTER vintage selection, and its comparison
+        # matches the sort direction -- paging among tied knowledge_dates
+        # walks ids DESC like the ORDER BY does, so no row is skipped or
+        # repeated at a page boundary inside a tie.
+        outer_conditions = []
+        if before_kd is not None:
+            params.extend([before_kd, before_id])
+            outer_conditions.append(
+                f"(selected.knowledge_date, selected.id) <"
+                f" (${len(params) - 1}, ${len(params)})"
             )
+        where = "WHERE " + " AND ".join(outer_conditions) if outer_conditions else ""
         params.append(limit)
+        sql = f"""
+            SELECT * FROM ({selected}) selected
+            {where}
+            ORDER BY selected.knowledge_date DESC, selected.id DESC
+            LIMIT ${len(params)}
+        """
 
         rows = await app.db.pool.fetch(sql, *params)
         claims = [

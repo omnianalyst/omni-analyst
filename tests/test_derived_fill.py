@@ -32,6 +32,7 @@ from omni.capability.arguments import (
 from omni.capability.derived import ARGUMENTS, DERIVED
 from omni.coverage.visibility import visible_claims
 from omni.fill.derived import fill_analysis
+from omni.fill.pipeline import claim_next_gap
 from omni.perception.divergence import resolve_derived_licence
 
 BASE = datetime(2024, 1, 1, tzinfo=UTC)
@@ -106,17 +107,13 @@ async def _insert_series(
 
 
 async def _gap(db, entity_id, *, audience_user_id=None):
-    gap_id = await db.pool.fetchval(
+    await db.pool.execute(
         _INSERT_GAP, entity_id, "perception_divergence",
         "perception_vs_fundamentals", "missing", audience_user_id, 100.0,
     )
-    return {
-        "id": gap_id,
-        "entity_id": entity_id,
-        "claim_type": "perception_divergence",
-        "key": "perception_vs_fundamentals",
-        "audience_user_id": audience_user_id,
-    }
+    gap = await claim_next_gap(db.pool, worker_id=f"test-{uuid4().hex[:8]}")
+    assert gap is not None
+    return gap
 
 
 async def _seed_shared(db, entity_id, *, seed=0):

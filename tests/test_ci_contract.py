@@ -52,8 +52,15 @@ def test_production_smoke_contract_is_static_and_offline():
     assert '--build-arg "NEUTRON_REVISION=$neutron_revision"' in source
     assert "com.omnianalyst.neutron.revision" in source
     assert "com.omnianalyst.neutron.wheel.sha256" in source
-    assert '--file "$root/Dockerfile" --tag omni-api:latest' in source
-    assert '--file "$root/Dockerfile.scheduler" --tag omni-scheduler:latest' in source
+    # Per-job image tags, never the daemon-global :latest alias a concurrent
+    # job can swap between inspect and startup (U10).
+    assert '--tag "$OMNI_CI_API_IMAGE"' in source
+    assert '--tag "$OMNI_CI_SCHEDULER_IMAGE"' in source
+    assert 'export OMNI_CI_API_IMAGE=' in source
+    assert "omni-api:latest" not in source
+    assert "omni-scheduler:latest" not in source
+    assert "image: ${OMNI_CI_API_IMAGE:?OMNI_CI_API_IMAGE is required}" in overlay
+    assert "image: ${OMNI_CI_SCHEDULER_IMAGE:?OMNI_CI_SCHEDULER_IMAGE is required}" in overlay
     assert 'up --detach --no-build postgres' in source
     assert 'up --detach --no-build api' in source
     assert 'up --detach --no-build scheduler' in source

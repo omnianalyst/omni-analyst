@@ -31,12 +31,17 @@ export function refresh(): Promise<void> {
 
   currentPromise = getSystemStatus()
     .then((data) => {
+      // A response started under token A must not populate state after the
+      // session switched to token B: the snapshot would describe another
+      // account's system view while the old snapshot looks current.
+      if (getAuthToken() !== token) return;
       status.value = data;
       state.value = "ok";
       errorMessage.value = null;
       lastOkAt.value = Date.now();
     })
     .catch((err) => {
+      if (getAuthToken() !== token) return;
       const { message } = describeError(err);
       errorMessage.value = message;
       state.value = "error";

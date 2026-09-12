@@ -31,20 +31,29 @@ build_args=(
     --label "com.omnianalyst.neutron.revision=$neutron_revision"
     --label "com.omnianalyst.neutron.wheel.sha256=$wheel_digest"
 )
-docker build "${build_args[@]}" --file "$root/Dockerfile" --tag omni-api:latest "$root"
-docker build "${build_args[@]}" --file "$root/Dockerfile.scheduler" --tag omni-scheduler:latest "$root"
+run_id="${GITHUB_RUN_ID:-$$}"
+run_attempt="${GITHUB_RUN_ATTEMPT:-0}"
+job_suffix="$(printf '%s' "${GITHUB_JOB:-local}:$$" | shasum | cut -c1-12)"
+project="omni-ci-${run_id}-${run_attempt}-${job_suffix}"
+# Per-job tags, not daemon-global :latest aliases: a shared runner (or a
+# co-running local job) can swap a mutable tag between inspect and startup,
+# making this test exercise another run's images.
+export OMNI_CI_API_IMAGE="omni-api:$project"
+export OMNI_CI_SCHEDULER_IMAGE="omni-scheduler:$project"
+export OMNI_CI_POSTGRES_CONTAINER="${project}-postgres"
 
-for image in omni-api:latest omni-scheduler:latest; do
+docker build "${build_args[@]}" --file "$root/Dockerfile" \
+    --tag "$OMNI_CI_API_IMAGE" "$root"
+docker build "${build_args[@]}" --file "$root/Dockerfile.scheduler" \
+    --tag "$OMNI_CI_SCHEDULER_IMAGE" "$root"
+
+for image in "$OMNI_CI_API_IMAGE" "$OMNI_CI_SCHEDULER_IMAGE"; do
     recorded_revision="$(docker image inspect --format '{{ index .Config.Labels "com.omnianalyst.neutron.revision" }}' "$image")"
     recorded_digest="$(docker image inspect --format '{{ index .Config.Labels "com.omnianalyst.neutron.wheel.sha256" }}' "$image")"
     [[ "$recorded_revision" == "$neutron_revision" ]]
     [[ "$recorded_digest" == "$wheel_digest" ]]
 done
 
-run_id="${GITHUB_RUN_ID:-$$}"
-run_attempt="${GITHUB_RUN_ATTEMPT:-0}"
-project="omni-ci-${run_id}-${run_attempt}"
-export OMNI_CI_POSTGRES_CONTAINER="${project}-postgres"
 export API_PORT="$((18000 + ($$ % 1000)))"
 export POSTGRES_DB=omni_ci_production
 export POSTGRES_USER=postgres

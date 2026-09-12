@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = "omni@localhost"
 
+    # Hosts a SimpleFIN setup token may carry in its claim URL, and the same
+    # list bounds the access URL the claim exchanges into. The bridge is a
+    # fixed host by protocol; an operator self-hosting a bridge adds it here
+    # rather than the code accepting any https URL the token names.
+    simplefin_hosts: str = "bridge.simplefin.org"
+
     @property
     def licensed(self) -> tuple[str, ...]:
         return tuple(
