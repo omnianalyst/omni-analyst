@@ -1,9 +1,9 @@
 """Demand minus coverage, computed per audience.
 
-Every claim read goes through omni.coverage.visibility.visible_claims. A gap
-computed against claims the audience cannot see is a redistribution leak, so
-this module never queries the claim table directly: it asks visibility for what
-the demand's audience may see, and classifies what comes back.
+Every claim read goes through omni.coverage.visibility. A gap computed against
+claims the audience cannot see is a redistribution leak, so this module never
+queries the claim table directly: it asks visibility to summarize what the
+demand's audience may see, and classifies that summary.
 
 Each active demand row is evaluated against the claims visible to that demand's
 own audience (its `requested_by`). The optional `audience` argument to
@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from omni.coverage.visibility import visible_claims
+from omni.coverage.visibility import visible_claim_summary
 
 # The partial unique index from migration 001, spelled exactly as the index
 # expression so ON CONFLICT can infer against it. The COALESCE columns are why
@@ -117,18 +117,18 @@ async def detect_gaps(pool, *, audience: UUID | None = None) -> list[dict]:
     gaps: list[dict] = []
     now = datetime.now(UTC)
     for group in grouped.values():
-        claims = await visible_claims(
+        summary = await visible_claim_summary(
             pool,
             audience=group["audience"],
             entity_id=group["entity_id"],
             claim_type=group["claim_type"],
             key=group["key"],
         )
-        gaps.extend(_classify(group, claims, now))
+        gaps.extend(_classify(group, summary, now))
     return gaps
 
 
-def _classify(group: dict, claims: list, now: datetime) -> list[dict]:
+def _classify(group: dict, summary: dict, now: datetime) -> list[dict]:
     base = {
         "entity_id": group["entity_id"],
         "claim_type": group["claim_type"],
@@ -142,12 +142,12 @@ def _classify(group: dict, claims: list, now: datetime) -> list[dict]:
     # null-valued claim still counts as coverage here (FRED's "no figure
     # published yet"), which is what stops the engine from re-requesting a
     # known hole forever.
-    if not claims:
+    if not summary["count"]:
         return [_gap(base, "missing", group["weight"], {"reason": "no visible claim"})]
 
     out: list[dict] = []
 
-    newest = max(c["knowledge_date"] for c in claims)
+    newest = summary["newest"]
     if group["max_staleness"] is not None:
         age = now - newest
         if age > group["max_staleness"]:
@@ -164,7 +164,7 @@ def _classify(group: dict, claims: list, now: datetime) -> list[dict]:
                 )
             )
 
-    best = max(c["confidence"] for c in claims)
+    best = summary["best"]
     if group["min_confidence"] is not None and best < group["min_confidence"]:
         out.append(
             _gap(
@@ -177,52 +177,22 @@ def _classify(group: dict, claims: list, now: datetime) -> list[dict]:
 
     # unverified counts distinct sources, not rows: two vintages from the same
     # source are one voice, not corroboration.
-    sources = {c["source"] for c in claims}
+    sources = summary["sources"]
     if len(sources) == 1:
         out.append(
             _gap(
                 base,
                 "unverified",
                 group["weight"],
-                {"sole_source": next(iter(sources))},
+            {"sole_source": sources[0]},
             )
         )
 
-    conflicts = _find_contradictions(claims)
+    conflicts = summary["conflicts"]
     if conflicts:
         out.append(_gap(base, "contradictory", group["weight"], {"conflicts": conflicts}))
 
     return out
-
-
-def _find_contradictions(claims: list) -> list[dict]:
-    """Same (key, event_date) seen by two sources with two different values.
-
-    This is the class usually forgotten and the most valuable one to surface,
-    so it is detected independently of how complete coverage otherwise looks:
-    a demand with two corroborating sources on one event_date and a conflict
-    on another still has a contradictory gap.
-    """
-    by_key_event: dict[tuple, list] = {}
-    for c in claims:
-        by_key_event.setdefault((c["key"], c["event_date"]), []).append(c)
-
-    conflicts: list[dict] = []
-    for (key, event_date), group in by_key_event.items():
-        sources = {c["source"] for c in group}
-        if len(sources) < 2:
-            continue
-        values = {json.dumps(c["value"], sort_keys=True) for c in group}
-        if len(values) >= 2:
-            conflicts.append(
-                {
-                    "key": key,
-                    "event_date": event_date.isoformat(),
-                    "sources": sorted(sources),
-                    "values": [c["value"] for c in group],
-                }
-            )
-    return conflicts
 
 
 def _gap(base: dict, gap_class: str, weight: float, detail: dict) -> dict:
