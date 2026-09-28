@@ -95,5 +95,45 @@ async def test_summary_preserves_audience_and_contradiction_rules(db):
     other_classes = {g["gap_class"] for g in gaps if g["audience_user_id"] == other}
     assert owner_classes == {"contradictory"}
     assert other_classes == {"unverified"}
-    conflict = next(g for g in gaps if g["gap_class"] == "contradictory")
+    conflict = next(
+        g for g in gaps if g["gap_class"] == "contradictory" and g["entity_id"] == entity
+    )
     assert conflict["detail"]["conflicts"][0]["sources"] == ["owner_private", "sec_edgar"]
+    assert conflict["detail"]["conflicts"][0]["values"] == [
+        {"amount": 100}, {"amount": 200}
+    ]
+    assert conflict["detail"]["conflicts_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_conflict_details_are_bounded(db):
+    entity = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) VALUES ('macro', 'CONFLICT', 'Conflict') RETURNING id"
+    )
+    await db.pool.execute(
+        "INSERT INTO demand (entity_id, claim_type, key, channel, weight) "
+        "VALUES ($1, 'macro_series_point', 'DGS10', 'test', 1)",
+        entity,
+    )
+    await db.pool.execute(
+        """
+        INSERT INTO claim (entity_id, claim_type, key, value, source, event_date,
+                           knowledge_date, confidence, redistributable)
+        SELECT $1, 'macro_series_point', 'DGS10',
+               jsonb_build_object('value', source_number),
+               'source_' || source_number,
+               $2::timestamptz - day_number * interval '1 day',
+               $2::timestamptz - day_number * interval '1 day', 1, 'allowed'
+        FROM generate_series(1, 40) AS day_number
+        CROSS JOIN generate_series(1, 2) AS source_number
+        """,
+        entity,
+        datetime.now(UTC),
+    )
+
+    gaps = await detect_gaps(db.pool)
+    conflict = next(
+        g for g in gaps if g["gap_class"] == "contradictory" and g["entity_id"] == entity
+    )
+    assert len(conflict["detail"]["conflicts"]) == 32
+    assert conflict["detail"]["conflicts_truncated"] is True

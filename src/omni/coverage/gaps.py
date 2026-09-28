@@ -184,13 +184,20 @@ def _classify(group: dict, summary: dict, now: datetime) -> list[dict]:
                 base,
                 "unverified",
                 group["weight"],
-            {"sole_source": sources[0]},
+                {"sole_source": sources[0]},
             )
         )
 
     conflicts = summary["conflicts"]
     if conflicts:
-        out.append(_gap(base, "contradictory", group["weight"], {"conflicts": conflicts}))
+        out.append(
+            _gap(
+                base,
+                "contradictory",
+                group["weight"],
+                {"conflicts": conflicts, "conflicts_truncated": summary["conflicts_truncated"]},
+            )
+        )
 
     return out
 

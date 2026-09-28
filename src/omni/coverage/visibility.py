@@ -17,6 +17,7 @@ independent of any user.
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 # Deliberately a fragment rather than a view: callers need to compose it with
@@ -65,11 +66,11 @@ async def visible_claim_summary(
                 visible
                 + "SELECT c.key, c.event_date, "
                 + "array_agg(DISTINCT c.source ORDER BY c.source) AS sources, "
-                + "array_agg(c.value::text ORDER BY c.knowledge_date DESC, c.event_date DESC) AS values "
+                + "min(c.value::text) AS first_value, max(c.value::text) AS last_value "
                 + f"FROM visible c WHERE {where} "
                 + "GROUP BY c.key, c.event_date "
                 + "HAVING count(DISTINCT c.source) > 1 AND count(DISTINCT c.value) > 1 "
-                + "ORDER BY max(c.knowledge_date) DESC, c.event_date DESC",
+                + "ORDER BY max(c.knowledge_date) DESC, c.event_date DESC LIMIT 33",
                 *params,
             )
     return {
@@ -77,14 +78,15 @@ async def visible_claim_summary(
         "newest": row["newest"],
         "best": row["best"],
         "sources": row["sources"] or [],
+        "conflicts_truncated": len(conflicts) > 32,
         "conflicts": [
             {
                 "key": conflict["key"],
                 "event_date": conflict["event_date"].isoformat(),
                 "sources": conflict["sources"],
-                "values": conflict["values"],
+                "values": [json.loads(conflict["first_value"]), json.loads(conflict["last_value"])],
             }
-            for conflict in conflicts
+            for conflict in conflicts[:32]
         ],
     }
 
