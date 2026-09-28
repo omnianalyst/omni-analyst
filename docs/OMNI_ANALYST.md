@@ -1,18 +1,19 @@
 # Omni Analyst
 
 **The operating document for this repository.** Current state, architecture,
-invariants, deployment, and open work. Everything else in `docs/` and
-The operator's local `_orchestrator/` archive is either evidence, a deeper reference, or archived history.
+invariants, deployment, and open work. Other files in `docs/` and the
+operator's local `_orchestrator/` archive are evidence, deeper references, or history.
 
 Last full audit: **2026-08-13**. The deployment state changed after this audit:
 on 2026-09-27 the scheduler was stopped after repeated memory-pressure restarts.
 On 2026-09-28 it was absent from `docker ps -a`; the API and Postgres remained
-running. The cause is still under investigation. Do not use older "scheduler
-running" entries below as current status, and do not restart it to profile it.
-Every number below was read from the live system
-or the working tree on that date, not copied from an earlier document. Several
-move every session — the re-measure commands are at the end. Prefer measurement
-over this file, including when this file is confident.
+running. An isolated 500,000-claim reproduction found a large Python memory
+spike in the coverage sweep. The bounded-read fix is merged in source but has
+not been deployed to the live host; other causes remain possible. See
+[the scheduler incident record](SCHEDULER_INCIDENT_2026-09-27.md).
+Do not use older "scheduler running" entries below as current status, and do
+not restart it to profile it. The historical numbers below were measured on
+2026-08-13; re-measure before relying on them.
 
 ---
 
@@ -66,9 +67,12 @@ the public and Tailscale blocks (added 2026-09-08, backup at
 `/deployments/caddy/Caddyfile.bak-pre-finance`); pre-071 dump at
 `/tmp/pre-071-20260908-1940.dump` on the host; `NEUTRON_REVISION` in the
 host `.env` moved to `ed5be29c...` with `OMNI_REVISION=cfab313...`.
-Public `app.omnianalyst.com` was already 308-looping on every path before
-this deploy (Cloudflare↔origin condition, unfixed); the Tailscale `:8080`
-route serves correctly.
+Public `app.omnianalyst.com` was 308-looping before that deploy. On
+2026-09-28 the missing public route was restored on deploy-home2 Caddy:
+Cloudflare Tunnel → `http://app.omnianalyst.com` → infra-home
+`100.108.123.49:8080` over Tailscale. The public UI and `/health` now return
+200; the sign-in page rendered in a browser. The Tailscale `:8080` route also
+serves correctly. The scheduler remains stopped.
 
 Header carries brand and nav left; search (Cmd+K), the bulletin pin, and a gear
 dropdown right.
@@ -693,18 +697,22 @@ replaced rather than whatever was tagged days ago.
 
 ### Shared Caddy
 
-Public routing is the shared `caddy` container at `/deployments/caddy/Caddyfile`,
-**not** the compose `edge` service. When adding a top-level API router, update
-both the repo `Caddyfile` matcher and **both** Omni matchers in the shared config
-(public domain and Tailscale/internal). Page routes must stay out of the `@api`
-matcher so they serve the SPA; API paths use `/newpath/*`, not `/newpath`.
+The public request first reaches the shared Caddy on deploy-home2 through the
+Cloudflare Tunnel. Its manual `http://app.omnianalyst.com` block forwards to
+infra-home `100.108.123.49:8080`. Infra-home's shared Caddy at
+`/deployments/caddy/Caddyfile` then serves the UI and routes API paths. The
+compose `edge` service is not the public entry. When adding an API path, update
+the repo `Caddyfile` matcher and both Omni matchers on infra-home (port 8080 and
+Tailscale/internal). Page routes must stay out of `@api` so they serve the SPA;
+API paths use `/newpath/*`, not `/newpath`. Keep the deploy-home2 manual block
+outside Teploy-managed markers so normal Teploy edits retain it.
 
 ```bash
 docker exec caddy caddy validate --config /etc/caddy/Caddyfile
 docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
-Back up the shared config first — it routes unrelated services.
+Back up each shared config before editing it; both hosts route unrelated services.
 
 ### Backups
 
@@ -736,10 +744,10 @@ put a copy off-box or prove recovery from the newest production schema.
 ### Verification
 
 ```bash
-ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml ps'
-ssh deployment-host 'docker exec omni_postgres psql -U postgres -d omni_v2 -Atc "select max(version) from _neutron_migrations;"'
-ssh deployment-host 'curl -fsS http://127.0.0.1:49153/health'
-ssh deployment-host "curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: app.omnianalyst.com' http://127.0.0.1/bulletin"
+ssh root@100.108.123.49 'docker ps --filter name=omni-analyst'
+ssh root@100.108.123.49 'curl -fsS http://127.0.0.1:8080/health'
+ssh tyler@100.88.83.27 "curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: app.omnianalyst.com' http://127.0.0.1/bulletin"
+curl -fsS https://app.omnianalyst.com/health
 ```
 
 Unauthenticated `/bulletin` and `/wallets` must return **401**, not 200 — a 200
