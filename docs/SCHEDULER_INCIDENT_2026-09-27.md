@@ -35,7 +35,32 @@ constructor bug, now fixed in a separate code change. Evidence is saved at
 `Teploy/_internal/COMPLETION_2026-09-25/omni-replica-20260928.log` on the
 operator's workstation.
 
-Before restarting production: review and merge the missing-key fix; verify a
-larger production-like coverage snapshot and normal shutdown under the same
-limit; prepare a short monitored canary with a rollback trigger. The live
-scheduler should remain stopped until that plan is reviewed.
+## Production release boundary and restart plan
+
+The live `/opt/omni-analyst` checkout is at `72c0ae4` with uncommitted API and
+finance changes, while the running API image identifies revision `cfab313`.
+The live database records migration 071; current `main` includes migrations
+072 and 073. Scheduler startup calls `migrate()` before starting any loops.
+Starting a newly built scheduler against this database would therefore apply
+schema changes while the older API remains live. This is a separate deployment
+blocker, even though the isolated memory test passed. Do not update the live
+checkout, migrate the live database, or restart the scheduler as an incidental
+part of this investigation.
+
+Before a production restart:
+
+1. Reconcile the live uncommitted finance/API changes with a clean, reviewed
+   release commit. Record the exact API and scheduler image revisions and
+   check migrations 072/073 against the running API and live finance data.
+2. Take and verify a database backup, then exercise the complete migration and
+   matching API/scheduler images on an isolated copy with production-like
+   coverage volume. Check memory, swap, loop progress, and graceful shutdown
+   under the existing 1 GiB RAM / 1.25 GiB RAM-plus-swap limit.
+3. Review the release and rollback procedure before touching production. A
+   monitored scheduler canary must have outbound venue/trading actions disabled
+   until explicitly approved, a short observation window, and a stop trigger
+   for sustained memory growth, swap pressure, repeated restarts, or failed
+   sweeps. Preserve Ship and Observe throughout.
+
+The live scheduler remains stopped pending that review. The missing-key fix
+from the replica is also required in the release.
