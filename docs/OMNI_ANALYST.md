@@ -697,18 +697,22 @@ replaced rather than whatever was tagged days ago.
 
 ### Shared Caddy
 
-Public routing is the shared `caddy` container at `/deployments/caddy/Caddyfile`,
-**not** the compose `edge` service. When adding a top-level API router, update
-both the repo `Caddyfile` matcher and **both** Omni matchers in the shared config
-(public domain and Tailscale/internal). Page routes must stay out of the `@api`
-matcher so they serve the SPA; API paths use `/newpath/*`, not `/newpath`.
+The public request first reaches the shared Caddy on deploy-home2 through the
+Cloudflare Tunnel. Its manual `http://app.omnianalyst.com` block forwards to
+infra-home `100.108.123.49:8080`. Infra-home's shared Caddy at
+`/deployments/caddy/Caddyfile` then serves the UI and routes API paths. The
+compose `edge` service is not the public entry. When adding an API path, update
+the repo `Caddyfile` matcher and both Omni matchers on infra-home (port 8080 and
+Tailscale/internal). Page routes must stay out of `@api` so they serve the SPA;
+API paths use `/newpath/*`, not `/newpath`. Keep the deploy-home2 manual block
+outside Teploy-managed markers so normal Teploy edits retain it.
 
 ```bash
 docker exec caddy caddy validate --config /etc/caddy/Caddyfile
 docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
-Back up the shared config first — it routes unrelated services.
+Back up each shared config before editing it; both hosts route unrelated services.
 
 ### Backups
 
@@ -740,10 +744,10 @@ put a copy off-box or prove recovery from the newest production schema.
 ### Verification
 
 ```bash
-ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml ps'
-ssh deployment-host 'docker exec omni_postgres psql -U postgres -d omni_v2 -Atc "select max(version) from _neutron_migrations;"'
-ssh deployment-host 'curl -fsS http://127.0.0.1:49153/health'
-ssh deployment-host "curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: app.omnianalyst.com' http://127.0.0.1/bulletin"
+ssh root@100.108.123.49 'docker ps --filter name=omni-analyst'
+ssh root@100.108.123.49 'curl -fsS http://127.0.0.1:8080/health'
+ssh tyler@100.88.83.27 "curl -sS -o /dev/null -w '%{http_code}\n' -H 'Host: app.omnianalyst.com' http://127.0.0.1/bulletin"
+curl -fsS https://app.omnianalyst.com/health
 ```
 
 Unauthenticated `/bulletin` and `/wallets` must return **401**, not 200 — a 200
