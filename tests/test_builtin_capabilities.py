@@ -113,6 +113,10 @@ class TestInvocation:
         with pytest.raises(Unavailable):
             await registry.get("fred.series").call("GDP")
 
+    async def test_sleeve_history_without_a_fred_key_is_unavailable(self, registry):
+        with pytest.raises(Unavailable, match="no FRED API key configured"):
+            await registry.get("fred.sleeve_history").call("sleeve_cash")
+
     async def test_the_detector_capability_runs_on_a_frame(self, registry):
         import numpy as np
         import pandas as pd
