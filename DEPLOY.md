@@ -46,6 +46,13 @@ be added later. No separate Neutron checkout or wheel build is needed.
 Health: once the API is up, `GET /health` returns 200. `/openapi.json` and
 `/docs` describe the surface (provided by Neutron - do not hand-write them).
 
+The current public `app.omnianalyst.com` route enters a Cloudflare Tunnel on
+deploy-home2. Its Caddy `http://app.omnianalyst.com` block forwards over
+Tailscale to infra-home `100.108.123.49:8080`, where the Omni UI and API are
+served. The route was restored on 2026-09-28 after a same-URL 308 redirect
+loop; both the public UI and `/health` returned 200 afterward. The public site
+at `omnianalyst.com` is a separate static deployment.
+
 ## Migrations
 
 There is **no separate migration container**. The migrator runs inside the app
