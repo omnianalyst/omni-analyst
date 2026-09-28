@@ -15,10 +15,6 @@
 #             the provider API spend for the same coverage. Hard-capped at
 #             replicas: 1 on purpose; do not raise it.
 #
-# Build prerequisite (run once before `compose build`, see DEPLOY.md):
-#
-#   uv build --wheel --project ../../Neutron/python --out-dir vendor
-#
 # Secrets come from the operator's environment or a .env file in this directory
 # (compose loads it automatically). POSTGRES_PASSWORD and OMNI_JWT_SECRET are
 # required; compose will refuse to start without them.
@@ -79,9 +75,8 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        NEUTRON_WHEEL: ${NEUTRON_WHEEL:-vendor/neutron_py-0.1.0-py3-none-any.whl}
         OMNI_REVISION: ${OMNI_REVISION:?OMNI_REVISION is required}
-        NEUTRON_REVISION: ${NEUTRON_REVISION:?NEUTRON_REVISION is required}
+        NEUTRON_PACKAGE_VERSION: ${NEUTRON_PACKAGE_VERSION:?NEUTRON_PACKAGE_VERSION is required}
     image: omni-api:latest
     # Public market/reference providers must not depend on the host's optional
     # Tailscale MagicDNS resolver. Docker still resolves compose service names.
@@ -142,9 +137,8 @@ services:
       context: .
       dockerfile: Dockerfile.scheduler
       args:
-        NEUTRON_WHEEL: ${NEUTRON_WHEEL:-vendor/neutron_py-0.1.0-py3-none-any.whl}
         OMNI_REVISION: ${OMNI_REVISION:?OMNI_REVISION is required}
-        NEUTRON_REVISION: ${NEUTRON_REVISION:?NEUTRON_REVISION is required}
+        NEUTRON_PACKAGE_VERSION: ${NEUTRON_PACKAGE_VERSION:?NEUTRON_PACKAGE_VERSION is required}
     image: omni-scheduler:latest
     dns:
       - 1.1.1.1

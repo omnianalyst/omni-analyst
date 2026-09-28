@@ -6,12 +6,7 @@
 # startup, so this image is self-contained: bring it up pointed at a reachable
 # Postgres and it will migrate then serve.
 #
-# About neutron-py: the app depends on Neutron as an *editable local path*
-# (pyproject.toml [tool.uv.sources] -> ../../Neutron/python). That path lives
-# outside any build context rooted at the repo, and Docker cannot COPY above the
-# context. The operator therefore builds the Neutron wheel on the host and
-# places it under vendor/ before building. The wheel carries its source commit,
-# which must match the explicit NEUTRON_REVISION build argument.
+# Neutron is installed from the version and artifacts pinned in uv.lock.
 
 # --------------------------------------------------------------------------- #
 # Stage 1 - builder: resolve and install every dependency into a clean venv.   #
@@ -27,33 +22,10 @@ ENV UV_LINK_MODE=copy \
 
 WORKDIR /app
 
-# Stand up the project venv first; everything installs into it.
-RUN uv venv /app/.venv
-
-# Install the project's third-party dependencies from the lock, WITHOUT the
-# project itself and WITHOUT the editable neutron path. We export the frozen
-# lock to a requirements stream, strip the editable (-e ../../Neutron/python)
-# line and any neutron-py reference, and install the rest verbatim. This keeps
-# the build reproducible against uv.lock for every registry dependency.
 COPY pyproject.toml uv.lock ./
-RUN uv export --frozen --no-dev --no-emit-project --no-annotate \
-        | grep -vE '^[[:space:]]*-e[[:space:]]' \
-        | grep -vE 'neutron-py' \
-        > /tmp/requirements.txt \
- && uv pip install --python /app/.venv/bin/python -r /tmp/requirements.txt
-
-# Now the local framework, from the operator-built wheel. Placed after the heavy
-# registry install so a Neutron rebuild invalidates only this thin layer.
-ARG NEUTRON_WHEEL=vendor/neutron_py-0.1.0-py3-none-any.whl
-ARG NEUTRON_REVISION
-# Copy into a directory rather than to a fixed filename. A wheel renamed to
-# neutron.whl loses its version, and uv rejects it: PEP 427 filenames carry the
-# version and installers parse it rather than reading metadata first.
-COPY ${NEUTRON_WHEEL} /tmp/wheels/
-COPY ops/build_neutron_wheel.py /tmp/build_neutron_wheel.py
-RUN python /tmp/build_neutron_wheel.py verify \
-        --wheel /tmp/wheels/*.whl --expected "${NEUTRON_REVISION}" \
- && uv pip install --python /app/.venv/bin/python /tmp/wheels/*.whl
+ARG NEUTRON_PACKAGE_VERSION
+RUN uv sync --locked --no-dev --no-install-project \
+ && test "$(/app/.venv/bin/python -c 'import importlib.metadata; print(importlib.metadata.version("neutron-framework"))')" = "${NEUTRON_PACKAGE_VERSION}"
 
 # Application source and migrations. We do NOT pip-install the project: the
 # migrations loader (omni.db) finds migrations/ by walking up from this file
@@ -68,22 +40,20 @@ COPY migrations/ ./migrations/
 FROM python:3.12-slim-bookworm AS runtime
 
 ARG OMNI_REVISION
-ARG NEUTRON_REVISION
+ARG NEUTRON_PACKAGE_VERSION
 
-RUN printf '%s\n%s\n' "${OMNI_REVISION}" "${NEUTRON_REVISION}" \
-      | grep -Eq '^[0-9a-f]{40}$' \
- && test "$(printf '%s\n%s\n' "${OMNI_REVISION}" "${NEUTRON_REVISION}" \
-      | grep -Ec '^[0-9a-f]{40}$')" -eq 2
+RUN printf '%s' "${OMNI_REVISION}" | grep -Eq '^[0-9a-f]{40}$' \
+ && test -n "${NEUTRON_PACKAGE_VERSION}"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \
     PATH=/app/.venv/bin:${PATH} \
     OMNI_BUILD_REVISION=${OMNI_REVISION} \
-    NEUTRON_BUILD_REVISION=${NEUTRON_REVISION}
+    NEUTRON_PACKAGE_VERSION=${NEUTRON_PACKAGE_VERSION}
 
 LABEL org.opencontainers.image.revision=${OMNI_REVISION} \
-      com.omnianalyst.neutron.revision=${NEUTRON_REVISION}
+      com.omnianalyst.neutron.version=${NEUTRON_PACKAGE_VERSION}
 
 # pg_dump (exact server major: the store is Postgres 17, and a client older
 # than the server cannot dump it) for the Settings backup download. PGDG

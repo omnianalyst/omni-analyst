@@ -4,7 +4,12 @@
 invariants, deployment, and open work. Everything else in `docs/` and
 The operator's local `_orchestrator/` archive is either evidence, a deeper reference, or archived history.
 
-Last measured: **2026-08-13**. Every number below was read from the live system
+Last full audit: **2026-08-13**. The deployment state changed after this audit:
+on 2026-09-27 the scheduler was stopped after repeated memory-pressure restarts.
+On 2026-09-28 it was absent from `docker ps -a`; the API and Postgres remained
+running. The cause is still under investigation. Do not use older "scheduler
+running" entries below as current status, and do not restart it to profile it.
+Every number below was read from the live system
 or the working tree on that date, not copied from an earlier document. Several
 move every session — the re-measure commands are at the end. Prefer measurement
 over this file, including when this file is confident.
@@ -410,7 +415,7 @@ docs/research/ hypothesis registry and the evidence ledger
 
 Remote: `<your-forgejo>/Tyler/omni-analyst.git`
 
-Neutron is a sibling checkout. Framework defects go to
+Omni pins `neutron-framework` to an exact PyPI version in `pyproject.toml` and `uv.lock`. Framework defects go to
 `Neutron/docs/ADOPTION_FINDINGS.md` — not here, and not in a comment.
 
 ### Git state
@@ -587,34 +592,17 @@ uv run uvicorn omni.main:app --reload
 Health, OpenAPI and docs are provided by Neutron at `/health`, `/openapi.json`
 and `/docs`. Do not hand-write them.
 
-### The Neutron wheel prerequisite
+### Neutron dependency
 
-`pyproject.toml` declares `neutron-py` as an editable path dependency at
-`../../Neutron/python`, outside the repo, so Docker cannot COPY it. Build the
-wheel on the host first, from the repository root. The Dockerfiles verify the
-wheel's `X-Neutron-Revision` stamp and compose requires both revision
-variables, so use the stamping helper rather than a plain `uv build`:
+`pyproject.toml` pins `neutron-framework==0.1.0`; `uv.lock` records the PyPI
+wheel and source hashes. The stack script installs it with the other locked
+dependencies. No second checkout or local wheel build is needed:
 
 ```bash
-set -euo pipefail
-export OMNI_REVISION=$(git rev-parse HEAD)
-export NEUTRON_REVISION=$(git -C ../../Neutron/python rev-parse HEAD)
-out="vendor/$NEUTRON_REVISION"
-python3 ops/build_neutron_wheel.py build --project ../../Neutron/python --out-dir "$out"
-shopt -s nullglob
-wheels=("$out"/neutron_py-*.whl)
-[[ ${#wheels[@]} -eq 1 ]] || { echo 'Expected exactly one Neutron wheel' >&2; exit 1; }
-export NEUTRON_WHEEL="${wheels[0]}"
-python3 ops/build_neutron_wheel.py verify \
-  --wheel "$NEUTRON_WHEEL" --expected "$NEUTRON_REVISION"
-npm --prefix ui run build
-docker compose -f docker-compose.prod.yml config --quiet
-docker compose -f docker-compose.prod.yml build api scheduler
+./ops/start_stack.sh
 ```
 
-`vendor/` is operator-created and untracked, like `.env`. The helper refuses
-dirty Neutron source. If that dependency moves again, CI breaks the same way
-and the failure reads as a uv error rather than a layout problem.
+The image verifies the installed package version against the exact project pin.
 
 ### Required configuration
 
@@ -656,38 +644,39 @@ The host at `/srv/omni` is an rsync target, not a git checkout (its
 `.git` is an empty repo on `master`), so the deploy is:
 
 ```bash
-# from the repo root, with the suite and the UI green; the section-7 block
-# above has already produced $NEUTRON_WHEEL and both revision variables
+# from the repo root, with the suite and the UI green
+export OMNI_REVISION="$(git rev-parse HEAD)"
+export NEUTRON_PACKAGE_VERSION="$(python3 ops/neutron_package.py)"
 npm --prefix ui run build
 
 rsync -az --delete --exclude='__pycache__' --exclude='*.pyc' src/ deployment-host:/srv/omni/src/
 rsync -az --delete migrations/ deployment-host:/srv/omni/migrations/
 rsync -az --delete ui/dist/   deployment-host:/srv/omni/ui/dist/
-rsync -az --relative "$NEUTRON_WHEEL" deployment-host:/srv/omni/
 rsync -az pyproject.toml uv.lock Dockerfile Dockerfile.scheduler \
           docker-compose.prod.yml Caddyfile .dockerignore AGENTS.md \
           deployment-host:/srv/omni/
 rsync -az --exclude='__pycache__' --exclude='*.log' ops/ deployment-host:/srv/omni/ops/
 
 ssh deployment-host bash -s -- \
-  "$OMNI_REVISION" "$NEUTRON_REVISION" "$NEUTRON_WHEEL" <<'REMOTE_BUILD'
+  "$OMNI_REVISION" "$NEUTRON_PACKAGE_VERSION" <<'REMOTE_BUILD'
 set -euo pipefail
 cd /srv/omni
-export OMNI_REVISION="$1" NEUTRON_REVISION="$2" NEUTRON_WHEEL="$3"
+export OMNI_REVISION="$1" NEUTRON_PACKAGE_VERSION="$2"
 docker compose -f docker-compose.prod.yml config --quiet
 docker compose -f docker-compose.prod.yml build api scheduler
 REMOTE_BUILD
-ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml up -d --no-build api scheduler'
+# Start api only after verifying the new images. The live scheduler is paused
+# pending its separate memory investigation; do not start it from this recipe.
+ssh deployment-host 'cd /srv/omni && docker compose -f docker-compose.prod.yml up -d --no-build api'
 ```
 
-The revision variables are passed from the LOCAL checkout on the ssh command
+The revision and package version are passed from the LOCAL checkout on the ssh command
 line -- the host's `.git` is an empty repo, so its history cannot supply them.
 
 Three things that will bite:
 
-- **Rebuild the Neutron wheel** rather than reusing the one on the host. The
-  tests run against the editable checkout, so a stale wheel deploys a framework
-  the suite never exercised.
+- **Use the locked PyPI artifact** in both images. The application tests and
+  image build must exercise the same `neutron-framework` version.
 - **`--delete` on `ops/` would remove the cron scripts.** They now live in the
   repo (`carry_cycle.sh`, `nav_snapshot.sh`, `launch_sweep.sh`,
   `nav_snapshot.py`) precisely so that stops being true, but the host also holds

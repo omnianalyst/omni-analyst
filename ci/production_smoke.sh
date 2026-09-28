@@ -2,34 +2,16 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-neutron_python="${1:-$root/../../Neutron/python}"
-neutron_repo="$(git -C "$neutron_python" rev-parse --show-toplevel)"
-neutron_revision="$(git -C "$neutron_repo" rev-parse HEAD)"
+neutron_version="$(python3 "$root/ops/neutron_package.py")"
 app_revision="${GITHUB_SHA:-$(git -C "$root" rev-parse HEAD)}"
-wheel_dir="$root/vendor/ci-wheel-$neutron_revision"
 
-mkdir -p "$wheel_dir"
-uv run python "$root/ops/build_neutron_wheel.py" build \
-    --project "$neutron_python" --out-dir "$wheel_dir"
-wheel_candidates=("$wheel_dir"/neutron_py-*.whl)
-if [[ ${#wheel_candidates[@]} -ne 1 || ! -f "${wheel_candidates[0]}" ]]; then
-    printf 'expected one Neutron wheel in %s\n' "$wheel_dir" >&2
-    exit 1
-fi
-wheel="${wheel_candidates[0]}"
-wheel_relative="${wheel#"$root/"}"
-wheel_digest="$(python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$wheel")"
-
-printf 'Neutron source: %s@%s\n' "$neutron_repo" "$neutron_revision"
-printf 'Neutron wheel: %s sha256:%s\n' "$wheel_relative" "$wheel_digest"
+printf 'Neutron PyPI version: %s\n' "$neutron_version"
 
 build_args=(
-    --build-arg "NEUTRON_WHEEL=$wheel_relative"
     --build-arg "OMNI_REVISION=$app_revision"
-    --build-arg "NEUTRON_REVISION=$neutron_revision"
+    --build-arg "NEUTRON_PACKAGE_VERSION=$neutron_version"
     --label "org.opencontainers.image.revision=$app_revision"
-    --label "com.omnianalyst.neutron.revision=$neutron_revision"
-    --label "com.omnianalyst.neutron.wheel.sha256=$wheel_digest"
+    --label "com.omnianalyst.neutron.version=$neutron_version"
 )
 run_id="${GITHUB_RUN_ID:-$$}"
 run_attempt="${GITHUB_RUN_ATTEMPT:-0}"
@@ -48,10 +30,8 @@ docker build "${build_args[@]}" --file "$root/Dockerfile.scheduler" \
     --tag "$OMNI_CI_SCHEDULER_IMAGE" "$root"
 
 for image in "$OMNI_CI_API_IMAGE" "$OMNI_CI_SCHEDULER_IMAGE"; do
-    recorded_revision="$(docker image inspect --format '{{ index .Config.Labels "com.omnianalyst.neutron.revision" }}' "$image")"
-    recorded_digest="$(docker image inspect --format '{{ index .Config.Labels "com.omnianalyst.neutron.wheel.sha256" }}' "$image")"
-    [[ "$recorded_revision" == "$neutron_revision" ]]
-    [[ "$recorded_digest" == "$wheel_digest" ]]
+    recorded_version="$(docker image inspect --format '{{ index .Config.Labels "com.omnianalyst.neutron.version" }}' "$image")"
+    [[ "$recorded_version" == "$neutron_version" ]]
 done
 
 export API_PORT="$((18000 + ($$ % 1000)))"
@@ -61,8 +41,7 @@ export POSTGRES_PASSWORD=synthetic-ci-postgres-password
 export OMNI_JWT_SECRET=synthetic-ci-jwt-secret-at-least-thirty-two-characters
 export OMNI_CREDENTIAL_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 export OMNI_REVISION="$app_revision"
-export NEUTRON_REVISION="$neutron_revision"
-export NEUTRON_WHEEL="$wheel_relative"
+export NEUTRON_PACKAGE_VERSION="$neutron_version"
 export DEBUG=false
 export FRED_API_KEY=
 export POLYGON_API_KEY=
