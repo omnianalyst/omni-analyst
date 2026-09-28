@@ -194,7 +194,7 @@ class SleeveHistoryAdapter:
     def __init__(
         self,
         *,
-        api_key: str | None,
+        api_key: str | None = None,
         fetch_fn: ObsFetcher | None = None,
         pink_fn: BytesFetcher | None = None,
     ):
