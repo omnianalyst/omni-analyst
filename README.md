@@ -31,15 +31,30 @@ the shared claim network.
 
 ## Running it
 
+Install Git, Docker with Compose, [uv](https://docs.astral.sh/uv/getting-started/installation/),
+and Node.js 22 or newer. Start Docker, then clone this repository and run:
+
 ```bash
-docker compose up -d postgres
-uv sync --extra dev
-uv run uvicorn omni.main:app --reload
+git clone https://github.com/omnianalyst/omni-analyst.git
+cd omni-analyst
+./ops/dev.sh
 ```
 
-See `DEPLOY.md` for the production stack (API, scheduler, Timescale Postgres,
-Caddy edge) and the full configuration reference. The only source of truth for
-settings is `src/omni/config.py`.
+Open [http://localhost:5173](http://localhost:5173) and create the first
+operator account. `uv` installs the pinned `neutron-framework` release from PyPI; the script generates a local
+token-signing secret in `.env`, starts Postgres in Docker, installs the Python
+and UI dependencies, and runs the API, scheduler, and UI. Press Ctrl-C to stop
+the app; `docker compose down` stops Postgres. On later runs, use the same
+command. Neutron is a Python dependency; no separate Neutron server or checkout is needed.
+
+If port 5434 is busy, change the host port in `docker-compose.yml` and the
+matching port in `.env`'s `DATABASE_URL`. The API running on your computer uses
+`localhost:5434`; an API running **inside** Docker must use the Compose service
+name `postgres:5432`. The production Compose file sets that address itself.
+
+For a server deployment, see [DEPLOY.md](DEPLOY.md). It describes the separate
+API and scheduler images, image provenance, secrets, and reverse proxy. The
+application setting names are defined in `src/omni/config.py`.
 
 ## The live site
 

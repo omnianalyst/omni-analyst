@@ -10,9 +10,9 @@ def test_gate_runs_historical_upgrades_and_production_smoke():
 
     assert "uv run python ci/historical_schema_upgrade.py" in workflow
     assert "production-smoke:" in workflow
-    assert "repository: neutron-build/neutron" in workflow
-    assert "path: Neutron" in workflow
-    assert "./ci/production_smoke.sh ../../Neutron/python" in workflow
+    assert "repository: neutron-build/neutron" not in workflow
+    assert "uv sync --locked --extra dev" in workflow
+    assert "./ci/production_smoke.sh" in workflow
     assert workflow.count("working-directory: omni-analyst/app-v2") >= 5
 
 
@@ -46,12 +46,11 @@ def test_production_smoke_contract_is_static_and_offline():
     overlay = (ROOT / "ci" / "compose.production-smoke.yml").read_text()
     environment = (ROOT / "ci" / "fixtures" / "production-smoke.env").read_text()
 
-    assert 'ops/build_neutron_wheel.py" build' in source
-    assert 'git -C "$neutron_repo" rev-parse HEAD' in source
+    assert 'ops/neutron_package.py"' in source
     assert '--build-arg "OMNI_REVISION=$app_revision"' in source
-    assert '--build-arg "NEUTRON_REVISION=$neutron_revision"' in source
-    assert "com.omnianalyst.neutron.revision" in source
-    assert "com.omnianalyst.neutron.wheel.sha256" in source
+    assert '--build-arg "NEUTRON_PACKAGE_VERSION=$neutron_version"' in source
+    assert "com.omnianalyst.neutron.version" in source
+    assert "neutron-framework" in (ROOT / "pyproject.toml").read_text()
     # Per-job image tags, never the daemon-global :latest alias a concurrent
     # job can swap between inspect and startup (U10).
     assert '--tag "$OMNI_CI_API_IMAGE"' in source
