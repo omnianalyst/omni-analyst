@@ -17,6 +17,7 @@ independent of any user.
 
 from __future__ import annotations
 
+import json
 from uuid import UUID
 
 # Deliberately a fragment rather than a view: callers need to compose it with
@@ -34,6 +35,60 @@ WHERE c.superseded_by IS NULL
 def visible_claims_cte(audience_param: str = "$1") -> str:
     """The visibility fragment as a CTE body, for composing into a larger query."""
     return VISIBLE_CLAIMS.replace("$1", audience_param)
+
+
+async def visible_claim_summary(
+    pool,
+    *,
+    audience: UUID | None,
+    entity_id: UUID,
+    claim_type: str,
+    key: str | None,
+) -> dict:
+    """Summarize a demanded fact without materializing its claim history."""
+    params = [audience, entity_id, claim_type]
+    where = "c.entity_id = $2 AND c.claim_type = $3::claim_type"
+    if key is not None:
+        params.append(key)
+        where += " AND c.key = $4"
+    visible = f"WITH visible AS ({visible_claims_cte()}) "
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        row = await conn.fetchrow(
+            visible
+            + "SELECT count(*) AS count, max(c.knowledge_date) AS newest, "
+            + "max(c.confidence) AS best, array_agg(DISTINCT c.source) AS sources "
+            + f"FROM visible c WHERE {where}",
+            *params,
+        )
+        conflicts = []
+        if row["sources"] is not None and len(row["sources"]) > 1:
+            conflicts = await conn.fetch(
+                visible
+                + "SELECT c.key, c.event_date, "
+                + "array_agg(DISTINCT c.source ORDER BY c.source) AS sources, "
+                + "min(c.value::text) AS first_value, max(c.value::text) AS last_value "
+                + f"FROM visible c WHERE {where} "
+                + "GROUP BY c.key, c.event_date "
+                + "HAVING count(DISTINCT c.source) > 1 AND count(DISTINCT c.value) > 1 "
+                + "ORDER BY max(c.knowledge_date) DESC, c.event_date DESC LIMIT 33",
+                *params,
+            )
+    return {
+        "count": row["count"],
+        "newest": row["newest"],
+        "best": row["best"],
+        "sources": row["sources"] or [],
+        "conflicts_truncated": len(conflicts) > 32,
+        "conflicts": [
+            {
+                "key": conflict["key"],
+                "event_date": conflict["event_date"].isoformat(),
+                "sources": conflict["sources"],
+                "values": [json.loads(conflict["first_value"]), json.loads(conflict["last_value"])],
+            }
+            for conflict in conflicts[:32]
+        ],
+    }
 
 
 async def visible_claims(
