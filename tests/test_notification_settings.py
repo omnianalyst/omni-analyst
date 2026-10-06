@@ -98,7 +98,26 @@ async def test_invalid_webhooks_are_refused_at_save_time(webhook, database_url):
 
 
 @pytest.mark.parametrize(
-    "email", ["not-an-email", "missing@tld", "a b@example.com", ""]
+    "email",
+    [
+        "not-an-email",
+        "missing@tld",
+        "a b@example.com",
+        "",
+        # Consecutive/edged dots in the local part -- no relay accepts
+        # them; the old single regex did (audit A15).
+        "foo..bar@example.com",
+        ".foo@example.com",
+        "foo.@example.com",
+        # Domain-label pathologies.
+        "a@b..com",
+        "a@-b.com",
+        "a@b-.com",
+        # Single-character TLD.
+        "a@b.c",
+        # Over-length local part (64 is the ceiling).
+        ("l" * 65) + "@example.com",
+    ],
 )
 async def test_malformed_emails_are_refused_at_save_time(email, database_url):
     client, cm, lifespan, headers = await _authed_client(database_url)
@@ -116,6 +135,59 @@ async def test_malformed_emails_are_refused_at_save_time(email, database_url):
     finally:
         await cm.__aexit__(None, None, None)
         await lifespan.__aexit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    "email",
+    ["plain@example.com", "first.last+tag@example.co.uk", "o'neill@example.com"],
+)
+async def test_valid_mailboxes_are_accepted_at_save_time(email, database_url):
+    client, cm, lifespan, headers = await _authed_client(database_url)
+    try:
+        r = await client.put(
+            "/settings/notifications",
+            json={"email": email},
+            headers=headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["email"] == email
+    finally:
+        await cm.__aexit__(None, None, None)
+        await lifespan.__aexit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    "webhook",
+    [
+        # A non-numeric port used to escape as a ValueError (500) from
+        # urlsplit's deferred .port access (audit A15).
+        "https://hooks.example.com:notaport/x",
+        # Out-of-range ports raise the same way.
+        "https://hooks.example.com:99999/x",
+    ],
+)
+async def test_malformed_webhook_ports_are_a_400_not_an_exception(
+    webhook, database_url
+):
+    client, cm, lifespan, headers = await _authed_client(database_url)
+    try:
+        r = await client.put(
+            "/settings/notifications",
+            json={"webhook_url": webhook},
+            headers=headers,
+        )
+        assert r.status_code == 400, r.text
+        assert "port" in r.json()["detail"].lower()
+    finally:
+        await cm.__aexit__(None, None, None)
+        await lifespan.__aexit__(None, None, None)
+
+
+def test_the_delivery_path_refuses_a_bad_port_as_a_failure():
+    from omni.alerts.notify import _validated_webhook_url
+
+    with pytest.raises(RuntimeError):
+        _validated_webhook_url("https://hooks.example.com:notaport/x")
 
 
 async def test_valid_configuration_persists_and_reports_delivery_state(

@@ -71,10 +71,11 @@ async def db():
     client = await connect(TEST_DATABASE_URL)
     await migrate(client)
     # Cross-test state that is keyed outside the users table (which each
-    # test file truncates itself): the login-throttle streak survives a users
-    # TRUNCATE, and a streak left by one file's brute-force test must not
-    # 429 an unrelated file's login.
+    # test file truncates itself): the login-throttle streak AND the
+    # admission budgets survive a users TRUNCATE, and state left by one
+    # file's brute-force test must not 429 an unrelated file's login.
     await client.pool.execute("TRUNCATE auth_throttle_event")
+    await client.pool.execute("TRUNCATE auth_budget")
     try:
         yield client
     finally:

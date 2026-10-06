@@ -95,6 +95,34 @@ async def main() -> None:
     )
     await scheduler.start()
 
+    lease_lost = asyncio.Event()
+
+    async def lease_watchdog() -> None:
+        """Stop the scheduler if it loses the singleton lease (audit A12).
+
+        The lease is a session advisory lock on a dedicated connection. If
+        that connection dies -- database restart, idle timeout, network -- the
+        lock is released and a successor may start, while this process kept
+        its loops running on the pool: two schedulers, double API spend, no
+        error anywhere. A liveness probe on the lease connection detects the
+        loss; the honest response is to stop (loudly) and let the supervisor
+        restart us, not to keep working without ownership.
+        """
+        while not stopping.is_set():
+            await asyncio.sleep(30.0)
+            if stopping.is_set():
+                return
+            if not await singleton.verify():
+                logger.error(
+                    "scheduler lost its singleton lease (lease connection "
+                    "unhealthy); stopping to avoid double-running"
+                )
+                lease_lost.set()
+                stopping.set()
+                return
+
+    watchdog = asyncio.create_task(lease_watchdog())
+
     from omni.autonomous.runner import AutonomousConfig
 
     autonomous = AutonomousRunner(
@@ -124,11 +152,19 @@ async def main() -> None:
         venues.cancel()
         with suppress(asyncio.CancelledError):
             await venues
+        watchdog.cancel()
+        with suppress(asyncio.CancelledError):
+            await watchdog
         await disconnect_all()
         await autonomous.stop()
         await scheduler.stop()
         await singleton.release()
         await client.close()
+    if lease_lost.is_set():
+        # Non-zero so restart policies that key on exit status restart us;
+        # the lease is gone and a successor (or this process, restarted)
+        # must take it over deliberately.
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":

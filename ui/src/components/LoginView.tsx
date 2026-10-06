@@ -34,9 +34,19 @@ export function LoginView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signedIn, setSignedIn] = useState(false);
+  const [reason, setReason] = useState<string | null>(null);
 
   useEffect(() => {
     setSignedIn(getAuthToken() !== null);
+    // password-changed / sessions-revoked arrive from auth flows that
+    // cleared the token and sent the browser here; without the banner the
+    // operator sees a bare login screen and assumes something broke.
+    const why = new URLSearchParams(window.location.search).get("reason");
+    if (why === "password-changed") {
+      setReason("Your password was changed. Sign in with your new password.");
+    } else if (why === "sessions-revoked") {
+      setReason("All sessions were signed out. Sign in to continue.");
+    }
   }, []);
 
   async function onSubmit(e: Event) {
@@ -89,6 +99,7 @@ export function LoginView() {
         </section>
       ) : (
         <section class="panel">
+          {reason ? <p class="muted" style={{ marginBottom: "12px" }}>{reason}</p> : null}
           <form class="auth-form" onSubmit={onSubmit}>
             <label class="auth-field">
               <span class="auth-label">Email</span>

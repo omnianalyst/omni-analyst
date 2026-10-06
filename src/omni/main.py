@@ -21,10 +21,23 @@ def create_app(database_url: str | None = None) -> App:
         # shared-data responses wherever anonymous is valid. An infrastructure
         # failure must not impersonate an unauthenticated caller.
         jwt_secret()
+        # Same rule for proxy trust: an unparsable OMNI_TRUSTED_PROXIES entry
+        # would otherwise surface as a per-request exception on the login
+        # path, or worse, quietly change which peer addresses are trusted.
+        from omni.auth.forwarded import validate_trusted_proxies
+
+        validate_trusted_proxies(settings.omni_trusted_proxies)
         client = await connect(url)
         await migrate(client)
         neutron_app.db = client
         neutron_app.state.db = client
+        # Prime the dummy password hash and the hashing executor: the first
+        # unknown-email login then verifies against a ready hash instead of
+        # paying a one-time hash inside a request (and the executor's thread
+        # is known-good before any credential depends on it).
+        from omni.auth.users import prime_password_hash
+
+        await prime_password_hash()
         try:
             yield
         finally:

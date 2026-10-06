@@ -48,6 +48,17 @@ MAX_DELIVERY_ATTEMPTS = 5
 DELIVERY_BACKOFF_BASE = timedelta(seconds=60.0)
 DELIVERY_TTL = timedelta(hours=24.0)
 DELIVERY_BATCH = 20
+#: How long a claimed row is invisible to other workers. Covers one batch of
+#: bounded sends (webhook 5s, SMTP 10s each); after that a crashed worker's
+#: rows become due again and are retried -- at-least-once, not at-most-once.
+DELIVERY_CLAIM_LEASE = timedelta(seconds=60.0)
+#: Terminal rows (delivered/failed) are queue status, not an archive: the
+#: payload carries the destination (a webhook URL can embed a secret token)
+#: and the message body, so holding them forever is holding plaintext
+#: destinations indefinitely (audit A11). A delivery window is 24h, so a
+#: row is terminal within ~24h of creation; anything still around a week
+#: later is history nobody can act on, and maintenance deletes it.
+DELIVERY_RETENTION = timedelta(days=7.0)
 
 
 def _destination_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -82,6 +93,12 @@ def _validated_webhook_url(url: str) -> str:
     vector, not as a convenience: no userinfo, no fragment, no redirects, no
     proxy env, and every address the host resolves to must be global unicast
     before a connection is opened.
+
+    ``urlsplit`` defers parsing the port until ``.port`` is touched, and a
+    non-numeric or out-of-range port makes THAT access raise ValueError --
+    which used to escape this function as a 500 on save and an unclassified
+    error per delivery attempt (audit A15). The port is read inside the
+    guard so a bad port is an ordinary refused URL.
     """
     try:
         parts = urlsplit(url)
@@ -93,14 +110,16 @@ def _validated_webhook_url(url: str) -> str:
         raise RuntimeError("webhook url must not carry credentials in the host")
     if parts.fragment:
         raise RuntimeError("webhook url must not carry a fragment")
-    if parts.port is not None and parts.port != 443:
-        raise RuntimeError(
-            f"webhook url must use port 443, got {parts.port}"
-        )
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise RuntimeError(f"webhook url port is invalid: {exc}") from exc
+    if port is not None and port != 443:
+        raise RuntimeError(f"webhook url must use port 443, got {port}")
     if not parts.hostname:
         raise RuntimeError("webhook url has no host")
     try:
-        literal = ipaddress.ip_address(parts.hostname)
+        literal = ipaddress.ip_address(parts.hostname.strip("[]"))
     except ValueError:
         return url
     if not _destination_allowed(literal):
@@ -313,22 +332,30 @@ def _send_email_message(to_address: str, msg: EmailMessage) -> None:
         smtp.send_message(msg)
 
 
-async def dispatch(pool, alert, firings: list) -> None:
+async def dispatch(pool, alert, firings: list, *, conn=None) -> None:
     """Enqueue delivery of one alert's new firings through every channel.
 
     No network happens here: rows in notification_delivery carry everything a
     retry needs (full message content and destination), and the scheduler's
     delivery loop does the sending with bounded retries. A channel that is
     down costs its row a retry, not the notification.
+
+    With ``conn`` given, every write runs on that caller's connection and
+    inside the caller's transaction: firing and enqueue commit or roll back
+    as one unit (audit A09). A firing whose notification rows were lost to a
+    crash between the two transactions could never be re-detected -- the
+    firing record is exactly what evaluation skips as already-done.
     """
-    notify = await _notify_config(pool, alert["user_id"])
+    executor = conn if conn is not None else pool
+
+    notify = await _notify_config(executor, alert["user_id"])
 
     webhook_url = notify.get("webhook_url")
     email_to = notify.get("email")
     if not webhook_url and not email_to:
         return
 
-    entity_symbol = await pool.fetchval(
+    entity_symbol = await executor.fetchval(
         "SELECT symbol FROM entity WHERE id = $1", alert["entity_id"]
     )
     payload = _payload(alert, firings, entity_symbol)
@@ -353,7 +380,7 @@ async def dispatch(pool, alert, firings: list) -> None:
             )
         )
     for channel, queued in rows:
-        await pool.execute(
+        await executor.execute(
             """
             INSERT INTO notification_delivery
                 (user_id, alert_id, channel, payload)
@@ -416,13 +443,26 @@ async def process_delivery_queue(
     batch: int = DELIVERY_BATCH,
     max_attempts: int = MAX_DELIVERY_ATTEMPTS,
     ttl: timedelta = DELIVERY_TTL,
+    retention: timedelta = DELIVERY_RETENTION,
 ) -> dict[str, int]:
     """Work the due part of the delivery queue once. Returns outcome counts.
 
-    Rows are claimed FOR UPDATE SKIP LOCKED, so two delivery workers (or a
-    manual run against a live scheduler) never send the same notification
-    twice. Old pending rows expire to failed without an attempt: a retry
-    landing hours after the event is noise, not alerting.
+    Claims rows in one short transaction (SKIP LOCKED, so two delivery
+    workers -- or a manual run against a live scheduler -- never send the
+    same notification twice inside a pass), then sends OUTSIDE any
+    transaction, then writes each outcome as its own committed statement.
+
+    The sends used to happen inside the claiming transaction: one aborted
+    transaction (a later row's UPDATE failing, a dropped connection) rolled
+    every already-sent row's ``delivered`` update back, and the next pass
+    re-sent the whole batch (audit A10). A crash between a successful send
+    and its outcome write still re-sends that one row when its claim lease
+    lapses -- at-least-once delivery, the honest minimum for a queue whose
+    consumers are webhooks and mailboxes.
+
+    Old pending rows expire to failed without an attempt: a retry landing
+    hours after the event is noise, not alerting. Terminal rows older than
+    ``retention`` are deleted in the same bounded pass (audit A11).
     """
     moment = now or datetime.now(UTC)
     expired = await pool.execute(
@@ -433,7 +473,28 @@ async def process_delivery_queue(
         """,
         moment - ttl,
     )
-    outcomes = {"delivered": 0, "retried": 0, "failed": 0, "expired": max(0, int(expired.split()[-1]))}
+    purged_rows = await pool.fetch(
+        """
+        WITH old AS (
+            SELECT ctid FROM notification_delivery
+            WHERE status IN ('delivered', 'failed')
+              AND created_at < $1
+            ORDER BY created_at
+            LIMIT 1000
+            FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM notification_delivery n USING old WHERE n.ctid = old.ctid
+        RETURNING 1
+        """,
+        moment - retention,
+    )
+    outcomes = {
+        "delivered": 0,
+        "retried": 0,
+        "failed": 0,
+        "expired": max(0, int(expired.split()[-1])),
+        "purged": len(purged_rows),
+    }
 
     async with pool.acquire() as conn, conn.transaction():
         rows = await conn.fetch(
@@ -449,60 +510,70 @@ async def process_delivery_queue(
             batch,
         )
         for row in rows:
-            queued = row["payload"]
-            if isinstance(queued, str):
-                queued = json.loads(queued)
-            try:
-                await _attempt_delivery(queued)
-            except Exception as exc:  # noqa: BLE001 - one dead row must not stop the batch
-                attempts = int(row["attempts"]) + 1
-                error = f"{type(exc).__name__}: {exc}"[:500]
-                if attempts >= max_attempts:
-                    await conn.execute(
-                        """
-                        UPDATE notification_delivery
-                        SET status = 'failed', attempts = $2, last_error = $3
-                        WHERE id = $1
-                        """,
-                        row["id"],
-                        attempts,
-                        error,
-                    )
-                    outcomes["failed"] += 1
-                else:
-                    backoff = DELIVERY_BACKOFF_BASE * (2 ** (attempts - 1))
-                    await conn.execute(
-                        """
-                        UPDATE notification_delivery
-                        SET attempts = $2, last_error = $3,
-                            next_attempt_at = $4
-                        WHERE id = $1
-                        """,
-                        row["id"],
-                        attempts,
-                        error,
-                        moment + backoff,
-                    )
-                    outcomes["retried"] += 1
-                logger.warning(
-                    "notification delivery %s failed (attempt %d): %s",
-                    row["id"],
-                    attempts,
-                    error,
-                )
-            else:
-                await conn.execute(
+            # The claim: attempts counted now, the row invisible to other
+            # workers for the lease window. Committed before any send.
+            await conn.execute(
+                """
+                UPDATE notification_delivery
+                SET attempts = attempts + 1, next_attempt_at = $2
+                WHERE id = $1
+                """,
+                row["id"],
+                moment + DELIVERY_CLAIM_LEASE,
+            )
+
+    for row in rows:
+        queued = row["payload"]
+        if isinstance(queued, str):
+            queued = json.loads(queued)
+        attempts = int(row["attempts"]) + 1
+        try:
+            await _attempt_delivery(queued)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one dead row must not stop the batch
+            error = f"{type(exc).__name__}: {exc}"[:500]
+            if attempts >= max_attempts:
+                await pool.execute(
                     """
                     UPDATE notification_delivery
-                    SET status = 'delivered', attempts = $2,
-                        delivered_at = $3, last_error = NULL
+                    SET status = 'failed', last_error = $2
                     WHERE id = $1
                     """,
                     row["id"],
-                    int(row["attempts"]) + 1,
-                    moment,
+                    error,
                 )
-                outcomes["delivered"] += 1
+                outcomes["failed"] += 1
+            else:
+                backoff = DELIVERY_BACKOFF_BASE * (2 ** (attempts - 1))
+                await pool.execute(
+                    """
+                    UPDATE notification_delivery
+                    SET last_error = $2, next_attempt_at = $3
+                    WHERE id = $1
+                    """,
+                    row["id"],
+                    error,
+                    moment + backoff,
+                )
+                outcomes["retried"] += 1
+            logger.warning(
+                "notification delivery %s failed (attempt %d): %s",
+                row["id"],
+                attempts,
+                error,
+            )
+        else:
+            await pool.execute(
+                """
+                UPDATE notification_delivery
+                SET status = 'delivered', delivered_at = $2, last_error = NULL
+                WHERE id = $1
+                """,
+                row["id"],
+                moment,
+            )
+            outcomes["delivered"] += 1
     return outcomes
 
 

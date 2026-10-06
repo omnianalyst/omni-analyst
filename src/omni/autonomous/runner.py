@@ -58,7 +58,11 @@ class AutonomousRunner:
         self._operator_user_id = None
 
     async def start(self) -> None:
+        from omni.scheduler.heartbeat import expect_loop
+
         self._running = True
+        for name, _fn, _interval in self._loops():
+            expect_loop(f"autonomous.{name}")
 
         # Resolve the operator: the first user on a single-operator deployment.
         # The fill pipeline needs this to attribute byo_only Polygon fetches --

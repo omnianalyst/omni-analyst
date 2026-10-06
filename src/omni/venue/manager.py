@@ -23,8 +23,10 @@ Two boundaries this module must not blur:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -34,6 +36,74 @@ from omni.credentials.keyring import decrypt_fields
 from omni.scheduler.health import record_loop_health
 
 logger = logging.getLogger("omni.venue.manager")
+
+#: How long a refresh waits for the cross-process rotation lock before
+#: refusing honestly. Long enough to queue behind one ordinary connect
+#: (Questrade's httpx timeout is 30s); short enough that a settings poll
+#: cannot hang an API request indefinitely.
+ROTATION_LOCK_TIMEOUT = 15.0
+_ROTATION_LOCK_RETRY = 0.25
+
+
+def _rotation_lock_key(user_id: UUID) -> int:
+    return int.from_bytes(
+        hashlib.sha256(f"omni:venue:rotation:{user_id}".encode()).digest()[:8],
+        "big",
+        signed=True,
+    )
+
+
+class RefreshBusy(Exception):
+    """Another process holds this user's venue rotation lock."""
+
+
+@asynccontextmanager
+async def _rotation_lock(pool, user_id: UUID) -> AsyncIterator[None]:
+    """Serialize venue token rotation across PROCESSES (audit A14).
+
+    The in-process ``_user_lock`` below serializes refreshes inside one
+    Python process -- but the scheduler reconciles venues while the API's
+    settings endpoints refresh the same user, and Questrade refresh tokens
+    are single-use: two processes connecting with the same stored token
+    race, the loser's rotation invalidates the winner's, and the stored
+    credential can end up consumed-but-persisted. A PostgreSQL session
+    advisory lock on a dedicated connection is the cross-process arbiter;
+    it releases itself if the connection dies, exactly like the work it
+    guards.
+    """
+    key = _rotation_lock_key(user_id)
+    conn = await pool.acquire()
+    try:
+        deadline = time.monotonic() + ROTATION_LOCK_TIMEOUT
+        while True:
+            got = await conn.fetchval("SELECT pg_try_advisory_lock($1)", key)
+            if got:
+                break
+            if time.monotonic() >= deadline:
+                raise RefreshBusy(
+                    "another venue refresh holds the rotation lock"
+                )
+            await asyncio.sleep(_ROTATION_LOCK_RETRY)
+        try:
+            yield
+        finally:
+            import contextlib
+
+            healthy = True
+            try:
+                await conn.execute("SELECT pg_advisory_unlock($1)", key)
+            except Exception:  # noqa: BLE001 - any failure means the lease connection is dead
+                # The connection died mid-refresh. Pool-releasing it would
+                # ask for a reset on a socket that will never answer and
+                # hang the caller; terminate is synchronous and ends both
+                # the session and its lock.
+                healthy = False
+            with contextlib.suppress(Exception):
+                if not healthy:
+                    conn.terminate()
+    finally:
+        await pool.release(conn)
+
 
 # Which fields of each venue's credential blob are secret. Anything named here
 # is stored encrypted and decrypted only at connect time. A field absent from
@@ -92,63 +162,94 @@ async def refresh_venues(pool, user_id) -> dict[str, str]:
     """Check Settings for enabled venues and connect/disconnect as needed.
 
     Returns a status dict: {venue_key: 'connected' | 'disabled' | 'error: ...'}
+
+    The whole body runs under the cross-process rotation lock (A14): reading
+    the stored refresh token, connecting, and persisting a rotated token are
+    one serialized critical section per user, across the API and scheduler
+    processes alike. A caller that cannot take the lock in bounded time gets
+    an honest busy status for each of the user's venues rather than racing
+    the rotation. Without a pool there is no cross-process venue state to
+    arbitrate (and no stored settings to load), so only the in-process lock
+    applies.
     """
     async with _user_lock(user_id):
         config = await _load_venue_config(pool, user_id)
         venues_config = config.get("venues", {})
-        owner_venues = _venues.setdefault(user_id, {})
-        status: dict[str, str] = {}
+        try:
+            if pool is not None:
+                async with _rotation_lock(pool, user_id):
+                    return await _refresh_venues_locked(pool, user_id, venues_config)
+            return await _refresh_venues_locked(pool, user_id, venues_config)
+        except RefreshBusy:
+            keys = set(venues_config) | set(_venues.get(user_id, {}))
+            if not keys:
+                return {}
+            status = {
+                key: "error: another venue refresh is in progress"
+                for key in keys
+            }
+            logger.info(
+                "venue refresh for user %s deferred: rotation lock busy", user_id
+            )
+            return status
 
-        for key in set(venues_config) | set(owner_venues):
-            vc = venues_config.get(key, {})
-            enabled = vc.get("enabled", False)
 
-            if key not in CONNECTABLE_VENUES:
-                old = owner_venues.pop(key, None)
-                if old is not None and hasattr(old, "aclose"):
+async def _refresh_venues_locked(
+    pool, user_id, venues_config: dict
+) -> dict[str, str]:
+    owner_venues = _venues.setdefault(user_id, {})
+    status: dict[str, str] = {}
+
+    for key in set(venues_config) | set(owner_venues):
+        vc = venues_config.get(key, {})
+        enabled = vc.get("enabled", False)
+
+        if key not in CONNECTABLE_VENUES:
+            old = owner_venues.pop(key, None)
+            if old is not None and hasattr(old, "aclose"):
+                await old.aclose()
+            status[key] = "scheduler-only" if key == "hyperliquid" else "unavailable"
+            continue
+
+        if not enabled:
+            old = owner_venues.pop(key, None)
+            if old is not None:
+                if hasattr(old, "aclose"):
                     await old.aclose()
-                status[key] = "scheduler-only" if key == "hyperliquid" else "unavailable"
-                continue
+                logger.info("venue %s disconnected for user %s", key, user_id)
+            status[key] = "disabled"
+            continue
 
-            if not enabled:
-                old = owner_venues.pop(key, None)
-                if old is not None:
-                    if hasattr(old, "aclose"):
-                        await old.aclose()
-                    logger.info("venue %s disconnected for user %s", key, user_id)
-                status[key] = "disabled"
-                continue
+        if key in owner_venues:
+            status[key] = "connected"
+            continue
 
-            if key in owner_venues:
+        credentials: dict = {}
+        try:
+            credentials = decrypt_fields(
+                vc.get("credentials", {}) or {}, SECRET_FIELDS.get(key, ())
+            )
+
+            async def persist_rotated_token(
+                token: str, venue_key: str = key
+            ) -> None:
+                await store_venue_refresh_token(pool, user_id, venue_key, token)
+
+            venue = await _connect_venue(key, credentials, persist_rotated_token)
+            if venue is not None:
+                owner_venues[key] = venue
                 status[key] = "connected"
-                continue
+                logger.info("venue %s connected for user %s", key, user_id)
+            else:
+                status[key] = "no credentials"
+        except Exception as exc:  # noqa: BLE001
+            error = _safe_error(exc, credentials)
+            status[key] = f"error: {error}"
+            logger.warning("venue %s failed for user %s: %s", key, user_id, error)
 
-            credentials: dict = {}
-            try:
-                credentials = decrypt_fields(
-                    vc.get("credentials", {}) or {}, SECRET_FIELDS.get(key, ())
-                )
-
-                async def persist_rotated_token(
-                    token: str, venue_key: str = key
-                ) -> None:
-                    await store_venue_refresh_token(pool, user_id, venue_key, token)
-
-                venue = await _connect_venue(key, credentials, persist_rotated_token)
-                if venue is not None:
-                    owner_venues[key] = venue
-                    status[key] = "connected"
-                    logger.info("venue %s connected for user %s", key, user_id)
-                else:
-                    status[key] = "no credentials"
-            except Exception as exc:  # noqa: BLE001
-                error = _safe_error(exc, credentials)
-                status[key] = f"error: {error}"
-                logger.warning("venue %s failed for user %s: %s", key, user_id, error)
-
-        if not owner_venues:
-            _venues.pop(user_id, None)
-        return status
+    if not owner_venues:
+        _venues.pop(user_id, None)
+    return status
 
 
 async def store_venue_credentials(pool, user_id, venue_key: str, credentials: dict) -> None:
@@ -366,6 +467,9 @@ async def reconcile_forever(pool, stopping, interval: float = RECONCILE_INTERVAL
     """
     import asyncio
 
+    from omni.scheduler.heartbeat import expect_loop
+
+    expect_loop("venue_reconciliation")
     while not stopping.is_set():
         try:
             status = await reconcile_once(pool)

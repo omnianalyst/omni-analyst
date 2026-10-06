@@ -64,6 +64,13 @@ def verified_token_claims(request: Request) -> dict | None:
     is an infrastructure failure, and downgrading it to "nobody" would serve
     shared-data responses while every caller looks logged-out. ``jwt_secret``
     raises instead, so a configuration fault surfaces as an error.
+
+    The ``ver`` claim is validated without coercion: ``int(...)`` on a signed
+    claim would accept ``"3"``, ``3.0`` and ``True``, raise on a list, and
+    overflow PostgreSQL's integer range on a huge value -- all from input
+    this deployment signed but a previous version's shape did not bound. A
+    ``ver`` that is not a plain int in range is a token this deployment
+    never issued; it reads as anonymous.
     """
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -83,7 +90,10 @@ def verified_token_claims(request: Request) -> dict | None:
         UUID(str(sub))
     except (ValueError, TypeError):
         return None
-    return payload
+    version = payload.get("ver", 0)  # claim-less pre-074 tokens read as 0
+    if type(version) is not int or not 0 <= version <= 2_147_483_647:
+        return None
+    return {**payload, "ver": version}
 
 
 def verified_token_subject(request: Request) -> UUID | None:
@@ -101,26 +111,46 @@ def verified_token_subject(request: Request) -> UUID | None:
 def resolve_audience_from_request(request: Request) -> UUID | None:
     """Return the active principal established by request middleware.
 
-    Direct callers without middleware retain token-only decoding for isolated
-    signature verification; application requests always use the database-backed
-    middleware result.
+    Application requests ALWAYS arrive through ActivePrincipalMiddleware,
+    which checked the token's revocation epoch and the user's active flag
+    against the database. A request without that middleware state is not an
+    anonymous caller -- it is a routing/infrastructure fault, and treating
+    it as anonymous would serve exactly the token-only access (no
+    revocation, no active check) the middleware exists to prevent. Such a
+    call raises; signature-only decoding for isolated tests is
+    ``verified_token_subject``.
     """
     state = getattr(request, "state", None)
-    if state is not None and getattr(state, "_omni_auth_checked", False):
-        return getattr(state, "_omni_audience", None)
-    return verified_token_subject(request)
+    if state is None or not getattr(state, "_omni_auth_checked", False):
+        raise internal_error(
+            "ActivePrincipalMiddleware did not run for this request"
+        )
+    return getattr(state, "_omni_audience", None)
 
 
 def resolve_role_from_request(request: Request) -> str | None:
     state = getattr(request, "state", None)
     if state is None or not getattr(state, "_omni_auth_checked", False):
-        return None
+        raise internal_error(
+            "ActivePrincipalMiddleware did not run for this request"
+        )
     return getattr(state, "_omni_role", None)
+
+
+def resolve_auth_version_from_request(request: Request) -> int | None:
+    """The authenticated row's auth_version, for compare-and-swap writes."""
+    state = getattr(request, "state", None)
+    if state is None or not getattr(state, "_omni_auth_checked", False):
+        raise internal_error(
+            "ActivePrincipalMiddleware did not run for this request"
+        )
+    return getattr(state, "_omni_auth_version", None)
 
 
 __all__ = [
     "jwt_secret",
     "resolve_audience_from_request",
+    "resolve_auth_version_from_request",
     "resolve_role_from_request",
     "verified_token_claims",
     "verified_token_subject",

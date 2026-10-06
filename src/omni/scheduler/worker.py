@@ -89,6 +89,10 @@ class SchedulerConfig:
     #: email), so it runs on its own cadence rather than inside alert
     #: evaluation -- a flapping webhook must not slow firing.
     delivery_interval: float = 60.0
+    #: Bounded pruning of expired auth throttle/budget rows (audit A04).
+    #: Hourly is far more than the 24h lookback needs; the batch is bounded
+    #: either way, so a backlog after downtime drains over several passes.
+    maintenance_interval: float = 3600.0
     licensed: tuple[str, ...] = ()
     worker_id: str = field(default_factory=lambda: f"omni-{os.getpid()}-{uuid4().hex[:6]}")
 
@@ -278,23 +282,40 @@ async def evaluate_alerts_once(pool) -> int:
     through ``visible_claims`` scoped to ``user_id`` -- so an alert never sees
     a claim its owner may not. A single failing alert is logged and skipped; one
     bad condition must not stop the others from firing.
+
+    Delivery enqueueing runs INSIDE evaluate's firing transaction (the
+    ``notify`` hook): firing and enqueue commit or roll back together, so a
+    crash between them cannot record a firing whose notification is then
+    unrecoverable -- evaluation skips already-fired claims forever (audit A09).
     """
     alerts = await pool.fetch(_ACTIVE_ALERTS)
     fired = 0
     for a in alerts:
         try:
-            new = await evaluate(pool, a, audience=a["user_id"])
-            fired += len(new)
-            if new:
-                # Delivery is enqueued as part of firing, not sent inline: the
-                # queue (worked by the delivery loop) owns retries, and a dead
-                # webhook must not stop the next alert from being recorded.
+            async def _enqueue(conn, new, *, _alert=a):
                 from omni.alerts.notify import dispatch
 
-                await dispatch(pool, a, new)
+                await dispatch(pool, _alert, new, conn=conn)
+
+            new = await evaluate(pool, a, audience=a["user_id"], notify=_enqueue)
+            fired += len(new)
         except Exception:
             logger.exception("alert %s evaluation failed", a["id"])
     return fired
+
+
+async def maintenance_once(pool) -> dict[str, int]:
+    """Bounded cleanup of expired auth throttle/budget state (audit A04).
+
+    Every login failure used to run a global age-based DELETE on the request
+    path -- unbounded work in the hottest write path auth has. This is the
+    replacement: the scheduler's maintenance loop runs the same pruning in
+    bounded batches on its own cadence and records the outcome like any other
+    loop, so moving it off the request path cannot quietly become "never".
+    """
+    from omni.auth.throttle import prune_auth_state
+
+    return await prune_auth_state(pool)
 
 
 async def drain_delivery_queue_once(pool) -> int:
@@ -363,10 +384,13 @@ class Scheduler:
         return result
 
     async def start(self) -> None:
+        from omni.scheduler.heartbeat import expect_loop
+
         self._running = True
         # Sweep once before the fill workers exist. Otherwise they start
         # against an empty queue, find nothing, and sleep out the whole poll
         # interval while work appears milliseconds later.
+        expect_loop("sweep")
         try:
             n = await self._do(
                 "sweep", self._config.sweep_interval, sweep_once, self._pool
@@ -376,6 +400,7 @@ class Scheduler:
         except Exception:
             logger.exception("initial sweep failed")
         self._tasks.append(asyncio.create_task(self._sweep_loop()))
+        expect_loop("fill")
         for i in range(self._config.fill_workers):
             self._tasks.append(
                 asyncio.create_task(self._fill_loop(f"{self._config.worker_id}-{i}"))
@@ -383,6 +408,7 @@ class Scheduler:
         # Resolve once before the loop starts, for the same reason sweep does:
         # otherwise the loop sleeps a full interval before clearing predictions
         # whose horizons already elapsed while the process was down.
+        expect_loop("resolve")
         try:
             n = await self._do(
                 "resolve", self._config.resolve_interval, resolve_once, self._pool
@@ -394,6 +420,7 @@ class Scheduler:
         # Predict once before the loop starts, for the same reason: otherwise a
         # demanded entity with complete coverage waits a full interval for its
         # first directional call.
+        expect_loop("predict")
         try:
             produced, abstained = await self._do(
                 "predict",
@@ -410,6 +437,7 @@ class Scheduler:
         # Surface once before the loop starts: otherwise a prediction that
         # already clears the calibrated threshold waits a full interval to become
         # a finding.
+        expect_loop("surface")
         try:
             n = await self._do(
                 "surface", self._config.surface_interval, surface_once, self._pool,
@@ -421,6 +449,7 @@ class Scheduler:
         self._tasks.append(asyncio.create_task(self._surface_loop()))
         # Alerts once before the loop starts: a watched condition already met by
         # current coverage fires immediately rather than after a full interval.
+        expect_loop("alerts")
         try:
             n = await self._do(
                 "alerts",
@@ -435,6 +464,7 @@ class Scheduler:
         # Delivery queue once at start: notifications queued while the
         # scheduler was down send as soon as the process returns, not one
         # interval later.
+        expect_loop("notification_delivery")
         try:
             await self._do(
                 "notification_delivery",
@@ -445,6 +475,22 @@ class Scheduler:
         except Exception:
             logger.exception("initial delivery drain failed")
         self._tasks.append(asyncio.create_task(self._delivery_loop()))
+        # Auth-state maintenance: bounded pruning of expired throttle/budget
+        # rows, hourly. Declared and health-recorded like every other loop so
+        # "moved off the request path" cannot quietly become "never runs".
+        # One initial pass, like every other loop: a declared-but-silent loop
+        # fails the per-loop heartbeat, and there is nothing to prune yet.
+        expect_loop("auth_maintenance")
+        try:
+            await self._do(
+                "auth_maintenance",
+                self._config.maintenance_interval,
+                maintenance_once,
+                self._pool,
+            )
+        except Exception:
+            logger.exception("initial auth maintenance failed")
+        self._tasks.append(asyncio.create_task(self._maintenance_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -649,6 +695,31 @@ class Scheduler:
                 logger.exception("delivery queue cycle failed")
             try:
                 await asyncio.sleep(self._config.delivery_interval)
+            except asyncio.CancelledError:
+                break
+
+    async def _maintenance_loop(self) -> None:
+        # start() already pruned once; wait before repeating.
+        try:
+            await asyncio.sleep(self._config.maintenance_interval)
+        except asyncio.CancelledError:
+            return
+        while self._running:
+            try:
+                pruned = await self._do(
+                    "auth_maintenance",
+                    self._config.maintenance_interval,
+                    maintenance_once,
+                    self._pool,
+                )
+                if pruned and (pruned["throttle_events"] or pruned["budgets"]):
+                    logger.info("auth maintenance pruned %s", pruned)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("auth maintenance cycle failed")
+            try:
+                await asyncio.sleep(self._config.maintenance_interval)
             except asyncio.CancelledError:
                 break
 

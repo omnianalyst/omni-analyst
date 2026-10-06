@@ -1,4 +1,4 @@
-import { getAuthToken, request, sendJson } from "./api";
+import { clearAuthToken, getAuthToken, request, sendJson } from "./api";
 
 export {
   AUTH_STATE_EVENT,
@@ -57,15 +57,31 @@ export const login = (email: string, password: string): Promise<LoginResponse> =
   sendJson<LoginResponse>("POST", "/auth/login", { email, password });
 
 // Requires the current password; a wrong one renders identically to a wrong
-// login so the endpoint cannot confirm guesses. 204 on success.
-export const changePassword = (
+// login so the endpoint cannot confirm guesses. On success the backend has
+// revoked every session including this browser's: clearing the stored token
+// and navigating away is not optional cleanup -- a client that keeps the
+// now-dead token shows "password changed" while its next protected call
+// 401s, and in-memory private state lingers with it. A full navigation to
+// the login screen (with the reason shown) is the honest end state.
+export async function changePassword(
   oldPassword: string,
   newPassword: string,
-): Promise<void> =>
-  authedSendJson<void>("POST", "/auth/change-password", {
+): Promise<void> {
+  await authedSendJson<void>("POST", "/auth/change-password", {
     old_password: oldPassword,
     new_password: newPassword,
   });
+  clearAuthToken();
+  window.location.replace("/login?reason=password-changed");
+}
+
+// Logout-all revokes every session server-side; the browser's stored token
+// dies with the rest of them and must not survive in localStorage.
+export async function logoutAll(): Promise<void> {
+  await authedSendJson<void>("POST", "/auth/logout-all");
+  clearAuthToken();
+  window.location.replace("/login?reason=sessions-revoked");
+}
 
 export interface SetupStatus {
   setup_required: boolean;

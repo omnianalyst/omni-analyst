@@ -10,14 +10,16 @@ _DEGRADED_THRESHOLD = 3
 _MAX_RESULT_LENGTH = 2000
 
 
-def _touch_heartbeat() -> None:
+def _touch_heartbeat(loop_name: str) -> None:
     # Best-effort on purpose: the heartbeat feeds the container healthcheck,
     # so a heartbeat that cannot be written shows up as failing liveness --
     # it must not also corrupt the loop-health record of a working loop.
+    # Per loop, not per process: one healthy loop must not be able to keep a
+    # wedged sibling's container looking alive (audit A13).
     from omni.scheduler.heartbeat import touch_heartbeat
 
     with contextlib.suppress(OSError):
-        touch_heartbeat()
+        touch_heartbeat(loop_name)
 
 EXPECTED_OPERATION_INTERVALS: dict[str, float] = {
     "sweep": 300.0,
@@ -27,6 +29,7 @@ EXPECTED_OPERATION_INTERVALS: dict[str, float] = {
     "surface": 300.0,
     "alerts": 60.0,
     "notification_delivery": 60.0,
+    "auth_maintenance": 3600.0,
     "autonomous.macro": 86_400.0,
     "autonomous.sector": 43_200.0,
     "autonomous.demand": 3_600.0,
@@ -84,7 +87,7 @@ async def record_loop_health(
             expected_interval_seconds,
             _bounded(result),
         )
-        _touch_heartbeat()
+        _touch_heartbeat(loop_name)
         return int(row["consecutive_failures"])
 
     row = await pool.fetchrow(

@@ -19,13 +19,24 @@ claim into alert_firing and raises the owner's demand for that (entity,
 claim_type) the first time the alert ever fires. Recording belongs with
 detection because a detected-but-unrecorded firing would re-fire on every poll,
 which is exactly the noise the firing table exists to prevent. The
-(alert_id, claim_id) primary key is the real dedup; evaluate's skip of
-already-fired rows is the efficiency that keeps it from recomputing them.
+(alert_id, claim_id) primary key is the real dedup; the INSERT ... RETURNING
+below is what makes the returned set match reality under concurrency: two
+evaluations racing on the same alert each see only the rows they actually
+inserted, so neither re-reports the other's firings (audit A09). Delivery
+enqueueing happens in the SAME transaction through the ``notify`` hook, so a
+firing exists if and only if its notification rows do.
+
+Sequence conditions (value crossings, percent changes) are evaluated per
+SOURCE series: claims for one (entity, claim_type) can come from several
+unrelated publishers, and interleaving them manufactures crossings --
+publisher A above the threshold, publisher B below, alternating forever --
+out of two series that each hold a steady position (audit A16).
 """
 
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -44,6 +55,14 @@ KNOWN_KINDS = frozenset({
 
 _DEFAULT_VALUE_FIELD = "value"
 
+#: A percent-change window is bounded to 100 years: anything wider can never
+#: be distinguished from "all history" by the data this store holds, and an
+#: unbounded value used to overflow timedelta construction during evaluation
+#: (a stored ``window_days: 1e30`` killed the alert's evaluation every cycle).
+MAX_WINDOW_DAYS = 36_500
+#: Same reasoning for staleness, in seconds (1,000 days).
+MAX_STALENESS_SECONDS = 86_400_000
+
 
 class InvalidCondition(ValueError):
     """A condition the closed set does not recognise or cannot evaluate.
@@ -52,6 +71,26 @@ class InvalidCondition(ValueError):
     never-fire row sitting in the table until someone wonders why nothing
     happened.
     """
+
+
+def _finite_number(value: Any) -> float | None:
+    """A usable threshold number, or None.
+
+    JSON parses ``Infinity``, ``-Infinity`` and ``NaN`` by default and Python
+    ints are unbounded, so "is a number" is not enough: a huge int overflows
+    float(), NaN passes every isinstance check and then makes every
+    comparison false -- a condition that looks set and can never fire. Only
+    finite, convertible numbers are usable.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def validate_condition(condition: Any) -> dict:
@@ -71,44 +110,45 @@ def validate_condition(condition: Any) -> dict:
         )
 
     if kind in ("value_above", "value_below"):
-        threshold = condition.get("threshold")
-        # bool is an int subclass; reject it explicitly so `true` is not a 1.
-        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
-            raise InvalidCondition(f"{kind}.threshold must be a number")
+        threshold = _finite_number(condition.get("threshold"))
+        if threshold is None:
+            raise InvalidCondition(f"{kind}.threshold must be a finite number")
         field = condition.get("field", _DEFAULT_VALUE_FIELD)
         if not isinstance(field, str) or not field:
             raise InvalidCondition(f"{kind}.field must be a non-empty string")
-        return {"kind": kind, "threshold": float(threshold), "field": field}
+        return {"kind": kind, "threshold": threshold, "field": field}
 
     if kind in ("pct_change_above", "pct_change_below"):
-        pct = condition.get("pct")
-        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
-            raise InvalidCondition(f"{kind}.pct must be a number")
-        if pct <= 0:
+        pct = _finite_number(condition.get("pct"))
+        if pct is None or pct <= 0:
             # A magnitude, not a signed direction: the kind carries the sign.
-            raise InvalidCondition(f"{kind}.pct must be positive")
-        window = condition.get("window_days")
-        if isinstance(window, bool) or not isinstance(window, (int, float)):
-            raise InvalidCondition(f"{kind}.window_days must be a number")
-        if window < 1:
-            raise InvalidCondition(f"{kind}.window_days must be at least 1")
+            raise InvalidCondition(f"{kind}.pct must be a positive finite number")
+        window = _finite_number(condition.get("window_days"))
+        if window is None or window < 1:
+            raise InvalidCondition(f"{kind}.window_days must be a number >= 1")
+        if window > MAX_WINDOW_DAYS:
+            raise InvalidCondition(
+                f"{kind}.window_days must be at most {MAX_WINDOW_DAYS}"
+            )
         field = condition.get("field", _DEFAULT_VALUE_FIELD)
         if not isinstance(field, str) or not field:
             raise InvalidCondition(f"{kind}.field must be a non-empty string")
         return {
             "kind": kind,
-            "pct": float(pct),
-            "window_days": float(window),
+            "pct": pct,
+            "window_days": window,
             "field": field,
         }
 
     if kind == "staleness_exceeds":
-        seconds = condition.get("seconds")
-        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
-            raise InvalidCondition("staleness_exceeds.seconds must be a number")
-        if seconds <= 0:
-            raise InvalidCondition("staleness_exceeds.seconds must be positive")
-        return {"kind": "staleness_exceeds", "seconds": float(seconds)}
+        seconds = _finite_number(condition.get("seconds"))
+        if seconds is None or seconds <= 0:
+            raise InvalidCondition("staleness_exceeds.seconds must be a positive finite number")
+        if seconds > MAX_STALENESS_SECONDS:
+            raise InvalidCondition(
+                f"staleness_exceeds.seconds must be at most {MAX_STALENESS_SECONDS}"
+            )
+        return {"kind": "staleness_exceeds", "seconds": seconds}
 
     return {"kind": "contradiction"}
 
@@ -187,7 +227,10 @@ def _pct_predicate(condition: dict, claims: list):
     field = condition["field"]
     pct = condition["pct"]
     window = timedelta(days=condition["window_days"])
-    ordered = _ordered(claims)
+    # Claims that never carried the watched field are not base candidates:
+    # "no value" is not a price that existed, and treating it as one moves the
+    # base of the series onto a row that never spoke for it.
+    ordered = _ordered([c for c in claims if _claim_number(c, field) is not None])
     dates = [c["knowledge_date"] for c in ordered]
 
     def holds(c: dict) -> bool:
@@ -235,18 +278,29 @@ def _satisfying(condition: dict, claims: list, now: datetime) -> list:
     """Pure: the claims this condition currently holds for.
 
     value_above / value_below / pct_change_* fire on crossings (see
-    _crossings). staleness_exceeds and contradiction are conditions over the
-    *set* of claims; they fire on the concrete claim(s) that embody the
-    condition, so the (alert, claim) dedup still pins them to a real row
-    rather than a synthetic one.
+    _crossings), computed PER SOURCE: claims for one (entity, claim_type) can
+    arrive from several unrelated publishers, and interleaving them
+    manufactures a crossing every time two publishers sit on opposite sides
+    of the threshold -- two steady series read as an oscillation (audit A16).
+    staleness_exceeds and contradiction are conditions over the *set* of
+    claims; they fire on the concrete claim(s) that embody the condition, so
+    the (alert, claim) dedup still pins them to a real row rather than a
+    synthetic one.
     """
     kind = condition["kind"]
 
-    if kind in ("value_above", "value_below"):
-        return _crossings(claims, _level_predicate(condition))
-
-    if kind in ("pct_change_above", "pct_change_below"):
-        return _crossings(claims, _pct_predicate(condition, claims))
+    if kind in ("value_above", "value_below", "pct_change_above", "pct_change_below"):
+        out = []
+        series: dict[str, list] = {}
+        for c in claims:
+            series.setdefault(c["source"], []).append(c)
+        for source_claims in series.values():
+            if kind in ("value_above", "value_below"):
+                holds = _level_predicate(condition)
+            else:
+                holds = _pct_predicate(condition, source_claims)
+            out.extend(_crossings(source_claims, holds))
+        return out
 
     if kind == "staleness_exceeds":
         if not claims:
@@ -279,24 +333,38 @@ def _satisfying(condition: dict, claims: list, now: datetime) -> list:
 
 _FIRED_CLAIMS = "SELECT claim_id FROM alert_firing WHERE alert_id = $1"
 
+# RETURNING claim_id is the dedup race fix (audit A09): under ON CONFLICT
+# DO NOTHING a racing evaluation inserts nothing and gets nothing back, so
+# each caller reports exactly the firings it recorded -- not the ones it
+# merely observed as satisfying.
 _INSERT_FIRING = """
 INSERT INTO alert_firing (alert_id, claim_id)
 VALUES ($1, $2)
 ON CONFLICT (alert_id, claim_id) DO NOTHING
+RETURNING claim_id
 """
 
 _TOUCH_LAST_FIRED = "UPDATE alert SET last_fired_at = now() WHERE id = $1"
 
 
-async def evaluate(pool, alert, *, audience: UUID | None) -> list:
+async def evaluate(pool, alert, *, audience: UUID | None, notify=None) -> list:
     """Record and return the claims that newly satisfy the alert's condition.
 
     Reads only through visible_claims scoped to ``audience`` (the alert owner);
     an alert never sees a claim its audience may not. Claims already recorded
-    in alert_firing are skipped, so a condition that remains true produces one
-    firing per claim rather than one per evaluation. The first time the alert
-    ever fires, one demand row is raised for its (entity, claim_type) -- the
-    second effect of firing, that a watched condition is asked to stay covered.
+    in alert_firing are skipped, and the INSERT ... ON CONFLICT ... RETURNING
+    inside the transaction reports only the rows THIS evaluation inserted:
+    the (alert, claim) primary key remains the dedup, but the returned set
+    now matches what was actually written even when two evaluations race.
+
+    ``notify``, when given, is awaited INSIDE the firing transaction as
+    ``notify(conn, new_firings)``: the firing record and its notification
+    queue rows commit or roll back together. Without that, a crash between
+    the two transactions left firings nothing would ever deliver --
+    evaluation skips already-fired claims, so those notifications were lost
+    forever, not delayed. The first time the alert ever fires, one demand row
+    is raised for its (entity, claim_type) -- the second effect of firing,
+    that a watched condition is asked to stay covered.
     """
     condition = validate_condition(_loads(alert["condition"]))
 
@@ -311,13 +379,20 @@ async def evaluate(pool, alert, *, audience: UUID | None) -> list:
         return []
 
     already = {r["claim_id"] for r in await pool.fetch(_FIRED_CLAIMS, alert["id"])}
-    new = [c for c in satisfying if c["id"] not in already]
-    if not new:
+    candidates = [c for c in satisfying if c["id"] not in already]
+    if not candidates:
         return []
 
+    new: list = []
     async with pool.acquire() as conn, conn.transaction():
-        for c in new:
-            await conn.execute(_INSERT_FIRING, alert["id"], c["id"])
+        for c in candidates:
+            inserted = await conn.fetchval(_INSERT_FIRING, alert["id"], c["id"])
+            if inserted is not None:
+                new.append(c)
+        if not new:
+            # A racing evaluation recorded every candidate first; this one
+            # wrote nothing and reports nothing.
+            return []
         await conn.execute(_TOUCH_LAST_FIRED, alert["id"])
 
         # Raise demand once per alert: the first firing is the signal that this
@@ -332,6 +407,9 @@ async def evaluate(pool, alert, *, audience: UUID | None) -> list:
                 claim_type=str(alert["claim_type"]),
                 requested_by=alert["user_id"],
             )
+
+        if notify is not None:
+            await notify(conn, new)
 
         # A one-shot's whole contract is "after it fires, stop watching".
         # Deactivating in the same transaction as the firing means there is no

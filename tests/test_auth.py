@@ -22,7 +22,7 @@ import pytest
 from neutron.test import TestClient
 
 from omni.api.auth import build_router
-from omni.auth import resolve_audience_from_request
+from omni.auth import verified_token_subject
 from omni.main import create_app
 
 GOOD_SECRET = "x" * 48
@@ -156,13 +156,16 @@ async def test_setup_then_login_round_trips_to_the_same_user(db, database_url):
         r_me = await client.get("/auth/me", headers=_bearer(token))
 
     # The login is case-insensitive and yields a token that maps back.
-    resolved = resolve_audience_from_request(_Req(_bearer(token)))
+    # Signature-only decoding (verified_token_subject): this asserts the
+    # token itself, independent of middleware; the /auth/me response below
+    # covers the middleware path end to end.
+    resolved = verified_token_subject(_Req(_bearer(token)))
     assert resolved is not None
     assert str(resolved) == registered_id
 
     # The setup-issued token is equally valid.
     assert (
-        str(resolve_audience_from_request(_Req(_bearer(setup_token))))
+        str(verified_token_subject(_Req(_bearer(setup_token))))
         == registered_id
     )
 
@@ -295,7 +298,7 @@ async def test_forged_or_tampered_token_resolves_to_none_not_the_named_user(
 
     # A legitimately issued token, as a control -- it must resolve.
     good_token = create_token({"sub": str(victim_id)}, GOOD_SECRET)
-    assert resolve_audience_from_request(_Req(_bearer(good_token))) == victim_id
+    assert verified_token_subject(_Req(_bearer(good_token))) == victim_id
 
     # 1. Signature tampered: flip the first character of the signature segment.
     #    The first char maps to the high bits of HMAC byte 0, which are always
@@ -306,14 +309,14 @@ async def test_forged_or_tampered_token_resolves_to_none_not_the_named_user(
     sig_mutated = (
         f"{header}.{_payload}.{mutated_sig_char}{signature[1:]}"
     )
-    assert resolve_audience_from_request(_Req(_bearer(sig_mutated))) is None
+    assert verified_token_subject(_Req(_bearer(sig_mutated))) is None
 
     # 2. Payload tampered: re-encode the payload to name a different user,
     #    keep the original signature -> the signature no longer matches the
     #    signing input.
     forged_payload = _b64url({"sub": str(uuid4())})
     payload_mutated = f"{header}.{forged_payload}.{signature}"
-    assert resolve_audience_from_request(_Req(_bearer(payload_mutated))) is None
+    assert verified_token_subject(_Req(_bearer(payload_mutated))) is None
 
     # 3. alg=none: classic confusion attack. decode_token only allows HS256.
     none_token = (
@@ -322,26 +325,26 @@ async def test_forged_or_tampered_token_resolves_to_none_not_the_named_user(
         + _b64url({"sub": str(victim_id)})
         + "."
     )
-    assert resolve_audience_from_request(_Req(_bearer(none_token))) is None
+    assert verified_token_subject(_Req(_bearer(none_token))) is None
 
     # 4. Wrong signer: a well-formed token that names the victim but was signed
     #    with a secret that is not this deployment's. This is the impersonation
     #    attempt; it must not resolve to the named user.
     impostor = create_token({"sub": str(victim_id)}, WRONG_SECRET)
-    resolved = resolve_audience_from_request(_Req(_bearer(impostor)))
+    resolved = verified_token_subject(_Req(_bearer(impostor)))
     assert resolved is None, "a wrongly-signed token resolved to the victim"
     assert resolved != victim_id
 
     # 5. A valid signature over a payload that carries no subject.
     no_sub = create_token({"role": "admin"}, GOOD_SECRET)
-    assert resolve_audience_from_request(_Req(_bearer(no_sub))) is None
+    assert verified_token_subject(_Req(_bearer(no_sub))) is None
 
 
 async def test_absent_token_resolves_to_none(db, database_url):
-    assert resolve_audience_from_request(_Req({})) is None
+    assert verified_token_subject(_Req({})) is None
     # And a non-Bearer scheme is not treated as a token.
     assert (
-        resolve_audience_from_request(
+        verified_token_subject(
             _Req({"authorization": f"Basic {GOOD_SECRET}"})
         )
         is None

@@ -12,6 +12,12 @@ cannot be used to enumerate which emails are registered. On a system where data
 access is licensed per user, that enumeration is how you find whose credentials
 to steal.
 
+Admission (audit A01/A02) is ``omni.auth.admission.credential_guard`` around
+every request that hashes a password: atomic IP/account budgets plus a
+serialized check-verify-record transaction per (email, IP). Authorization
+failures are raised AFTER the guard commits -- raising inside it would roll
+the failure record back with the refusal.
+
 Tokens are issued with ``neutron.auth.jwt.create_token`` and verified with
 ``omni.auth.resolve_audience_from_request``. No crypto is written here.
 """
@@ -23,24 +29,23 @@ from typing import Any
 
 from neutron import App, Router
 from neutron.auth.jwt import create_token
-from neutron.error import bad_request, forbidden, rate_limited, unauthorized
+from neutron.error import AppError, bad_request, conflict, forbidden, unauthorized
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from omni.auth import (
     jwt_secret,
     resolve_audience_from_request,
+    resolve_auth_version_from_request,
     resolve_role_from_request,
 )
+from omni.auth.admission import credential_guard
 from omni.auth.forwarded import client_ip_from_request
 from omni.auth.ratelimit import check_rate_limit
-from omni.auth.throttle import (
-    check_login_throttle,
-    record_login_failure,
-    record_login_success,
-)
+from omni.auth.throttle import record_login_failure, record_login_success
 from omni.auth.users import (
     MIN_PASSWORD_LENGTH,
+    CredentialChangedConcurrently,
     PasswordTooShort,
     authenticate_user,
     bump_auth_version,
@@ -91,7 +96,9 @@ def _user_dict(row: Any) -> dict:
 def _issue_token(row: Any) -> str:
     # ver is the revocation epoch checked by ActivePrincipalMiddleware;
     # riding it in the claim is what lets a password change or logout-all
-    # retire tokens that have not expired yet.
+    # retire tokens that have not expired yet. The version issued is the
+    # one whose password was just verified -- never reread later, which
+    # would make an old-password login into a newly valid token.
     return create_token(
         {"sub": str(row["id"]), "ver": row["auth_version"]},
         jwt_secret(),
@@ -99,21 +106,18 @@ def _issue_token(row: Any) -> str:
     )
 
 
-async def _admit(pool, request: Request, email: str) -> None:
-    """Both gates every credential endpoint passes before any hashing.
+def _burst_guard(request: Request) -> str:
+    """The cheap per-process limiter ahead of any database work.
 
-    The in-memory per-IP window is the cheap burst guard; the database check
-    is the authoritative, replica-shared lockout keyed by (email, ip) with
-    escalating cooldowns. Either refusing answers 429.
+    Not the authoritative budget -- replicas each get this allowance -- but
+    it absorbs a single-process hammer without touching PostgreSQL.
     """
     ip = client_ip_from_request(request)
     if not check_rate_limit(ip):
+        from neutron.error import rate_limited
+
         raise rate_limited("Too many attempts; wait a minute and try again.")
-    admitted, _retry_after = await check_login_throttle(
-        pool, email=email, ip=ip
-    )
-    if not admitted:
-        raise rate_limited("Too many attempts; wait a minute and try again.")
+    return ip
 
 
 def build_router(app: App) -> Router:
@@ -133,18 +137,26 @@ def build_router(app: App) -> Router:
         # already been claimed. Reaching it after setup returns 409, not a new
         # account. Rate-limited per client IP -- it is a credential endpoint
         # reachable during the first-run window.
-        await _admit(app.db.pool, request, body.email)
+        ip = _burst_guard(request)
         try:
-            row = await create_initial_operator(
-                app.db.pool, email=body.email, password=body.password
-            )
+            async with credential_guard(
+                app.db.pool, email=body.email, ip=ip
+            ) as conn:
+                row = await create_initial_operator(
+                    conn, email=body.email, password=body.password
+                )
+                await record_login_success(conn, email=body.email, ip=ip)
         except PasswordTooShort:
             raise bad_request(
                 f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
-        await record_login_success(
-            app.db.pool, email=body.email, ip=client_ip_from_request(request)
-        )
+        except AppError:
+            # Setup already complete is a failed claim on a credential
+            # endpoint; the pair's history should say so. Recorded after
+            # the guard: the refused claim rolled the transaction back, and
+            # the record must outlive it.
+            await record_login_failure(app.db.pool, email=body.email, ip=ip)
+            raise
         return {
             "token": _issue_token(row),
             "token_type": "bearer",
@@ -164,10 +176,17 @@ def build_router(app: App) -> Router:
             raise unauthorized("Authentication required")
         if resolve_role_from_request(request) != "operator":
             raise forbidden("Operator access required")
+        # Register hashes a password through the same single executor as
+        # login, so it takes the same admission (A02): an operator script
+        # creating accounts in a loop cannot queue unbounded hashing work.
+        ip = _burst_guard(request)
         try:
-            row = await create_user(
-                app.db.pool, email=body.email, password=body.password
-            )
+            async with credential_guard(
+                app.db.pool, email=body.email, ip=ip
+            ) as conn:
+                row = await create_user(
+                    conn, email=body.email, password=body.password
+                )
         except PasswordTooShort:
             raise bad_request(
                 f"password must be at least {MIN_PASSWORD_LENGTH} characters"
@@ -176,18 +195,24 @@ def build_router(app: App) -> Router:
 
     @router.post("/auth/login", status_code=200)
     async def login(body: LoginIn, request: Request) -> dict:
-        # Two-layer throttling before any hashing, then the uniform 401 below.
-        # Failures are recorded only when admitted, so a locked-out guesser
-        # does not extend the lockout, and a successful login clears the key.
-        await _admit(app.db.pool, request, body.email)
-        ip = client_ip_from_request(request)
-        row = await authenticate_user(
-            app.db.pool, email=body.email, password=body.password
-        )
+        # Admission is one serialized unit per (email, IP): budgets, throttle
+        # check, password verification and the outcome record all commit (or
+        # roll back) together. The 401 for a failed verification is raised
+        # after the guard exits -- inside it, the rollback would erase the
+        # failure the next admission decision reads.
+        ip = _burst_guard(request)
+        async with credential_guard(
+            app.db.pool, email=body.email, ip=ip
+        ) as conn:
+            row = await authenticate_user(
+                conn, email=body.email, password=body.password
+            )
+            if row is None:
+                await record_login_failure(conn, email=body.email, ip=ip)
+            else:
+                await record_login_success(conn, email=body.email, ip=ip)
         if row is None:
-            await record_login_failure(app.db.pool, email=body.email, ip=ip)
             raise unauthorized("Invalid email or password")
-        await record_login_success(app.db.pool, email=body.email, ip=ip)
         return {
             "token": _issue_token(row),
             "token_type": "bearer",
@@ -206,26 +231,48 @@ def build_router(app: App) -> Router:
 
     @router.post("/auth/change-password", status_code=204)
     async def change_pw(body: ChangePasswordIn, request: Request) -> None:
-        # Rotate the signed-in operator's own password. Requires the current
-        # password (re-verification) so a stolen token alone cannot lock the
-        # operator out. A wrong current password answers 400, not 401: the
-        # bearer session IS valid, and a 401 here would make the client clear
-        # it -- one typo logging the operator out. Guessing still requires a
-        # working session, so nothing is enumerated that was not already.
+        # Rotate the signed-in user's own password. The account is the
+        # AUTHENTICATED one -- its email is loaded server-side, never taken
+        # from the request, which only carries passwords. Admission keys on
+        # that server-loaded email (A02): a stolen session cannot hammer the
+        # hashing executor with password guesses unthrottled.
+        #
+        # A wrong current password answers 400, not 401: the bearer session
+        # IS valid, and a 401 here would make the client clear it -- one
+        # typo logging the operator out. Guessing still requires a working
+        # session, so nothing is enumerated that was not already.
         audience = resolve_audience_from_request(request)
         if audience is None:
             raise unauthorized("Authentication required")
+        email = await app.db.pool.fetchval(
+            "SELECT email FROM users WHERE id = $1 AND active", audience
+        )
+        if email is None:
+            raise unauthorized("Authentication required")
+        expected_auth_version = resolve_auth_version_from_request(request)
+        ip = _burst_guard(request)
         try:
-            ok = await change_password(
-                app.db.pool,
-                user_id=audience,
-                old_password=body.old_password,
-                new_password=body.new_password,
-            )
+            async with credential_guard(
+                app.db.pool, email=email, ip=ip
+            ) as conn:
+                ok = await change_password(
+                    conn,
+                    user_id=audience,
+                    old_password=body.old_password,
+                    new_password=body.new_password,
+                    expected_auth_version=expected_auth_version,
+                )
         except PasswordTooShort:
             raise bad_request(
                 f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
+        except CredentialChangedConcurrently:
+            raise conflict(
+                "Your credentials changed in another session; "
+                "sign in again and retry"
+            )
+        except ValueError as exc:
+            raise bad_request(str(exc)) from exc
         if not ok:
             raise bad_request("Current password is incorrect")
 

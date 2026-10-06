@@ -158,7 +158,9 @@ class TestRetryLifecycle:
 
         start = datetime.now(UTC)
         first = await process_delivery_queue(db.pool, now=start)
-        assert first == {"delivered": 0, "retried": 1, "failed": 0, "expired": 0}
+        assert first == {
+            "delivered": 0, "retried": 1, "failed": 0, "expired": 0, "purged": 0
+        }
 
         row = await db.pool.fetchrow(
             "SELECT status, attempts, next_attempt_at, last_error "
@@ -286,6 +288,147 @@ class TestRetryLifecycle:
             "failed": 1,
             "delivered": 1,
         }
+
+
+class TestNoReplayAfterAbortedBatch:
+    """A10: sends no longer happen inside the claiming transaction.
+
+    One aborted pass used to roll back every already-sent row's ``delivered``
+    update, and the next pass re-sent the whole batch. Outcomes are now
+    committed per row as the batch progresses.
+    """
+
+    async def _two_due_rows(self, db):
+        user_id = await _user_with_webhook(db)
+        alert = _fake_alert(user_id)
+        await dispatch(db.pool, alert, [])
+        await db.pool.execute(
+            "DELETE FROM notification_delivery WHERE channel = 'email'"
+        )
+        await db.pool.execute(
+            """
+            INSERT INTO notification_delivery (user_id, alert_id, channel, payload)
+            VALUES ($1, $2, 'webhook', '{"kind":"webhook","url":"https://x.example/", "body": {}}')
+            """,
+            user_id,
+            alert["id"],
+        )
+        await db.pool.execute(
+            "UPDATE notification_delivery SET next_attempt_at = now() "
+            "WHERE next_attempt_at > now()"
+        )
+        return user_id
+
+    async def test_a_crash_mid_batch_does_not_resend_the_finished_row(
+        self, db, monkeypatch
+    ):
+        await self._two_due_rows(db)
+        sends: list[dict] = []
+
+        async def _send(url, payload):
+            sends.append(payload)
+            if len(sends) == 2:
+                # The second send completes, then the worker dies before
+                # writing its outcome (cancellation aborts the loop).
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(notify, "_send_webhook", _send)
+
+        with pytest.raises(asyncio.CancelledError):
+            await process_delivery_queue(db.pool)
+
+        states = {
+            r["id"]: r["status"]
+            for r in await db.pool.fetch("SELECT id, status FROM notification_delivery")
+        }
+        assert "delivered" in states.values(), (
+            "the first row's committed outcome was lost with the batch"
+        )
+
+        async def _ok(url, payload):
+            sends.append(payload)
+
+        monkeypatch.setattr(notify, "_send_webhook", _ok)
+        # Enough time passes for the crashed row's claim lease to lapse.
+        await db.pool.execute(
+            "UPDATE notification_delivery SET next_attempt_at = now() "
+            "WHERE status = 'pending'"
+        )
+        outcomes = await process_delivery_queue(db.pool)
+        assert outcomes["delivered"] == 1, "only the unfinished row is resent"
+        assert len(sends) == 3, f"sent {len(sends)} times for two notifications"
+
+    async def test_a_failed_row_does_not_rollback_its_siblings(self, db, monkeypatch):
+        await self._two_due_rows(db)
+
+        async def _first_ok_then_broken(url, payload):
+            if "x.example" in url:
+                raise RuntimeError("webhook gone")
+
+        monkeypatch.setattr(notify, "_send_webhook", _first_ok_then_broken)
+        outcomes = await process_delivery_queue(db.pool)
+        assert outcomes["delivered"] == 1
+        assert outcomes["retried"] == 1
+
+        delivered = await db.pool.fetchval(
+            "SELECT count(*) FROM notification_delivery WHERE status = 'delivered'"
+        )
+        assert delivered == 1, (
+            "a sibling's failure rolled back a delivered row's outcome"
+        )
+
+
+class TestRetention:
+    """A11: terminal rows carry destinations and payloads; they do not
+    accumulate forever."""
+
+    async def test_old_terminal_rows_are_purged(self, db, monkeypatch):
+        user_id = await _user_with_webhook(db)
+        await dispatch(db.pool, _fake_alert(user_id), [])
+        await db.pool.execute(
+            "UPDATE notification_delivery SET status = 'delivered', "
+            "delivered_at = now() - interval '8 days', "
+            "created_at = now() - interval '8 days'"
+        )
+        await db.pool.execute(
+            "INSERT INTO notification_delivery "
+            "(user_id, alert_id, channel, payload, status, created_at) VALUES "
+            "($1, $2, 'webhook', '{}', 'failed', now() - interval '9 days')",
+            user_id,
+            uuid4(),
+        )
+        await db.pool.execute(
+            "INSERT INTO notification_delivery "
+            "(user_id, alert_id, channel, payload, status, created_at) VALUES "
+            "($1, $2, 'webhook', '{}', 'delivered', now() - interval '1 hour')",
+            user_id,
+            uuid4(),
+        )
+
+        async def _no_send(url, payload):
+            raise AssertionError("retention purge attempted a send")
+
+        monkeypatch.setattr(notify, "_send_webhook", _no_send)
+        outcomes = await process_delivery_queue(db.pool)
+        assert outcomes["purged"] == 3
+        remaining = await db.pool.fetchval(
+            "SELECT count(*) FROM notification_delivery"
+        )
+        assert remaining == 1, "recent terminal rows must survive the purge"
+
+    async def test_pending_rows_are_never_purged_by_retention(self, db, monkeypatch):
+        user_id = await _user_with_webhook(db)
+        await dispatch(db.pool, _fake_alert(user_id), [])
+        await db.pool.execute(
+            "UPDATE notification_delivery SET created_at = now() - interval '30 days'"
+        )
+        async def _no_send(url, payload):
+            raise AssertionError("an expired row was attempted")
+
+        monkeypatch.setattr(notify, "_send_webhook", _no_send)
+        outcomes = await process_delivery_queue(db.pool)
+        assert outcomes["expired"] == 2
+        # Expired-to-failed this pass; a later pass purges them by age.
 
 
 class _FakeSMTP:

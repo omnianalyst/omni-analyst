@@ -81,6 +81,21 @@ class Settings(BaseSettings):
     # separated IPs or CIDRs, e.g. "10.0.0.0/8, 172.16.0.5".
     omni_trusted_proxies: str = ""
 
+    # Fixed-window admission budgets for credential endpoints (audit A01).
+    # Every admitted login/setup/register/password-change request reserves
+    # one unit from both budgets before any hashing, committed whether the
+    # attempt succeeds or fails. The IP budget is wider than the account
+    # budget on purpose: one address legitimately serves several accounts
+    # (an office NAT, a household), while the account budget is the tight
+    # one that bounds distributed guessing against a single identity --
+    # locking an account out by spraying its name from many addresses is the
+    # trade this explicitly makes, and it is the right side of it. These are
+    # fixed windows: a burst straddling a window edge gets a fresh allowance
+    # at the edge; they bound rate, not total attempts (the escalating
+    # cooldown in auth.throttle does the second job).
+    omni_auth_ip_budget: int = 30
+    omni_auth_account_budget: int = 10
+
     # Scheduler liveness: how stale the heartbeat file may be before the
     # container healthcheck fails. Sweep runs every 300s; 900s tolerates one
     # missed cycle without flapping.

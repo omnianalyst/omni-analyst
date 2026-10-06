@@ -95,4 +95,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()" || exit 1
 
-CMD ["uvicorn", "omni.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers is disabled explicitly: Omni resolves the client address
+# itself from OMNI_TRUSTED_PROXIES (see auth/forwarded.py), and a second,
+# independent trust authority inside the server would silently rewrite
+# request.client before Omni ever evaluates it.
+CMD ["uvicorn", "omni.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]

@@ -10,8 +10,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from neutron import App, Router
-from neutron.error import bad_request, unauthorized
+from neutron.error import AppError, bad_request, unauthorized
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -30,7 +31,38 @@ class NotifyIn(BaseModel):
 MAX_WEBHOOK_URL_LENGTH = 2048
 MAX_NOTIFY_EMAIL_LENGTH = 320
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Syntactic mailbox validation, not a delivery guarantee: a local part of
+# dot-atoms without the pathologies (leading/trailing/doubled dots, over 64
+# chars), and a domain of 1-63 character alphanumeric/hyphen labels that
+# neither start nor end with a hyphen, ending in an alphabetic TLD of two
+# or more characters, whole address under 320 characters. The old single
+# regex accepted ``a@b..com``, ``a@-b.com`` and ``a@b.c`` -- mailboxes no
+# relay accepts, saved as if they would ever deliver (audit A15).
+_LOCAL_ATOM = re.compile(r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+$")
+_LABEL = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+def _valid_notify_email(value: str) -> bool:
+    if len(value) > MAX_NOTIFY_EMAIL_LENGTH or value.count("@") != 1:
+        return False
+    local, _, domain = value.partition("@")
+    if not local or len(local) > 64:
+        return False
+    if any(
+        part.startswith(".") or part.endswith(".") or not part
+        for part in local.split(".")
+    ):
+        return False
+    if not all(_LOCAL_ATOM.match(part) for part in local.split(".")):
+        return False
+    labels = domain.split(".")
+    if len(labels) < 2 or any(
+        len(label) < 1 or len(label) > 63 or not _LABEL.match(label)
+        or label.startswith("-") or label.endswith("-")
+        for label in labels
+    ):
+        return False
+    return len(labels[-1]) >= 2 and labels[-1].isalpha()
 
 
 def _validated_notify_value(key: str, value: str) -> str:
@@ -44,7 +76,7 @@ def _validated_notify_value(key: str, value: str) -> str:
     from omni.alerts.notify import _validated_webhook_url
 
     if key == "email":
-        if len(value) > MAX_NOTIFY_EMAIL_LENGTH or not _EMAIL_RE.match(value):
+        if not _valid_notify_email(value):
             raise bad_request(f"{value[:40]!r} is not a valid email address")
         return value
     if key == "webhook_url":
@@ -377,12 +409,25 @@ def build_router(app: App) -> Router:
     async def test_notifications(request: Request) -> dict:
         """Send one test event through every configured channel."""
         from omni.alerts.notify import send_test
+        from omni.auth.admission import reserve_budgets
 
         user = resolve_audience_from_request(request)
         if user is None:
             raise unauthorized("Authentication required")
+        # Every call sends real network traffic (webhook POST, SMTP relay);
+        # without a budget a session script turns the button into a spam
+        # relay through the deployment's own credentials.
+        try:
+            await reserve_budgets(app.db.pool, [(f"notify-test:{user}", 3, 60)])
+        except TimeoutError as exc:
+            raise AppError(
+                503, "unavailable", "Service Unavailable",
+                "Settings are busy; retry shortly.",
+            ) from exc
         try:
             return await send_test(app.db.pool, user)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise bad_request(str(exc)) from exc
 
