@@ -1,4 +1,4 @@
-"""Delivery for alert firings: webhook and email.
+"""Delivery for alert firings: webhook and email, through a durable queue.
 
 A firing nobody hears about is a row in a table. This module is the second
 half of alerting -- getting the event to the person who asked for it -- with
@@ -10,13 +10,15 @@ two channels, each opt-in per user:
   * email: plain text, through the deployment's SMTP configuration. The
     address is the user's; the relay is the operator's.
 
-Failure discipline: a delivery that cannot be sent is LOGGED and swallowed. A
-firing is recorded before delivery is attempted, and a dead webhook must never
-stop the next alert from being evaluated -- the record is the source of truth
-and the inbox (unacknowledged firings) is the fallback view. There is no retry
-queue on purpose: a personal instance with a flapping webhook would silently
-accumulate a backlog that retries then dump at 3am. One attempt, one log line,
-the record stands.
+Failure discipline: ``dispatch`` ENQUEUES one row per channel and never
+touches the network -- a dead webhook cannot stop the next alert from being
+evaluated, and a five-second outage no longer permanently loses the
+notification. ``process_delivery_queue`` (the scheduler's delivery loop)
+retries pending rows with bounded exponential backoff, marks rows failed
+after max attempts, and expires rows older than the delivery TTL so a retry
+dump hours after the event cannot happen. The firing record remains the
+source of truth; the queue is the delivery status, visible per user as
+pending/failed/delivered counts.
 
 Configuration lives in user_settings.data.notify: {"webhook_url": ...,
 "email": ...}. Per-user, because alerts are per-user; SMTP is per-deployment
@@ -31,6 +33,7 @@ import json
 import logging
 import smtplib
 import ssl
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from typing import Any
 from urllib.parse import urlsplit
@@ -40,6 +43,11 @@ from omni.config import settings
 logger = logging.getLogger("omni.alerts.notify")
 
 _NOTIFY_SETTINGS = "SELECT data FROM user_settings WHERE user_id = $1"
+
+MAX_DELIVERY_ATTEMPTS = 5
+DELIVERY_BACKOFF_BASE = timedelta(seconds=60.0)
+DELIVERY_TTL = timedelta(hours=24.0)
+DELIVERY_BATCH = 20
 
 
 def _destination_allowed(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -242,20 +250,6 @@ def _email_body(alert, firings: list, entity_symbol: str | None) -> str:
     return "\n".join(lines)
 
 
-async def _send_email(to_address: str, alert, firings: list, entity_symbol) -> None:
-    """Blocking SMTP send; called via to_thread from dispatch."""
-    subject_name = entity_symbol or str(alert["entity_id"])[:8]
-    msg = EmailMessage()
-    msg["Subject"] = (
-        f"Omni alert: {subject_name} -- "
-        f"{_describe_condition(alert['condition'])}"
-    )
-    msg["From"] = settings.smtp_from
-    msg["To"] = to_address
-    msg.set_content(_email_body(alert, firings, entity_symbol))
-    _send_email_message(to_address, msg)
-
-
 async def _notify_config(pool, user_id) -> dict:
     row = await pool.fetchrow(_NOTIFY_SETTINGS, user_id)
     if row is None:
@@ -320,32 +314,201 @@ def _send_email_message(to_address: str, msg: EmailMessage) -> None:
 
 
 async def dispatch(pool, alert, firings: list) -> None:
-    """Deliver one alert's new firings through every configured channel."""
+    """Enqueue delivery of one alert's new firings through every channel.
+
+    No network happens here: rows in notification_delivery carry everything a
+    retry needs (full message content and destination), and the scheduler's
+    delivery loop does the sending with bounded retries. A channel that is
+    down costs its row a retry, not the notification.
+    """
     notify = await _notify_config(pool, alert["user_id"])
 
     webhook_url = notify.get("webhook_url")
     email_to = notify.get("email")
-    if not webhook_url and not (email_to and settings.smtp_host):
+    if not webhook_url and not email_to:
         return
 
     entity_symbol = await pool.fetchval(
         "SELECT symbol FROM entity WHERE id = $1", alert["entity_id"]
     )
     payload = _payload(alert, firings, entity_symbol)
-
+    rows = []
     if webhook_url:
-        try:
-            await _send_webhook(webhook_url, payload)
-        except Exception:
-            logger.warning("alert webhook delivery failed", exc_info=True)
-
-    if email_to and settings.smtp_host:
-        try:
-            await asyncio.to_thread(
-                _send_email, email_to, alert, firings, entity_symbol
+        rows.append(
+            ("webhook", {"kind": "webhook", "url": webhook_url, "body": payload})
+        )
+    if email_to:
+        rows.append(
+            (
+                "email",
+                {
+                    "kind": "email",
+                    "to": email_to,
+                    "subject": (
+                        f"Omni alert: {entity_symbol or str(alert['entity_id'])[:8]} -- "
+                        f"{_describe_condition(alert['condition'])}"
+                    ),
+                    "body": _email_body(alert, firings, entity_symbol),
+                },
             )
-        except Exception:
-            logger.warning("alert email delivery failed", exc_info=True)
+        )
+    for channel, queued in rows:
+        await pool.execute(
+            """
+            INSERT INTO notification_delivery
+                (user_id, alert_id, channel, payload)
+            VALUES ($1, $2, $3, $4::jsonb)
+            """,
+            alert["user_id"],
+            alert["id"],
+            channel,
+            json.dumps(queued),
+        )
 
 
-__all__ = ["dispatch", "send_test"]
+async def delivery_status(pool, user_id) -> dict[str, int]:
+    """Pending/failed/delivered counts for a user's delivery queue.
+
+    Deliberately excludes the destination column: a webhook URL can embed a
+    secret token, and status is not a reason to hand it back out.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT status, count(*) AS n
+        FROM notification_delivery
+        WHERE user_id = $1
+        GROUP BY status
+        """,
+        user_id,
+    )
+    counts = {row["status"]: int(row["n"]) for row in rows}
+    return {
+        "pending": counts.get("pending", 0),
+        "failed": counts.get("failed", 0),
+        "delivered": counts.get("delivered", 0),
+    }
+
+
+async def _attempt_delivery(queued: dict) -> None:
+    if queued.get("kind") == "webhook":
+        await _send_webhook(queued["url"], queued["body"])
+        return
+    if queued.get("kind") == "email":
+        if not settings.smtp_host:
+            raise RuntimeError(
+                "email channel requires the deployment's SMTP configuration "
+                "(OMNI_SMTP_HOST)"
+            )
+        msg = EmailMessage()
+        msg["Subject"] = queued["subject"]
+        msg["From"] = settings.smtp_from
+        msg["To"] = queued["to"]
+        msg.set_content(queued["body"])
+        await asyncio.to_thread(_send_email_message, queued["to"], msg)
+        return
+    raise RuntimeError(f"unknown delivery channel payload kind: {queued.get('kind')!r}")
+
+
+async def process_delivery_queue(
+    pool,
+    *,
+    now: datetime | None = None,
+    batch: int = DELIVERY_BATCH,
+    max_attempts: int = MAX_DELIVERY_ATTEMPTS,
+    ttl: timedelta = DELIVERY_TTL,
+) -> dict[str, int]:
+    """Work the due part of the delivery queue once. Returns outcome counts.
+
+    Rows are claimed FOR UPDATE SKIP LOCKED, so two delivery workers (or a
+    manual run against a live scheduler) never send the same notification
+    twice. Old pending rows expire to failed without an attempt: a retry
+    landing hours after the event is noise, not alerting.
+    """
+    moment = now or datetime.now(UTC)
+    expired = await pool.execute(
+        """
+        UPDATE notification_delivery
+        SET status = 'failed', last_error = 'expired: delivery window elapsed'
+        WHERE status = 'pending' AND created_at < $1
+        """,
+        moment - ttl,
+    )
+    outcomes = {"delivered": 0, "retried": 0, "failed": 0, "expired": max(0, int(expired.split()[-1]))}
+
+    async with pool.acquire() as conn, conn.transaction():
+        rows = await conn.fetch(
+            """
+            SELECT id, channel, payload, attempts
+            FROM notification_delivery
+            WHERE status = 'pending' AND next_attempt_at <= $1
+            ORDER BY created_at
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+            """,
+            moment,
+            batch,
+        )
+        for row in rows:
+            queued = row["payload"]
+            if isinstance(queued, str):
+                queued = json.loads(queued)
+            try:
+                await _attempt_delivery(queued)
+            except Exception as exc:  # noqa: BLE001 - one dead row must not stop the batch
+                attempts = int(row["attempts"]) + 1
+                error = f"{type(exc).__name__}: {exc}"[:500]
+                if attempts >= max_attempts:
+                    await conn.execute(
+                        """
+                        UPDATE notification_delivery
+                        SET status = 'failed', attempts = $2, last_error = $3
+                        WHERE id = $1
+                        """,
+                        row["id"],
+                        attempts,
+                        error,
+                    )
+                    outcomes["failed"] += 1
+                else:
+                    backoff = DELIVERY_BACKOFF_BASE * (2 ** (attempts - 1))
+                    await conn.execute(
+                        """
+                        UPDATE notification_delivery
+                        SET attempts = $2, last_error = $3,
+                            next_attempt_at = $4
+                        WHERE id = $1
+                        """,
+                        row["id"],
+                        attempts,
+                        error,
+                        moment + backoff,
+                    )
+                    outcomes["retried"] += 1
+                logger.warning(
+                    "notification delivery %s failed (attempt %d): %s",
+                    row["id"],
+                    attempts,
+                    error,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE notification_delivery
+                    SET status = 'delivered', attempts = $2,
+                        delivered_at = $3, last_error = NULL
+                    WHERE id = $1
+                    """,
+                    row["id"],
+                    int(row["attempts"]) + 1,
+                    moment,
+                )
+                outcomes["delivered"] += 1
+    return outcomes
+
+
+__all__ = [
+    "delivery_status",
+    "dispatch",
+    "process_delivery_queue",
+    "send_test",
+]

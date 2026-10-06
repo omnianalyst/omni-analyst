@@ -96,6 +96,11 @@ services:
       DEBUG: ${DEBUG:-false}
       # Required to issue tokens. No default on purpose - see DEPLOY.md.
       OMNI_JWT_SECRET: ${OMNI_JWT_SECRET:?OMNI_JWT_SECRET is required}
+      # Addresses allowed to speak for the real client via X-Forwarded-For
+      # (the Caddy/front proxy). Empty = forwarded headers are never trusted;
+      # behind a proxy that means one shared login-throttle bucket, which is
+      # the fail-closed side of the trade.
+      OMNI_TRUSTED_PROXIES: ${OMNI_TRUSTED_PROXIES:-}
       # Optional ingestion credentials. Absent ones degrade to honest refusals.
       FRED_API_KEY: ${FRED_API_KEY:-}
       POLYGON_API_KEY: ${POLYGON_API_KEY:-}
@@ -143,12 +148,12 @@ services:
     dns:
       - 1.1.1.1
       - 8.8.8.8
-    # Depends on a HEALTHY api, not just a started one. /health answers only
-    # after the api lifespan has run migrations, so by the time this starts the
-    # schema is in place and the scheduler's own migrate() is a no-op - the two
-    # migrators never race. (The migrator uses _neutron_migrations.version
-    # PRIMARY KEY rather than an advisory lock, so two concurrent first-boot
-    # migrators would clash; this ordering removes that window.)
+    # Depends on a HEALTHY api, not just a started one: /health answers only
+    # after the api lifespan has run migrations, keeping first-boot ordering
+    # simple. Concurrent migrators are safe regardless of ordering --
+    # Neutron's Migrator serialises each run behind a pg_advisory_xact_lock
+    # (one transaction: lock, read versions, apply), so two processes booting
+    # against one fresh database serialise and the loser finds nothing to do.
     depends_on:
       postgres:
         condition: service_healthy
@@ -208,7 +213,10 @@ services:
       # actually connects venues, so it must read the same key that
       # encrypted the credentials.
       - omni_keys:/var/lib/omni
-    # Exactly one. Do not scale.
+    # Exactly one. Singleton ownership is enforced IN THE APP: the scheduler
+    # takes a PostgreSQL advisory lock at startup and refuses to run when
+    # another instance holds it (see omni/scheduler/singleton.py), so this
+    # replicas: 1 is orchestration intent, not the guarantee itself.
     # Memory ceiling: steady ~570MB with the synthesis catch-up observed at
     # 835MB RSS (2026-08-21), so the limit sits above the recorded high-water
     # rather than above idle. A kill here aborts one loop pass; the loops are

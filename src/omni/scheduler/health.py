@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 logger = logging.getLogger("omni.scheduler.worker")
 
 _DEGRADED_THRESHOLD = 3
 _MAX_RESULT_LENGTH = 2000
+
+
+def _touch_heartbeat() -> None:
+    # Best-effort on purpose: the heartbeat feeds the container healthcheck,
+    # so a heartbeat that cannot be written shows up as failing liveness --
+    # it must not also corrupt the loop-health record of a working loop.
+    from omni.scheduler.heartbeat import touch_heartbeat
+
+    with contextlib.suppress(OSError):
+        touch_heartbeat()
 
 EXPECTED_OPERATION_INTERVALS: dict[str, float] = {
     "sweep": 300.0,
@@ -15,6 +26,7 @@ EXPECTED_OPERATION_INTERVALS: dict[str, float] = {
     "predict": 300.0,
     "surface": 300.0,
     "alerts": 60.0,
+    "notification_delivery": 60.0,
     "autonomous.macro": 86_400.0,
     "autonomous.sector": 43_200.0,
     "autonomous.demand": 3_600.0,
@@ -72,6 +84,7 @@ async def record_loop_health(
             expected_interval_seconds,
             _bounded(result),
         )
+        _touch_heartbeat()
         return int(row["consecutive_failures"])
 
     row = await pool.fetchrow(

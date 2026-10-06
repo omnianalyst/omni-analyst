@@ -84,6 +84,11 @@ class SchedulerConfig:
     #: waiting for a human to poll. Without this loop /alerts/{id}/firings is
     #: always empty -- the feature read as live but was inert.
     alerts_interval: float = 60.0
+    #: Delivery-queue drain: retries queued notifications with bounded
+    #: backoff. Reads the store and does bounded network sends (webhook/
+    #: email), so it runs on its own cadence rather than inside alert
+    #: evaluation -- a flapping webhook must not slow firing.
+    delivery_interval: float = 60.0
     licensed: tuple[str, ...] = ()
     worker_id: str = field(default_factory=lambda: f"omni-{os.getpid()}-{uuid4().hex[:6]}")
 
@@ -270,8 +275,8 @@ async def evaluate_alerts_once(pool) -> int:
     firings. Returns the count of new firings.
 
     Each alert is evaluated against its owner's audience -- ``evaluate`` reads
-    through ``visible_claims`` scoped to ``user_id`` -- so an alert never sees a
-    claim its owner may not. A single failing alert is logged and skipped; one
+    through ``visible_claims`` scoped to ``user_id`` -- so an alert never sees
+    a claim its owner may not. A single failing alert is logged and skipped; one
     bad condition must not stop the others from firing.
     """
     alerts = await pool.fetch(_ACTIVE_ALERTS)
@@ -281,16 +286,23 @@ async def evaluate_alerts_once(pool) -> int:
             new = await evaluate(pool, a, audience=a["user_id"])
             fired += len(new)
             if new:
-                # Delivery is part of firing, not a follow-up job: a firing
-                # nobody hears about is furniture. Failures are logged inside
-                # dispatch and never block the loop -- a dead webhook must not
-                # stop the next alert from being recorded.
+                # Delivery is enqueued as part of firing, not sent inline: the
+                # queue (worked by the delivery loop) owns retries, and a dead
+                # webhook must not stop the next alert from being recorded.
                 from omni.alerts.notify import dispatch
 
                 await dispatch(pool, a, new)
         except Exception:
             logger.exception("alert %s evaluation failed", a["id"])
     return fired
+
+
+async def drain_delivery_queue_once(pool) -> int:
+    """Send due queued notifications once. Returns how many were delivered."""
+    from omni.alerts.notify import process_delivery_queue
+
+    outcomes = await process_delivery_queue(pool)
+    return outcomes["delivered"]
 
 
 class Scheduler:
@@ -420,6 +432,19 @@ class Scheduler:
         except Exception:
             logger.exception("initial alerts evaluation failed")
         self._tasks.append(asyncio.create_task(self._alerts_loop()))
+        # Delivery queue once at start: notifications queued while the
+        # scheduler was down send as soon as the process returns, not one
+        # interval later.
+        try:
+            await self._do(
+                "notification_delivery",
+                self._config.delivery_interval,
+                drain_delivery_queue_once,
+                self._pool,
+            )
+        except Exception:
+            logger.exception("initial delivery drain failed")
+        self._tasks.append(asyncio.create_task(self._delivery_loop()))
 
     async def stop(self) -> None:
         self._running = False
@@ -599,6 +624,31 @@ class Scheduler:
                 logger.exception("alerts cycle failed")
             try:
                 await asyncio.sleep(self._config.alerts_interval)
+            except asyncio.CancelledError:
+                break
+
+    async def _delivery_loop(self) -> None:
+        # start() already drained once; wait before repeating.
+        try:
+            await asyncio.sleep(self._config.delivery_interval)
+        except asyncio.CancelledError:
+            return
+        while self._running:
+            try:
+                n = await self._do(
+                    "notification_delivery",
+                    self._config.delivery_interval,
+                    drain_delivery_queue_once,
+                    self._pool,
+                )
+                if n:
+                    logger.info("delivery queue sent %d notifications", n)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("delivery queue cycle failed")
+            try:
+                await asyncio.sleep(self._config.delivery_interval)
             except asyncio.CancelledError:
                 break
 

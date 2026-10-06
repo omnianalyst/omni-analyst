@@ -11,8 +11,10 @@ The contract of ``resolve_audience_from_request`` is narrow and load-bearing:
 * an absent, malformed, expired or tampered token yields ``None`` -- the shared
   network only;
 * it never reads ``X-User-Id`` and never falls back to another identity;
-* it never raises. A broken token is an anonymous caller, not an error, and
-  certainly not somebody else.
+* a token failure never raises: a broken token is an anonymous caller, not an
+  error, and certainly not somebody else. A *configuration* failure (missing
+  or short signing key) does raise: an infrastructure fault must not
+  masquerade as an unauthenticated caller.
 
 ``None`` flows downstream into ``visible_claims`` as ``audience=None``, which
 already means "the shared network alone". Nothing here changes that semantics;
@@ -54,31 +56,46 @@ def jwt_secret() -> str:
     return raw
 
 
+def verified_token_claims(request: Request) -> dict | None:
+    """Return the verified Bearer token's claims, else ``None``.
+
+    Never raises on a broken token: absent, malformed, expired or tampered is
+    the anonymous case. A misconfigured signing key is NOT anonymous -- that
+    is an infrastructure failure, and downgrading it to "nobody" would serve
+    shared-data responses while every caller looks logged-out. ``jwt_secret``
+    raises instead, so a configuration fault surfaces as an error.
+    """
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header[len("Bearer "):]
+    # Configuration faults propagate: they are infrastructure failures, not
+    # the anonymous case. Only token decode failures downgrade to anonymous.
+    secret = jwt_secret()
+    try:
+        payload = decode_token(token, secret)
+    except AppError:
+        return None
+    sub = payload.get("sub")
+    if not sub:
+        return None
+    try:
+        UUID(str(sub))
+    except (ValueError, TypeError):
+        return None
+    return payload
+
+
 def verified_token_subject(request: Request) -> UUID | None:
     """Return the caller's user id from a verified Bearer token, else ``None``.
 
     Never raises: any failure to produce a verified identity is the anonymous
     case. Does not read ``X-User-Id`` under any circumstance.
     """
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
+    payload = verified_token_claims(request)
+    if payload is None:
         return None
-    token = auth_header[len("Bearer "):]
-    try:
-        secret = jwt_secret()
-    except AppError:
-        return None
-    try:
-        payload = decode_token(token, secret)
-    except Exception:  # noqa: BLE001 - any decode failure = not authenticated, never a 500
-        return None
-    sub = payload.get("sub")
-    if not sub:
-        return None
-    try:
-        return UUID(str(sub))
-    except (ValueError, TypeError):
-        return None
+    return UUID(str(payload["sub"]))
 
 
 def resolve_audience_from_request(request: Request) -> UUID | None:
@@ -105,5 +122,6 @@ __all__ = [
     "jwt_secret",
     "resolve_audience_from_request",
     "resolve_role_from_request",
+    "verified_token_claims",
     "verified_token_subject",
 ]

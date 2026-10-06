@@ -14,6 +14,7 @@ on; if it regresses, the private tier is open.
 
 import asyncio
 import base64
+import contextlib
 import json
 from uuid import uuid4
 
@@ -560,3 +561,183 @@ async def test_password_hashing_leaves_the_event_loop_and_wrong_stays_wrong(
         assert ok is not None and ok["id"] == row["id"]
         assert wrong is None
         assert ticks, "the loop was expected to progress while argon2 ran"
+
+
+async def _drive_startup(app):
+    """Run the ASGI lifespan startup and return the first message it sends.
+
+    startup.complete means the app came up; startup.failed means it refused
+    to-- which is what a configuration fault must produce.
+    """
+    receive = asyncio.Queue()
+    send = asyncio.Queue()
+    task = asyncio.create_task(app({"type": "lifespan"}, receive.get, send.put))
+    await receive.put({"type": "lifespan.startup"})
+    message = await send.get()
+    if message["type"] == "lifespan.startup.failed":
+        # The protocol ends here: no shutdown reply will ever come.
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        return message
+    await receive.put({"type": "lifespan.shutdown"})
+    with contextlib.suppress(BaseException):
+        await send.get()
+        await task
+    return message
+
+
+async def test_startup_fails_fast_without_a_jwt_secret(db, database_url, monkeypatch):
+    # An infrastructure fault must not impersonate an unauthenticated
+    # caller: with the signing key missing, the app must refuse to start
+    # rather than silently downgrade every authenticated request to
+    # anonymous (misleading 401s plus shared-data responses on endpoints
+    # where anonymous access is valid).
+    monkeypatch.delenv("OMNI_JWT_SECRET", raising=False)
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    monkeypatch.setattr("omni.config.settings.omni_jwt_secret", "")
+
+    message = await _drive_startup(_make_app(database_url))
+    assert message["type"] == "lifespan.startup.failed", message
+    assert "OMNI_JWT_SECRET" in message.get("message", "")
+
+
+async def test_short_jwt_secret_also_fails_startup(db, database_url, monkeypatch):
+    monkeypatch.setenv("OMNI_JWT_SECRET", "x" * 31)
+    message = await _drive_startup(_make_app(database_url))
+    assert message["type"] == "lifespan.startup.failed", message
+
+
+async def test_configured_jwt_secret_starts_cleanly(db, database_url):
+    message = await _drive_startup(_make_app(database_url))
+    assert message["type"] == "lifespan.startup.complete", message
+
+
+async def test_password_change_revokes_previously_issued_tokens(db, database_url):
+    # Audit finding 3: tokens outliving the password that secured them is
+    # the theft window. After a rotation, the pre-change bearer token must
+    # die immediately -- not at expiry.
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        old_token = await _setup_first_user(client, password="original-pass-123")
+
+        r = await client.post(
+            "/auth/change-password",
+            json={"old_password": "original-pass-123", "new_password": "rotated-pass-456"},
+            headers=_bearer(old_token),
+        )
+        assert r.status_code == 204, r.text
+
+        me_with_old = await client.get("/auth/me", headers=_bearer(old_token))
+        assert me_with_old.status_code == 401, (
+            "a token minted before the password change still authenticates"
+        )
+
+        login = await client.post(
+            "/auth/login",
+            json={"email": "op@example.com", "password": "rotated-pass-456"},
+        )
+        assert login.status_code == 200
+        me_with_new = await client.get(
+            "/auth/me", headers=_bearer(login.json()["token"])
+        )
+        assert me_with_new.status_code == 200
+
+
+async def test_issued_tokens_carry_the_revocation_epoch(db, database_url):
+    from neutron.auth.jwt import decode_token
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        token = await _setup_first_user(client)
+        claims = decode_token(token, GOOD_SECRET)
+        assert claims["ver"] == 0
+
+
+async def test_logout_all_revokes_every_session(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        first = await _setup_first_user(client)
+        second = (
+            await client.post(
+                "/auth/login",
+                json={"email": "op@example.com", "password": "a" * 16},
+            )
+        ).json()["token"]
+
+        r = await client.post("/auth/logout-all", headers=_bearer(first))
+        assert r.status_code == 204, r.text
+
+        for dead in (first, second):
+            me = await client.get("/auth/me", headers=_bearer(dead))
+            assert me.status_code == 401
+
+        # The password is untouched: a fresh login works immediately.
+        again = await client.post(
+            "/auth/login",
+            json={"email": "op@example.com", "password": "a" * 16},
+        )
+        assert again.status_code == 200
+
+
+async def test_logout_all_requires_auth(db, database_url):
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post("/auth/logout-all")
+    assert r.status_code == 401
+
+
+async def test_oversized_credentials_are_refused_before_hashing(db, database_url, monkeypatch):
+    # Audit finding 4: an unbounded password string ties up the single
+    # argon2 executor. The bound must refuse the request at validation, with
+    # the hashing executor never invoked.
+    from omni.auth import users
+
+    calls: list[str] = []
+
+    async def _spy(func, *args):
+        calls.append(func.__name__)
+        return await _real_password_call(func, *args)
+
+    _real_password_call = users._password_call
+    monkeypatch.setattr(users, "_password_call", _spy)
+
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post(
+            "/auth/setup",
+            json={"email": "big@example.com", "password": "x" * 2000},
+        )
+        assert r.status_code == 422, r.text
+        assert calls == [], "the hashing executor ran for an oversized body"
+
+        r_login = await client.post(
+            "/auth/login",
+            json={"email": "b" * 500 + "@example.com", "password": "a" * 16},
+        )
+        assert r_login.status_code == 422
+
+    count = await db.pool.fetchval(
+        "SELECT count(*) FROM users WHERE email = 'big@example.com'"
+    )
+    assert count == 0
+
+
+async def test_body_limit_refuses_oversized_requests_before_handlers(
+    db, database_url
+):
+    # The blanket ceiling at the ASGI layer: no handler, parser or executor
+    # should see a byte of a body beyond the bound. A real >1MiB JSON body
+    # (httpx computes Content-Length from the bytes it sends).
+    app = _make_app(database_url)
+    async with _Lifespan(app), TestClient(app) as client:
+        r = await client.post(
+            "/auth/login",
+            json={"email": "big@example.com", "password": "x" * (2 * 1024 * 1024)},
+        )
+        assert r.status_code == 413, r.text
+
+    written = await db.pool.fetchval(
+        "SELECT count(*) FROM users WHERE email = 'big@example.com'"
+    )
+    assert written == 0

@@ -70,8 +70,17 @@ COPY --from=builder --chown=omni:omni /app/migrations /app/migrations
 
 USER omni
 
-# The scheduler's __main__ also runs the migrator on start. To avoid racing the
-# API's migrator on a fresh database, compose starts this only after the API is
-# healthy (i.e. migrations already applied); by then its own migrate() is a
-# no-op. It logs sweep/gap/fill stats on shutdown.
+# The scheduler's __main__ also runs the migrator on start. Concurrent
+# migrators are safe: Neutron's Migrator serialises each run behind a
+# pg_advisory_xact_lock, so a second process waits, re-reads the versions
+# table and no-ops. Compose still starts this service after the API is
+# healthy to keep first-boot ordering simple.
 CMD ["python", "-m", "omni.scheduler"]
+
+# Liveness for the container itself. A wedged scheduler process that stays
+# alive otherwise reads as healthy forever; the heartbeat file is touched only
+# after a loop pass records success, and this check fails once it goes stale
+# past OMNI_SCHEDULER_HEARTBEAT_MAX_AGE (default 900s; sweeps run every 300s).
+# start-period covers first boot: seeding and the initial sweep passes.
+HEALTHCHECK --start-period=120s --interval=30s --timeout=5s --retries=3 \
+    CMD ["python", "-m", "omni.scheduler.heartbeat"]

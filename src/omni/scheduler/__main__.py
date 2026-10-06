@@ -19,6 +19,7 @@ from omni.config import settings
 from omni.db import connect, migrate
 from omni.entities.identify import run as populate_identifiers
 from omni.entities.seed import run as seed_market_universe
+from omni.scheduler.singleton import acquire_scheduler_singleton
 from omni.scheduler.worker import Scheduler, SchedulerConfig, default_registry
 from omni.venue.manager import disconnect_all, reconcile_forever
 
@@ -31,6 +32,19 @@ logger = logging.getLogger("omni.scheduler")
 async def main() -> None:
     client = await connect(settings.database_url)
     await migrate(client)
+
+    # Singleton ownership, enforced by the database rather than by deployment
+    # convention: compose `replicas: 1` is intent, not a lock, and a second
+    # scheduler started any other way would double the provider API spend for
+    # the same coverage. Refusing loudly beats racing quietly.
+    singleton = await acquire_scheduler_singleton(client.pool)
+    if singleton is None:
+        logger.error(
+            "another scheduler holds the singleton lock "
+            "(pg_advisory_lock key omni:scheduler:singleton); refusing to start"
+        )
+        await client.close()
+        raise SystemExit(2)
 
     # Stand up the market universe before identifier population, so the company
     # entities exist by the time identify reads them. Idempotent upserts, pure
@@ -113,6 +127,7 @@ async def main() -> None:
         await disconnect_all()
         await autonomous.stop()
         await scheduler.stop()
+        await singleton.release()
         await client.close()
 
 

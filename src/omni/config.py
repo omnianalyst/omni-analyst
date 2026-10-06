@@ -74,6 +74,18 @@ class Settings(BaseSettings):
     # here so local/dev and deploy without an explicit export still work.
     omni_jwt_secret: str = ""
 
+    # Reverse proxies whose socket peer may speak for the real client. Empty
+    # (the default) means forwarded headers are never trusted: a direct client
+    # cannot spoof X-Forwarded-For, and behind an unconfigured proxy everyone
+    # shares the proxy's throttle bucket -- fail closed on both sides. Comma-
+    # separated IPs or CIDRs, e.g. "10.0.0.0/8, 172.16.0.5".
+    omni_trusted_proxies: str = ""
+
+    # Scheduler liveness: how stale the heartbeat file may be before the
+    # container healthcheck fails. Sweep runs every 300s; 900s tolerates one
+    # missed cycle without flapping.
+    scheduler_heartbeat_max_age: float = 900.0
+
     #: Providers for which this operator holds a redistribution licence, so
     #: their data may enter shared coverage. Comma-separated provider keys.
     licensed_redistribution_providers: str = ""

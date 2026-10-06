@@ -3,9 +3,11 @@ from contextlib import asynccontextmanager
 from neutron import App, CORSMiddleware
 from starlette.middleware import Middleware
 
+from omni.auth import jwt_secret
 from omni.auth.middleware import ActivePrincipalMiddleware
 from omni.config import settings
 from omni.db import connect, migrate
+from omni.middleware import MaxBodySizeMiddleware
 
 
 def create_app(database_url: str | None = None) -> App:
@@ -13,6 +15,12 @@ def create_app(database_url: str | None = None) -> App:
 
     @asynccontextmanager
     async def lifespan(neutron_app: App):
+        # Configuration faults are fatal at startup, not silent downgrades.
+        # If the signing key is missing or short, every authenticated request
+        # would otherwise render as anonymous -- misleading 401s plus
+        # shared-data responses wherever anonymous is valid. An infrastructure
+        # failure must not impersonate an unauthenticated caller.
+        jwt_secret()
         client = await connect(url)
         await migrate(client)
         neutron_app.db = client
@@ -37,6 +45,7 @@ def create_app(database_url: str | None = None) -> App:
                 allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
                 allow_headers=["Authorization", "Content-Type"],
             ),
+            Middleware(MaxBodySizeMiddleware),
             Middleware(ActivePrincipalMiddleware),
         ],
     )

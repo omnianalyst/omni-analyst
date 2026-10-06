@@ -6,10 +6,13 @@ Three processes, because they have genuinely different lifecycles:
    horizontally. Serves JSON only; it does not serve the `ui/` front end, which
    the image deliberately omits.
 2. **scheduler** - `python -m omni.scheduler`. The background sweep and fill
-   loops. Run **exactly one**. Its fill workers lease gaps with `SKIP LOCKED`, so
-   a second instance would not corrupt the gap table - it would simply double
-   the data-provider API spend to produce the same coverage. `docker-compose.prod.yml`
-   hard-caps it at `replicas: 1`.
+   loops. Run **exactly one**. Singleton ownership is enforced in the app:
+   the scheduler takes a PostgreSQL advisory lock at startup and refuses to
+   run while another instance holds it (`omni/scheduler/singleton.py`), so a
+   second instance -- manual or mis-orchestrated -- exits loudly instead of
+   doubling the data-provider API spend for the same coverage. The compose
+   file's `replicas: 1` is orchestration intent; the database lock is the
+   guarantee.
 3. **postgres** - `timescale/timescaledb:2.17.2-pg17`, matching the dev compose
    image. The single source of truth.
 
@@ -61,13 +64,12 @@ too. The migrator is idempotent: it records applied versions in
 `_neutron_migrations` and skips them. Adding a third, standalone migration
 container would only create a racer.
 
-The migrator relies on `_neutron_migrations.version PRIMARY KEY` rather than an
-advisory lock, so two migrators hitting a **fresh** database simultaneously can
-clash. The compose file removes that window by starting the scheduler only after
-the API is *healthy* - and `/health` answers only once the lifespan (which
-includes migrations) has completed, so the schema is already in place by the
-time the scheduler starts. **For the very first boot of a brand-new database,
-run a single API replica** until it is healthy, then scale out.
+The migrator serialises concurrent runs with a transaction-scoped advisory
+lock (`pg_advisory_xact_lock` around the whole run: lock, read versions,
+apply), so two migrators hitting a **fresh** database simultaneously serialise
+-- the second waits, re-reads the versions table, and finds nothing left to
+do. A regression test (`tests/test_migration_lock.py`) launches two migrators
+concurrently against a blank database on every run.
 
 ---
 
@@ -80,7 +82,7 @@ The only source of truth for variable names is `src/omni/config.py` (pydantic
 
 | Variable | Default | When missing / wrong |
 |---|---|---|
-| `OMNI_JWT_SECRET` | none | The app **starts fine**, but any endpoint that must *issue* a token raises `500 "OMNI_JWT_SECRET is not configured"`; incoming `Bearer` tokens cannot be verified, so every caller is treated as anonymous (shared network only). There is no default **on purpose**: a signing key shipped in source would not be a signing key. Must be at least 32 characters. `JWT_SECRET` is accepted as an alias. |
+| `OMNI_JWT_SECRET` | none | The app **refuses to start**: startup fails fast with `OMNI_JWT_SECRET is not configured` (or a too-short rejection below 32 characters). Previously a missing key silently downgraded every authenticated request to anonymous -- an infrastructure fault impersonating an unauthenticated caller -- which served shared-data responses while every caller looked logged-out. There is no default **on purpose**: a signing key shipped in source would not be a signing key. `JWT_SECRET` is accepted as an alias. |
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5434/omni_v2` | That default is the **dev** compose port. Inside a container `localhost` is the container itself, which has no Postgres, so startup fails on connect. Point it at the `postgres` service - the compose file does this for you (`postgresql://...@postgres:5432/...`). |
 | `POSTGRES_PASSWORD` | none (prod) | Compose refuses to start (`POSTGRES_PASSWORD is required`). The dev compose defaults it to `postgres`; prod must not. |
 
@@ -95,6 +97,8 @@ reason, not the claim store for a value.
 | Variable | Default | What degrades without it |
 |---|---|---|
 | `DEBUG` | `false` | Safe to leave unset. |
+| `OMNI_TRUSTED_PROXIES` | `""` (none) | Login throttling sees the reverse proxy's address instead of the real client, so everyone behind the proxy shares one throttle bucket. Set it to the proxy's address or CIDR (comma-separated for several, e.g. `10.0.0.0/8`) and `X-Forwarded-For` is honoured **only** from those peers -- a direct client cannot spoof it. A malformed entry is a loud startup-path error, never a silent narrowing. |
+| `SCHEDULER_HEARTBEAT_MAX_AGE` | `900` | How stale the scheduler's heartbeat file may be before the container healthcheck fails (sweeps run every 300s; the default tolerates one missed cycle). |
 | `FRED_API_KEY` | `""` | Macro indices and the **shareable** perception layer (consumer sentiment, VIX, credit spreads) stop filling; attempts raise `Unavailable "no FRED API key configured"` and record `unfillable`. FRED is `allowed`-class, so a key is the only thing keeping this shared coverage live. |
 | `SEC_USER_AGENT` | `""` | Fundamentals (EDGAR companyfacts) and filings stop filling; attempts raise `Unavailable "no SEC User-Agent configured"`. Not a secret - EDGAR is free and public-domain, it just requires an identifying `User-Agent` of the form `Organisation contact@example.com`, which EDGAR rejects outright without one. |
 | `POLYGON_API_KEY` | `""` | Polygon fills raise `Unavailable "no Polygon API key configured"`. (Polygon is `byo_only`; see below.) |

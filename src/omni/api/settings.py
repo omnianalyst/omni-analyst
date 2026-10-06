@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,6 +25,36 @@ __all__ = ["build_router"]
 class NotifyIn(BaseModel):
     webhook_url: str | None = None
     email: str | None = None
+
+
+MAX_WEBHOOK_URL_LENGTH = 2048
+MAX_NOTIFY_EMAIL_LENGTH = 320
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validated_notify_value(key: str, value: str) -> str:
+    """Syntactic and policy validation at save time, not delivery time.
+
+    DNS and reachability stay the test button's job; what must never persist
+    is a value that is malformed on its face or that the SSRF policy would
+    refuse at send time anyway -- saving it only moves the failure far from
+    the mutation that caused it.
+    """
+    from omni.alerts.notify import _validated_webhook_url
+
+    if key == "email":
+        if len(value) > MAX_NOTIFY_EMAIL_LENGTH or not _EMAIL_RE.match(value):
+            raise bad_request(f"{value[:40]!r} is not a valid email address")
+        return value
+    if key == "webhook_url":
+        if len(value) > MAX_WEBHOOK_URL_LENGTH:
+            raise bad_request("webhook url is too long")
+        try:
+            return _validated_webhook_url(value)
+        except RuntimeError as exc:
+            raise bad_request(str(exc)) from exc
+    raise bad_request(f"unknown notification field: {key}")
 
 
 class DataKeyIn(BaseModel):
@@ -228,10 +259,13 @@ def build_router(app: App) -> Router:
                 except (ValueError, TypeError):
                     data = {}
         notify = (data or {}).get("notify") or {}
+        from omni.alerts.notify import delivery_status
+
         return {
             "webhook_configured": bool(notify.get("webhook_url")),
             "email": notify.get("email") or None,
             "smtp_available": bool(settings.smtp_host),
+            "delivery": await delivery_status(app.db.pool, user),
         }
 
     @router.put("/settings/notifications")
@@ -239,14 +273,18 @@ def build_router(app: App) -> Router:
         # A field the caller OMITTED must preserve the stored value: GET hides
         # the webhook URL, so an email-only save arrives without webhook_url,
         # and replacing the whole notify object silently disconnected the
-        # webhook. Explicit null removes.
+        # webhook. Explicit null removes. Values are validated BEFORE storage:
+        # an unpersistable webhook (private host, wrong scheme) or malformed
+        # email is refused here, not discovered at the next delivery.
         user = resolve_audience_from_request(request)
         if user is None:
             raise unauthorized("Authentication required")
-        patch = {
-            key: (getattr(body, key) or "").strip() or None
-            for key in ("webhook_url", "email") if key in body.model_fields_set
-        }
+        patch = {}
+        for key in ("webhook_url", "email"):
+            if key not in body.model_fields_set:
+                continue
+            value = (getattr(body, key) or "").strip() or None
+            patch[key] = _validated_notify_value(key, value) if value else None
         raw = await app.db.pool.fetchval(
             """
             INSERT INTO user_settings (user_id, data)
@@ -261,10 +299,13 @@ def build_router(app: App) -> Router:
             json.dumps(patch),
         )
         notify = json.loads(raw) if isinstance(raw, str) else raw
+        from omni.alerts.notify import delivery_status
+
         return {
             "webhook_configured": bool(notify.get("webhook_url")),
             "email": notify.get("email"),
             "smtp_available": bool(settings.smtp_host),
+            "delivery": await delivery_status(app.db.pool, user),
         }
 
     @router.get("/settings/backup")

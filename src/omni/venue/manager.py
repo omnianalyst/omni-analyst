@@ -25,7 +25,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
@@ -50,6 +51,31 @@ CONNECTABLE_VENUES = frozenset({"questrade"})
 
 _venues: dict[UUID, dict[str, Any]] = {}
 _locks: dict[UUID, asyncio.Lock] = {}
+# Reference count per user for the keyed lock above. An entry in _locks used
+# to be created by any refresh/disconnect and removed only by disconnect_user,
+# so a user who configured and then removed a venue (or never got one
+# connected) leaked a lock object forever. The count reaches zero exactly
+# when no reconciliation is in flight, and the lock is dropped then -- unless
+# a venue is live, which keeps the user's state (and lock) resident on
+# purpose.
+_lock_refs: dict[UUID, int] = {}
+
+
+@asynccontextmanager
+async def _user_lock(user_id: UUID) -> AsyncIterator[asyncio.Lock]:
+    lock = _locks.setdefault(user_id, asyncio.Lock())
+    _lock_refs[user_id] = _lock_refs.get(user_id, 0) + 1
+    try:
+        async with lock:
+            yield lock
+    finally:
+        remaining = _lock_refs.get(user_id, 1) - 1
+        if remaining > 0:
+            _lock_refs[user_id] = remaining
+        else:
+            _lock_refs.pop(user_id, None)
+            if not _venues.get(user_id):
+                _locks.pop(user_id, None)
 
 
 async def _load_venue_config(pool, user_id) -> dict:
@@ -67,8 +93,7 @@ async def refresh_venues(pool, user_id) -> dict[str, str]:
 
     Returns a status dict: {venue_key: 'connected' | 'disabled' | 'error: ...'}
     """
-    lock = _locks.setdefault(user_id, asyncio.Lock())
-    async with lock:
+    async with _user_lock(user_id):
         config = await _load_venue_config(pool, user_id)
         venues_config = config.get("venues", {})
         owner_venues = _venues.setdefault(user_id, {})
@@ -398,8 +423,7 @@ def connected_venues(user_id: UUID) -> dict[str, Any]:
 
 
 async def disconnect_venue(user_id: UUID, key: str) -> None:
-    lock = _locks.setdefault(user_id, asyncio.Lock())
-    async with lock:
+    async with _user_lock(user_id):
         venue = _venues.get(user_id, {}).pop(key, None)
         if venue is not None and hasattr(venue, "aclose"):
             await venue.aclose()
@@ -408,8 +432,7 @@ async def disconnect_venue(user_id: UUID, key: str) -> None:
 
 
 async def disconnect_user(user_id: UUID) -> None:
-    lock = _locks.setdefault(user_id, asyncio.Lock())
-    async with lock:
+    async with _user_lock(user_id):
         venues = _venues.pop(user_id, {})
         for key, venue in venues.items():
             try:
@@ -417,7 +440,6 @@ async def disconnect_user(user_id: UUID) -> None:
                     await venue.aclose()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("venue %s close failed for user %s: %s", key, user_id, exc)
-    _locks.pop(user_id, None)
 
 
 async def disconnect_all() -> None:
@@ -426,3 +448,4 @@ async def disconnect_all() -> None:
         await disconnect_user(user_id)
     _venues.clear()
     _locks.clear()
+    _lock_refs.clear()

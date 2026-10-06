@@ -61,7 +61,7 @@ async def create_user(pool: asyncpg.Pool, *, email: str, password: str) -> Any:
             """
             INSERT INTO users (email, password_hash)
             VALUES ($1, $2)
-            RETURNING id, email, created_at, active, role
+            RETURNING id, email, created_at, active, role, auth_version
             """,
             canonical,
             await _password_call(hash_password, password),
@@ -82,7 +82,7 @@ async def create_initial_operator(
             INSERT INTO users (email, password_hash, role)
             SELECT $1, $2, 'operator'
             WHERE NOT EXISTS (SELECT 1 FROM users)
-            RETURNING id, email, created_at, active, role
+            RETURNING id, email, created_at, active, role, auth_version
             """,
             canonical,
             await _password_call(hash_password, password),
@@ -105,7 +105,7 @@ async def authenticate_user(
     """
     canonical = _normalise_email(email)
     row = await pool.fetchrow(
-        "SELECT id, email, password_hash, created_at, active, role "
+        "SELECT id, email, password_hash, created_at, active, role, auth_version "
         "FROM users WHERE lower(email) = $1",
         canonical,
     )
@@ -133,6 +133,10 @@ async def change_password(
     Returns True on success, False when the old password does not match (the
     caller renders the same response as a wrong login -- no enumeration). Raises
     PasswordTooShort before touching the row if the new password is weak.
+
+    The auth_version increment rides the same UPDATE: every bearer token
+    issued before this moment carries the old epoch and dies with it, so a
+    stolen token does not outlive the password rotation that displaced it.
     """
     if len(new_password) < MIN_PASSWORD_LENGTH:
         raise PasswordTooShort
@@ -144,11 +148,26 @@ async def change_password(
     ):
         return False
     await pool.execute(
-        "UPDATE users SET password_hash = $1 WHERE id = $2",
+        "UPDATE users SET password_hash = $1, auth_version = auth_version + 1 "
+        "WHERE id = $2",
         await _password_call(hash_password, new_password),
         user_id,
     )
     return True
+
+
+async def bump_auth_version(pool: asyncpg.Pool, user_id: UUID) -> int:
+    """Invalidate every bearer token issued to the user so far.
+
+    The revocation half of logout-all-sessions: the increment moves the
+    user's epoch past whatever ver claim existing tokens carry, without
+    touching the password.
+    """
+    return await pool.fetchval(
+        "UPDATE users SET auth_version = auth_version + 1 WHERE id = $1 "
+        "RETURNING auth_version",
+        user_id,
+    )
 
 
 async def user_count(pool: asyncpg.Pool) -> int:

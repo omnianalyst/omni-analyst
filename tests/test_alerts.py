@@ -951,6 +951,7 @@ class TestNotifySettings:
             initial = await client.get("/settings/notifications", headers=headers)
             assert initial.json() == {
                 "webhook_configured": False, "email": None, "smtp_available": False,
+                "delivery": {"pending": 0, "failed": 0, "delivered": 0},
             }
 
             saved = await client.put(

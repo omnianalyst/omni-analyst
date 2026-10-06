@@ -15,8 +15,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@neutron-build/cli": "latest",
-    "@neutron-build/core": "latest",
+    "@neutron-build/cli": "0.1.5",
+    "@neutron-build/core": "0.1.8",
     "@preact/signals": "^2.11.0",
     "preact": "^10.25.4",
     "preact-render-to-string": "^6.5.0"

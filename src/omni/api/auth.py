@@ -24,7 +24,7 @@ from typing import Any
 from neutron import App, Router
 from neutron.auth.jwt import create_token
 from neutron.error import bad_request, forbidden, rate_limited, unauthorized
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from omni.auth import (
@@ -32,11 +32,18 @@ from omni.auth import (
     resolve_audience_from_request,
     resolve_role_from_request,
 )
+from omni.auth.forwarded import client_ip_from_request
 from omni.auth.ratelimit import check_rate_limit
+from omni.auth.throttle import (
+    check_login_throttle,
+    record_login_failure,
+    record_login_success,
+)
 from omni.auth.users import (
     MIN_PASSWORD_LENGTH,
     PasswordTooShort,
     authenticate_user,
+    bump_auth_version,
     change_password,
     create_initial_operator,
     create_user,
@@ -47,24 +54,27 @@ from omni.config import settings
 
 TOKEN_EXPIRES_IN = settings.token_expires_in
 
-
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "anonymous"
+# Credential-field ceilings: these bodies reach Argon2 and the single hashing
+# executor, so an unbounded string is a cheap way to tie that worker up. The
+# email bound is the RFC-wise maximum (320); the password bound is far above
+# any real credential and far below anything worth hashing.
+MAX_EMAIL_LENGTH = 320
+MAX_PASSWORD_LENGTH = 1024
 
 
 class RegisterIn(BaseModel):
-    email: str
-    password: str
+    email: str = Field(max_length=MAX_EMAIL_LENGTH)
+    password: str = Field(max_length=MAX_PASSWORD_LENGTH)
 
 
 class LoginIn(BaseModel):
-    email: str
-    password: str
+    email: str = Field(max_length=MAX_EMAIL_LENGTH)
+    password: str = Field(max_length=MAX_PASSWORD_LENGTH)
 
 
 class ChangePasswordIn(BaseModel):
-    old_password: str
-    new_password: str
+    old_password: str = Field(max_length=MAX_PASSWORD_LENGTH)
+    new_password: str = Field(max_length=MAX_PASSWORD_LENGTH)
 
 
 def _user_dict(row: Any) -> dict:
@@ -76,6 +86,34 @@ def _user_dict(row: Any) -> dict:
         "active": row["active"],
         "role": row["role"],
     }
+
+
+def _issue_token(row: Any) -> str:
+    # ver is the revocation epoch checked by ActivePrincipalMiddleware;
+    # riding it in the claim is what lets a password change or logout-all
+    # retire tokens that have not expired yet.
+    return create_token(
+        {"sub": str(row["id"]), "ver": row["auth_version"]},
+        jwt_secret(),
+        expires_in=TOKEN_EXPIRES_IN,
+    )
+
+
+async def _admit(pool, request: Request, email: str) -> None:
+    """Both gates every credential endpoint passes before any hashing.
+
+    The in-memory per-IP window is the cheap burst guard; the database check
+    is the authoritative, replica-shared lockout keyed by (email, ip) with
+    escalating cooldowns. Either refusing answers 429.
+    """
+    ip = client_ip_from_request(request)
+    if not check_rate_limit(ip):
+        raise rate_limited("Too many attempts; wait a minute and try again.")
+    admitted, _retry_after = await check_login_throttle(
+        pool, email=email, ip=ip
+    )
+    if not admitted:
+        raise rate_limited("Too many attempts; wait a minute and try again.")
 
 
 def build_router(app: App) -> Router:
@@ -95,8 +133,7 @@ def build_router(app: App) -> Router:
         # already been claimed. Reaching it after setup returns 409, not a new
         # account. Rate-limited per client IP -- it is a credential endpoint
         # reachable during the first-run window.
-        if not check_rate_limit(_client_ip(request)):
-            raise rate_limited("Too many attempts; wait a minute and try again.")
+        await _admit(app.db.pool, request, body.email)
         try:
             row = await create_initial_operator(
                 app.db.pool, email=body.email, password=body.password
@@ -105,13 +142,11 @@ def build_router(app: App) -> Router:
             raise bad_request(
                 f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
-        token = create_token(
-            {"sub": str(row["id"])},
-            jwt_secret(),
-            expires_in=TOKEN_EXPIRES_IN,
+        await record_login_success(
+            app.db.pool, email=body.email, ip=client_ip_from_request(request)
         )
         return {
-            "token": token,
+            "token": _issue_token(row),
             "token_type": "bearer",
             "expires_in": TOKEN_EXPIRES_IN,
             "user": _user_dict(row),
@@ -141,23 +176,20 @@ def build_router(app: App) -> Router:
 
     @router.post("/auth/login", status_code=200)
     async def login(body: LoginIn, request: Request) -> dict:
-        # Rate-limited per client IP: the front door has no other lock, and an
-        # unthrottled endpoint lets a guesser hammer it at network speed. The
-        # uniform 401 below still applies to the credential check itself.
-        if not check_rate_limit(_client_ip(request)):
-            raise rate_limited("Too many attempts; wait a minute and try again.")
+        # Two-layer throttling before any hashing, then the uniform 401 below.
+        # Failures are recorded only when admitted, so a locked-out guesser
+        # does not extend the lockout, and a successful login clears the key.
+        await _admit(app.db.pool, request, body.email)
+        ip = client_ip_from_request(request)
         row = await authenticate_user(
             app.db.pool, email=body.email, password=body.password
         )
         if row is None:
+            await record_login_failure(app.db.pool, email=body.email, ip=ip)
             raise unauthorized("Invalid email or password")
-        token = create_token(
-            {"sub": str(row["id"])},
-            jwt_secret(),
-            expires_in=TOKEN_EXPIRES_IN,
-        )
+        await record_login_success(app.db.pool, email=body.email, ip=ip)
         return {
-            "token": token,
+            "token": _issue_token(row),
             "token_type": "bearer",
             "expires_in": TOKEN_EXPIRES_IN,
         }
@@ -196,6 +228,17 @@ def build_router(app: App) -> Router:
             )
         if not ok:
             raise bad_request("Current password is incorrect")
+
+    @router.post("/auth/logout-all", status_code=204)
+    async def logout_all(request: Request) -> None:
+        # Revoke every bearer token issued to the signed-in user so far --
+        # including this one -- by moving the user's auth_version past every
+        # ver claim in flight. The password is untouched; the client clears
+        # its stored token and re-authenticates.
+        audience = resolve_audience_from_request(request)
+        if audience is None:
+            raise unauthorized("Authentication required")
+        await bump_auth_version(app.db.pool, audience)
 
     return router
 
