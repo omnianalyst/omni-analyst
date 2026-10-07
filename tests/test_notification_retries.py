@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -535,9 +537,12 @@ class TestConcurrentDeliveryWorkers:
         assert outcomes["delivered"] == 3
         assert len(progress) == 3
 
-    async def test_the_delivery_loop_touches_its_heartbeat_per_row(
+    async def test_the_delivery_loop_marks_progress_per_row(
         self, db, monkeypatch, tmp_path
     ):
+        # Pass-C C2: the per-row milestone refreshes the in-flight marker,
+        # not the success file -- only a completed pass may touch that, or
+        # "completed a pass" stops meaning completed.
         monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
         from omni.scheduler import heartbeat
         from omni.scheduler.worker import drain_delivery_queue_once
@@ -550,10 +555,63 @@ class TestConcurrentDeliveryWorkers:
         monkeypatch.setattr(notify, "_attempt_delivery", _ok)
         delivered = await drain_delivery_queue_once(db.pool)
         assert delivered == 2
-        age = heartbeat.heartbeat_age_seconds("notification_delivery")
+        assert heartbeat.heartbeat_age_seconds("notification_delivery") is None, (
+            "a mid-pass milestone touched the success file"
+        )
+        age = heartbeat.pass_age_seconds("notification_delivery")
         assert age is not None and age < 5.0, (
             "a slow-but-working delivery pass read as never having progressed"
         )
+
+    async def test_passes_aborted_at_their_first_milestone_never_complete(
+        self, db, monkeypatch, tmp_path
+    ):
+        # Pass-C C2, the audit's reproduction: three passes, each aborted
+        # right after its first milestone (the on-disk state of a worker
+        # that died one item in), must leave the success heartbeat absent
+        # -- zero completed passes -- and only a decaying marker behind.
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import heartbeat
+
+        await self._due_rows(db, 3)
+
+        async def _ok(queued):
+            pass
+
+        monkeypatch.setattr(notify, "_attempt_delivery", _ok)
+
+        from omni.scheduler.heartbeat import refresh_pass
+
+        def _milestone_then_abort():
+            # What the scheduler's wiring does at the milestone, then the
+            # worker dies immediately after it (crash, OOM, operator kill).
+            refresh_pass("notification_delivery")
+            raise RuntimeError("worker died at its milestone")
+
+        for _ in range(3):
+            with pytest.raises(RuntimeError, match="worker died"):
+                await process_delivery_queue(
+                    db.pool, on_progress=_milestone_then_abort
+                )
+
+        assert heartbeat.heartbeat_age_seconds("notification_delivery") is None, (
+            "an aborted pass left the success heartbeat fresh"
+        )
+        assert heartbeat.pass_age_seconds("notification_delivery") is not None
+
+        # Once the abandoned marker decays past the allowance, the
+        # crash-loop reads dead: with no success file ever written, the
+        # "never completed a pass" gate can actually fire.
+        heartbeat.expect_loop("notification_delivery")
+        stale = time.time() - 1200.0
+        os.utime(
+            tmp_path / "hb" / "running-notification_delivery", (stale, stale)
+        )
+        ok, message = heartbeat.check_heartbeat(900.0)
+        assert ok is False, (
+            "a delivery loop crash-looping one item deep read healthy forever"
+        )
+        assert "notification_delivery" in message
 
 
 class TestRetention:

@@ -33,7 +33,7 @@ from typing import Any
 from uuid import UUID
 
 from omni.credentials.keyring import decrypt_fields
-from omni.scheduler.health import record_loop_health
+from omni.scheduler.health import end_loop_pass, record_loop_health
 
 logger = logging.getLogger("omni.venue.manager")
 
@@ -519,6 +519,8 @@ async def reconcile_forever(pool, stopping, interval: float = RECONCILE_INTERVAL
                 )
             except Exception:
                 logger.exception("could not record venue reconciliation failure")
+            finally:
+                end_loop_pass("venue_reconciliation")
             logger.exception("venue reconciliation failed")
         try:
             await asyncio.wait_for(stopping.wait(), timeout=interval)

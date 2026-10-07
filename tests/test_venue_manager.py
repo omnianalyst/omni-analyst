@@ -327,3 +327,36 @@ async def test_a_reconcile_pass_that_cannot_run_still_fails_liveness(
     ok, message = heartbeat.check_heartbeat(900.0)
     assert ok is False
     assert "venue_reconciliation" in message
+
+
+async def test_a_failed_reconcile_pass_drops_its_marker_when_the_record_cannot_commit(
+    db, monkeypatch, tmp_path
+):
+    # Pass-C C1 for the venue loop: the in-flight marker must not survive a
+    # failed pass just because the loop_health write could not commit, or
+    # the next begin_pass re-touches it and the loop reads healthy while
+    # accomplishing nothing.
+    await db.pool.execute("TRUNCATE loop_health")
+    monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+    from omni.scheduler import heartbeat
+
+    stopping = asyncio.Event()
+
+    async def reconcile(_pool):
+        stopping.set()
+        raise RuntimeError("venue query blew up")
+
+    async def unreachable_record(*a, **kw):
+        raise RuntimeError("loop_health unreachable")
+
+    monkeypatch.setattr(manager, "reconcile_once", reconcile)
+    monkeypatch.setattr(manager, "record_loop_health", unreachable_record)
+
+    await manager.reconcile_forever(db.pool, stopping, interval=17.0)
+
+    assert heartbeat.pass_age_seconds("venue_reconciliation") is None, (
+        "the in-flight marker outlived a pass whose outcome could not be recorded"
+    )
+    ok, message = heartbeat.check_heartbeat(900.0)
+    assert ok is False
+    assert "venue_reconciliation" in message

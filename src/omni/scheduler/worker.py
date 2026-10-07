@@ -43,8 +43,8 @@ from omni.conviction.producers import producers_for
 from omni.conviction.publish import load_calibration, record
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.fill.pipeline import drain
-from omni.scheduler.health import record_loop_health, touch_loop_heartbeat
-from omni.scheduler.heartbeat import begin_pass
+from omni.scheduler.health import end_loop_pass, record_loop_health
+from omni.scheduler.heartbeat import begin_pass, refresh_pass
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +131,7 @@ async def fill_once(
         worker_id=worker_id or config.worker_id,
         max_gaps=config.max_gaps_per_cycle,
         licensed=config.licensed,
-        on_progress=lambda: touch_loop_heartbeat("fill"),
+        on_progress=lambda: refresh_pass("fill"),
     )
 
 
@@ -305,8 +305,10 @@ async def evaluate_alerts_once(pool) -> int:
             logger.exception("alert %s evaluation failed", a["id"])
         # The pass is linear in alert count with no ceiling, so each alert
         # is itself a liveness milestone: a long healthy alerts pass must
-        # not read as a wedged loop between touches (pass-B F5).
-        touch_loop_heartbeat("alerts")
+        # not read as a wedged loop between touches (pass-B F5). The marker,
+        # not the success file: only a completed pass may touch that
+        # (pass-C C2).
+        refresh_pass("alerts")
     return fired
 
 
@@ -330,7 +332,7 @@ async def drain_delivery_queue_once(pool) -> int:
 
     outcomes = await process_delivery_queue(
         pool,
-        on_progress=lambda: touch_loop_heartbeat("notification_delivery"),
+        on_progress=lambda: refresh_pass("notification_delivery"),
     )
     return outcomes["delivered"]
 
@@ -379,22 +381,34 @@ class Scheduler:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            await record_loop_health(
-                self._pool,
-                loop_name=loop_name,
-                ok=False,
-                error=f"{type(exc).__name__}: {exc}",
-                expected_interval_seconds=interval,
-            )
+            try:
+                await record_loop_health(
+                    self._pool,
+                    loop_name=loop_name,
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                    expected_interval_seconds=interval,
+                )
+            except Exception:
+                # A record that cannot commit must not replace the pass's
+                # own exception in the logs (pass-C C3), nor leave the
+                # in-flight marker behind for the next begin_pass to
+                # re-touch (pass-C C1).
+                logger.exception("could not record failure health for %s", loop_name)
+            finally:
+                end_loop_pass(loop_name)
             raise
         if on_result is not None:
             on_result(result)
-        await record_loop_health(
-            self._pool,
-            loop_name=loop_name,
-            ok=True,
-            expected_interval_seconds=interval,
-        )
+        try:
+            await record_loop_health(
+                self._pool,
+                loop_name=loop_name,
+                ok=True,
+                expected_interval_seconds=interval,
+            )
+        finally:
+            end_loop_pass(loop_name)
         return result
 
     async def start(self) -> None:

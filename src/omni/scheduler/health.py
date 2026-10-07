@@ -15,19 +15,22 @@ def touch_loop_heartbeat(loop_name: str) -> None:
     # so a heartbeat that cannot be written shows up as failing liveness --
     # it must not also corrupt the loop-health record of a working loop.
     # Per loop, not per process: one healthy loop must not be able to keep a
-    # wedged sibling's container looking alive (audit A13). Also called
-    # mid-pass by loops whose passes can legitimately outlast the allowance
-    # (delivery, fill, alerts): a slow healthy pass is not a wedged loop.
+    # wedged sibling's container looking alive (audit A13). A completed pass
+    # is the only writer: mid-pass progress refreshes the in-flight marker
+    # instead (pass-C C2), so the file's freshness keeps meaning "completed".
     from omni.scheduler.heartbeat import touch_heartbeat
 
     with contextlib.suppress(OSError):
         touch_heartbeat(loop_name)
 
 
-def _end_heartbeat_pass(loop_name: str) -> None:
+def end_loop_pass(loop_name: str) -> None:
     # The pass is no longer in flight; leaving the marker behind would let a
     # loop that fails every pass keep itself looking alive through its own
-    # restarts.
+    # restarts. record_loop_health calls this after committing, and the
+    # wrappers call it again in a finally around that record so the marker
+    # drops even when the record cannot commit (pass-C C1) -- the unlink is
+    # idempotent, so the doubled call costs nothing.
     from omni.scheduler.heartbeat import end_pass
 
     with contextlib.suppress(OSError):
@@ -114,7 +117,7 @@ async def record_loop_health(
             _bounded(result),
         )
         touch_loop_heartbeat(loop_name)
-        _end_heartbeat_pass(loop_name)
+        end_loop_pass(loop_name)
         return int(row["consecutive_failures"])
 
     row = await pool.fetchrow(
@@ -149,7 +152,7 @@ async def record_loop_health(
         )
     if liveness:
         touch_loop_heartbeat(loop_name)
-    _end_heartbeat_pass(loop_name)
+    end_loop_pass(loop_name)
     return consecutive
 
 
@@ -172,12 +175,17 @@ async def run_with_health(pool, *, loop_name: str, interval: float, fn):
             )
         except Exception:
             logger.exception("could not record failure health for %s", loop_name)
+        finally:
+            end_loop_pass(loop_name)
         raise
-    await record_loop_health(
-        pool,
-        loop_name=loop_name,
-        ok=True,
-        result=result,
-        expected_interval_seconds=interval,
-    )
+    try:
+        await record_loop_health(
+            pool,
+            loop_name=loop_name,
+            ok=True,
+            result=result,
+            expected_interval_seconds=interval,
+        )
+    finally:
+        end_loop_pass(loop_name)
     return result

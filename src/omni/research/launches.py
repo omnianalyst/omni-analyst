@@ -373,12 +373,18 @@ async def sweep(
 async def main() -> int:
     from omni.config import settings
     from omni.db import connect
-    from omni.scheduler.health import EXPECTED_OPERATION_INTERVALS, record_loop_health
+    from omni.scheduler.health import (
+        EXPECTED_OPERATION_INTERVALS,
+        end_loop_pass,
+        record_loop_health,
+    )
+    from omni.scheduler.heartbeat import begin_pass
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     client = await connect(settings.database_url)
+    begin_pass("launch_sweep")
     try:
         errors: list[str] = []
         counts = await sweep(
@@ -409,6 +415,8 @@ async def main() -> int:
             )
         except Exception:  # noqa: BLE001,S110
             pass
+        finally:
+            end_loop_pass("launch_sweep")
         raise
     finally:
         await client.close()

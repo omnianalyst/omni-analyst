@@ -232,3 +232,80 @@ class TestParsing:
         assert parsed.buys_24h == 400
         assert parsed.sells_24h == 0
         assert parsed.sellers_24h == 0
+
+
+class TestMainPassContract:
+    """Pass-C C4: launch_sweep must opt into the in-flight pass marker like
+    every other expected loop, and drop it when the pass ends -- including
+    when the health record cannot commit."""
+
+    class _Client:
+        def __init__(self, pool):
+            self.pool = pool
+
+        async def close(self):
+            pass
+
+    async def test_the_pass_is_marked_in_flight_and_dropped_when_it_records(
+        self, db, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import heartbeat
+
+        await db.pool.execute("TRUNCATE loop_health")
+        marker_seen_mid_pass: list[float | None] = []
+
+        async def fake_connect(_url):
+            return self._Client(db.pool)
+
+        async def fake_sweep(pool, *, now, errors):
+            marker_seen_mid_pass.append(heartbeat.pass_age_seconds("launch_sweep"))
+            return {"tracked": 0}
+
+        monkeypatch.setattr("omni.db.connect", fake_connect)
+        monkeypatch.setattr(launches, "sweep", fake_sweep)
+
+        assert await launches.main() == 0
+
+        assert len(marker_seen_mid_pass) == 1
+        mid_pass_age = marker_seen_mid_pass[0]
+        assert mid_pass_age is not None and mid_pass_age < 5.0, (
+            "the sweep ran without its pass marked in flight"
+        )
+        assert heartbeat.pass_age_seconds("launch_sweep") is None, (
+            "the marker outlived a pass that recorded its outcome"
+        )
+        status = await db.pool.fetchval(
+            "SELECT last_status FROM loop_health WHERE loop_name = 'launch_sweep'"
+        )
+        assert status == "success"
+
+    async def test_a_failed_pass_drops_its_marker_when_the_record_cannot_commit(
+        self, db, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import heartbeat
+
+        await db.pool.execute("TRUNCATE loop_health")
+
+        async def fake_connect(_url):
+            return self._Client(db.pool)
+
+        async def exploding_sweep(pool, *, now, errors):
+            raise RuntimeError("feed down")
+
+        async def unreachable_record(*a, **kw):
+            raise RuntimeError("loop_health unreachable")
+
+        monkeypatch.setattr("omni.db.connect", fake_connect)
+        monkeypatch.setattr(launches, "sweep", exploding_sweep)
+        monkeypatch.setattr(
+            "omni.scheduler.health.record_loop_health", unreachable_record
+        )
+
+        with pytest.raises(RuntimeError, match="feed down"):
+            await launches.main()
+
+        assert heartbeat.pass_age_seconds("launch_sweep") is None, (
+            "the marker outlived a pass whose outcome could not be recorded"
+        )

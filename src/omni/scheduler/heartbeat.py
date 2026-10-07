@@ -17,6 +17,10 @@ The contract is now:
   in-progress marker is liveness too: a slow-but-healthy pass (a delivery
   batch of slow sends, a long fill) is not a wedged loop, and judging it by
   its last completed pass alone read healthy work as stale mid-pass.
+* ``refresh_pass(name)`` -- a mid-pass milestone re-asserts the in-flight
+  marker. Progress is liveness, but only a completed pass may touch the
+  success file: milestones writing it made "completed a pass" stop meaning
+  completed (pass-C C2).
 * ``end_pass(name)`` -- drop the in-progress marker. Recording a failed
   pass without liveness does this: a loop that keeps beginning passes and
   failing them all must not keep the container alive through its own
@@ -84,6 +88,11 @@ def begin_pass(name: str) -> None:
     path = _running_path(name)
     path.touch(exist_ok=True)
     os.utime(path)
+
+
+def refresh_pass(name: str) -> None:
+    """A mid-pass milestone: the pass is still in flight and progressing."""
+    begin_pass(name)
 
 
 def end_pass(name: str) -> None:
@@ -185,5 +194,6 @@ __all__ = [
     "heartbeat_age_seconds",
     "heartbeat_dir",
     "pass_age_seconds",
+    "refresh_pass",
     "touch_heartbeat",
 ]

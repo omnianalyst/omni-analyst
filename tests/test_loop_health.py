@@ -215,3 +215,105 @@ class TestSchedulerDoWrapper:
         row = await _row(db.pool, "predict")
         assert row["consecutive_failures"] == 0
         assert row["last_success_at"] is not None
+
+    async def test_the_marker_drops_even_when_the_health_record_cannot_commit(
+        self, db, monkeypatch, tmp_path
+    ):
+        # Pass-C C1: the unlink used to live only inside record_loop_health,
+        # so a record that could not commit left the marker behind and the
+        # next begin_pass re-touched it -- a scheduler whose every pass
+        # failed read healthy indefinitely.
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import heartbeat
+
+        async def unreachable_record(*a, **kw):
+            raise RuntimeError("loop_health unreachable")
+
+        monkeypatch.setattr(
+            "omni.scheduler.worker.record_loop_health", unreachable_record
+        )
+
+        async def boom(*a, **kw):
+            raise RuntimeError("pass blew up")
+
+        sched = self._scheduler(db)
+        for cycle in range(3):
+            # Pass-C C3: the pass's own exception must survive a record
+            # that raised; the recorder's error must not replace it.
+            with pytest.raises(RuntimeError, match="pass blew up"):
+                await sched._do("fill", 30.0, boom)
+            assert heartbeat.pass_age_seconds("fill") is None, (
+                f"cycle {cycle}: the in-flight marker outlived a pass whose "
+                "outcome could not be recorded"
+            )
+        heartbeat.expect_loop("fill")
+        ok, message = heartbeat.check_heartbeat(900.0)
+        assert ok is False, "every pass failed, no outcome recorded, still healthy"
+        assert "never completed" in message
+
+    async def test_a_passing_pass_drops_its_marker_when_the_record_cannot_commit(
+        self, db, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import heartbeat
+
+        async def unreachable_record(*a, **kw):
+            raise RuntimeError("loop_health unreachable")
+
+        monkeypatch.setattr(
+            "omni.scheduler.worker.record_loop_health", unreachable_record
+        )
+
+        async def fine(*a, **kw):
+            return []
+
+        sched = self._scheduler(db)
+        # The unrecorded success still propagates: the outcome is the record,
+        # and swallowing it here would read a dead record as a clean pass.
+        with pytest.raises(RuntimeError, match="loop_health unreachable"):
+            await sched._do("fill", 30.0, fine)
+        assert heartbeat.pass_age_seconds("fill") is None
+
+
+class TestRunWithHealth:
+    """The autonomous-tier wrapper: same marker discipline as _do."""
+
+    async def test_the_marker_drops_even_when_the_health_record_cannot_commit(
+        self, db, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import health, heartbeat
+
+        async def unreachable_record(*a, **kw):
+            raise RuntimeError("loop_health unreachable")
+
+        monkeypatch.setattr(health, "record_loop_health", unreachable_record)
+
+        async def boom():
+            raise RuntimeError("pass blew up")
+
+        with pytest.raises(RuntimeError, match="pass blew up"):
+            await health.run_with_health(
+                db.pool, loop_name="carry", interval=86_400.0, fn=boom
+            )
+        assert heartbeat.pass_age_seconds("carry") is None
+
+    async def test_a_passing_pass_drops_its_marker_when_the_record_cannot_commit(
+        self, db, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import health, heartbeat
+
+        async def unreachable_record(*a, **kw):
+            raise RuntimeError("loop_health unreachable")
+
+        monkeypatch.setattr(health, "record_loop_health", unreachable_record)
+
+        async def fine():
+            return "done"
+
+        with pytest.raises(RuntimeError, match="loop_health unreachable"):
+            await health.run_with_health(
+                db.pool, loop_name="carry", interval=86_400.0, fn=fine
+            )
+        assert heartbeat.pass_age_seconds("carry") is None

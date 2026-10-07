@@ -162,12 +162,15 @@ async def test_a_completed_pass_with_contained_failures_keeps_liveness(
     assert ok is True, message
 
 
-async def test_the_alerts_pass_touches_its_heartbeat_per_alert(
+async def test_the_alerts_pass_marks_progress_per_alert_without_claiming_completion(
     db, _heartbeat_in_tmp
 ):
     # The alerts pass is linear in alert count with no ceiling; each alert
     # evaluated is a liveness milestone, so a long healthy pass does not
-    # read as stale between touches.
+    # read as stale between touches. Pass-C C2: the milestone refreshes the
+    # in-flight marker, NOT the success file -- "completed a pass" must stay
+    # the success file's meaning, or a pass aborted right after a milestone
+    # reads healthy with zero completed passes.
     import json
 
     from omni.scheduler.worker import evaluate_alerts_once
@@ -192,8 +195,41 @@ async def test_the_alerts_pass_touches_its_heartbeat_per_alert(
 
     fired = await evaluate_alerts_once(db.pool)
     assert fired == 0  # no claims exist: nothing fires, the pass still ran
-    age = heartbeat.heartbeat_age_seconds("alerts")
-    assert age is not None and age < 5.0
+    assert heartbeat.heartbeat_age_seconds("alerts") is None, (
+        "a mid-pass milestone touched the success file"
+    )
+    age = heartbeat.pass_age_seconds("alerts")
+    assert age is not None and age < 5.0, (
+        "a slow-but-working alerts pass read as never having progressed"
+    )
+
+
+async def test_the_fill_pass_marks_progress_without_claiming_completion(
+    db, monkeypatch, _heartbeat_in_tmp
+):
+    # The third milestone call site: fill_once wires drain's on_progress.
+    # It must refresh the marker, not the success file, for the same reason
+    # as the alerts milestone above.
+    from omni.scheduler import worker
+    from omni.scheduler.worker import SchedulerConfig, fill_once
+
+    async def fake_drain(
+        pool, *, registry, worker_id, max_gaps, licensed, on_progress
+    ):
+        on_progress()
+        return []
+
+    monkeypatch.setattr(worker, "drain", fake_drain)
+
+    await fill_once(db.pool, registry=None, config=SchedulerConfig())
+
+    assert heartbeat.heartbeat_age_seconds("fill") is None, (
+        "a mid-pass milestone touched the success file"
+    )
+    age = heartbeat.pass_age_seconds("fill")
+    assert age is not None and age < 5.0, (
+        "a slow-but-working fill pass read as never having progressed"
+    )
 
 
 async def test_a_slow_scheduled_loop_is_judged_against_its_own_interval(
