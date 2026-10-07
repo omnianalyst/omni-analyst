@@ -73,6 +73,129 @@ async def test_a_declared_loop_that_goes_stale_fails_the_check(_heartbeat_in_tmp
     assert "alerts" in message
 
 
+async def test_a_pass_that_began_within_the_allowance_is_live(_heartbeat_in_tmp):
+    # Pass-B F5: a delivery batch of slow sends, a long fill, a big alerts
+    # pass -- all healthy work that outlasts the allowance between touches.
+    # Judged by the last completed pass alone, mid-pass read as wedged.
+    heartbeat.expect_loop("fill")
+    heartbeat.begin_pass("fill")
+    ok, _message = heartbeat.check_heartbeat(900.0)
+    assert ok is True, "a pass in flight read as a wedged loop"
+
+
+async def test_an_abandoned_pass_marker_goes_stale_like_a_success_does(
+    _heartbeat_in_tmp,
+):
+    # A worker that died mid-pass leaves its marker behind; the marker must
+    # decay by the same allowance, not prove liveness forever.
+    heartbeat.expect_loop("fill")
+    heartbeat.begin_pass("fill")
+    stale = time.time() - 1200.0
+    os.utime(_heartbeat_in_tmp / "running-fill", (stale, stale))
+    ok, message = heartbeat.check_heartbeat(900.0)
+    assert ok is False
+    assert "stale" in message
+    assert "fill" in message
+
+
+async def test_a_fresh_marker_does_not_mask_a_wedged_sibling(_heartbeat_in_tmp):
+    heartbeat.expect_loop("sweep")
+    heartbeat.expect_loop("notification_delivery")
+    heartbeat.begin_pass("sweep")
+    ok, message = heartbeat.check_heartbeat(900.0)
+    assert ok is False
+    assert "notification_delivery" in message
+    assert "never completed" in message
+
+
+async def test_a_loop_that_begins_passes_but_fails_them_all_reads_dead(
+    db, _heartbeat_in_tmp
+):
+    # A13 discipline under markers: recording a failed pass drops the
+    # in-flight marker, or a crash-looping loop would keep the container
+    # alive through its own restarts.
+    from omni.scheduler.health import record_loop_health
+
+    name = f"test-loop-{uuid4().hex[:6]}"
+    heartbeat.expect_loop(name)
+    heartbeat.begin_pass(name)
+    await record_loop_health(
+        db.pool,
+        loop_name=name,
+        ok=False,
+        error="boom",
+        expected_interval_seconds=60.0,
+    )
+    ok, message = heartbeat.check_heartbeat(900.0)
+    assert ok is False, "a crash-looping loop kept itself alive via pass markers"
+    assert "never completed" in message
+
+
+async def test_a_successful_pass_clears_its_in_flight_marker(db, _heartbeat_in_tmp):
+    from omni.scheduler.health import record_loop_health
+
+    name = f"test-loop-{uuid4().hex[:6]}"
+    heartbeat.expect_loop(name)
+    heartbeat.begin_pass(name)
+    await record_loop_health(db.pool, loop_name=name, ok=True)
+    assert heartbeat.pass_age_seconds(name) is None
+
+
+async def test_a_completed_pass_with_contained_failures_keeps_liveness(
+    db, _heartbeat_in_tmp
+):
+    # Pass-B F2: the heartbeat means "a pass completed", not "a pass had
+    # nothing to complain about". One user's expired venue token must not
+    # fail the scheduler container's healthcheck while every loop runs.
+    from omni.scheduler.health import record_loop_health
+
+    name = "venue_reconciliation"
+    heartbeat.expect_loop(name)
+    await record_loop_health(
+        db.pool,
+        loop_name=name,
+        ok=False,
+        error="questrade=error: invalid refresh token",
+        liveness=True,
+    )
+    ok, message = heartbeat.check_heartbeat(900.0)
+    assert ok is True, message
+
+
+async def test_the_alerts_pass_touches_its_heartbeat_per_alert(
+    db, _heartbeat_in_tmp
+):
+    # The alerts pass is linear in alert count with no ceiling; each alert
+    # evaluated is a liveness milestone, so a long healthy pass does not
+    # read as stale between touches.
+    import json
+
+    from omni.scheduler.worker import evaluate_alerts_once
+
+    await db.pool.execute("TRUNCATE entity, users CASCADE")
+    user = await db.pool.fetchval(
+        "INSERT INTO users (email, password_hash) "
+        "VALUES ('hb-alerts@example.com', 'x') RETURNING id"
+    )
+    entity = await db.pool.fetchval(
+        "INSERT INTO entity (kind, symbol, name) "
+        "VALUES ('company', 'HB', 'HB') RETURNING id"
+    )
+    for threshold in (100, 200):
+        await db.pool.execute(
+            "INSERT INTO alert (user_id, entity_id, claim_type, condition) "
+            "VALUES ($1, $2, 'price_snapshot', $3::jsonb)",
+            user,
+            entity,
+            json.dumps({"kind": "value_above", "threshold": threshold}),
+        )
+
+    fired = await evaluate_alerts_once(db.pool)
+    assert fired == 0  # no claims exist: nothing fires, the pass still ran
+    age = heartbeat.heartbeat_age_seconds("alerts")
+    assert age is not None and age < 5.0
+
+
 async def test_a_slow_scheduled_loop_is_judged_against_its_own_interval(
     _heartbeat_in_tmp,
 ):

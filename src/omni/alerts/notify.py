@@ -33,6 +33,7 @@ import json
 import logging
 import smtplib
 import ssl
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from typing import Any
@@ -48,10 +49,14 @@ MAX_DELIVERY_ATTEMPTS = 5
 DELIVERY_BACKOFF_BASE = timedelta(seconds=60.0)
 DELIVERY_TTL = timedelta(hours=24.0)
 DELIVERY_BATCH = 20
-#: How long a claimed row is invisible to other workers. Covers one batch of
-#: bounded sends (webhook 5s, SMTP 10s each); after that a crashed worker's
-#: rows become due again and are retried -- at-least-once, not at-most-once.
-DELIVERY_CLAIM_LEASE = timedelta(seconds=60.0)
+#: How long a claimed row is invisible to other workers. Each row is claimed
+#: immediately before its own send, so this covers ONE bounded send, not a
+#: batch: a webhook is the aiohttp total timeout (5s), while SMTP is
+#: timeout=10s per socket operation across a whole session (connect, ehlo,
+#: starttls, ehlo, login, send, quit -- on the order of a dozen operations).
+#: After the lease lapses a crashed worker's row becomes due again and is
+#: retried -- at-least-once, not at-most-once.
+DELIVERY_CLAIM_LEASE = timedelta(seconds=120.0)
 #: Terminal rows (delivered/failed) are queue status, not an archive: the
 #: payload carries the destination (a webhook URL can embed a secret token)
 #: and the message body, so holding them forever is holding plaintext
@@ -436,6 +441,42 @@ async def _attempt_delivery(queued: dict) -> None:
     raise RuntimeError(f"unknown delivery channel payload kind: {queued.get('kind')!r}")
 
 
+async def _claim_one_due_row(pool, due_from: datetime):
+    """Claim the oldest due row for this worker and return it, or None.
+
+    One short transaction (SKIP LOCKED, so two delivery workers -- or a
+    manual run against a live scheduler -- each take a different row, never
+    the same one) that counts the attempt and hides the row for the lease
+    window. The lease is stamped from this claim, not from the pass start:
+    a row claimed after nineteen siblings already sent still gets a full
+    lease of its own.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """
+            SELECT id, channel, payload, attempts
+            FROM notification_delivery
+            WHERE status = 'pending' AND next_attempt_at <= $1
+            ORDER BY created_at
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            """,
+            due_from,
+        )
+        if row is None:
+            return None
+        await conn.execute(
+            """
+            UPDATE notification_delivery
+            SET attempts = attempts + 1, next_attempt_at = $2
+            WHERE id = $1
+            """,
+            row["id"],
+            datetime.now(UTC) + DELIVERY_CLAIM_LEASE,
+        )
+        return row
+
+
 async def process_delivery_queue(
     pool,
     *,
@@ -444,21 +485,37 @@ async def process_delivery_queue(
     max_attempts: int = MAX_DELIVERY_ATTEMPTS,
     ttl: timedelta = DELIVERY_TTL,
     retention: timedelta = DELIVERY_RETENTION,
+    on_progress: Callable[[], None] | None = None,
 ) -> dict[str, int]:
     """Work the due part of the delivery queue once. Returns outcome counts.
 
-    Claims rows in one short transaction (SKIP LOCKED, so two delivery
-    workers -- or a manual run against a live scheduler -- never send the
-    same notification twice inside a pass), then sends OUTSIDE any
-    transaction, then writes each outcome as its own committed statement.
+    Each row is claimed in its own short transaction immediately before its
+    send (SKIP LOCKED, so two delivery workers -- or a manual run against a
+    live scheduler -- never send the same notification twice inside a pass),
+    sent OUTSIDE any transaction, and its outcome written as its own
+    committed statement fenced on the claim -- ``attempts`` must still match
+    and the row must still be ``pending``. A worker whose lease lapsed
+    mid-send and lost the row to a fresher one therefore cannot overwrite
+    the fresher outcome: a delivered row cannot be flipped to ``failed`` by
+    a stale writer. An outcome write that matches no row means the row was
+    lost, and is not counted.
 
-    The sends used to happen inside the claiming transaction: one aborted
-    transaction (a later row's UPDATE failing, a dropped connection) rolled
-    every already-sent row's ``delivered`` update back, and the next pass
-    re-sent the whole batch (audit A10). A crash between a successful send
-    and its outcome write still re-sends that one row when its claim lease
-    lapses -- at-least-once delivery, the honest minimum for a queue whose
-    consumers are webhooks and mailboxes.
+    The sends used to happen inside one batch-wide claiming transaction: one
+    aborted transaction (a later row's UPDATE failing, a dropped connection)
+    rolled every already-sent row's ``delivered`` update back, and the next
+    pass re-sent the whole batch (audit A10). A crash between a successful
+    send and its outcome write still re-sends that one row when its claim
+    lease lapses -- at-least-once delivery, the honest minimum for a queue
+    whose consumers are webhooks and mailboxes.
+
+    Timestamps are stamped per row, not from the pass start: the claim lease
+    and the retry backoff are anchored to when the row is actually claimed
+    and when its outcome is written, so a late row in a slow batch waits out
+    its full backoff instead of one already half-elapsed.
+
+    ``on_progress`` (if given) is called after each row's outcome, so the
+    scheduler's delivery loop can refresh its heartbeat mid-pass -- a batch
+    of slow sends is a slow pass, not a wedged loop.
 
     Old pending rows expire to failed without an attempt: a retry landing
     hours after the event is noise, not alerting. Terminal rows older than
@@ -496,33 +553,10 @@ async def process_delivery_queue(
         "purged": len(purged_rows),
     }
 
-    async with pool.acquire() as conn, conn.transaction():
-        rows = await conn.fetch(
-            """
-            SELECT id, channel, payload, attempts
-            FROM notification_delivery
-            WHERE status = 'pending' AND next_attempt_at <= $1
-            ORDER BY created_at
-            LIMIT $2
-            FOR UPDATE SKIP LOCKED
-            """,
-            moment,
-            batch,
-        )
-        for row in rows:
-            # The claim: attempts counted now, the row invisible to other
-            # workers for the lease window. Committed before any send.
-            await conn.execute(
-                """
-                UPDATE notification_delivery
-                SET attempts = attempts + 1, next_attempt_at = $2
-                WHERE id = $1
-                """,
-                row["id"],
-                moment + DELIVERY_CLAIM_LEASE,
-            )
-
-    for row in rows:
+    for _ in range(batch):
+        row = await _claim_one_due_row(pool, moment)
+        if row is None:
+            break
         queued = row["payload"]
         if isinstance(queued, str):
             queued = json.loads(queued)
@@ -533,30 +567,35 @@ async def process_delivery_queue(
             raise
         except Exception as exc:  # noqa: BLE001 - one dead row must not stop the batch
             error = f"{type(exc).__name__}: {exc}"[:500]
+            outcome_at = datetime.now(UTC)
             if attempts >= max_attempts:
-                await pool.execute(
+                applied = await pool.execute(
                     """
                     UPDATE notification_delivery
                     SET status = 'failed', last_error = $2
-                    WHERE id = $1
+                    WHERE id = $1 AND status = 'pending' AND attempts = $3
                     """,
                     row["id"],
                     error,
+                    attempts,
                 )
-                outcomes["failed"] += 1
+                if applied != "UPDATE 0":
+                    outcomes["failed"] += 1
             else:
                 backoff = DELIVERY_BACKOFF_BASE * (2 ** (attempts - 1))
-                await pool.execute(
+                applied = await pool.execute(
                     """
                     UPDATE notification_delivery
                     SET last_error = $2, next_attempt_at = $3
-                    WHERE id = $1
+                    WHERE id = $1 AND status = 'pending' AND attempts = $4
                     """,
                     row["id"],
                     error,
-                    moment + backoff,
+                    outcome_at + backoff,
+                    attempts,
                 )
-                outcomes["retried"] += 1
+                if applied != "UPDATE 0":
+                    outcomes["retried"] += 1
             logger.warning(
                 "notification delivery %s failed (attempt %d): %s",
                 row["id"],
@@ -564,16 +603,20 @@ async def process_delivery_queue(
                 error,
             )
         else:
-            await pool.execute(
+            applied = await pool.execute(
                 """
                 UPDATE notification_delivery
                 SET status = 'delivered', delivered_at = $2, last_error = NULL
-                WHERE id = $1
+                WHERE id = $1 AND status = 'pending' AND attempts = $3
                 """,
                 row["id"],
-                moment,
+                datetime.now(UTC),
+                attempts,
             )
-            outcomes["delivered"] += 1
+            if applied != "UPDATE 0":
+                outcomes["delivered"] += 1
+        if on_progress is not None:
+            on_progress()
     return outcomes
 
 

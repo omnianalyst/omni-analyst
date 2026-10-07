@@ -10,16 +10,29 @@ _DEGRADED_THRESHOLD = 3
 _MAX_RESULT_LENGTH = 2000
 
 
-def _touch_heartbeat(loop_name: str) -> None:
+def touch_loop_heartbeat(loop_name: str) -> None:
     # Best-effort on purpose: the heartbeat feeds the container healthcheck,
     # so a heartbeat that cannot be written shows up as failing liveness --
     # it must not also corrupt the loop-health record of a working loop.
     # Per loop, not per process: one healthy loop must not be able to keep a
-    # wedged sibling's container looking alive (audit A13).
+    # wedged sibling's container looking alive (audit A13). Also called
+    # mid-pass by loops whose passes can legitimately outlast the allowance
+    # (delivery, fill, alerts): a slow healthy pass is not a wedged loop.
     from omni.scheduler.heartbeat import touch_heartbeat
 
     with contextlib.suppress(OSError):
         touch_heartbeat(loop_name)
+
+
+def _end_heartbeat_pass(loop_name: str) -> None:
+    # The pass is no longer in flight; leaving the marker behind would let a
+    # loop that fails every pass keep itself looking alive through its own
+    # restarts.
+    from omni.scheduler.heartbeat import end_pass
+
+    with contextlib.suppress(OSError):
+        end_pass(loop_name)
+
 
 EXPECTED_OPERATION_INTERVALS: dict[str, float] = {
     "sweep": 300.0,
@@ -65,7 +78,20 @@ async def record_loop_health(
     error: str | None = None,
     result: object | None = None,
     expected_interval_seconds: float | None = None,
+    liveness: bool | None = None,
 ) -> int:
+    """Record a pass outcome. ``liveness`` separates "a pass completed" from
+    "the pass had nothing to complain about" (pass-B finding F2).
+
+    By default the heartbeat is touched only on success -- a loop that is
+    failing honestly must not keep the container looking alive (A13). A pass
+    that COMPLETED but recorded business failures (per-venue connection
+    errors, contained and expected) passes ``liveness=True``: the loop ran,
+    the outcome stays in ``loop_health`` for the System page, and one user's
+    expired broker token does not fail the scheduler container's healthcheck.
+    Infrastructure failures of the pass itself (the query raised) leave
+    ``liveness`` unset, and the pass marker is dropped either way.
+    """
     if ok:
         row = await pool.fetchrow(
             """
@@ -87,7 +113,8 @@ async def record_loop_health(
             expected_interval_seconds,
             _bounded(result),
         )
-        _touch_heartbeat(loop_name)
+        touch_loop_heartbeat(loop_name)
+        _end_heartbeat_pass(loop_name)
         return int(row["consecutive_failures"])
 
     row = await pool.fetchrow(
@@ -120,10 +147,16 @@ async def record_loop_health(
             consecutive,
             error,
         )
+    if liveness:
+        touch_loop_heartbeat(loop_name)
+    _end_heartbeat_pass(loop_name)
     return consecutive
 
 
 async def run_with_health(pool, *, loop_name: str, interval: float, fn):
+    from omni.scheduler.heartbeat import begin_pass
+
+    begin_pass(loop_name)
     try:
         result = await fn()
     except asyncio.CancelledError:

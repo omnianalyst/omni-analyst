@@ -38,16 +38,21 @@ from starlette.exceptions import HTTPException
 
 from omni.auth.throttle import check_login_throttle, email_fingerprint, normalize_ip
 
+# The clock is pinned once per statement: clock_timestamp() is volatile, so
+# separate calls in the WHERE and the SET arms could straddle a window edge
+# and reset `used` to 1 instead of incrementing (pass-B F8). A CTE over a
+# volatile function is materialized, giving every arm the same instant.
 _RESERVE = """
+WITH moment AS (SELECT clock_timestamp() AS t)
 INSERT INTO auth_budget(key, used, expires_at)
-VALUES ($1, 1, clock_timestamp() + $3::interval)
+VALUES ($1, 1, (SELECT t FROM moment) + $3::interval)
 ON CONFLICT (key) DO UPDATE SET
-    used = CASE WHEN auth_budget.expires_at <= clock_timestamp()
+    used = CASE WHEN auth_budget.expires_at <= (SELECT t FROM moment)
                 THEN 1 ELSE auth_budget.used + 1 END,
-    expires_at = CASE WHEN auth_budget.expires_at <= clock_timestamp()
-                      THEN clock_timestamp() + $3::interval
+    expires_at = CASE WHEN auth_budget.expires_at <= (SELECT t FROM moment)
+                      THEN (SELECT t FROM moment) + $3::interval
                       ELSE auth_budget.expires_at END
-WHERE auth_budget.expires_at <= clock_timestamp()
+WHERE auth_budget.expires_at <= (SELECT t FROM moment)
    OR auth_budget.used < $2
 RETURNING used
 """

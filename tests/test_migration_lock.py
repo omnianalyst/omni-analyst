@@ -20,7 +20,17 @@ import asyncpg
 
 from omni.db import connect, migrate
 
-_SERVER = "postgresql://postgres:postgres@localhost:5434"
+# Same contract as conftest: an explicit TEST_DATABASE_URL is honoured
+# exactly (its server, anyway -- the scratch database below is still ours
+# to create and drop), and without one the docker dev postgres is the
+# default server. Hardcoding the port made this file the only test that
+# failed on a host without the dev postgres, dressed as a regression.
+_EXPLICIT_URL = os.environ.get("TEST_DATABASE_URL")
+_SERVER = (
+    _EXPLICIT_URL.rsplit("/", 1)[0]
+    if _EXPLICIT_URL and "://" in _EXPLICIT_URL and "/" in _EXPLICIT_URL.split("://", 1)[1]
+    else "postgresql://postgres:postgres@localhost:5434"
+)
 _DATABASE = f"omni_v2_migrate_race_test_{os.getpid()}"
 
 

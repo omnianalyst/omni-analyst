@@ -151,6 +151,27 @@ class TestSchedulerDoWrapper:
     def _scheduler(self, db):
         return Scheduler(db.pool, registry=None, config=SchedulerConfig())
 
+    async def test_do_marks_the_pass_in_flight_before_running_it(
+        self, db, monkeypatch, tmp_path
+    ):
+        # Pass-B F5: the marker is what lets a legitimately slow pass read
+        # as live; without it the healthcheck only ever sees completed
+        # passes and a long healthy pass looks wedged mid-flight.
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import heartbeat
+
+        seen: list[float | None] = []
+
+        async def slow(*a, **kw):
+            seen.append(heartbeat.pass_age_seconds("sweep"))
+
+        await self._scheduler(db)._do("sweep", 300.0, slow)
+
+        assert seen and seen[0] is not None and seen[0] < 5.0
+        assert heartbeat.pass_age_seconds("sweep") is None, (
+            "the in-flight marker outlived the pass it was for"
+        )
+
     async def test_a_raising_work_call_is_recorded_as_failure_and_reraised(self, db):
         sched = self._scheduler(db)
 

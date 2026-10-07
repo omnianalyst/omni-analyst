@@ -21,6 +21,7 @@ tests pin the replacement:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from uuid import uuid4
 
 import pytest
@@ -32,6 +33,16 @@ from omni.auth.throttle import email_fingerprint
 from omni.main import create_app
 
 SECRET = "a" * 48
+
+
+@contextlib.asynccontextmanager
+async def _busy_guard(*args, **kwargs):
+    """Stand-in for credential_guard that refuses the way exhausted
+    infrastructure does: a 503 before any verification happened."""
+    from omni.auth.admission import busy
+
+    raise busy()
+    yield  # pragma: no cover - unreachable by construction
 
 
 class _Lifespan:
@@ -557,3 +568,72 @@ class TestChangePasswordCas:
                 headers=_bearer(token),
             )
         assert r.status_code == 409, r.text
+
+
+class TestSetupInfraRefusalsAreNotCredentialFailures:
+    """Pass-B F3: a 503 out of the admission machinery (pool exhaustion,
+    password-busy) is infrastructure refusing the request before any
+    verification. Recording it as a login failure would inflate the
+    (email, ip) lockout streak -- exactly the "infrastructure failure
+    masquerading as a bad password" admission's contract forbids."""
+
+    async def test_a_busy_setup_refusal_writes_no_throttle_row(
+        self, db, database_url, monkeypatch
+    ):
+        app = create_app(database_url)
+        monkeypatch.setattr("omni.api.auth.credential_guard", _busy_guard)
+        async with _Lifespan(app), TestClient(app) as client:
+            r = await client.post(
+                "/auth/setup",
+                json={"email": "busy@example.com", "password": "a" * 16},
+            )
+            assert r.status_code == 503, r.text
+        rows = await db.pool.fetchval("SELECT count(*) FROM auth_throttle_event")
+        assert rows == 0, "a 503 was recorded as a failed credential claim"
+
+    async def test_setup_after_setup_still_records_its_failed_claim(
+        self, db, database_url
+    ):
+        app = create_app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            first = await client.post(
+                "/auth/setup",
+                json={"email": "claimed@example.com", "password": "a" * 16},
+            )
+            assert first.status_code == 200, first.text
+            from omni.auth.ratelimit import reset_for_test
+
+            reset_for_test()
+            second = await client.post(
+                "/auth/setup",
+                json={"email": "claimed@example.com", "password": "a" * 16},
+            )
+            assert second.status_code == 409, second.text
+        rows = await db.pool.fetchval(
+            "SELECT count(*) FROM auth_throttle_event WHERE email_hash = $1",
+            email_fingerprint("claimed@example.com"),
+        )
+        assert rows == 1, "the 409's failed-claim record went missing"
+
+    async def test_a_busy_login_refusal_writes_no_throttle_row(
+        self, db, database_url, monkeypatch
+    ):
+        # /auth/login never had the catch-all; this pins the asymmetry shut
+        # from the other side so a future refactor cannot reintroduce it.
+        app = create_app(database_url)
+        async with _Lifespan(app), TestClient(app) as client:
+            await client.post(
+                "/auth/setup",
+                json={"email": "login-busy@example.com", "password": "a" * 16},
+            )
+            from omni.auth.ratelimit import reset_for_test
+
+            reset_for_test()
+            monkeypatch.setattr("omni.api.auth.credential_guard", _busy_guard)
+            r = await client.post(
+                "/auth/login",
+                json={"email": "login-busy@example.com", "password": "wrong" * 3},
+            )
+            assert r.status_code == 503, r.text
+        rows = await db.pool.fetchval("SELECT count(*) FROM auth_throttle_event")
+        assert rows == 0

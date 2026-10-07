@@ -266,3 +266,64 @@ async def test_reconcile_loop_records_contained_connection_errors(db, monkeypatc
     assert row["last_error"] == f"{owner}:questrade=error: provider unavailable"
     assert row["last_result"] == "1 configured users checked"
     assert row["expected_interval_seconds"] == 17.0
+
+
+async def test_a_bad_venue_credential_does_not_fail_container_liveness(
+    db, monkeypatch, tmp_path
+):
+    # Pass-B F2, end to end: every other loop fresh, the reconcile pass
+    # completes, one venue errors -- the container healthcheck must stay
+    # green while loop_health still carries the failure for the System page.
+    await db.pool.execute("TRUNCATE loop_health")
+    monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+    from omni.scheduler import heartbeat
+
+    for loop in ("sweep", "fill", "resolve"):
+        heartbeat.expect_loop(loop)
+        heartbeat.touch_heartbeat(loop)
+
+    stopping = asyncio.Event()
+    owner = uuid4()
+
+    async def reconcile(_pool):
+        stopping.set()
+        return {owner: {"questrade": "error: invalid refresh token"}}
+
+    monkeypatch.setattr(manager, "reconcile_once", reconcile)
+
+    await manager.reconcile_forever(db.pool, stopping, interval=17.0)
+
+    ok, message = heartbeat.check_heartbeat(900.0)
+    assert ok is True, message
+
+    row = await db.pool.fetchrow(
+        "SELECT last_status, last_error FROM loop_health "
+        "WHERE loop_name = 'venue_reconciliation'"
+    )
+    assert row["last_status"] == "failure"
+    assert "invalid refresh token" in row["last_error"]
+
+
+async def test_a_reconcile_pass_that_cannot_run_still_fails_liveness(
+    db, monkeypatch, tmp_path
+):
+    # The other half of F2: liveness is kept for COMPLETED passes. A pass
+    # that blows up before recording (the query itself raised) must keep
+    # failing the check exactly as before.
+    await db.pool.execute("TRUNCATE loop_health")
+    monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+    from omni.scheduler import heartbeat
+
+    stopping = asyncio.Event()
+
+    async def reconcile(_pool):
+        stopping.set()
+        raise RuntimeError("venue query blew up")
+
+    monkeypatch.setattr(manager, "reconcile_once", reconcile)
+
+    await manager.reconcile_forever(db.pool, stopping, interval=17.0)
+
+    ok, message = heartbeat.check_heartbeat(900.0)
+    assert ok is False
+    assert "venue_reconciliation" in message

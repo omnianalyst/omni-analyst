@@ -13,11 +13,19 @@ The contract is now:
   declaration is written before the loop's first pass, so a loop that never
   completes ANY pass is "expected but silent", which fails the check; a
   first-success gate alone would wait forever for a file that never appears.
+* ``begin_pass(name)`` -- mark a pass of loop ``name`` as in flight. A fresh
+  in-progress marker is liveness too: a slow-but-healthy pass (a delivery
+  batch of slow sends, a long fill) is not a wedged loop, and judging it by
+  its last completed pass alone read healthy work as stale mid-pass.
+* ``end_pass(name)`` -- drop the in-progress marker. Recording a failed
+  pass without liveness does this: a loop that keeps beginning passes and
+  failing them all must not keep the container alive through its own
+  restarts, or the marker would undo the A13 discipline below.
 * ``touch_heartbeat(name)`` -- a successful pass of loop ``name`` refreshes
-  that loop's file. Failures never touch anything: a loop that is failing
+  that loop's file. Failures never touch it: a loop that is failing
   honestly must not keep the container looking alive.
-* ``check_heartbeat(max_age)`` -- healthy only when EVERY expected loop's
-  file exists and is fresher than ``max_age``.
+* ``check_heartbeat(max_age)`` -- healthy only when EVERY expected loop has
+  a fresh success file or a fresh in-progress marker.
 
 The heartbeat directory is a flat directory of per-loop files next to the
 manifest; nothing here reads the database, so the healthcheck stays cheap
@@ -57,11 +65,30 @@ def _expected_path(name: str) -> Path:
     return heartbeat_dir() / f"expected-{safe}"
 
 
+def _running_path(name: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
+    return heartbeat_dir() / f"running-{safe}"
+
+
 def expect_loop(name: str) -> None:
     """Declare a loop this process intends to run; see the module docstring."""
     directory = heartbeat_dir()
     directory.mkdir(parents=True, exist_ok=True)
     _expected_path(name).touch(exist_ok=True)
+
+
+def begin_pass(name: str) -> None:
+    """Mark a pass of this loop as in flight; see the module docstring."""
+    directory = heartbeat_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = _running_path(name)
+    path.touch(exist_ok=True)
+    os.utime(path)
+
+
+def end_pass(name: str) -> None:
+    """Drop the in-progress marker: this pass is no longer in flight."""
+    _running_path(name).unlink(missing_ok=True)
 
 
 def touch_heartbeat(name: str) -> None:
@@ -80,8 +107,17 @@ def heartbeat_age_seconds(name: str) -> float | None:
         return None
 
 
+def pass_age_seconds(name: str) -> float | None:
+    """Seconds since the loop last began (or advanced) a pass, or None."""
+    try:
+        return max(0.0, time.time() - _running_path(name).stat().st_mtime)
+    except OSError:
+        return None
+
+
 def check_heartbeat(max_age_seconds: float) -> tuple[bool, str]:
-    """Every expected loop must have a fresh success file.
+    """Every expected loop must have a fresh success file or a fresh
+    in-progress marker.
 
     ``max_age_seconds`` is the floor. A loop with a known expected interval
     is allowed up to three of them: a daily autonomous loop is not "stale"
@@ -103,13 +139,19 @@ def check_heartbeat(max_age_seconds: float) -> tuple[bool, str]:
     if not expected:
         return False, "scheduler heartbeat missing: no loop has been declared"
 
+    fresh: list[str] = []
     for name in expected:
-        age = heartbeat_age_seconds(name)
-        if age is None:
+        ages = [
+            age
+            for age in (heartbeat_age_seconds(name), pass_age_seconds(name))
+            if age is not None
+        ]
+        if not ages:
             return False, (
                 f"scheduler heartbeat missing: loop '{name}' has never "
                 "completed a pass"
             )
+        age = min(ages)
         interval = EXPECTED_OPERATION_INTERVALS.get(name)
         allowed = max(interval * 3, max_age_seconds) if interval else max_age_seconds
         if age > allowed:
@@ -117,8 +159,8 @@ def check_heartbeat(max_age_seconds: float) -> tuple[bool, str]:
                 f"scheduler heartbeat stale: loop '{name}' {age:.0f}s since "
                 "last progress"
             )
-    ages = ", ".join(f"{name} {heartbeat_age_seconds(name):.0f}s" for name in expected)
-    return True, f"heartbeats fresh ({ages})"
+        fresh.append(f"{name} {age:.0f}s")
+    return True, f"heartbeats fresh ({', '.join(fresh)})"
 
 
 def main() -> int:
@@ -136,9 +178,12 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "begin_pass",
     "check_heartbeat",
+    "end_pass",
     "expect_loop",
     "heartbeat_age_seconds",
     "heartbeat_dir",
+    "pass_age_seconds",
     "touch_heartbeat",
 ]

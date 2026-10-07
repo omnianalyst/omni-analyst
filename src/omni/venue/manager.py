@@ -467,11 +467,12 @@ async def reconcile_forever(pool, stopping, interval: float = RECONCILE_INTERVAL
     """
     import asyncio
 
-    from omni.scheduler.heartbeat import expect_loop
+    from omni.scheduler.heartbeat import begin_pass, expect_loop
 
     expect_loop("venue_reconciliation")
     while not stopping.is_set():
         try:
+            begin_pass("venue_reconciliation")
             status = await reconcile_once(pool)
             failures = [
                 f"{user_id}:{key}={state}"
@@ -479,6 +480,12 @@ async def reconcile_forever(pool, stopping, interval: float = RECONCILE_INTERVAL
                 for key, state in sorted(venues.items())
                 if state.startswith("error:")
             ]
+            # The pass completed: per-venue error states are contained
+            # business outcomes (a user's expired Questrade token must not
+            # fail the scheduler container's healthcheck -- pass-B F2), so
+            # liveness is kept and the outcome stays in loop_health for the
+            # System page. The except paths below record without liveness:
+            # a reconcile pass that cannot run at all is a real failure.
             await record_loop_health(
                 pool,
                 loop_name="venue_reconciliation",
@@ -486,6 +493,7 @@ async def reconcile_forever(pool, stopping, interval: float = RECONCILE_INTERVAL
                 error="; ".join(failures) or None,
                 result=f"{len(status)} configured users checked",
                 expected_interval_seconds=interval,
+                liveness=True,
             )
             if status:
                 logger.info(

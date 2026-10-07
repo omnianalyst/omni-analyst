@@ -150,7 +150,14 @@ def build_router(app: App) -> Router:
             raise bad_request(
                 f"password must be at least {MIN_PASSWORD_LENGTH} characters"
             )
-        except AppError:
+        except AppError as exc:
+            if exc.status == 503:
+                # busy() from pool exhaustion or the hashing semaphore is
+                # infrastructure refusing the request, not a bad credential
+                # claim: recording it would lock the (email, ip) pair out of
+                # first-run setup on outage blips (pass-B F3), against
+                # admission's own "must not masquerade as a bad password".
+                raise
             # Setup already complete is a failed claim on a credential
             # endpoint; the pair's history should say so. Recorded after
             # the guard: the refused claim rolled the transaction back, and

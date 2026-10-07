@@ -362,11 +362,15 @@ async def drain(
     worker_id: str,
     max_gaps: int = 100,
     licensed: Sequence[str] = (),
+    on_progress: Callable[[], None] | None = None,
 ) -> list[FillResult]:
     """Work the queue until it is empty or `max_gaps` have been attempted.
 
     Bounded on purpose: an unbounded drain against a gap engine that can reopen
-    gaps is a way to spend an API budget in one call.
+    gaps is a way to spend an API budget in one call. `on_progress` (if given)
+    is called after each attempted gap, so the scheduler can refresh its
+    heartbeat mid-pass -- a fill pass of slow providers is a slow pass, not a
+    wedged loop.
     """
     results: list[FillResult] = []
     deadline = time.monotonic() + 300
@@ -377,4 +381,6 @@ async def drain(
         if result is None:
             break
         results.append(result)
+        if on_progress is not None:
+            on_progress()
     return results

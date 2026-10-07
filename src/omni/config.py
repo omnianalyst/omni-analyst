@@ -91,8 +91,11 @@ class Settings(BaseSettings):
     # locking an account out by spraying its name from many addresses is the
     # trade this explicitly makes, and it is the right side of it. These are
     # fixed windows: a burst straddling a window edge gets a fresh allowance
-    # at the edge; they bound rate, not total attempts (the escalating
-    # cooldown in auth.throttle does the second job).
+    # at the edge; they bound rate, not total attempts. The escalating
+    # cooldown in auth.throttle is keyed per (email, ip) pair, so it engages
+    # against a guesser that stays on one address; one rotating source
+    # addresses never meets the doubling cooldowns and is bounded only by
+    # this account budget's rate.
     omni_auth_ip_budget: int = 30
     omni_auth_account_budget: int = 10
 

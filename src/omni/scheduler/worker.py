@@ -43,7 +43,8 @@ from omni.conviction.producers import producers_for
 from omni.conviction.publish import load_calibration, record
 from omni.coverage.gaps import detect_gaps, persist_gaps
 from omni.fill.pipeline import drain
-from omni.scheduler.health import record_loop_health
+from omni.scheduler.health import record_loop_health, touch_loop_heartbeat
+from omni.scheduler.heartbeat import begin_pass
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ async def fill_once(
         worker_id=worker_id or config.worker_id,
         max_gaps=config.max_gaps_per_cycle,
         licensed=config.licensed,
+        on_progress=lambda: touch_loop_heartbeat("fill"),
     )
 
 
@@ -301,6 +303,10 @@ async def evaluate_alerts_once(pool) -> int:
             fired += len(new)
         except Exception:
             logger.exception("alert %s evaluation failed", a["id"])
+        # The pass is linear in alert count with no ceiling, so each alert
+        # is itself a liveness milestone: a long healthy alerts pass must
+        # not read as a wedged loop between touches (pass-B F5).
+        touch_loop_heartbeat("alerts")
     return fired
 
 
@@ -322,7 +328,10 @@ async def drain_delivery_queue_once(pool) -> int:
     """Send due queued notifications once. Returns how many were delivered."""
     from omni.alerts.notify import process_delivery_queue
 
-    outcomes = await process_delivery_queue(pool)
+    outcomes = await process_delivery_queue(
+        pool,
+        on_progress=lambda: touch_loop_heartbeat("notification_delivery"),
+    )
     return outcomes["delivered"]
 
 
@@ -354,12 +363,17 @@ class Scheduler:
         ``asyncio.CancelledError`` is never recorded as a failure -- shutdown is
         not a fault.
 
+        The pass is marked in flight before it starts, so a pass that
+        legitimately outlasts the heartbeat allowance still reads live
+        (pass-B F5).
+
         ``on_result`` (if given) is called synchronously with the result BEFORE
         the health-record await. The scheduler's stats counters are updated this
         way so they tick the instant the work is done, not one DB-write later --
         otherwise there is a window where the work is visible in the store but
         ``stats`` has not advanced, which the resolve-loop test polls for.
         """
+        begin_pass(loop_name)
         try:
             result = await fn(*args, **kwargs)
         except asyncio.CancelledError:

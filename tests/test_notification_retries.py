@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -218,7 +219,13 @@ class TestRetryLifecycle:
             outcomes = await process_delivery_queue(db.pool, now=moment)
             if i < notify.MAX_DELIVERY_ATTEMPTS - 1:
                 assert outcomes["retried"] == 1
-                moment += notify.DELIVERY_BACKOFF_BASE * (2**i)
+                # The retry is anchored to the row's outcome time (pass-B
+                # F4), which trails this driver's `moment` by the pass's own
+                # execution time, so advance a second past each boundary
+                # rather than exactly onto it.
+                moment += (
+                    notify.DELIVERY_BACKOFF_BASE * (2**i) + timedelta(seconds=1)
+                )
             else:
                 assert outcomes["failed"] == 1
 
@@ -375,6 +382,177 @@ class TestNoReplayAfterAbortedBatch:
         )
         assert delivered == 1, (
             "a sibling's failure rolled back a delivered row's outcome"
+        )
+
+
+class TestConcurrentDeliveryWorkers:
+    """Pass-B F1/F4: each row is claimed immediately before its own send,
+    and every outcome write is fenced on the claim it answers.
+
+    The old shape claimed the whole batch up front with a lease shorter than
+    the batch's worst-case send time, so a second worker re-sent rows the
+    first was still sending, and an unconditional outcome write let the
+    stale worker flip a delivered row to ``failed``."""
+
+    async def _due_rows(self, db, n: int):
+        user_id = await _user_with_webhook(db)
+        for i in range(n):
+            await db.pool.execute(
+                """
+                INSERT INTO notification_delivery (user_id, alert_id, channel, payload)
+                VALUES ($1, $2, 'webhook', $3::jsonb)
+                """,
+                user_id,
+                uuid4(),
+                json.dumps(
+                    {
+                        "kind": "webhook",
+                        "url": f"https://hooks.example.com/h{i}",
+                        "body": {},
+                    }
+                ),
+            )
+        return user_id
+
+    async def test_two_workers_send_every_row_exactly_once(self, db, monkeypatch):
+        await self._due_rows(db, 6)
+        sends: list[str] = []
+
+        async def _slow(queued):
+            sends.append(queued["url"])
+            await asyncio.sleep(0.4)
+
+        monkeypatch.setattr(notify, "_attempt_delivery", _slow)
+        # Shorter than a whole batch's send time (6 rows x 0.4s = 2.4s) but
+        # longer than a single row's send: exactly the window in which the
+        # old batch-wide claim had lapsed mid-pass and a second worker
+        # re-sent rows the first was still sending.
+        monkeypatch.setattr(notify, "DELIVERY_CLAIM_LEASE", timedelta(seconds=1.2))
+
+        async def worker(delay: float):
+            await asyncio.sleep(delay)
+            return await process_delivery_queue(db.pool)
+
+        first, second = await asyncio.gather(worker(0.0), worker(1.5))
+
+        assert first["delivered"] + second["delivered"] == 6
+        counts = Counter(sends)
+        assert len(counts) == 6, f"only {len(counts)} distinct rows were sent"
+        assert set(counts.values()) == {1}, (
+            f"rows were sent more than once: {counts.most_common(3)}"
+        )
+
+    async def test_a_stale_worker_cannot_flip_a_delivered_row_to_failed(
+        self, db, monkeypatch
+    ):
+        user_id = await self._due_rows(db, 1)
+        calls = {"n": 0}
+
+        async def _stale_send_fails_late(queued):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # The stale worker's send outlives its lease, then fails.
+                await asyncio.sleep(0.5)
+                raise RuntimeError("stale worker error")
+
+        monkeypatch.setattr(notify, "_attempt_delivery", _stale_send_fails_late)
+        monkeypatch.setattr(notify, "DELIVERY_CLAIM_LEASE", timedelta(seconds=0.05))
+
+        async def stale_worker():
+            return await process_delivery_queue(db.pool, max_attempts=1)
+
+        async def fresh_worker():
+            # Wait until the stale worker has claimed the row, then past its
+            # (tiny) lease: the fresh worker re-claims, delivers, and writes
+            # the winning outcome first.
+            while (
+                await db.pool.fetchval(
+                    "SELECT attempts FROM notification_delivery"
+                )
+                < 1
+            ):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.2)
+            return await process_delivery_queue(db.pool, max_attempts=1)
+
+        stale, fresh = await asyncio.gather(stale_worker(), fresh_worker())
+
+        row = await db.pool.fetchrow(
+            "SELECT status, attempts, last_error, delivered_at "
+            "FROM notification_delivery"
+        )
+        assert row["status"] == "delivered", (
+            "a delivered row was flipped by a stale worker's late outcome"
+        )
+        assert row["attempts"] == 2
+        assert row["delivered_at"] is not None
+        assert stale == {
+            "delivered": 0, "retried": 0, "failed": 0, "expired": 0, "purged": 0
+        }, "the stale worker counted a row it no longer owned"
+        assert fresh["delivered"] == 1
+        assert await delivery_status(db.pool, user_id) == {
+            "pending": 0, "failed": 0, "delivered": 1,
+        }
+
+    async def test_retry_backoff_is_anchored_to_the_outcome_not_pass_start(
+        self, db, monkeypatch
+    ):
+        await self._due_rows(db, 1)
+        finished_send: list[datetime] = []
+
+        async def _slow_failure(queued):
+            await asyncio.sleep(1.5)
+            finished_send.append(datetime.now(UTC))
+            raise RuntimeError("slow transient failure")
+
+        monkeypatch.setattr(notify, "_attempt_delivery", _slow_failure)
+        monkeypatch.setattr(notify, "DELIVERY_BACKOFF_BASE", timedelta(seconds=1.0))
+
+        start = datetime.now(UTC)
+        outcomes = await process_delivery_queue(db.pool, now=start)
+        assert outcomes["retried"] == 1
+
+        row = await db.pool.fetchrow(
+            "SELECT next_attempt_at FROM notification_delivery"
+        )
+        # The backoff clock starts when the outcome is written, not when the
+        # pass began: a row whose own send consumed the whole backoff window
+        # must not come back due immediately.
+        assert row["next_attempt_at"] >= finished_send[0]
+        assert row["next_attempt_at"] - finished_send[0] >= timedelta(seconds=0.9)
+
+    async def test_each_row_outcome_reports_progress(self, db, monkeypatch):
+        await self._due_rows(db, 3)
+        progress: list[int] = []
+
+        async def _ok(queued):
+            pass
+
+        monkeypatch.setattr(notify, "_attempt_delivery", _ok)
+        outcomes = await process_delivery_queue(
+            db.pool, on_progress=lambda: progress.append(1)
+        )
+        assert outcomes["delivered"] == 3
+        assert len(progress) == 3
+
+    async def test_the_delivery_loop_touches_its_heartbeat_per_row(
+        self, db, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("OMNI_SCHEDULER_HEARTBEAT", str(tmp_path / "hb"))
+        from omni.scheduler import heartbeat
+        from omni.scheduler.worker import drain_delivery_queue_once
+
+        await self._due_rows(db, 2)
+
+        async def _ok(queued):
+            pass
+
+        monkeypatch.setattr(notify, "_attempt_delivery", _ok)
+        delivered = await drain_delivery_queue_once(db.pool)
+        assert delivered == 2
+        age = heartbeat.heartbeat_age_seconds("notification_delivery")
+        assert age is not None and age < 5.0, (
+            "a slow-but-working delivery pass read as never having progressed"
         )
 
 
