@@ -286,6 +286,17 @@ class TestTsmom252:
         assert sum(alloc.weights.values()) == pytest.approx(1.0)
         assert alloc.inputs["in_trend"] == ["S0", "S1"]
 
+    def test_weights_never_sum_above_one_for_any_basket_size(self):
+        # round(1/6, 4) * 6 = 1.0002: the shadow book refused the whole rule
+        # as leverage on every night six sectors were in trend.
+        from omni.research.allocation import tsmom_252
+
+        for count in (3, 6, 7, 9, 11):
+            names = [f"S{i}" for i in range(count)]
+            alloc = tsmom_252(self._panel([True] * count), names, benchmark="SPY")
+            assert len(alloc.weights) == count
+            assert sum(alloc.weights.values()) <= 1.0 + 1e-9
+
     def test_all_names_falling_is_all_cash_not_a_refusal(self):
         from omni.research.allocation import tsmom_252
 
