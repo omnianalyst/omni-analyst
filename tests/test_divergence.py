@@ -458,3 +458,18 @@ class TestRecomputeZAbstainsOnConstantSeries:
         # A monotonically rising series: the last point is well above the
         # rolling mean, so the z-score is real and positive, not the abstain 0.0.
         assert z > 1.0
+
+
+class TestScoreIsTheFlaggedDays:
+    def test_direction_and_evidence_describe_the_day_that_was_flagged(self):
+        perc_obs, fact_obs = _gen(+20, -20)
+        draft = compute_divergence(_inputs(perc_obs), _inputs(fact_obs))
+        assert draft is not None
+        ev = draft.evidence
+        assert "flagged_at" in ev
+        # The evidence z-scores are taken on the flagged day, so their
+        # difference IS the reported score (the property the evidence exists
+        # to make checkable).
+        assert ev["perception_z"] - ev["fact_z"] == pytest.approx(
+            draft.value["score"], abs=2e-4
+        )

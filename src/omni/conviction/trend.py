@@ -55,30 +55,93 @@ _CONTINUATION_FLOOR = 10
 
 
 async def measured_continuation_ratio(
-    pool, *, method: str = METHOD, audience: UUID | None = None
+    pool,
+    *,
+    method: str = METHOD,
+    audience: UUID | None = None,
+    as_of: datetime | None = None,
 ) -> float | None:
-    """The method's own realized target-to-stop distance ratio, from the
-    finding_payoff view: avg payoff distance over avg risked distance among
-    resolved calls. This is the only source the target multiple may come from
-    -- never a hand-chosen constant. None below the sample floor.
+    """The method's REALIZED move per unit of risk, over its resolved calls.
+
+    For each surfaced, resolved, directional call: how far price actually went
+    in the call's direction by the time it closed (the barrier it hit, or the
+    recorded exit price on an expiry), divided by the distance it risked. The
+    mean of that is what the method has delivered, and it is the only source
+    the target multiple may come from.
+
+    It was previously `avg_payoff_pct / avg_risk_pct` -- the barrier distances
+    the calls were WRITTEN with. No outcome entered it: the "measured" ratio was
+    the producer's own previous geometry read back, and once active it fixed
+    every call's confidence at `1 / (1 + ratio)`.
+
+    ``as_of`` makes the read point-in-time: only calls resolved (and surfaced)
+    by then count. A replay passes its historical decision time, so a backfilled
+    call cannot set its target from outcomes that had not happened yet. With no
+    ``as_of`` -- a live call -- the materialized ``finding_payoff`` view is read,
+    which is the same quantity as of the last statistics refresh.
+
+    None below the sample floor, and None when the realized mean is not
+    positive: a method that has not delivered continuation has no continuation
+    ratio, and a zero or negative target distance is not a target.
     """
-    row = await pool.fetchrow(
-        """
-        SELECT SUM(resolved) AS resolved,
-               SUM(avg_payoff_pct * resolved) / NULLIF(SUM(resolved), 0) AS payoff,
-               SUM(avg_risk_pct * resolved) / NULLIF(SUM(resolved), 0) AS risk
-        FROM finding_payoff
-        WHERE method = $1
-          AND (audience_user_id IS NULL OR audience_user_id IS NOT DISTINCT FROM $2)
-        """,
-        method,
-        audience,
-    )
-    if row is None or not row["resolved"] or row["resolved"] < _CONTINUATION_FLOOR:
+    if as_of is None:
+        row = await pool.fetchrow(
+            """
+            SELECT SUM(realized_n) AS n,
+                   SUM(avg_realized_ratio * realized_n)
+                       / NULLIF(SUM(realized_n), 0) AS ratio
+            FROM finding_payoff
+            WHERE method = $1
+              AND (audience_user_id IS NULL OR audience_user_id IS NOT DISTINCT FROM $2)
+            """,
+            method,
+            audience,
+        )
+    else:
+        row = await pool.fetchrow(
+            """
+            WITH directional AS (
+                SELECT p.entry_price,
+                       CASE p.direction WHEN 'up'
+                            THEN p.entry_price - p.lower_barrier
+                            ELSE p.upper_barrier - p.entry_price END AS risk_distance,
+                       CASE p.direction WHEN 'up' THEN 1 ELSE -1 END AS side_sign,
+                       CASE p.outcome
+                            WHEN 'upper' THEN p.upper_barrier
+                            WHEN 'lower' THEN p.lower_barrier
+                            WHEN 'expiry' THEN p.exit_price END AS measured_exit
+                FROM finding f
+                JOIN prediction p ON p.id = f.prediction_id
+                WHERE f.status = 'surfaced'
+                  AND f.method = $1
+                  AND (f.audience_user_id IS NULL
+                       OR f.audience_user_id IS NOT DISTINCT FROM $2)
+                  AND p.outcome <> 'pending'
+                  AND p.resolved_at <= $3
+                  AND f.created_at <= $3
+                  AND p.direction IN ('up', 'down')
+                  AND p.entry_price > 0 AND p.lower_barrier > 0
+                  AND p.lower_barrier < p.entry_price
+                  AND p.upper_barrier > p.entry_price
+            )
+            SELECT count(*) AS n,
+                   avg(side_sign * (measured_exit - entry_price) / risk_distance)
+                       AS ratio
+            FROM directional
+            WHERE measured_exit IS NOT NULL
+            """,
+            method,
+            audience,
+            as_of,
+        )
+    if row is None or not row["n"] or row["n"] < _CONTINUATION_FLOOR:
         return None
-    if not row["payoff"] or not row["risk"]:
+    if row["ratio"] is None:
         return None
-    return float(row["payoff"] / row["risk"])
+    ratio = float(row["ratio"])
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        return None
+    return ratio
 
 
 def _realized_vol(closes: list[float]) -> float:
@@ -146,26 +209,47 @@ def trend_call(
     return direction, upper, lower, confidence
 
 
-async def _price_window(
+async def _price_window_with_venue(
     pool, *, entity_id: UUID, audience: UUID | None, as_of: datetime, limit: int
-) -> list[float]:
-    """The trailing daily closes knowable as-of ``as_of``, oldest-first.
+) -> tuple[list[float], str | None]:
+    """The trailing closes of ONE venue knowable as-of ``as_of``, oldest-first,
+    and that venue's key.
 
     Point-in-time: a price filed after ``as_of`` is invisible, so a backtest
     cannot peek. Polygon bars carry ``close``; CoinGecko snapshots carry
     ``price``.
+
+    **One venue, one row per timestamp.** An entity priced by two venues has two
+    interleaved series, and a flat ``ORDER BY event_date LIMIT n`` over both is
+    neither: the "50-bar" SMA spans 25 bars, and the realized vol is mostly the
+    venues' basis bouncing between consecutive rows. A restated bar is the same
+    problem in one venue. So the window is pinned to the venue of the newest
+    visible print (keyed as ``basis._venue_price_series`` keys it), and
+    ``DISTINCT ON (event_date)`` keeps the most recently knowable version of
+    each bar.
     """
     rows = await pool.fetch(
         f"""
         WITH visible AS (
         {visible_claims_cte("$3")}
+        ),
+        priced AS (
+            SELECT c.value, c.event_date, c.knowledge_date,
+                   COALESCE(c.value->>'venue', c.source) AS venue_key
+            FROM visible c
+            WHERE c.entity_id = $1
+              AND c.claim_type = 'price_snapshot'
+              AND c.knowledge_date <= $2
+        ),
+        newest AS (
+            SELECT venue_key FROM priced
+            ORDER BY event_date DESC, knowledge_date DESC, venue_key
+            LIMIT 1
         )
-        SELECT c.value
-        FROM visible c
-        WHERE c.entity_id = $1
-          AND c.claim_type = 'price_snapshot'
-          AND c.knowledge_date <= $2
-        ORDER BY c.event_date DESC
+        SELECT DISTINCT ON (p.event_date) p.value, p.venue_key
+        FROM priced p
+        JOIN newest n ON n.venue_key IS NOT DISTINCT FROM p.venue_key
+        ORDER BY p.event_date DESC, p.knowledge_date DESC
         LIMIT $4
         """,
         entity_id,
@@ -174,7 +258,9 @@ async def _price_window(
         limit,
     )
     closes: list[float] = []
+    venue: str | None = None
     for r in rows:
+        venue = r["venue_key"]
         raw = r["value"]
         if isinstance(raw, (str, bytes)):
             raw = json.loads(raw)
@@ -190,6 +276,17 @@ async def _price_window(
         except (TypeError, ValueError):
             continue
     closes.reverse()  # oldest-first
+    return closes, venue
+
+
+async def _price_window(
+    pool, *, entity_id: UUID, audience: UUID | None, as_of: datetime, limit: int
+) -> list[float]:
+    """The trailing closes of one venue, oldest-first. See
+    `_price_window_with_venue`, which this is without the venue key."""
+    closes, _venue = await _price_window_with_venue(
+        pool, entity_id=entity_id, audience=audience, as_of=as_of, limit=limit
+    )
     return closes
 
 
@@ -213,7 +310,7 @@ async def produce_trend_prediction_from_coverage(
     ``window`` closes), the series is flat, or price sits on the MA. Abstention
     is the honest outcome, never a manufactured call.
     """
-    closes = await _price_window(
+    closes, price_venue = await _price_window_with_venue(
         pool, entity_id=entity_id, audience=audience_user_id, as_of=as_of,
         limit=window,
     )
@@ -226,7 +323,17 @@ async def produce_trend_prediction_from_coverage(
     # The target multiple comes from the method's own resolved record when it
     # has one (finding_payoff, above the sample floor); the conservative
     # vol-scaled default otherwise. Never a hand-chosen constant.
-    ratio = await measured_continuation_ratio(pool, method=METHOD, audience=audience_user_id)
+    #
+    # A replay stamps `created_at` with its historical decision time; then the
+    # ratio is read point-in-time as of that decision, so a backfilled call's
+    # target is never set from outcomes that had not happened yet. A live call
+    # (no `created_at`) reads the materialized statistics.
+    ratio = await measured_continuation_ratio(
+        pool,
+        method=METHOD,
+        audience=audience_user_id,
+        as_of=as_of if created_at is not None else None,
+    )
     call = trend_call(entry, sma, vol, target_k=target_k, continuation_ratio=ratio)
     if call is None:
         return None
@@ -253,5 +360,8 @@ async def produce_trend_prediction_from_coverage(
             "sma": sma,
             "realized_vol": vol,
             "confidence_model": "driftless_first_passage",
+            # The venue the window (and so the entry) was read from. The
+            # resolver scores the call on this venue's path alone.
+            **({"price_venue": price_venue} if price_venue is not None else {}),
         },
     )

@@ -110,6 +110,11 @@ _QUALITY_POOR_BPS = 50.0
 
 # Outlier flag threshold (v1 ``_identify_outlier_executions``): |z| > 2.
 _OUTLIER_Z_THRESHOLD = 2.0
+# Iglewicz-Hoaglin modified z-score scale factors: 0.6745 makes MAD consistent
+# with a normal sigma; 1.253314 does the same for the mean absolute deviation,
+# the fallback when more than half the values tie and MAD is zero.
+_MAD_TO_SIGMA = 0.6745
+_MEANAD_TO_SIGMA = 1.253314
 
 # Market-impact coefficients. These are v1's calibration literals, carried
 # bit-for-bit; none is tuned and v1 itself never calibrated them (the linear
@@ -121,7 +126,6 @@ _LINEAR_PERM_COEF = 0.05
 _LINEAR_VOL_MULT = 1.5
 _SQRT_TEMP_COEF = 0.314
 _SQRT_PERM_COEF = 0.142
-_SQRT_ANNUALISE = float(np.sqrt(252))
 _POWER_LAW_COEF = 1.0
 _POWER_LAW_ALPHA = 0.6
 
@@ -498,28 +502,37 @@ def slippage_summary(slippage_bps: Sequence[float]) -> dict[str, float]:
 def identify_outliers(
     values: Sequence[float], *, z_threshold: float = _OUTLIER_Z_THRESHOLD
 ) -> list[dict]:
-    """Indices whose value is more than ``z_threshold`` std from the mean.
+    """Indices whose robust z-score exceeds ``z_threshold`` in magnitude.
 
-    Ported from v1 ``_identify_outlier_executions`` (which flagged IS-bps
-    outliers at |z| > 2). Raises on an empty series. A constant series has no
-    spread and returns ``[]``; the check is ``np.ptp(arr) == 0`` (exact
-    regardless of magnitude) rather than ``np.std == 0``, because ``np.std``
-    of a constant non-integer series is a tiny nonzero float and dividing by
-    it fabricates z-scores from floating-point residue. v1's ``len > 3`` floor
-    is not retained: ``n == 1`` returns ``[]`` and ``n == 2`` distinct values
-    computes z-scores.
+    v1 scored each value against a mean and std that included the value
+    itself. The largest |z| that can produce is sqrt(n - 1), so with n <= 5
+    nothing could ever clear the 2.0 threshold however wild the fill. The
+    score here is the modified z-score: distance from the median over the
+    median absolute deviation (scaled to a normal sigma), falling back to the
+    mean absolute deviation when more than half the values tie and MAD is zero.
+
+    Raises on an empty or non-finite series. A constant series has no spread
+    and returns ``[]`` via the exact ``np.ptp(arr) == 0`` guard.
     """
     values = list(values)
     if len(values) == 0:
         raise Unavailable("values is empty: outlier detection is undefined")
     arr = np.asarray(values, dtype=float)
-    mean = float(np.mean(arr))
-    std = float(np.std(arr))
-    if np.ptp(arr) == 0.0:
+    if not np.all(np.isfinite(arr)):
+        raise Unavailable("values contain NaN/inf: outlier detection is undefined")
+    spread = float(np.ptp(arr))
+    if spread == 0.0:
         return []
+    median = float(np.median(arr))
+    deviations = np.abs(arr - median)
+    mad = float(np.median(deviations))
+    if mad > spread * 1e-12:
+        scale = mad / _MAD_TO_SIGMA
+    else:
+        scale = _MEANAD_TO_SIGMA * float(np.mean(deviations))
     outliers: list[dict] = []
     for i, v in enumerate(arr):
-        z = (float(v) - mean) / std
+        z = (float(v) - median) / scale
         if abs(z) > z_threshold:
             outliers.append({"index": i, "value": float(v), "z_score": float(z)})
     return outliers
@@ -531,7 +544,8 @@ def identify_outliers(
 #
 # Each estimator returns (temporary_bps, permanent_bps) as v1 did, except the
 # power-law model which v1 returned as a single scalar. The arithmetic is
-# v1's bit-for-bit; the coefficients are the named constants above. None is
+# v1's except for the square-root model's volatility units (see its
+# docstring); the coefficients are the named constants above. None is
 # calibrated and v1 never calibrated them either -- they are placeholders
 # carried so a future calibration has a fixed point to replace.
 
@@ -567,18 +581,30 @@ def estimate_square_root_impact(
 ) -> tuple[float, float]:
     """Square-root market-impact model (Almgren et al.). Returns (temp, perm) bps.
 
-    Ported verbatim from v1 ``MarketImpactModel.estimate_square_root_impact``.
-    Raises ``Unavailable`` when ``adv`` is zero -- v1 would divide by zero
-    inside ``participation = order_size / adv``.
+    ``volatility`` is the DAILY return volatility as a fraction (0.02 = 2%),
+    the unit the square-root law is stated in: impact ~ coef * sigma_daily *
+    sqrt(order / ADV). v1 multiplied the temporary leg alone by sqrt(252), so
+    the two legs read the same argument in different units and a 1%-of-ADV
+    order at 2% daily vol came out at ~100 bps temporary against ~3 bps
+    permanent. Both legs now use the daily figure. The coefficients are still
+    v1's uncalibrated literals.
+
+    Raises ``Unavailable`` when ``adv`` is not positive or an input is
+    negative/non-finite.
     """
-    if adv == 0:
+    order_size, adv = float(order_size), float(adv)
+    volatility, spread = float(volatility), float(spread)
+    if not all(np.isfinite(v) for v in (order_size, adv, volatility, spread)):
+        raise Unavailable("non-finite input: square-root impact is undefined")
+    if adv <= 0:
         raise Unavailable("adv is zero: square-root impact is undefined")
-    participation = float(order_size) / float(adv)
+    if order_size < 0 or volatility < 0 or spread < 0:
+        raise Unavailable("negative input: square-root impact is undefined")
+    participation = order_size / adv
     temporary = (
         _SQRT_TEMP_COEF
         * float(np.sqrt(participation))
-        * float(volatility)
-        * _SQRT_ANNUALISE
+        * volatility
         * _BPS
     )
     permanent = (

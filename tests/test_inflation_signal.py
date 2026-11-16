@@ -177,8 +177,14 @@ class TestEndToEnd:
         # The headline YoY is the hand-computed 1.0% (cpi[-13]=300, cpi[-1]=303).
         # This is the discrimination: a [-12]-instead-of-[-13] bug gives 0.916%.
         assert value["yoy"] == pytest.approx(1.0, abs=1e-6)
-        assert value["mom_annualized"] == pytest.approx(0.9909, abs=1e-3)
-        assert value["3m_annualized"] == pytest.approx(0.9926, abs=1e-3)
+        # Compounded: (303/302.75)^12 - 1 and (303/302.25)^4 - 1. Simple x12
+        # and x4 scaling gave 0.9909 and 0.9926.
+        assert value["mom_annualized"] == pytest.approx(
+            ((303 / 302.75) ** 12 - 1) * 100, abs=1e-6
+        )
+        assert value["3m_annualized"] == pytest.approx(
+            ((303 / 302.25) ** 4 - 1) * 100, abs=1e-6
+        )
 
         # A shared (allowed, no audience) derived claim reaches shared coverage.
         assert await db.pool.fetchval(

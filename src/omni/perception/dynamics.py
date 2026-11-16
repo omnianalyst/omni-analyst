@@ -101,29 +101,40 @@ class SentimentDynamicsModel:
 
             correlations = []
 
+            # Positional, not label-aligned. `Series.corr` aligns its operands
+            # on the INDEX, so `sentiment.iloc[:lag].corr(returns.iloc[-lag:])`
+            # threw the shift away and correlated the overlapping dates
+            # contemporaneously -- every lag returned (nearly) the lag-0 number
+            # and "optimal lag" was the largest of 21 copies of it. The two
+            # slices are paired row for row here.
+            s_vals = sentiment[col].to_numpy(dtype=float)
+            r_vals = returns[col].to_numpy(dtype=float)
+
             # Test different lags
             for lag in range(-max_lag, max_lag + 1):
                 if lag < 0:
-                    # Sentiment leads returns
-                    corr = sentiment[col].iloc[:lag].corr(
-                        returns[col].iloc[-lag:]
-                    )
+                    # Sentiment leads returns: s[t] against r[t + |lag|]
+                    a, b = s_vals[:lag], r_vals[-lag:]
                 elif lag > 0:
-                    # Returns lead sentiment
-                    corr = sentiment[col].iloc[lag:].corr(
-                        returns[col].iloc[:-lag]
-                    )
+                    # Returns lead sentiment: r[t] against s[t + lag]
+                    a, b = s_vals[lag:], r_vals[:-lag]
                 else:
                     # Contemporaneous
-                    corr = sentiment[col].corr(returns[col])
+                    a, b = s_vals, r_vals
+                corr = self._pair_correlation(a, b)
 
                 correlations.append({
                     'lag': lag,
-                    'correlation': corr if not pd.isna(corr) else 0
+                    # None, not 0: an unmeasurable correlation (too few pairs,
+                    # a flat series) is not a measured zero.
+                    'correlation': corr,
                 })
 
-            # Find optimal lag
-            corr_df = pd.DataFrame(correlations)
+            # Find optimal lag among the lags that could be measured
+            measured = [c for c in correlations if c['correlation'] is not None]
+            if not measured:
+                continue
+            corr_df = pd.DataFrame(measured)
             optimal_lag = corr_df.loc[corr_df['correlation'].abs().idxmax()]
 
             lead_lag_corr[col] = {
@@ -132,6 +143,9 @@ class SentimentDynamicsModel:
                 'sentiment_leads': optimal_lag['lag'] < 0,
                 'all_correlations': correlations
             }
+
+        if not lead_lag_corr:
+            return {'by_asset': {}, 'summary': None}
 
         # Summary statistics
         optimal_lags = [v['optimal_lag'] for v in lead_lag_corr.values()]
@@ -144,6 +158,22 @@ class SentimentDynamicsModel:
                 'avg_max_correlation': float(np.mean([v['max_correlation'] for v in lead_lag_corr.values()]))
             }
         }
+
+    @staticmethod
+    def _pair_correlation(a: np.ndarray, b: np.ndarray) -> float | None:
+        """Pearson correlation of two equal-length arrays paired by position,
+        over the rows where both are finite. None when it cannot be measured:
+        fewer than three pairs, or either side flat."""
+        if len(a) != len(b):
+            return None
+        mask = np.isfinite(a) & np.isfinite(b)
+        if int(mask.sum()) < 3:
+            return None
+        x, y = a[mask], b[mask]
+        if np.ptp(x) == 0 or np.ptp(y) == 0:
+            return None
+        corr = float(np.corrcoef(x, y)[0, 1])
+        return corr if np.isfinite(corr) else None
 
     def _calculate_sentiment_momentum(
         self,
@@ -232,10 +262,21 @@ class SentimentDynamicsModel:
             # Bearish divergence: sentiment worsening while price rising
             bearish_div = (sentiment_norm.diff() < 0) & (price_norm.diff() > 0) & (divergence.abs() > div_threshold)
 
-            if bullish_div.iloc[-window:].any() or bearish_div.iloc[-window:].any():
+            recent_bull = bullish_div.iloc[-window:]
+            recent_bear = bearish_div.iloc[-window:]
+            flagged = recent_bull | recent_bear
+            if flagged.any():
+                # The divergence is "active" because it was flagged on some day
+                # in the window -- so its type and its score are THAT day's.
+                # Reading them off the last row described a flag raised up to
+                # `window` days ago with today's numbers, which may be near
+                # zero or of the opposite sign.
+                flagged_at = flagged[flagged].index[-1]
                 divergences.append({
                     'asset': col,
-                    'type': 'bullish' if bullish_div.iloc[-1] else 'bearish' if bearish_div.iloc[-1] else 'none',
+                    'type': 'bullish' if bool(recent_bull.loc[flagged_at]) else 'bearish',
+                    'flagged_at': flagged_at,
+                    'flagged_score': float(divergence.loc[flagged_at]),
                     'divergence_score': float(divergence.iloc[-1]),
                     'days_persisted': int(bullish_div.iloc[-window:].sum() + bearish_div.iloc[-window:].sum()),
                     'current_sentiment': float(sentiment[col].iloc[-1]),

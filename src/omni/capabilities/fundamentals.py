@@ -197,6 +197,11 @@ async def financial_ratios(
     return ratios
 
 
+# Minimum (discount - terminal growth) for a Gordon terminal value to mean
+# anything. Stated, not fitted.
+_MIN_TERMINAL_SPREAD = 0.01
+
+
 async def dcf_valuation(
     fundamentals: dict[str, Any],
     current_price: float,
@@ -228,10 +233,28 @@ async def dcf_valuation(
         revenue_growth = income_statement.get("revenue_growth_rate")
         growth_rate = min(revenue_growth, 0.20)
 
+    derived_inputs: dict[str, Any] = {}
     if discount_rate is None:
         risk_free_rate = 0.04
         market_premium = 0.08
-        beta = fundamentals.get("beta", 1.0)
+        # A missing beta falls back to 1.0 (the market). That is an assumption,
+        # not a measurement, and the live DCF producer (conviction/predict.py)
+        # does not supply one -- so it is recorded in `assumptions` as
+        # `beta_assumed` and travels into the prediction's provenance instead
+        # of being silent. Refusing here would silence that producer; that call
+        # belongs to whoever owns it.
+        beta = fundamentals.get("beta")
+        beta_assumed = beta is None
+        if beta_assumed:
+            beta = 1.0
+        elif not np.isfinite(float(beta)):
+            raise Unavailable("non-finite beta; cannot derive a cost of equity")
+        derived_inputs = {
+            "beta": float(beta),
+            "beta_assumed": beta_assumed,
+            "risk_free_rate": risk_free_rate,
+            "equity_risk_premium": market_premium,
+        }
 
         cost_of_equity = risk_free_rate + beta * market_premium
 
@@ -251,6 +274,20 @@ async def dcf_valuation(
             )
         else:
             discount_rate = cost_of_equity
+
+    # Gordon-growth well-posedness. At discount <= terminal growth the terminal
+    # value is infinite or NEGATIVE, and just above it the valuation is almost
+    # entirely the terminal term divided by a number near zero. A low-beta name
+    # under the derived WACC lands exactly there. One percentage point of spread
+    # is the floor below which the result is the denominator talking.
+    if not np.isfinite(discount_rate) or not np.isfinite(terminal_growth_rate):
+        raise Unavailable("non-finite discount or terminal growth rate")
+    if discount_rate - terminal_growth_rate < _MIN_TERMINAL_SPREAD:
+        raise Unavailable(
+            f"discount rate {discount_rate:.4f} is not at least "
+            f"{_MIN_TERMINAL_SPREAD:.2%} above terminal growth "
+            f"{terminal_growth_rate:.4f}; the terminal value is ill-posed"
+        )
 
     projected_cash_flows = []
     current_fcf = free_cash_flow
@@ -300,6 +337,7 @@ async def dcf_valuation(
             "terminal_growth_rate": terminal_growth_rate,
             "discount_rate": discount_rate,
             "projection_years": years,
+            **derived_inputs,
         },
         "projected_cash_flows": projected_cash_flows,
         "terminal_value": terminal_value,
@@ -546,15 +584,28 @@ async def peer_comparison(
     }
 
 
-def max_drawdown(daily_returns: Sequence[float]) -> float:
-    if not daily_returns:
-        return 0.0
+def _equity_curve(daily_returns: Sequence[float]) -> np.ndarray:
+    """Cumulative equity starting AT 1.0, before the first return.
 
-    cumulative = np.cumprod([1 + r for r in daily_returns])
+    Without the leading 1.0 the first peak is `1 + r0`, so a series that opens
+    with losses has no peak to fall from: [-10%, -10%, +5%] read -10% against a
+    true -19%.
+    """
+    return np.concatenate(([1.0], np.cumprod(1.0 + np.asarray(daily_returns, dtype=float))))
+
+
+def max_drawdown(daily_returns: Sequence[float]) -> float:
+    """Worst peak-to-trough decline in percent (<= 0), from starting equity."""
+    if len(daily_returns) == 0:
+        raise Unavailable("no returns; drawdown is undefined, not zero")
+    if not np.all(np.isfinite(np.asarray(daily_returns, dtype=float))):
+        raise Unavailable("non-finite return in series; drawdown undefined")
+
+    cumulative = _equity_curve(daily_returns)
     running_max = np.maximum.accumulate(cumulative)
     drawdown = (cumulative - running_max) / running_max * 100
 
-    return float(np.min(drawdown)) if len(drawdown) > 0 else 0.0
+    return float(np.min(drawdown))
 
 
 def blend_position_returns(
@@ -565,16 +616,29 @@ def blend_position_returns(
 
     min_periods = min(len(pr["returns"]) for pr in position_returns.values())
     min_periods = min(min_periods, 252)
+    if min_periods == 0:
+        return []
 
+    # Series are chronological and end on the same bar: take each one's most
+    # RECENT `min_periods` so day i is the same calendar day in every position.
+    # Indexing from the head blended the oldest 252 bars and, for series of
+    # unequal length, paired different days.
+    tails = {
+        name: list(pr["returns"])[-min_periods:]
+        for name, pr in position_returns.items()
+    }
     daily_returns = []
     for i in range(min_periods):
         day_return = sum(
-            pr["weight"] * pr["returns"][i]
-            for pr in position_returns.values()
-            if i < len(pr["returns"])
+            pr["weight"] * tails[name][i] for name, pr in position_returns.items()
         )
         daily_returns.append(day_return)
     return daily_returns
+
+
+# Below this many days a compounded annual figure is an extrapolation of noise
+# (2% in a week "annualises" to ~181%), so it is not reported.
+_MIN_DAYS_TO_ANNUALISE = 30
 
 
 async def portfolio_returns(
@@ -584,42 +648,100 @@ async def portfolio_returns(
     period_days: int,
     *,
     risk_free_rate_pct: float,
+    starting_value: float | None = None,
+    periods_per_year: int = 252,
 ) -> dict[str, Any]:
+    """Money-weighted period return (Modified Dietz) plus risk on the daily series.
+
+    ``R = (V1 - V0 - F) / (V0 + sum(w_i * F_i))`` where ``V0`` is
+    ``starting_value`` (the book's value at the start of the period), ``V1`` is
+    ``total_value``, ``F_i`` are the period's external flows (buys positive,
+    sells negative) and ``w_i`` is the fraction of the period flow ``i`` was
+    invested for. A transaction may carry ``days_from_start``; one that does
+    not is weighted as present for the whole period (``w = 1``).
+
+    ``starting_value=None`` means the caller is asserting the book was OPENED
+    inside the period by these transactions (``V0 = 0``). A book that already
+    held assets must pass its starting value: omitting it measured the gain
+    against the period's net buys alone, so a 100k book that bought 10k and
+    ended at 115k read +1050% instead of +4.5%.
+
+    A non-positive capital base is refused. It used to be replaced by
+    ``total_value``, reporting exactly 0%.
+
+    ``annualized_return`` is ``None`` under ``_MIN_DAYS_TO_ANNUALISE`` days.
+    ``sharpe_ratio`` is computed from ``daily_returns`` alone (annualised mean
+    over annualised volatility); it previously divided the cash-flow return by
+    the volatility of this separate series, a ratio of two different books.
+    ``periods_per_year`` must match the series' calendar (252 sessions, 365
+    for a 24/7 series).
+    """
     if not transactions:
         raise Unavailable("no transactions in period")
+    if period_days <= 0:
+        raise Unavailable(f"period_days must be positive, got {period_days}")
+    if not np.isfinite(total_value):
+        raise Unavailable("non-finite total_value")
 
-    initial_value = 0.0
+    v0 = 0.0 if starting_value is None else float(starting_value)
+    if not np.isfinite(v0) or v0 < 0:
+        raise Unavailable(f"starting_value must be a finite non-negative amount, got {v0}")
+
+    net_flow = 0.0
+    weighted_flow = 0.0
     for txn in transactions:
-        if txn.get("transaction_type") == "buy":
-            initial_value += abs(txn.get("total_amount") or 0)
-        elif txn.get("transaction_type") == "sell":
-            initial_value -= abs(txn.get("total_amount") or 0)
+        kind = txn.get("transaction_type")
+        if kind not in ("buy", "sell"):
+            continue
+        amount = txn.get("total_amount")
+        if amount is None or not np.isfinite(float(amount)):
+            raise Unavailable(f"{kind} transaction has no finite total_amount")
+        flow = abs(float(amount)) if kind == "buy" else -abs(float(amount))
+        day = txn.get("days_from_start")
+        if day is None:
+            weight = 1.0
+        else:
+            day = float(day)
+            if not np.isfinite(day) or day < 0 or day > period_days:
+                raise Unavailable(
+                    f"days_from_start {day} is outside the {period_days}-day period"
+                )
+            weight = (period_days - day) / period_days
+        net_flow += flow
+        weighted_flow += weight * flow
 
-    if initial_value <= 0:
-        initial_value = total_value
+    capital_base = v0 + weighted_flow
+    if capital_base <= 0:
+        raise Unavailable(
+            "non-positive capital base (starting value plus time-weighted net "
+            "flows); a return on it is undefined. Pass starting_value if the "
+            "book held assets before the period"
+        )
 
-    absolute_return = total_value - initial_value
-
-    percentage_return = (
-        (absolute_return / initial_value * 100) if initial_value > 0 else 0.0
-    )
+    absolute_return = total_value - v0 - net_flow
+    percentage_return = absolute_return / capital_base * 100
 
     years = period_days / 365.25
-    annualized_return = (
-        (pow(1 + percentage_return / 100, 1 / years) - 1) * 100
-        if years > 0
-        else percentage_return
-    )
+    if period_days >= _MIN_DAYS_TO_ANNUALISE and percentage_return > -100.0:
+        annualized_return: float | None = (
+            pow(1 + percentage_return / 100, 1 / years) - 1
+        ) * 100
+    else:
+        annualized_return = None
 
     if len(daily_returns) <= 1:
         raise Unavailable("fewer than 2 daily returns; cannot estimate volatility")
+    daily = np.asarray(daily_returns, dtype=float)
+    if not np.all(np.isfinite(daily)):
+        raise Unavailable("non-finite value in daily_returns")
 
-    daily_std = np.std(daily_returns)
-    volatility = daily_std * np.sqrt(252) * 100
+    daily_std = float(np.std(daily))
+    volatility = daily_std * np.sqrt(periods_per_year) * 100
 
-    volatility_defined = float(np.ptp(daily_returns)) != 0.0
+    volatility_defined = float(np.ptp(daily)) != 0.0
+    series_annual_return = float(np.mean(daily)) * periods_per_year * 100
     sharpe_ratio = (
-        (annualized_return - risk_free_rate_pct) / volatility
+        (series_annual_return - risk_free_rate_pct) / volatility
         if volatility_defined
         else None
     )
@@ -629,13 +751,21 @@ async def portfolio_returns(
     return {
         "absolute_return": round(absolute_return, 2),
         "percentage_return": round(percentage_return, 2),
-        "annualized_return": round(annualized_return, 2),
+        "annualized_return": (
+            round(annualized_return, 2) if annualized_return is not None else None
+        ),
         "volatility": round(volatility, 2),
         "sharpe_ratio": (
             round(sharpe_ratio, 2) if sharpe_ratio is not None else None
         ),
         "max_drawdown": round(mdd, 2),
+        "return_method": "modified_dietz",
+        "starting_value": v0,
+        "capital_base": round(capital_base, 2),
     }
+
+
+_MIN_OBS_VAR_99 = 100
 
 
 async def risk_metrics(
@@ -644,7 +774,11 @@ async def risk_metrics(
     *,
     risk_free_rate_pct: float,
     benchmark_returns: Sequence[float] | None = None,
+    periods_per_year: int = 252,
 ) -> dict[str, Any]:
+    """Historical risk metrics. `periods_per_year` must match the series'
+    calendar: 252 for session data, 365 for a 24/7 crypto series (252 there
+    understates volatility by sqrt(365/252) = 1.20x)."""
     if len(daily_returns) < 20:
         raise Unavailable(
             f"insufficient historical data ({len(daily_returns)} days; need >=20) "
@@ -653,15 +787,24 @@ async def risk_metrics(
 
     returns_array = np.array(daily_returns)
 
+    if not np.all(np.isfinite(returns_array)):
+        raise Unavailable("non-finite value in daily_returns")
+
     var_95_daily = np.percentile(returns_array, 5)
-    var_99_daily = np.percentile(returns_array, 1)
     var_95 = var_95_daily * total_value
-    var_99 = var_99_daily * total_value
+    # A 1% quantile needs at least 1/0.01 = 100 observations to have a single
+    # point in its tail. Below that np.percentile just interpolates toward the
+    # sample minimum and labels it a 99% VaR; it is reported as None instead.
+    var_99: float | None = (
+        float(np.percentile(returns_array, 1) * total_value)
+        if returns_array.size >= _MIN_OBS_VAR_99
+        else None
+    )
 
     cvar_95 = np.mean(returns_array[returns_array <= var_95_daily]) * total_value
 
     daily_std = np.std(returns_array)
-    annual_std = daily_std * np.sqrt(252)
+    annual_std = daily_std * np.sqrt(periods_per_year)
     std_dev = annual_std * 100
 
     # Sortino downside deviation -- the textbook denominator
@@ -674,10 +817,12 @@ async def risk_metrics(
     downside = np.minimum(returns_array, 0.0)
     downside_dev_raw = float(np.sqrt(np.mean(downside**2)))
     downside_defined = not np.isclose(downside_dev_raw, 0.0, atol=_ZERO_STD_ATOL)
-    downside_dev = downside_dev_raw * np.sqrt(252) * 100 if downside_defined else 0.0
+    downside_dev = (
+        downside_dev_raw * np.sqrt(periods_per_year) * 100 if downside_defined else 0.0
+    )
 
     mean_daily_return = np.mean(returns_array)
-    annual_return = mean_daily_return * 252 * 100
+    annual_return = mean_daily_return * periods_per_year * 100
 
     sortino = (
         (annual_return - risk_free_rate_pct) / downside_dev
@@ -685,7 +830,7 @@ async def risk_metrics(
         else None
     )
 
-    cumulative = np.cumprod(1 + returns_array)
+    cumulative = _equity_curve(returns_array)  # from starting equity, see helper
     running_max = np.maximum.accumulate(cumulative)
     drawdowns = (cumulative - running_max) / running_max
     max_dd = abs(float(np.min(drawdowns))) * 100
@@ -694,15 +839,16 @@ async def risk_metrics(
     portfolio_beta: float | None = None
     if benchmark_returns is not None and len(benchmark_returns) >= 20:
         min_len = min(len(daily_returns), len(benchmark_returns))
-        port_ret = np.array(daily_returns[:min_len])
-        bench_ret = np.array(benchmark_returns[:min_len])
+        # Tail-aligned: both series end on the same bar (see correlation_matrix).
+        port_ret = np.array(daily_returns[-min_len:])
+        bench_ret = np.array(benchmark_returns[-min_len:])
         if float(np.ptp(bench_ret)) != 0.0:
             cov_matrix = np.cov(port_ret, bench_ret)
             portfolio_beta = float(cov_matrix[0, 1] / cov_matrix[1, 1])
 
     return {
         "value_at_risk_95": round(var_95, 2),
-        "value_at_risk_99": round(var_99, 2),
+        "value_at_risk_99": round(var_99, 2) if var_99 is not None else None,
         "conditional_var_95": round(cvar_95, 2),
         "portfolio_beta": (
             round(portfolio_beta, 2) if portfolio_beta is not None else None
@@ -756,8 +902,12 @@ async def correlation_matrix(
                 returns1 = historical_data[sym1]
                 returns2 = historical_data[sym2]
                 min_len = min(len(returns1), len(returns2))
-                returns1 = returns1[:min_len]
-                returns2 = returns2[:min_len]
+                # Chronological series ending on the same bar are aligned from
+                # the TAIL. Head-truncation pairs day t with day t+k whenever
+                # one series is shorter (a later listing): a true 0.93
+                # correlation read 0.09 with ten leading bars missing.
+                returns1 = returns1[-min_len:]
+                returns2 = returns2[-min_len:]
                 if min_len <= 10:
                     raise Unavailable(
                         f"insufficient overlapping history for {sym1}/{sym2} "
@@ -781,10 +931,14 @@ async def benchmark_comparison(
         raise Unavailable("non-positive benchmark start price")
 
     sp500_return = ((end_price - start_price) / start_price) * 100
-    alpha = portfolio_return - sp500_return
+    # Plain excess return over the benchmark. It is NOT a beta-adjusted alpha:
+    # no beta is estimated here. `alpha` is kept as the legacy key for existing
+    # consumers and always equals `excess_return`.
+    excess_return = portfolio_return - sp500_return
 
     return {
         "sp500_return": round(sp500_return, 2),
-        "alpha": round(alpha, 2),
+        "excess_return": round(excess_return, 2),
+        "alpha": round(excess_return, 2),
         "data_source": "historical",
     }

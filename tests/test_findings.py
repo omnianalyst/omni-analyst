@@ -64,8 +64,12 @@ async def _prediction(db, entity_id, *, direction="up", outcome=None):
 
 
 def _bucket(low, n, hits):
+    # mean_confidence is the bucket's zero-edge hit rate; the gate requires the
+    # Wilson lower bound of hits/n to beat it, so fixtures state a record that
+    # genuinely does (380 of 400 at a mean confidence of 0.85, not 34 of 40).
     return Calibration("manipulation_signal", "detect", low,
-                       round(low + 0.1, 2), n, hits)
+                       round(low + 0.1, 2), n, hits,
+                       mean_confidence=round(low + 0.05, 2))
 
 
 def _candidate(claim_id, confidence=0.85, **kw):
@@ -96,7 +100,7 @@ class TestRecording:
         # Buckets must cover the candidate's confidence for a rate to exist.
         v = assess(_candidate(c, supporting=("volume z=4.2",),
                               disconfirming=("earnings due",)),
-                   [_bucket(0.7, 40, 34), _bucket(0.8, 40, 36)])
+                   [_bucket(0.7, 400, 360), _bucket(0.8, 400, 380)])
         assert v.surfaced
         fid = await record(db.pool, v, entity_id=e, prediction_id=p)
 
@@ -123,23 +127,28 @@ class TestRecording:
         would let the published hit rate drift from what was claimed."""
         e = await _entity(db)
         c = await _claim(db, e)
-        v = assess(_candidate(c), [_bucket(0.7, 40, 34)])
+        v = assess(_candidate(c), [_bucket(0.8, 400, 380)])
         with pytest.raises(asyncpg.IntegrityConstraintViolationError):
             await record(db.pool, v, entity_id=e, prediction_id=None)
 
-    async def test_confidence_above_every_observed_bucket_reports_no_rate(self, db):
-        """Surfaced on the threshold's evidence, but honest that this exact
-        confidence has never been observed resolving. None, not an
-        extrapolation."""
+    async def test_confidence_above_every_measured_bucket_is_refused(self, db):
+        """This exact confidence has never been observed resolving, so there is
+        no record to surface it on. Refused, with no extrapolated rate."""
         e = await _entity(db)
         c = await _claim(db, e)
         p = await _prediction(db, e)
-        v = assess(_candidate(c, confidence=0.95), [_bucket(0.7, 40, 34)])
-        assert v.surfaced
+        v = assess(_candidate(c, confidence=0.95), [_bucket(0.7, 400, 360)])
+        # Rewritten: this used to assert the call was SURFACED on the 0.7
+        # bucket's evidence with no rate of its own -- a confidence whose own
+        # bucket was never measured, let through because a lower one qualified.
+        # A candidate is gated on its own bucket, so this is a refusal.
+        assert not v.surfaced
+        assert v.refusal is Refusal.BELOW_THRESHOLD
         assert v.calibrated_hit_rate is None
         fid = await record(db.pool, v, entity_id=e, prediction_id=p)
-        row = await db.pool.fetchrow("SELECT threshold, calibrated_hit_rate "
+        row = await db.pool.fetchrow("SELECT status, threshold, calibrated_hit_rate "
                                      "FROM finding WHERE id=$1", fid)
+        assert row["status"] == "refused"
         assert row["threshold"] == pytest.approx(0.7)
         assert row["calibrated_hit_rate"] is None
 
@@ -188,7 +197,7 @@ class TestBriefing:
         e = await _entity(db)
         c = await _claim(db, e)
         p = await _prediction(db, e)
-        await record(db.pool, assess(_candidate(c), [_bucket(0.7, 40, 34)]),
+        await record(db.pool, assess(_candidate(c), [_bucket(0.8, 400, 380)]),
                      entity_id=e, prediction_id=p)
         await record(db.pool, assess(_candidate(c), []), entity_id=e)
 
@@ -202,7 +211,7 @@ class TestBriefing:
         owner = uuid4()
         c = await _claim(db, e, owner=owner)
         p = await _prediction(db, e)
-        await record(db.pool, assess(_candidate(c), [_bucket(0.7, 40, 34)]),
+        await record(db.pool, assess(_candidate(c), [_bucket(0.8, 400, 380)]),
                      entity_id=e, audience_user_id=owner, prediction_id=p)
 
         assert len(await briefing(db.pool, audience=owner)) == 1
@@ -213,7 +222,7 @@ class TestBriefing:
 class TestScorecard:
     async def _surface(self, db, e, c, outcome, direction="up"):
         p = await _prediction(db, e, direction=direction, outcome=outcome)
-        await record(db.pool, assess(_candidate(c), [_bucket(0.7, 40, 34)]),
+        await record(db.pool, assess(_candidate(c), [_bucket(0.8, 400, 380)]),
                      entity_id=e, prediction_id=p)
 
     async def test_accuracy_is_reported_on_what_was_surfaced(self, db):
@@ -254,7 +263,7 @@ class TestScorecard:
         c = await _claim(db, e)
         await record(db.pool, assess(_candidate(c), []), entity_id=e)
         await record(db.pool, assess(_candidate(c, falsifiable=False),
-                                     [_bucket(0.7, 40, 34)]), entity_id=e)
+                                     [_bucket(0.8, 400, 380)]), entity_id=e)
         counts = await refusal_counts(db.pool)
         assert counts[Refusal.UNCALIBRATED.value] == 1
         assert counts[Refusal.NOT_FALSIFIABLE.value] == 1
@@ -271,7 +280,7 @@ class TestScorecard:
         other = uuid4()
         for _ in range(12):
             p = await _prediction(db, e, direction="up", outcome="upper")
-            await record(db.pool, assess(_candidate(c), [_bucket(0.7, 40, 34)]),
+            await record(db.pool, assess(_candidate(c), [_bucket(0.8, 400, 380)]),
                          entity_id=e, audience_user_id=owner, prediction_id=p)
 
         owner_card = (await scorecard(db.pool, audience=owner))[0]
@@ -400,7 +409,7 @@ class TestClaimlessFindings:
         v = assess(
             _candidate(None, supporting=("input claim a",),
                        disconfirming=("risk event",)),
-            [_bucket(0.7, 40, 34)],
+            [_bucket(0.8, 400, 380)],
         )
         assert v.surfaced
         fid = await record(db.pool, v, entity_id=e, prediction_id=p)

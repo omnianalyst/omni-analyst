@@ -396,7 +396,7 @@ def _cases():
 
     return {
         "macro.sahm_rule": (
-            {"unemployment_values": [3.5] * 9 + [3.9, 4.1, 4.3]},
+            {"unemployment_values": [3.5] * 12 + [3.9, 4.1, 4.3]},
             lambda r: bool(r["triggered"]) is True
             and r["value"] == pytest.approx(0.6),
         ),
@@ -652,11 +652,10 @@ def _cases():
                 "target_vol": 0.10,
                 "max_leverage": 5.0,
             },
+            # No correlation supplied -> sized at correlation 1: the weighted
+            # vols sum to the target.
             lambda r: isinstance(r, pd.Series)
-            and abs(
-                float(np.sqrt(np.sum((r.to_numpy() * np.array([0.10, 0.20])) ** 2)))
-                - 0.10
-            )
+            and abs(float(np.sum(r.to_numpy() * np.array([0.10, 0.20]))) - 0.10)
             < 1e-9,
         ),
         "portfolio.risk_contributions": (
@@ -1004,7 +1003,9 @@ def _cases():
             {"returns": _returns(50)},
             lambda r: isinstance(r, list)
             and len(r) == 50
-            and all(l in ("quiet", "transition", "volatile") for l in r),
+            # The first window-1 (19) bars have no full window: "warmup".
+            and r[:19] == ["warmup"] * 19
+            and all(l in ("quiet", "transition", "volatile") for l in r[19:]),
         ),
         "regime.classify_volatility": (
             {"returns": _returns(50)},
@@ -1162,7 +1163,8 @@ def _cases():
             {"values": [0.0] * 9 + [100.0]},
             lambda r: len(r) == 1
             and r[0]["index"] == 9
-            and r[0]["z_score"] == pytest.approx(3.0),
+            # modified z-score, mean-absolute-deviation fallback (MAD is 0)
+            and r[0]["z_score"] == pytest.approx(100.0 / (1.253314 * 10.0)),
         ),
         # --- signal fusion ---
         "signal_fusion.normalize": (
@@ -1190,9 +1192,13 @@ def _cases():
                 "b": [0.0, 0.0] + [float(i) for i in range(38)],
                 "max_lag": 5,
             },
+            # Two trending LEVEL series: the shift is recovered, but a ramp
+            # against a ramp correlates at 1.0 at every lag, so after the
+            # serial-correlation correction it carries no significance. (This
+            # asserted 1.0 before lead_lag corrected for autocorrelation.)
             lambda r: r.lag == 2
             and r.correlation == pytest.approx(1.0)
-            and r.significance == pytest.approx(1.0),
+            and r.significance == pytest.approx(0.0),
         ),
         # --- market risk (capabilities/risk.py) ---
         "market_risk.liquidity_risk": (
@@ -1208,9 +1214,10 @@ def _cases():
             and r["top_5_concentration"] == 1.0,
         ),
         "market_risk.options_skew": (
-            {"skews": [10.0, None, 10.0]},
-            # avg 10 -> score (10 + 20) * 2.5 = 75; None dropped
-            lambda r: r["score"] == 75.0 and r["average_skew"] == 10.0,
+            {"skews": [0.10, None, 0.10]},
+            # decimal IV skew: avg 0.10 -> (0.10 + 0.20) * 250 = 75; None dropped
+            lambda r: r["score"] == pytest.approx(75.0)
+            and r["average_skew"] == pytest.approx(0.10),
         ),
         "market_risk.breadth": (
             {
@@ -1297,8 +1304,10 @@ def _cases():
             {
                 # Strategy A (col 0) strictly dominates B (col 1) in every
                 # group, so the in-sample-best is A out-of-sample too: every
-                # split's logit is > 0 -> PBO == 0.0 (no overfitting).
-                "performance": [[0.002, 0.001]] * 20,
+                # split's logit is > 0 -> PBO == 0.0 (no overfitting). The rows
+                # alternate so each strategy has a dispersion: PBO ranks on
+                # Sharpe, and a constant column's Sharpe is undefined (refused).
+                "performance": [[0.003, 0.001], [0.002, -0.001]] * 10,
                 "n_groups": 10,
             },
             lambda r: r.pbo == 0.0
@@ -1376,23 +1385,26 @@ def _cases():
         ),
         "crossasset.roro_indicator": (
             # Only VIX present with enough history: 5d return -0.25 -> vix_score
-            # clamps to 1.0, weight 0.30 -> composite 0.30 -> RISK_ON.
+            # clamps to 1.0. The composite is the weighted mean over PRESENT
+            # components, so it reads 1.0 on 30% of the nominal weight.
             {"returns": {"VIX": [0.0] * 5 + [-0.05] * 5}},
             lambda r: r["components"] == {"vix_direction": 1.0}
-            and r["score"] == pytest.approx(0.30, abs=0.001)
-            and r["classification"] == "RISK_ON",
+            and r["score"] == pytest.approx(1.0, abs=0.001)
+            and r["weight_covered"] == pytest.approx(0.30)
+            and r["classification"] == "STRONG_RISK_ON",
         ),
         "crossasset.sector_rotation": (
             {
                 "sector_prices": {
-                    "Technology": [100.0 + 0.5 * i for i in range(20)],
-                    "Energy": [50.0] * 20,
-                    "Utilities": [100.0 - 0.5 * i for i in range(20)],
+                    "Technology": [100.0 + 0.5 * i for i in range(21)],
+                    "Energy": [50.0] * 21,
+                    "Utilities": [100.0 - 0.5 * i for i in range(21)],
                 }
             },
-            # Tech 100->109.5 -> ret_20d 9.5; Energy flat -> momentum 0.0.
+            # 21 closes = 20 bars: Tech 100->110 -> ret_20d 10.0; Energy flat
+            # -> momentum 0.0. (Was 20 closes asserting a 19-bar 9.5.)
             lambda r: r["leaders"][0]["sector"] == "Technology"
-            and r["sectors"]["Technology"]["return_20d"] == 9.5
+            and r["sectors"]["Technology"]["return_20d"] == 10.0
             and r["sectors"]["Energy"]["momentum_score"] == 0.0,
         ),
         "crossasset.information_coefficient": (
@@ -1613,7 +1625,7 @@ class TestInvocation:
             inflation=2.0, output_gap=0.0
         )
         async_out = await registry.get("macro.sahm_rule").call(
-            unemployment_values=[3.5] * 9 + [3.9, 4.1, 4.3]
+            unemployment_values=[3.5] * 12 + [3.9, 4.1, 4.3]
         )
         assert sync_out == pytest.approx(2.5)
         assert "triggered" in async_out

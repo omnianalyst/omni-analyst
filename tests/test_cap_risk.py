@@ -193,17 +193,31 @@ class TestCalculatePutCallSkew:
 
 class TestAnalyzeOptionsSkew:
     def test_score_from_average_skew(self):
-        # avg 0.2 -> (0.2 + 20) * 2.5 = 50.5
-        out = analyze_options_skew([0.16, 0.24])
-        assert out["average_skew"] == pytest.approx(0.2)
-        assert out["score"] == pytest.approx(50.5)
+        # Decimal IV skews: avg 0.06 (6 vol points of put skew)
+        # -> (0.06 + 0.20) * 250 = 65. Under v1's vol-point mapping this
+        # scored 50.15, indistinguishable from no skew at all.
+        out = analyze_options_skew([0.04, 0.08])
+        assert out["average_skew"] == pytest.approx(0.06)
+        assert out["score"] == pytest.approx(65.0)
+
+    def test_score_uses_the_unit_calculate_put_call_skew_returns(self):
+        # The same chain the skew helper reads: 0.35 avg OTM-put IV minus 0.19
+        # avg OTM-call IV = 0.16 -> (0.16 + 0.20) * 250 = 90.
+        puts = [{"strike": 90.0, "implied_volatility": 0.3},
+                {"strike": 80.0, "implied_volatility": 0.4}]
+        calls = [{"strike": 110.0, "implied_volatility": 0.2},
+                 {"strike": 120.0, "implied_volatility": 0.18}]
+        skew = calculate_put_call_skew(calls, puts, 100.0)
+        assert analyze_options_skew([skew])["score"] == pytest.approx(90.0)
 
     def test_extremes_clamp_to_zero_and_hundred(self):
-        assert analyze_options_skew([-20.0])["score"] == pytest.approx(0.0)
-        assert analyze_options_skew([20.0])["score"] == pytest.approx(100.0)
+        assert analyze_options_skew([-0.20])["score"] == pytest.approx(0.0)
+        assert analyze_options_skew([0.20])["score"] == pytest.approx(100.0)
+        assert analyze_options_skew([-0.5])["score"] == pytest.approx(0.0)
+        assert analyze_options_skew([0.5])["score"] == pytest.approx(100.0)
 
     def test_none_skews_dropped(self):
-        out = analyze_options_skew([None, -20.0, 20.0])
+        out = analyze_options_skew([None, -0.20, 0.20])
         assert out["average_skew"] == pytest.approx(0.0)
         assert out["score"] == pytest.approx(50.0)
 
@@ -374,6 +388,23 @@ class TestCalculateCorrelationStability:
         a = np.linspace(0.01, 0.05, 70)
         df = pd.DataFrame({"A": a, "B": a})
         assert calculate_correlation_stability(df) == pytest.approx(0.0)
+
+
+    def test_newest_observation_enters_a_window(self):
+        # 61 rows: the windows are rows 0..59 and rows 1..60. The old loop
+        # stopped one short, saw only the first window, and returned the std
+        # of a single number (0.0) -- the newest return was never used.
+        rng = np.random.default_rng(4)
+        a = rng.normal(0, 0.01, 61)
+        b = a + rng.normal(0, 0.002, 61)
+        b[-1] = -10 * a[-1] + 0.05  # the newest pair breaks the co-movement
+        df = pd.DataFrame({"A": a, "B": b})
+        first = df.iloc[0:60].corr().iloc[0, 1]
+        second = df.iloc[1:61].corr().iloc[0, 1]
+        assert abs(first - second) > 0.01
+        assert calculate_correlation_stability(df) == pytest.approx(
+            float(np.std([first, second]))
+        )
 
 
 class TestIdentifyCorrelationClusters:

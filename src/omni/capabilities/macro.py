@@ -27,6 +27,8 @@ import numpy as np
 
 from omni.ingest.protocol import Unavailable
 
+SAHM_MIN_OBSERVATIONS = 15
+
 
 def calculate_trend(values: Sequence[float]) -> str:
     if len(values) < 2:
@@ -106,7 +108,8 @@ def calculate_inflation_trend(cpi_values: Sequence[float]) -> dict[str, Any]:
         ) * 100
         mom_changes.append(change)
 
-    recent_annualized = np.mean(mom_changes[:3]) * 12
+    # Compounded, not mean * 12: three months of 0.5% is 6.17% a year, not 6.00%.
+    recent_annualized = ((cpi_values[-1] / cpi_values[-4]) ** 4 - 1) * 100
 
     return {
         "recent_mom_changes": mom_changes[:3],
@@ -169,9 +172,12 @@ def taylor_rule(
     *,
     inflation_target: float = 2.0,
     neutral_real_rate: float = 0.5,
-    inflation_weight: float = 1.5,
+    inflation_weight: float = 0.5,
     output_gap_weight: float = 0.5,
 ) -> float:
+    # Taylor (1993): i = r* + pi + 0.5 (pi - pi*) + 0.5 gap. `inflation` is
+    # added once outside the bracket, so the bracket weight is 0.5 for a total
+    # response of 1.5. A 1.5 here would respond 2.5-for-1.
     return (
         neutral_real_rate
         + inflation
@@ -263,13 +269,23 @@ def assess_policy_implications(
 
 
 async def sahm_rule(unemployment_values: Sequence[float]) -> dict[str, Any]:
-    if len(unemployment_values) < 12:
+    # Sahm (2019): the current 3-month average minus the LOWEST 3-month
+    # average of the previous 12 months. That needs 12 prior averages plus the
+    # current one, i.e. 15 monthly observations. The raw monthly minimum is
+    # always <= the minimum of the averages, so using it biases the indicator
+    # up and triggers early.
+    if len(unemployment_values) < SAHM_MIN_OBSERVATIONS:
         raise Unavailable(
-            f"need >=12 unemployment observations for the Sahm rule, got {len(unemployment_values)}"
+            f"need >={SAHM_MIN_OBSERVATIONS} unemployment observations for the "
+            f"Sahm rule, got {len(unemployment_values)}"
         )
 
-    current_avg = np.mean(list(unemployment_values)[-3:])
-    min_12m = np.min(list(unemployment_values)[-12:])
+    series = np.asarray(list(unemployment_values)[-SAHM_MIN_OBSERVATIONS:], dtype=float)
+    if not np.all(np.isfinite(series)):
+        raise Unavailable("non-finite unemployment observation; Sahm rule undefined")
+    averages = np.convolve(series, np.ones(3) / 3.0, mode="valid")
+    current_avg = averages[-1]
+    min_12m = np.min(averages[:-1])
     sahm_indicator = current_avg - min_12m
 
     return {
@@ -341,10 +357,10 @@ async def inflation_measures(cpi_values: Sequence[float]) -> dict[str, Any]:
     yoy_inflation = ((current - year_ago) / year_ago) * 100
 
     previous = cpi_values[-2]
-    mom_inflation = ((current - previous) / previous) * 100 * 12
+    mom_inflation = ((current / previous) ** 12 - 1) * 100
 
     three_month_ago = cpi_values[-4]
-    three_month_annualized = ((current - three_month_ago) / three_month_ago) * 100 * 4
+    three_month_annualized = ((current / three_month_ago) ** 4 - 1) * 100
 
     return {
         "yoy": yoy_inflation,

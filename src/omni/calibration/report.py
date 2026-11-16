@@ -52,6 +52,41 @@ class BenchmarkCalibrationBucket:
     mean_confidence: float | None
     benchmarked_n: int
     market_mean_probability: float | None
+    # The 95% Wilson interval on `hit_rate`. A rate without one invites reading
+    # 7 of 10 as 70%; the interval for that is [0.40, 0.89].
+    hit_rate_interval: tuple[float, float] | None = None
+    # Mean squared error of the stated confidence against the 0/1 outcome over
+    # the bucket. A proper score: it is minimised by stating the true rate, so
+    # it cannot be improved by hedging or by overclaiming.
+    brier: float | None = None
+    # The model's numbers over the BENCHMARKED subset only -- the same
+    # predictions `market_mean_probability` is taken over. `hit_rate` and
+    # `mean_confidence` cover all `n`; set beside a market mean over a subset
+    # they compare two different samples, and a difference between them is as
+    # likely to be which predictions happened to have a market as anything
+    # about skill. These three are the like-for-like comparison.
+    benchmarked_hit_rate: float | None = None
+    benchmarked_mean_confidence: float | None = None
+    benchmarked_brier: float | None = None
+
+
+_Z_95 = 1.959963984540054
+
+
+def _wilson(hits: int, n: int) -> tuple[float, float]:
+    p = hits / n
+    z_sq = _Z_95 * _Z_95
+    denominator = 1.0 + z_sq / n
+    centre = (p + z_sq / (2 * n)) / denominator
+    half = (_Z_95 / denominator) * (p * (1.0 - p) / n + z_sq / (4 * n * n)) ** 0.5
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def _brier(rows: Sequence) -> float:
+    return sum(
+        (float(p.confidence) - (1.0 if _hit(p.direction, p.outcome) else 0.0)) ** 2
+        for p in rows
+    ) / len(rows)
 
 
 def calibration_with_benchmark(
@@ -114,11 +149,8 @@ def calibration_with_benchmark(
             n = len(in_bucket)
             hits = sum(1 for p in in_bucket if _hit(p.direction, p.outcome))
 
-            benchmarked = [
-                benchmarks[str(p.id)]
-                for p in in_bucket
-                if str(p.id) in benchmarks
-            ]
+            benchmarked_preds = [p for p in in_bucket if str(p.id) in benchmarks]
+            benchmarked = [benchmarks[str(p.id)] for p in benchmarked_preds]
             benchmarked_n = len(benchmarked)
             market_probs = [float(b.market_probability) for b in benchmarked]
 
@@ -127,14 +159,30 @@ def calibration_with_benchmark(
                 mean_conf: float | None = (
                     sum(float(p.confidence) for p in in_bucket) / n
                 )
+                interval: tuple[float, float] | None = _wilson(hits, n)
+                brier: float | None = _brier(in_bucket)
             else:
                 hit_rate = None
                 mean_conf = None
+                interval = None
+                brier = None
 
             if benchmarked_n >= min_bucket_n:
                 market_mean: float | None = sum(market_probs) / benchmarked_n
+                b_hits = sum(
+                    1 for p in benchmarked_preds if _hit(p.direction, p.outcome)
+                )
+                b_hit_rate: float | None = b_hits / benchmarked_n
+                b_mean_conf: float | None = (
+                    sum(float(p.confidence) for p in benchmarked_preds)
+                    / benchmarked_n
+                )
+                b_brier: float | None = _brier(benchmarked_preds)
             else:
                 market_mean = None
+                b_hit_rate = None
+                b_mean_conf = None
+                b_brier = None
 
             buckets.append(
                 BenchmarkCalibrationBucket(
@@ -145,6 +193,11 @@ def calibration_with_benchmark(
                     mean_confidence=mean_conf,
                     benchmarked_n=benchmarked_n,
                     market_mean_probability=market_mean,
+                    hit_rate_interval=interval,
+                    brier=brier,
+                    benchmarked_hit_rate=b_hit_rate,
+                    benchmarked_mean_confidence=b_mean_conf,
+                    benchmarked_brier=b_brier,
                 )
             )
         out[method] = buckets

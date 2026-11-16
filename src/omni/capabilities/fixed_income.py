@@ -104,6 +104,10 @@ class YieldCurve:
     yields: list[float]
     curve_type: str = "TREASURY"
 
+    # `yields` are continuously-compounded zero rates: every consumer in this
+    # module discounts with exp(-r * t). `build_yield_curve` converts the
+    # annual-effective yields `calculate_yield` solves into this convention.
+
     def interpolate(self, tenor: float) -> float:
         if len(self.tenors) < 2:
             raise Unavailable(
@@ -263,6 +267,17 @@ def calculate_price(bond: Bond, discount_curve: YieldCurve | None = None) -> flo
     raise Unavailable("either yield_to_maturity or discount_curve must be provided")
 
 
+def _dirty_price(bond: Bond, clean_price: float | None = None) -> float:
+    """Clean quote plus accrued interest at settlement.
+
+    `Bond.price` is a clean quote (`calculate_total_return` has always added
+    accrued to it), while the PV of remaining flows is the full (dirty) price.
+    Solving a dirty PV against a clean quote overstates yield mid-coupon.
+    """
+    clean = bond.price if clean_price is None else clean_price
+    return clean + calculate_accrued_interest(bond, _settle(bond))
+
+
 def calculate_yield(bond: Bond, price: float | None = None) -> float:
     if price is None:
         price = bond.price
@@ -271,6 +286,7 @@ def calculate_yield(bond: Bond, price: float | None = None) -> float:
 
     cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
+    price = _dirty_price(bond, price)
 
     def objective(ytm: float) -> float:
         calc_price = 0.0
@@ -306,7 +322,7 @@ def calculate_duration(
     bond_down = _bond_with_ytm(bond, ytm + yield_change)
     price_up = calculate_price(bond_up)
     price_down = calculate_price(bond_down)
-    price_base = bond.price if (bond.price or 0) > 0 else calculate_price(bond)
+    price_base = _dirty_price(bond) if (bond.price or 0) > 0 else calculate_price(bond)
 
     # v1 computed (price_down - price_up) / (2 * dy * P_0), omitting the
     # leading negative sign in the definition of effective duration. The
@@ -329,7 +345,7 @@ def calculate_convexity(bond: Bond) -> float:
     cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
     ytm = bond.yield_to_maturity if bond.yield_to_maturity is not None else calculate_yield(bond)
-    price = bond.price if (bond.price or 0) > 0 else calculate_price(bond)
+    price = _dirty_price(bond) if (bond.price or 0) > 0 else calculate_price(bond)
 
     weighted_sum = 0.0
     for cf_date, cf_amount in cash_flows:
@@ -348,6 +364,7 @@ def calculate_convexity(bond: Bond) -> float:
 def calculate_z_spread(bond: Bond, risk_free_curve: YieldCurve) -> float:
     cash_flows = _future_cash_flows(bond)
     settle = _settle(bond)
+    target = _dirty_price(bond)
 
     def objective(z_spread: float) -> float:
         price = 0.0
@@ -356,7 +373,7 @@ def calculate_z_spread(bond: Bond, risk_free_curve: YieldCurve) -> float:
             if t > 0:
                 spot_rate = risk_free_curve.zero_rate(t)
                 price += cf_amount * np.exp(-(spot_rate + z_spread) * t)
-        return price - bond.price
+        return price - target
 
     try:
         return optimize.brentq(objective, -0.05, 0.10)
@@ -376,26 +393,29 @@ def calculate_credit_metrics(
     was a source-less number presented as data, and a credit-loss figure is
     only as honest as the recovery it assumes.
 
-    ``implied_default_probability`` is ``z_spread / (1 - recovery_rate) * ttm``.
-    ``spread / (1 - R)`` is a *hazard rate* (an annual PD); multiplying by
-    ``ttm`` turns it into a *cumulative* probability. For long tenors this can
-    exceed 1.0. That is faithful to v1 (``:306``) and not a porting bug, but
-    consumers should treat the field as a raw cumulative figure, not a clamped
-    probability.
+    ``spread / (1 - R)`` is a *hazard rate*. The cumulative default
+    probability over the remaining life is ``1 - exp(-hazard * ttm)``; v1's
+    linear ``hazard * ttm`` exceeded 1.0 at long tenors.
     """
+    if not 0.0 <= recovery_rate < 1.0:
+        raise Unavailable(
+            f"recovery_rate must be in [0, 1); got {recovery_rate}"
+        )
     z_spread = calculate_z_spread(bond, risk_free_curve)
 
     settle = _settle(bond)
     ttm = time_to_maturity(settle, bond.maturity_date, bond.day_count)
 
-    implied_default_prob = z_spread / (1 - recovery_rate) * ttm
+    hazard_rate = z_spread / (1 - recovery_rate)
+    implied_default_prob = 1.0 - float(np.exp(-hazard_rate * ttm))
     duration_metrics = calculate_duration(bond)
     dv01 = duration_metrics["dollar_duration"] / 100
-    credit01 = duration_metrics["modified_duration"] * bond.price / 10000
+    credit01 = duration_metrics["modified_duration"] * _dirty_price(bond) / 10000
 
     return {
         "z_spread": z_spread,
         "z_spread_bps": z_spread * 10000,
+        "hazard_rate": hazard_rate,
         "implied_default_probability": implied_default_prob,
         "expected_loss": implied_default_prob * (1 - recovery_rate) * bond.face_value,
         "dv01": dv01,
@@ -468,15 +488,20 @@ def calculate_total_return(
     ending_price = calculate_price(bond_at_end)
     accrued_sale = calculate_accrued_interest(bond, ending_date)
 
-    price_return = (ending_price - initial_price) + (accrued_sale - accrued_purchase)
+    # `calculate_price` is the PV of remaining flows, i.e. already the full
+    # (dirty) price at the sale date. Adding accrued_sale on top counted the
+    # accrual twice.
+    price_return = ending_price - (initial_price + accrued_purchase)
     income_return = coupon_income + reinvestment_income
     total_return = price_return + income_return
 
+    if holding_period_days <= 0:
+        raise Unavailable(
+            f"holding_period_days must be positive; got {holding_period_days}"
+        )
     years = holding_period_days / 365
     total_return_pct = total_return / (initial_price + accrued_purchase)
-    annualized_return = (
-        (1 + total_return_pct) ** (1 / years) - 1 if years > 0 else 0.0
-    )
+    annualized_return = (1 + total_return_pct) ** (1 / years) - 1
 
     return {
         "total_return": total_return,
@@ -487,7 +512,9 @@ def calculate_total_return(
         "coupon_income": coupon_income,
         "reinvestment_income": reinvestment_income,
         "initial_price": initial_price + accrued_purchase,
-        "ending_price": ending_price + accrued_sale,
+        "ending_price": ending_price,
+        "ending_clean_price": ending_price - accrued_sale,
+        "accrued_at_sale": accrued_sale,
     }
 
 
@@ -505,7 +532,8 @@ def calculate_spread_duration(bond: Bond, risk_free_curve: YieldCurve) -> float:
             spot_rate = risk_free_curve.zero_rate(t)
             price_wider += cf_amount * np.exp(-(spot_rate + wider_spread) * t)
 
-    return (bond.price - price_wider) / bond.price * 10000
+    full_price = _dirty_price(bond)
+    return (full_price - price_wider) / full_price * 10000
 
 
 def analyze_credit_migration(
@@ -583,7 +611,11 @@ def fit_nelson_siegel(
         method="L-BFGS-B",
         bounds=[(None, None), (None, None), (None, None), (0.001, 10)],
     )
-    return tuple(result.x)
+    if not result.success or not np.all(np.isfinite(result.x)):
+        raise Unavailable(
+            f"Nelson-Siegel fit did not converge: {result.message}"
+        )
+    return tuple(float(v) for v in result.x)
 
 
 def build_yield_curve(
@@ -600,8 +632,12 @@ def build_yield_curve(
             continue
         ttm = time_to_maturity(curve_date, bond.maturity_date, bond.day_count)
         ytm = calculate_yield(bond)
+        if ytm <= -1.0:
+            raise Unavailable(f"yield {ytm} has no continuous equivalent")
         tenors.append(ttm)
-        yields.append(ytm)
+        # Annual-effective -> continuous, the convention every curve consumer
+        # (exp(-r * t)) discounts with.
+        yields.append(float(np.log1p(ytm)))
 
     if not tenors:
         raise Unavailable(
@@ -612,7 +648,9 @@ def build_yield_curve(
 
     if method == "nelson_siegel":
         fitted = fit_nelson_siegel(tenors, yields)
-        smooth_tenors = np.linspace(0.25, 30, 100)
+        # The fitted grid spans the observed tenors only; a fit to 1-5y zeros
+        # says nothing about the 30y point.
+        smooth_tenors = np.linspace(min(tenors), max(tenors), 100)
         smooth_yields = [nelson_siegel(t, *fitted) for t in smooth_tenors]
         return YieldCurve(
             curve_date=curve_date,

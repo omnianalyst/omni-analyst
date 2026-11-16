@@ -208,11 +208,26 @@ class TestRoroIndicator:
         assert out["classification"] == "STRONG_RISK_OFF"
 
     async def test_single_component_composites_correctly(self):
-        # Only VIX present with enough history -> composite = 0.30 -> RISK_ON.
+        # Only VIX present with enough history. The composite is the weighted
+        # mean over PRESENT components, so one component at +1.0 reads +1.0 and
+        # `weight_covered` says it rests on 30% of the nominal weight. (This
+        # asserted 0.30 / RISK_ON while the weights were not renormalised, which
+        # made an absent component indistinguishable from a neutral one.)
         out = await roro_indicator({"VIX": [0.0] * 5 + [-0.05] * 5})
         assert out["components"] == {"vix_direction": 1.0}
+        assert out["score"] == pytest.approx(1.0, abs=0.001)
+        assert out["weight_covered"] == pytest.approx(0.30)
+        assert out["classification"] == "STRONG_RISK_ON"
+
+    async def test_missing_component_does_not_dilute_the_composite(self):
+        # VIX +1.0 (w .30) and dollar -0.75 (w .20), credit and breadth absent:
+        # (0.30 - 0.15) / 0.50 = 0.30, not the un-renormalised 0.15.
+        out = await roro_indicator(
+            {"VIX": [0.0] * 5 + [-0.05] * 5, "UUP": [0.005] * 10}
+        )
+        assert out["components"] == {"vix_direction": 1.0, "dollar_strength": -0.75}
+        assert out["weight_covered"] == pytest.approx(0.50)
         assert out["score"] == pytest.approx(0.30, abs=0.001)
-        assert out["classification"] == "RISK_ON"
 
     async def test_short_series_is_skipped_not_fabricated_zero(self):
         # HYG/TLT present but <10 bars: v1 fabricated 0 credit reading; the port
@@ -235,13 +250,15 @@ class TestRoroIndicator:
 
 class TestSectorRotation:
     async def test_ranks_and_computes_momentum(self):
-        # Technology: 100 -> 109.5 over 20 bars (linear +0.5/bar).
-        # ret_20d = (109.5-100)/100 = 0.095 -> 9.5
-        # ret_5d  = (109.5-107.5)/107.5 = 0.01860... -> 1.86
-        # momentum = 0.095*0.6 + 0.01860*0.4 = 0.06444 -> 0.0644
-        tech = [100.0 + 0.5 * i for i in range(20)]
-        energy = [50.0] * 20  # flat -> 0 return
-        util = [100.0 - 0.5 * i for i in range(20)]  # 100 -> 90.5
+        # Technology: 21 closes, 100 -> 110 over 20 BARS (linear +0.5/bar).
+        # ret_20d = 110/100 - 1 = 0.10 -> 10.0
+        # ret_5d  = 110/107.5 - 1 = 0.023256 -> 2.33
+        # momentum = 0.10*0.6 + 0.023256*0.4 = 0.069302 -> 0.0693
+        # (This fixture had 20 closes and asserted 9.5 / 1.86: a 19-bar and a
+        # 4-bar return under 20d / 5d labels. An N-bar return needs N+1 closes.)
+        tech = [100.0 + 0.5 * i for i in range(21)]
+        energy = [50.0] * 21  # flat -> 0 return
+        util = [100.0 - 0.5 * i for i in range(21)]  # 100 -> 90
         out = await sector_rotation(
             {"Technology": tech, "Energy": energy, "Utilities": util}
         )
@@ -249,9 +266,9 @@ class TestSectorRotation:
         assert out["laggards"][-1]["sector"] == "Utilities"
 
         t = out["sectors"]["Technology"]
-        assert t["return_20d"] == 9.5
-        assert t["return_5d"] == pytest.approx(1.86, abs=0.01)
-        assert t["momentum_score"] == pytest.approx(0.0644, abs=0.0001)
+        assert t["return_20d"] == 10.0
+        assert t["return_5d"] == pytest.approx(2.33, abs=0.005)
+        assert t["momentum_score"] == pytest.approx(0.0693, abs=0.0001)
 
         e = out["sectors"]["Energy"]
         assert e["return_20d"] == 0.0
@@ -259,14 +276,27 @@ class TestSectorRotation:
         assert e["momentum_score"] == 0.0
 
         u = out["sectors"]["Utilities"]
-        assert u["return_20d"] == -9.5
+        assert u["return_20d"] == -10.0
+
+    async def test_twenty_closes_is_not_enough_for_a_twenty_bar_return(self):
+        with pytest.raises(Unavailable, match="21"):
+            await sector_rotation({"Technology": [100.0 + i for i in range(20)]})
+
+    async def test_non_positive_price_inside_the_window_is_not_slid_past(self):
+        # A zero inside the trailing window used to be filtered out, sliding
+        # every index back one bar. The sector is now not ranked at all.
+        bad = [100.0 + i for i in range(25)]
+        bad[-3] = 0.0
+        good = [100.0 + 0.5 * i for i in range(21)]
+        out = await sector_rotation({"Good": good, "Bad": bad})
+        assert "Bad" not in out["sectors"]
 
     async def test_cycle_phase_from_leaders(self):
         # Three mid/late/recession leaders -> tie at 1 each -> mid_cycle wins
         # by priority. Build prices so Technology (mid) leads momentum.
-        tech = [100.0 + 1.0 * i for i in range(20)]      # strong up
-        energy = [100.0 + 0.1 * i for i in range(20)]     # mild up
-        util = [100.0 - 0.1 * i for i in range(20)]       # mild down
+        tech = [100.0 + 1.0 * i for i in range(21)]      # strong up
+        energy = [100.0 + 0.1 * i for i in range(21)]     # mild up
+        util = [100.0 - 0.1 * i for i in range(21)]       # mild down
         out = await sector_rotation(
             {"Technology": tech, "Energy": energy, "Utilities": util}
         )
@@ -280,8 +310,8 @@ class TestSectorRotation:
     async def test_skips_sector_with_non_positive_prices_only(self):
         # A sector whose prices are all <= 0 yields no positives -> skipped.
         # The other valid sector still produces a result.
-        good = [100.0 + 0.5 * i for i in range(20)]
-        out = await sector_rotation({"Good": good, "Bad": [-1.0] * 20})
+        good = [100.0 + 0.5 * i for i in range(21)]
+        out = await sector_rotation({"Good": good, "Bad": [-1.0] * 21})
         assert "Good" in out["sectors"]
         assert "Bad" not in out["sectors"]
 
@@ -585,3 +615,72 @@ class TestFloatNoiseGuards:
         )
         assert math.isfinite(q.long_short_sharpe)
         assert q.long_short_sharpe > 0
+
+
+# ---------------------------------------------------------------------------
+# Quant-audit regressions (2026-11)
+# ---------------------------------------------------------------------------
+
+class TestAuditRegressions:
+    async def test_shorter_series_is_aligned_from_the_tail(self):
+        # B is A with its first ten bars missing. Both end on the same bar, so
+        # the true correlation is 1.0; head-truncation paired day t with t+10.
+        rng = np.random.default_rng(0)
+        a = list(rng.normal(0, 0.01, 60))
+        b = a[10:]
+        c = list(rng.normal(0, 0.01, 60))
+        d = list(rng.normal(0, 0.01, 60))
+        out = await cross_asset_correlations({"A": a, "B": b, "C": c, "D": d})
+        assert out["matrix"]["A"]["B"] == 1.0
+        assert out["data_points"] == 50
+
+    def test_rolling_ic_does_not_call_noise_significant(self):
+        # Independent white noise: at a nominal 5% the rolling path fired 78%
+        # of the time when overlapping windows were scored as independent.
+        hits = 0
+        runs = 120
+        for seed in range(runs):
+            rng = np.random.default_rng(seed)
+            ic = time_series_ic(
+                pd.Series(rng.normal(size=500)),
+                pd.Series(rng.normal(size=500)),
+                method="pearson",
+                rolling_window=60,
+            )
+            hits += bool(ic.p_value < 0.05)
+        assert hits / runs < 0.12
+
+    def test_rolling_ic_still_finds_a_real_relationship(self):
+        rng = np.random.default_rng(1)
+        a = pd.Series(rng.normal(size=1500))
+        b = 0.3 * a + pd.Series(rng.normal(size=1500))
+        ic = time_series_ic(a, b, method="pearson", rolling_window=60)
+        assert ic.p_value < 0.001
+        assert ic.n_periods == 1441  # the full rolling series is still reported
+
+    def test_rolling_spearman_ranks_within_the_window(self):
+        # A monotone but non-linear relation inside every window: within-window
+        # rank correlation is exactly 1. A level shift halfway through must not
+        # change that; full-sample ranking let it.
+        x = np.concatenate([np.arange(40.0), 1000.0 + np.arange(40.0)])
+        rng = np.random.default_rng(2)
+        x = x + rng.normal(0, 1e-6, x.size)
+        y = np.exp(x / 500.0)
+        ic = time_series_ic(pd.Series(x), pd.Series(y), rolling_window=10)
+        assert ic.by_period.min() == pytest.approx(1.0)
+
+    def test_quantile_annualisation_respects_the_horizon(self):
+        rng = np.random.default_rng(3)
+        rows = []
+        for d in range(40):
+            sig = rng.normal(size=10)
+            for a in range(10):
+                rows.append({"date": d, "asset": a, "signal": sig[a],
+                             "forward_return": 0.01 * sig[a] + rng.normal(0, 0.01)})
+        df = pd.DataFrame(rows)
+        one = quantile_analysis(df, "signal", "forward_return", horizon=1)
+        five = quantile_analysis(df, "signal", "forward_return", horizon=5)
+        assert five.long_short_return_ann == pytest.approx(one.long_short_return_ann / 5)
+        assert five.long_short_sharpe == pytest.approx(one.long_short_sharpe / math.sqrt(5))
+        with pytest.raises(ValueError, match="horizon"):
+            quantile_analysis(df, "signal", "forward_return", horizon=0)

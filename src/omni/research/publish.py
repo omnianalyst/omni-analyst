@@ -130,11 +130,14 @@ def summarise(history: list[dict[str, Any]]) -> dict[str, Any]:
     than any recorded result was actually judged against.
     """
     total_cells = sum(int(e["cells"]) for e in history)
-    stats = [
-        abs(float(t))
+    # Signed, exactly as `Registry.recorded_stats` hands them to the same
+    # function: `fdr_bar_for` ranks a measured loser as a null.
+    signed = [
+        float(t)
         for e in history
         if (t := (e.get("detail") or {}).get("best_recent_third_t")) is not None
     ]
+    stats = [abs(t) for t in signed]
     passed = [e for e in history if str(e["verdict"]).lower() == PASS_VERDICT]
 
     return {
@@ -143,7 +146,7 @@ def summarise(history: list[dict[str, Any]]) -> dict[str, Any]:
         "passed": len(passed),
         "failed": len(history) - len(passed),
         "bar": bar_for(total_cells=total_cells, pending_cells=0),
-        "fdr_bar": fdr_bar_for(stats=stats, pending_cells=0),
+        "fdr_bar": fdr_bar_for(stats=signed, pending_cells=0),
         "best_t": max(stats, default=None),
         "sources": sorted({str(e["source"]) for e in history}),
         "last_recorded_at": history[0]["recorded_at"] if history else None,

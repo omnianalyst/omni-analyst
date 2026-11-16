@@ -87,14 +87,21 @@ class TestNormalize:
     def test_zscore_method_is_rolling_and_clipped_bit_for_bit(self):
         # v1's registry Z_SCORE is a *rolling* z divided by 3 and clipped to
         # [-1, 1] -- NOT a unit-std z-score (that is `z_score()` above). The
-        # warmup indices use an expanding window, so only full-window indices
-        # settle. These expected values are v1's formula applied by hand to
-        # [1..8] with window=4: rolling mean/std (population), std<1e-8 guard
-        # (none triggered), (x-mean)/std, then clip(/3, -1, 1).
+        # warmup indices use an EXPANDING window for both mean and std, so only
+        # full-window indices settle. Expected values by hand on [1..8] with
+        # window=4 (population std, then clip(/3, -1, 1)):
+        #   i=0: one point, std 0 -> guard -> z 0
+        #   i=1: (2-1.5)/0.5 = 1            -> 0.3333333
+        #   i=2: (3-2)/0.8164966 = 1.2247449 -> 0.4082483
+        #   i>=3: (x-mean)/1.1180340 = 1.3416408 -> 0.4472136
+        # The first three used to be [-1.0, -0.3333333, 0.2041241]: the warm-up
+        # was scored against the mean of the first FULL window (2.5), i.e.
+        # against bars that had not happened yet. The full-window values are
+        # unchanged.
         x = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
         out = normalize(x, NormalizationMethod.Z_SCORE, window=4)
         expected = np.array(
-            [-1.0, -0.3333333, 0.2041241, 0.4472136, 0.4472136, 0.4472136, 0.4472136, 0.4472136]
+            [0.0, 0.3333333, 0.4082483, 0.4472136, 0.4472136, 0.4472136, 0.4472136, 0.4472136]
         )
         assert np.allclose(out, expected, atol=1e-6)
         assert out.min() >= -1.0 and out.max() <= 1.0
@@ -366,3 +373,50 @@ class TestFailurePaths:
     def test_cross_correlation_mismatched_length_raises(self):
         with pytest.raises(Unavailable, match="mismatched lengths"):
             cross_correlation_at_lag([1.0, 2.0], [1.0, 2.0, 3.0], lag=0)
+
+
+# ---------------------------------------------------------------------------
+# Quant-audit regressions (2026-11)
+# ---------------------------------------------------------------------------
+
+
+class TestAuditRegressions:
+    def test_zscore_warmup_does_not_see_the_future(self):
+        # Changing bars AFTER index i must not change the normalised value AT i.
+        x = np.array([1.0, 3.0, 2.0, 5.0, 4.0, 6.0, 8.0, 7.0])
+        y = x.copy()
+        y[3:] = [50.0, -40.0, 60.0, 80.0, -70.0]
+        a = normalize(x, NormalizationMethod.Z_SCORE, window=4)
+        b = normalize(y, NormalizationMethod.Z_SCORE, window=4)
+        assert np.allclose(a[:3], b[:3])
+
+    def test_leadlag_noise_is_not_scored_significant(self):
+        # Best-of-21-lags on independent white noise used to average 0.86 and
+        # hit 1.0 in 30% of runs. After the Sidak correction a "2-sigma"
+        # significance (>= 0.8) should occur at roughly its nominal 5%.
+        sig = []
+        for seed in range(200):
+            rng = np.random.default_rng(seed)
+            sig.append(
+                lead_lag(rng.normal(size=60), rng.normal(size=60), max_lag=10).significance
+            )
+        sig = np.array(sig)
+        assert float(np.mean(sig >= 0.8)) < 0.12
+        assert float(np.mean(sig)) < 0.5
+
+    def test_leadlag_random_walk_levels_are_not_scored_significant(self):
+        sig = []
+        for seed in range(100):
+            rng = np.random.default_rng(seed)
+            a = np.cumsum(rng.normal(size=60))
+            b = np.cumsum(rng.normal(size=60))
+            sig.append(lead_lag(a, b, max_lag=10).significance)
+        assert float(np.mean(np.array(sig) >= 0.8)) < 0.10
+
+    def test_leadlag_real_partial_relationship_survives_the_corrections(self):
+        rng = np.random.default_rng(5)
+        a = rng.normal(size=200)
+        b = np.roll(a, 3) * 0.4 + rng.normal(size=200)
+        res = lead_lag(a, b, max_lag=10)
+        assert res.lag == 3
+        assert res.significance == pytest.approx(1.0)

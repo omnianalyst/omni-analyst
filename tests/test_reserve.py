@@ -501,3 +501,58 @@ class TestOnlyExchangeLabelsCount:
             "the exchange filter no longer compares category; every labelled "
             "address would count as an exchange"
         )
+
+
+class TestTheShiftIsTestedNotJustMeasured:
+    async def test_a_shift_inside_the_baselines_own_noise_abstains(self, db):
+        """Signal mean +10 against a baseline of +/-50: an effect of 0.2
+        per-observation deviations and a test statistic of about 0.42. It used
+        to fire a call -- any non-zero difference did."""
+        e = await _entity(db)
+        await _seed_labels(db)
+        as_of = datetime(2025, 1, 31, tzinfo=UTC)
+        await _seed_prices(db, e, as_of)
+        signal = [(60, INFLOW), (40, OUTFLOW)] * (HALF // 2)
+        await _seed_flows(db, e, _balanced_baseline() + signal, as_of)
+
+        pid = await produce_reserve_prediction_from_coverage(
+            db.pool,
+            entity_id=e,
+            audience_user_id=None,
+            horizon_ends_at=as_of + timedelta(days=7),
+            as_of=as_of,
+            window=WINDOW,
+        )
+        assert pid is None
+
+    async def test_the_statistic_is_over_the_standard_error_of_the_means(self, db):
+        """Baseline +/-50 (n=HALF), signal +150 (n=HALF).
+
+        effect = 150 / 50 = 3.0 per-observation deviations (sets the barrier).
+        z = 150 / (s * sqrt(2 / HALF)), s the sample deviation of the baseline
+        -- the same shift judged as a difference of two means.
+        """
+        import json
+        import math
+
+        e = await _entity(db)
+        await _seed_labels(db)
+        as_of = datetime(2025, 1, 31, tzinfo=UTC)
+        await _seed_prices(db, e, as_of)
+        await _seed_flows(db, e, _balanced_baseline() + [(150, INFLOW)] * HALF, as_of)
+
+        pid = await produce_reserve_prediction_from_coverage(
+            db.pool,
+            entity_id=e,
+            audience_user_id=None,
+            horizon_ends_at=as_of + timedelta(days=7),
+            as_of=as_of,
+            window=WINDOW,
+        )
+        row = await db.pool.fetchrow("SELECT provenance FROM prediction WHERE id=$1", pid)
+        assumptions = json.loads(row["provenance"])["assumptions"]
+        sample_std = 50.0 * math.sqrt(HALF / (HALF - 1))
+        expected_z = 150.0 / (sample_std * math.sqrt(2.0 / HALF))
+        assert assumptions["effect_size"] == pytest.approx(3.0)
+        assert assumptions["z_score"] == pytest.approx(expected_z)
+        assert assumptions["z_score"] > assumptions["effect_size"]

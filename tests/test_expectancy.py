@@ -306,3 +306,56 @@ class TestMeasuredExpiry:
         assert result.assumed_share == Decimal(1) / Decimal(4)
         # (200 - 200 + 0 + 400) / 4 = 100
         assert result.gross_bps == Decimal(100)
+
+
+class TestTheMeanCarriesAnErrorBar:
+    def test_standard_error_and_t_are_hand_computable(self):
+        """Two winners (+300 bps) and two losers (-200 bps) on four horizons.
+
+        mean = +50; deviations +250, +250, -250, -250; sample variance
+        = 4 * 62500 / 3 = 83333.33; std = 288.675; se = std / sqrt(4) = 144.34;
+        t = 50 / 144.34 = 0.3464.
+        """
+        trades = [
+            _trade(outcome="upper", upper="103", lower="98", horizon="h1"),
+            _trade(outcome="upper", upper="103", lower="98", horizon="h2"),
+            _trade(outcome="lower", upper="103", lower="98", horizon="h3"),
+            _trade(outcome="lower", upper="103", lower="98", horizon="h4"),
+        ]
+        result = compute(trades)
+        assert result.gross_bps == Decimal(50)
+        assert float(result.pnl_std_bps) == pytest.approx(288.6751, abs=1e-3)
+        assert float(result.standard_error_bps) == pytest.approx(144.3376, abs=1e-3)
+        assert float(result.t_stat) == pytest.approx(0.34641, abs=1e-4)
+
+    def test_the_error_uses_independent_horizons_not_rows(self):
+        """The same four outcomes on TWO horizon dates are two observations."""
+        trades = [
+            _trade(outcome="upper", upper="103", lower="98", horizon="h1"),
+            _trade(outcome="upper", upper="103", lower="98", horizon="h1"),
+            _trade(outcome="lower", upper="103", lower="98", horizon="h2"),
+            _trade(outcome="lower", upper="103", lower="98", horizon="h2"),
+        ]
+        result = compute(trades)
+        assert result.effective_n == 2
+        assert float(result.standard_error_bps) == pytest.approx(
+            288.6751 / 2 ** 0.5, abs=1e-3
+        )
+
+    def test_one_horizon_has_no_error_bar_and_no_t(self):
+        result = compute([_trade(outcome="upper"), _trade(outcome="lower")])
+        assert result.effective_n == 1
+        assert result.standard_error_bps is None
+        assert result.t_stat is None
+
+    def test_identical_outcomes_are_not_infinite_significance(self):
+        result = compute([
+            _trade(outcome="upper", upper="103", lower="98", horizon="h1"),
+            _trade(outcome="upper", upper="103", lower="98", horizon="h2"),
+        ])
+        assert result.t_stat is None
+
+    def test_an_empty_sample_has_neither(self):
+        result = compute([])
+        assert result.pnl_std_bps is None
+        assert result.standard_error_bps is None

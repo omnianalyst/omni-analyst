@@ -18,6 +18,18 @@ the future: it reports a level and a threshold, and the thresholds are stated
 here rather than inferred, because a floor that moves with the data is not a
 floor.
 
+**Notional and capital are different denominators, and the verdict uses one.**
+Funding is earned on NOTIONAL: a pair of size N collects the rate on N. But a
+pair ties up more than N -- N of cash in the spot leg plus N / leverage of margin
+behind the short perp -- so the same book returns less per dollar committed.
+Idle stablecoin, the floor below, is a return on CAPITAL. An earlier version
+compared net-on-notional straight to that floor, which flattered the book by
+`1 + 1/leverage` (a third at 3x): a book netting 5.5% on notional read as clear
+of a 4.5% floor while earning 4.1% on the money actually committed. So both the
+reading and the justified level are converted to capital with the same factor
+before anything is compared, and the notional figure is still reported next to
+it because that is the unit every finding states.
+
 **It does not trade, halt, or size anything.** A health reading that could stop
 the book would be a second controller disagreeing with the first; the cycle's
 own guards decide what happens to money. This decides what an operator is told.
@@ -40,12 +52,15 @@ JUSTIFIED_NET_PCT = Decimal("14.58")
 
 # Half of it. Not a derived number -- a stated one. At this level the book still
 # pays, and the point of the threshold is that somebody looks before it is a
-# question of whether to keep going.
+# question of whether to keep going. ON NOTIONAL, like the justification it
+# halves; `degraded_on_capital_pct` converts it for the comparison.
 DEGRADED_PCT = JUSTIFIED_NET_PCT / 2
 
-# Roughly what idle stablecoin earns. Below this the book is taking exchange,
-# liquidation and basis risk to underperform doing nothing, which is the one
-# level at which continuing is not a judgement call.
+# Roughly what idle stablecoin earns ON CAPITAL. Below this the book is taking
+# exchange, liquidation and basis risk to underperform doing nothing, which is
+# the one level at which continuing is not a judgement call. It is the only
+# threshold here that is natively a return on capital, which is why every other
+# number is converted to capital before being compared to it.
 FLOOR_PCT = Decimal("4.5")
 
 # Hyperliquid settles hourly. Annualising a per-settlement rate needs the
@@ -66,6 +81,35 @@ WHERE c.entity_id = ANY($2::uuid[])
   AND c.event_date <= $5
 GROUP BY c.entity_id
 """
+
+
+def capital_per_notional(perp_leverage: Decimal) -> Decimal:
+    """Capital a delta-neutral pair ties up per unit of notional.
+
+    One unit of cash buys the spot leg; `1 / leverage` of margin backs the
+    short perp. At 3x that is 1.333, at 5x 1.2, at 1x 2.0. There is no default:
+    the leverage is a property of the account, and a permissive guess (a high
+    one) would shrink the denominator and flatter the book.
+    """
+    if not isinstance(perp_leverage, Decimal):
+        raise TypeError(
+            f"perp_leverage must be a Decimal, got {type(perp_leverage).__name__}"
+        )
+    if not perp_leverage.is_finite() or perp_leverage <= 0:
+        raise ValueError(
+            f"perp_leverage must be a positive finite number, got {perp_leverage}"
+        )
+    return Decimal(1) + Decimal(1) / perp_leverage
+
+
+def on_capital(pct_on_notional: Decimal, perp_leverage: Decimal) -> Decimal:
+    """A return on notional restated as a return on the capital committed."""
+    return pct_on_notional / capital_per_notional(perp_leverage)
+
+
+def degraded_on_capital_pct(perp_leverage: Decimal) -> Decimal:
+    """Half the justified level, on capital at this leverage."""
+    return on_capital(DEGRADED_PCT, perp_leverage)
 
 
 class Verdict(str, Enum):
@@ -94,7 +138,12 @@ class Verdict(str, Enum):
 
 @dataclass(frozen=True)
 class Health:
-    """What the tradeable universe currently pays, against what justified it."""
+    """What the tradeable universe currently pays, against what justified it.
+
+    `basket_gross_pct` and `basket_net_pct` are on NOTIONAL. The verdict is
+    taken on `basket_net_on_capital_pct`, against `FLOOR_PCT` and against
+    `justified_on_capital_pct` -- all three on capital at `perp_leverage`.
+    """
 
     as_of: datetime
     per_asset_pct: dict[str, Decimal]
@@ -102,22 +151,45 @@ class Health:
     execution_cost_bps: Decimal | None
     basket_net_pct: Decimal | None
     verdict: Verdict
+    perp_leverage: Decimal
+    basket_net_on_capital_pct: Decimal | None = None
+
+    @property
+    def justified_on_capital_pct(self) -> Decimal:
+        return on_capital(JUSTIFIED_NET_PCT, self.perp_leverage)
 
     def summary(self) -> str:
         gross = "n/a" if self.basket_gross_pct is None else f"{self.basket_gross_pct:.2f}%"
         net = "n/a" if self.basket_net_pct is None else f"{self.basket_net_pct:.2f}%"
+        cap = (
+            "n/a"
+            if self.basket_net_on_capital_pct is None
+            else f"{self.basket_net_on_capital_pct:.2f}%"
+        )
         return (
             f"carry health {self.verdict.value}: basket gross {gross}/yr, "
-            f"net {net}/yr against {JUSTIFIED_NET_PCT}%/yr justified"
+            f"net {net}/yr on notional = {cap}/yr on capital at "
+            f"{self.perp_leverage}x, against {self.justified_on_capital_pct:.2f}%/yr "
+            f"justified on capital ({JUSTIFIED_NET_PCT}% on notional) and a "
+            f"{FLOOR_PCT}% floor"
         )
 
 
-def classify(net_pct: Decimal | None) -> Verdict:
-    if net_pct is None:
+def classify(
+    net_on_capital_pct: Decimal | None, *, perp_leverage: Decimal
+) -> Verdict:
+    """The state of a net return ON CAPITAL at `perp_leverage`.
+
+    The floor is a return on capital already. The degraded level is half the
+    justification, which is stated on notional, converted with the same factor
+    the reading was -- so the two are compared like for like.
+    """
+    degraded = degraded_on_capital_pct(perp_leverage)
+    if net_on_capital_pct is None:
         return Verdict.UNKNOWN
-    if net_pct < FLOOR_PCT:
+    if net_on_capital_pct < FLOOR_PCT:
         return Verdict.BELOW_FLOOR
-    if net_pct < DEGRADED_PCT:
+    if net_on_capital_pct < degraded:
         return Verdict.DEGRADED
     return Verdict.HEALTHY
 
@@ -130,6 +202,7 @@ async def assess(
     funding_venue: str,
     as_of: datetime,
     enter_rank: int,
+    perp_leverage: Decimal,
     lookback_days: int = 7,
     hold_days: int = 42,
     execution_cost_bps: Decimal | None = None,
@@ -141,11 +214,21 @@ async def assess(
     them: a round trip charged once against six weeks of carry, not once against
     a year. Charging them annually would understate the book by roughly eight
     times and manufacture a decay that is not there.
+
+    `perp_leverage` is the leverage the short perp leg is actually margined at.
+    It is required: it sets the capital a pair ties up, and the verdict is
+    taken on capital (see the module docstring).
     """
     from omni.coverage.visibility import visible_claims_cte
 
+    # Validated before anything is read, so a bad leverage is a refusal and
+    # never an UNKNOWN that looks like thin coverage.
+    capital_per_notional(perp_leverage)
+
     if not assets:
-        return Health(as_of, {}, None, execution_cost_bps, None, Verdict.UNKNOWN)
+        return Health(
+            as_of, {}, None, execution_cost_bps, None, Verdict.UNKNOWN, perp_leverage
+        )
 
     rows = await pool.fetch(
         _TRAILING.format(visible=visible_claims_cte("$1")),
@@ -161,7 +244,10 @@ async def assess(
         if r["n"] >= min_settlements and r["mean_rate"] is not None
     }
     if len(per_asset) < enter_rank:
-        return Health(as_of, per_asset, None, execution_cost_bps, None, Verdict.UNKNOWN)
+        return Health(
+            as_of, per_asset, None, execution_cost_bps, None, Verdict.UNKNOWN,
+            perp_leverage,
+        )
 
     top = sorted(per_asset.values(), reverse=True)[:enter_rank]
     gross = sum(top, Decimal(0)) / enter_rank
@@ -172,4 +258,9 @@ async def assess(
         drag = execution_cost_bps / Decimal(100) * (Decimal(365) / Decimal(hold_days))
         net = gross - drag
 
-    return Health(as_of, per_asset, gross, execution_cost_bps, net, classify(net))
+    net_on_capital = on_capital(net, perp_leverage)
+    return Health(
+        as_of, per_asset, gross, execution_cost_bps, net,
+        classify(net_on_capital, perp_leverage=perp_leverage),
+        perp_leverage, net_on_capital,
+    )

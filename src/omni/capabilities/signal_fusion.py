@@ -74,6 +74,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
+from scipy import stats
 
 from omni.ingest.protocol import Unavailable
 
@@ -131,26 +132,29 @@ def z_score(values: Sequence[float]) -> np.ndarray:
 
 
 def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
-    if len(values) < window:
-        return np.full_like(values, float(np.mean(values)))
-    cumsum = np.cumsum(np.insert(values, 0, 0))
+    """Trailing mean; an EXPANDING mean over the warm-up, never a future one.
+
+    The warm-up indices used to be filled with the mean of the first FULL
+    window, so index 0 was scored against observations 1..window-1 that had not
+    happened yet -- look-ahead in the first `window - 1` points of every
+    normalised signal. Each index now sees only `values[: i + 1]`.
+    """
     result = np.empty_like(values, dtype=float)
-    full_rolling = (cumsum[window:] - cumsum[:-window]) / window
-    result[: window - 1] = values[: window - 1]
-    result[window - 1 :] = full_rolling
-    mean = float(np.mean(values[:window]))
-    result[: window - 1] = mean
+    for i in range(len(values)):
+        result[i] = float(np.mean(values[max(0, i - window + 1) : i + 1]))
     return result
 
 
 def _rolling_std(values: np.ndarray, window: int) -> np.ndarray:
+    """Trailing population std; expanding over the warm-up, causal throughout.
+
+    Index 0 has one observation and therefore a std of exactly 0; `normalize`'s
+    flat-stretch guard maps that to a z of 0. (It used to borrow `values[:2]`,
+    the next bar.)
+    """
     result = np.empty_like(values, dtype=float)
-    if len(values) < window:
-        return np.full_like(values, float(np.std(values)))
-    for i in range(min(window - 1, len(values))):
-        result[i] = float(np.std(values[: max(i + 1, 2)]))
-    for i in range(window - 1, len(values)):
-        result[i] = float(np.std(values[i - window + 1 : i + 1]))
+    for i in range(len(values)):
+        result[i] = float(np.std(values[max(0, i - window + 1) : i + 1]))
     return result
 
 
@@ -477,8 +481,21 @@ def lead_lag(a: Sequence[float], b: Sequence[float], *, max_lag: int) -> LeadLag
     """Find the shift maximising `|correlation|` and report its significance.
 
     Scans `lag` in `[-max_lag, max_lag]`. Returns the best lag (positive =>
-    `a` leads `b`), its correlation, and v1's significance
-    (`min(1, |t| / 2.5)` with `t = r * sqrt(n_eff - 2) / sqrt(1 - r^2)`).
+    `a` leads `b`), its correlation, and a significance in [0, 1].
+
+    The significance is v1's `min(1, |z| / 2.5)`, but `z` is no longer the raw
+    single-test t of the winning lag. Two corrections, both of which v1 lacked:
+
+    - **Selection.** The reported lag is the best of `2 * max_lag + 1` tried.
+      Its p-value is Sidak-adjusted for that many looks, then converted back to
+      an equivalent |z|. Unadjusted, independent white noise (n=60, max_lag=10)
+      scored a mean significance of 0.86 and hit 1.0 in 30% of runs.
+    - **Serial correlation.** The t uses Bartlett's effective sample size
+      `n * (1 - ra*rb) / (1 + ra*rb)`, with `ra`, `rb` the lag-1
+      autocorrelations of the two series. Two independent random-walk LEVELS
+      correlate spuriously at almost any lag (significance was 1.0 in 93% of
+      runs); their effective sample is a handful of points and they now score
+      near zero. Pass returns or differences, not levels, for a meaningful scan.
 
     Raises `Unavailable` on mismatched lengths, `max_lag >= series length` (the
     scan would query lags the series cannot support), `max_lag > n - 2` (the
@@ -525,9 +542,31 @@ def lead_lag(a: Sequence[float], b: Sequence[float], *, max_lag: int) -> LeadLag
             f"best lag {best_lag} leaves only {n_eff} overlapping points; "
             f"need >= {_MIN_EFFECTIVE_OVERLAP} for a meaningful correlation"
         )
-    if n_eff >= 3:
-        t_stat = best_corr * (n_eff - 2) ** 0.5 / (1 - best_corr**2 + 1e-10) ** 0.5
-        significance = min(1.0, abs(t_stat) / _SIGNIFICANCE_SCALE)
+    rho = _lag1_autocorrelation(arr_a) * _lag1_autocorrelation(arr_b)
+    # Bartlett's effective sample size; only ever a reduction (anti-persistent
+    # pairs are not credited with more observations than they have).
+    n_ind = n_eff * min(1.0, (1.0 - rho) / (1.0 + rho)) if rho > -1.0 else float(n_eff)
+    if n_ind >= 3.0:
+        t_stat = best_corr * (n_ind - 2.0) ** 0.5 / (1 - best_corr**2 + 1e-10) ** 0.5
+        p_single = 2.0 * float(stats.t.sf(abs(t_stat), df=n_ind - 2.0))
+        n_lags = 2 * max_lag + 1
+        # Sidak, computed via log1p/expm1 so a tiny p survives the round trip.
+        p_adjusted = -float(np.expm1(n_lags * np.log1p(-min(p_single, 1.0 - 1e-16))))
+        z_equiv = float(stats.norm.isf(min(max(p_adjusted, 0.0), 1.0) / 2.0))
+        significance = min(1.0, max(0.0, z_equiv) / _SIGNIFICANCE_SCALE)
     else:
         significance = 0.0
     return LeadLag(lag=best_lag, correlation=best_corr, significance=significance)
+
+
+def _lag1_autocorrelation(x: np.ndarray) -> float:
+    """Lag-1 sample autocorrelation, clamped to [0, 1).
+
+    Clamped at zero because the effective-sample correction is only ever used
+    to REDUCE the sample; a negative estimate is treated as no persistence.
+    """
+    d = x - float(np.mean(x))
+    denom = float(d @ d)
+    if denom < 1e-24:
+        return 0.0
+    return float(min(max(float(d[1:] @ d[:-1]) / denom, 0.0), 1.0 - 1e-9))

@@ -201,12 +201,21 @@ def calculate_put_call_skew(
     return None
 
 
+# Decimal IV skew of +-0.20 (20 vol points) spans the 0-100 score.
+_SKEW_SCORE_HALF_RANGE = 0.20
+_SKEW_SCORE_SLOPE = 50.0 / _SKEW_SCORE_HALF_RANGE
+
+
 def analyze_options_skew(skews: Sequence[float | None]) -> dict[str, Any]:
     """Average put-call skew mapped to a 0-100 score.
 
-    `(avg + 20) * 2.5`: a skew of -20 maps to 0 (call-skew / complacency), +20
-    maps to 100 (put-skew / fear). `None` skews (unmeasurable) are dropped; if
-    none remain, v1 returned a neutral 50 -- gone here.
+    Skews are DECIMAL implied-vol differences (0.05 = 5 vol points), the unit
+    `calculate_put_call_skew` returns and `find_extreme_skew` thresholds on.
+    `(avg + 0.20) * 250`: a skew of -0.20 maps to 0 (call-skew / complacency),
+    +0.20 maps to 100 (put-skew / fear). v1 mapped +-20 in vol POINTS, so any
+    decimal skew scored 50 +- 1 and the score carried no information. `None`
+    skews (unmeasurable) are dropped; if none remain, v1 returned a neutral
+    50 -- gone here.
     """
     present = [s for s in skews if s is not None]
     if not present:
@@ -214,7 +223,7 @@ def analyze_options_skew(skews: Sequence[float | None]) -> dict[str, Any]:
 
     avg_skew = float(np.mean(present))
     return {
-        "score": min(100, max(0, (avg_skew + 20) * 2.5)),
+        "score": min(100.0, max(0.0, (avg_skew + _SKEW_SCORE_HALF_RANGE) * _SKEW_SCORE_SLOPE)),
         "average_skew": avg_skew,
     }
 
@@ -424,7 +433,9 @@ def calculate_correlation_stability(returns_df: pd.DataFrame) -> float:
     """
     window = 60
     correlations: list[float] = []
-    for i in range(window, len(returns_df)):
+    # `+ 1` so the final window ends on the newest observation; without it
+    # the most recent return never entered any window.
+    for i in range(window, len(returns_df) + 1):
         window_data = returns_df.iloc[i - window: i]
         corr_matrix = window_data.corr()
         correlations.append(

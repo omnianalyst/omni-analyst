@@ -285,9 +285,31 @@ def test_vol_target_equal_risk_contributions():
 def test_vol_target_hits_target_vol():
     vols = pd.Series([0.10, 0.20, 0.30, 0.15, 0.25], index=list("ABCDE"))
     target = 0.12
-    w = vol_target_weights(vols, target_vol=target, max_leverage=5.0)
+    # Uncorrelated assets, stated explicitly: the identity matrix is an input,
+    # not an assumption the function makes on the caller's behalf.
+    w = vol_target_weights(
+        vols, target_vol=target, max_leverage=5.0, corr_matrix=np.eye(5)
+    )
     port_vol = float(np.sqrt(np.sum((w.to_numpy() * vols.to_numpy()) ** 2)))
     assert abs(port_vol - target) < 1e-9, f"port vol {port_vol:.4f} != target {target}"
+
+
+def test_vol_target_without_correlation_never_overshoots_the_target():
+    """Ten 60%-vol assets targeted at 10%. With no correlation supplied the
+    function must not assume zero: under v1's zero-correlation default the
+    gross was 0.527 and the realised vol at a true pairwise 0.7 was 27%.
+    Sizing at correlation 1 gives gross 1/6 and a realised vol <= target under
+    ANY correlation structure."""
+    vols = np.full(10, 0.60)
+    w = vol_target_weights(vols, target_vol=0.10, max_leverage=5.0).to_numpy()
+    assert float(np.abs(w).sum()) == pytest.approx(0.10 / 0.60)
+    for rho in (0.0, 0.7, 1.0):
+        corr = np.full((10, 10), rho)
+        np.fill_diagonal(corr, 1.0)
+        cov = np.outer(vols, vols) * corr
+        assert float(np.sqrt(w @ cov @ w)) <= 0.10 + 1e-12
+    corr = np.full((10, 10), 1.0)
+    assert float(np.sqrt(w @ (np.outer(vols, vols) * corr) @ w)) == pytest.approx(0.10)
 
 
 def test_vol_target_leverage_cap():
@@ -513,14 +535,26 @@ def test_fit_factor_risk_model_raises_on_asset_with_no_observations():
     asset_returns, factor_returns, _, _ = _build_dataset()
     ar = asset_returns.copy()
     ar["A0"] = np.nan  # zero finite observations
-    with pytest.raises(Unavailable, match="finite observation"):
+    with pytest.raises(Unavailable, match=r"'A0' has 0 observation"):
         fit_factor_risk_model(ar, factor_returns)
 
     ar2 = asset_returns.copy()
     ar2.iloc[0, 0] = 0.01
     ar2.iloc[1:, 0] = np.nan  # exactly one finite observation
-    with pytest.raises(Unavailable, match="finite observation"):
+    with pytest.raises(Unavailable, match=r"'A0' has 1 observation"):
         fit_factor_risk_model(ar2, factor_returns)
+
+
+def test_fit_factor_risk_model_refuses_asset_with_too_little_overlap():
+    """An asset with real returns but too little overlap to regress used to
+    get ZERO exposures and be called fully idiosyncratic -- a portfolio holding
+    it then reported no factor risk from a factor-driven asset. It must raise
+    and name the asset instead."""
+    asset_returns, factor_returns, _, _ = _build_dataset()
+    ar = asset_returns.copy()
+    ar.iloc[10:, 1] = np.nan  # ten finite observations, below min_obs=24
+    with pytest.raises(Unavailable, match=r"'A1' has 10 observation"):
+        fit_factor_risk_model(ar, factor_returns)
 
 
 def test_ewma_volatility_raises_on_all_nan():
@@ -657,6 +691,54 @@ def test_efficient_frontier_return_monotone_and_min_vol_beats_equal_weight():
     assert fr["volatility"].min() < eq_vol
 
 
+def test_mean_variance_refuses_no_more_observations_than_assets():
+    """T <= N: the sample covariance is singular and the means are noise. v1
+    accepted two rows and returned weights."""
+    rng = np.random.default_rng(3)
+    R = pd.DataFrame(rng.normal(0, 0.01, (3, 3)), columns=list("ABC"))
+    with pytest.raises(Unavailable, match="more aligned observations than assets"):
+        max_sharpe_weights(R)
+    with pytest.raises(Unavailable, match="more aligned observations than assets"):
+        efficient_frontier(R)
+
+
+def test_ledoit_wolf_shrinks_a_short_sample_toward_identity_and_vanishes_long():
+    """Hand-checkable limits of the estimator: on a short noisy panel the
+    off-diagonals move toward zero and the intensity is material; on a long
+    panel the intensity is near zero and the estimate is the sample one."""
+    from omni.capabilities.portfolio import _ledoit_wolf_cov
+
+    rng = np.random.default_rng(11)
+    true = np.array([[1.0, 0.6], [0.6, 1.0]]) * 1e-4
+    short = rng.multivariate_normal([0, 0], true, size=12)
+    cov_s, delta_s = _ledoit_wolf_cov(short)
+    sample_s = np.cov(short, rowvar=False, ddof=0)
+    assert 0.0 < delta_s <= 1.0
+    assert abs(cov_s[0, 1]) == pytest.approx((1 - delta_s) * abs(sample_s[0, 1]))
+    assert np.trace(cov_s) == pytest.approx(np.trace(sample_s))
+
+    long = rng.multivariate_normal([0, 0], true, size=20000)
+    cov_l, delta_l = _ledoit_wolf_cov(long)
+    assert delta_l < 0.01
+    assert delta_l < delta_s
+    assert cov_l == pytest.approx(np.cov(long, rowvar=False, ddof=0), rel=0.02)
+
+
+def test_max_sharpe_raises_when_the_optimiser_does_not_converge(monkeypatch):
+    """An unconverged SLSQP iterate must not be clipped, renormalised and
+    returned as a portfolio."""
+    import omni.capabilities.portfolio as portfolio_mod
+
+    class _Failed:
+        success = False
+        message = "iteration limit reached"
+        x = np.array([0.9, 0.9, 0.9])
+
+    monkeypatch.setattr(portfolio_mod, "minimize", lambda *a, **k: _Failed())
+    with pytest.raises(Unavailable, match="did not converge"):
+        max_sharpe_weights(_returns_panel())
+
+
 def test_max_sharpe_raises_on_single_asset():
     with pytest.raises(Unavailable, match=">= 2 assets"):
         max_sharpe_weights(pd.DataFrame({"A": np.linspace(0.01, 0.02, 50)}))
@@ -665,24 +747,40 @@ def test_max_sharpe_raises_on_single_asset():
 def test_efficient_frontier_raises_on_too_few_observations():
     # Two assets but only one usable row -> covariance undefined.
     R = pd.DataFrame({"A": [0.01], "B": [0.02]})
-    with pytest.raises(Unavailable, match="aligned observations"):
+    with pytest.raises(Unavailable, match="aligned observations than assets"):
         efficient_frontier(R)
 
 
 def test_value_at_risk_known_quantile():
-    """Hand-verified: the 5th percentile of [-.05,-.02,0,.01,.03] under linear
-    interpolation is -0.044 (position 0.2 between -.05 and -.02)."""
+    """Hand-verified: the 20th percentile of [-.05,-.02,0,.01,.03] under linear
+    interpolation is -0.026 (position 0.8 between -.05 and -.02). Five points
+    resolve an 80% tail (one whole observation in it); they do not resolve a
+    95% tail, which this test used to interpolate."""
     r = [-0.05, -0.02, 0.0, 0.01, 0.03]
-    var = value_at_risk(r, confidence=0.95)
-    assert abs(var - (-0.044)) < 1e-9
+    var = value_at_risk(r, confidence=0.80)
+    assert abs(var - (-0.026)) < 1e-9
+
+
+def test_value_at_risk_refuses_a_tail_it_cannot_resolve():
+    """>= 1/(1-c) observations, the floor portfolio_risk.calculate_var applies:
+    5 points cannot give a 95% VaR, and 20 cannot give a 99% VaR."""
+    r5 = [-0.05, -0.02, 0.0, 0.01, 0.03]
+    with pytest.raises(Unavailable, match=">= 20 finite returns"):
+        value_at_risk(r5, confidence=0.95)
+    with pytest.raises(Unavailable, match=">= 20 finite returns"):
+        expected_shortfall(r5, confidence=0.95)
+    r20 = list(np.linspace(-0.05, 0.05, 20))
+    assert value_at_risk(r20, confidence=0.95) < 0
+    with pytest.raises(Unavailable, match=">= 100 finite returns"):
+        value_at_risk(r20, confidence=0.99)
 
 
 def test_expected_shortfall_known_and_le_var():
-    """Only -0.05 falls at/below the -0.044 VaR, so ES = -0.05 (single-point
+    """Only -0.05 falls at/below the -0.026 VaR, so ES = -0.05 (single-point
     tail). ES must be <= VaR (a deeper or equal loss)."""
     r = [-0.05, -0.02, 0.0, 0.01, 0.03]
-    var = value_at_risk(r, confidence=0.95)
-    es = expected_shortfall(r, confidence=0.95)
+    var = value_at_risk(r, confidence=0.80)
+    es = expected_shortfall(r, confidence=0.80)
     assert abs(es - (-0.05)) < 1e-9
     assert es <= var
 
@@ -705,12 +803,12 @@ def test_value_at_risk_raises_on_too_few_observations():
 def test_expected_shortfall_single_tail_is_extreme_loss():
     """With one observation in the tail, ES is that observation (the most
     extreme loss), not a fabricated average and not equal to the interpolated
-    VaR. For [0.10,0.05,0.02,0.0,-0.30] the 5th-pctile VaR is -0.24 (linear
+    VaR. For [0.10,0.05,0.02,0.0,-0.30] the 20th-pctile VaR is -0.06 (linear
     interpolation), so only -0.30 falls at/below it -> ES = -0.30 = min."""
     r = [0.10, 0.05, 0.02, 0.0, -0.30]
-    var = value_at_risk(r, confidence=0.95)
-    es = expected_shortfall(r, confidence=0.95)
-    assert abs(var - (-0.24)) < 1e-9
+    var = value_at_risk(r, confidence=0.80)
+    es = expected_shortfall(r, confidence=0.80)
+    assert abs(var - (-0.06)) < 1e-9
     assert abs(es - (-0.30)) < 1e-12
     assert es < var
 

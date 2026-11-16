@@ -303,3 +303,22 @@ class TestConfiguration:
         a = ManipulationAnalyzer(baseline=25, event=4, reversal=1)
         finding = a.detect_volume_anomaly(df)
         assert finding.evidence["baseline_window_bars"] == 25
+
+    def test_an_ordinary_market_has_no_composite_confidence(self):
+        """A percentile rank is uniform under the null, and the max of three
+        averages 0.75. Nothing fired, so the composite is zero -- the raw rank
+        is still there, under a name that does not claim to be a probability."""
+        result = ManipulationAnalyzer().analyze(_flat_market(200))
+        if not result["detected_patterns"]:
+            assert result["composite_confidence"] == 0.0
+        assert 0.0 <= result["max_percentile_rank"] <= 1.0
+        assert result["max_percentile_rank"] >= result["composite_confidence"]
+
+    def test_quiet_markets_average_near_zero_not_above_a_half(self):
+        composites = [
+            ManipulationAnalyzer().analyze(
+                _flat_market(200, rng=np.random.default_rng(seed))
+            )["composite_confidence"]
+            for seed in range(40)
+        ]
+        assert sum(composites) / len(composites) < 0.2

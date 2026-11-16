@@ -36,6 +36,9 @@ the reason, when:
   shared network alone and the shared network holds no venue data.
 - `universe_too_small` -- fewer ranked names than `minimum_universe`. A
   cross-sectional rank over three assets is not a ranking.
+- `mixed_settlement_cadence` -- the scored names settle on different
+  intervals. The score is a mean per settlement, which has no common unit
+  across cadences.
 - `non_finite_score` -- a `NaN` or infinite rate reached a score. The name is
   not dropped: every comparison against `NaN` is false, so a silently discarded
   one would shrink the universe and shift every rank below it without a trace.
@@ -52,6 +55,7 @@ from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from itertools import pairwise
 from typing import Generic, TypeVar
 from uuid import UUID
 
@@ -76,6 +80,19 @@ UNIVERSE_MULTIPLE_OF_ENTER = 2
 ABSTAIN_NO_COVERAGE = "no_funding_coverage_visible"
 ABSTAIN_UNIVERSE_TOO_SMALL = "universe_too_small"
 ABSTAIN_NON_FINITE_SCORE = "non_finite_score"
+ABSTAIN_MIXED_CADENCE = "mixed_settlement_cadence"
+
+# The score is a mean rate PER SETTLEMENT, which ranks names correctly only
+# when they all settle on one cadence: the same annual carry arrives as a
+# per-settlement mean half the size on a 4-hour contract as on an 8-hour one.
+# One venue per ranking removes the cross-venue case; a single venue can still
+# list contracts on different intervals. A name's cadence is the median gap
+# between its settlements (robust to a missed print), measured only when it has
+# enough gaps for a median to mean something, and two cadences "differ" beyond
+# this ratio -- wide enough that timestamp jitter and an isolated gap never
+# trip it, far inside the 2x that separates real settlement schedules.
+_CADENCE_MIN_SETTLEMENTS = 4
+_CADENCE_MAX_RATIO = Decimal("1.5")
 
 K = TypeVar("K", bound=Hashable)
 
@@ -311,6 +328,43 @@ async def _funding_window(
     return windows
 
 
+def _median_gap_seconds(
+    settlements: Sequence[tuple[datetime, Decimal]],
+) -> Decimal | None:
+    """The median interval between consecutive settlements, or None when the
+    window is too thin for one (`_CADENCE_MIN_SETTLEMENTS`)."""
+    if len(settlements) < _CADENCE_MIN_SETTLEMENTS:
+        return None
+    gaps = sorted(
+        Decimal(str((later[0] - earlier[0]).total_seconds()))
+        for earlier, later in pairwise(settlements)
+    )
+    gaps = [g for g in gaps if g > 0]
+    if not gaps:
+        return None
+    return gaps[len(gaps) // 2]
+
+
+def cadences_are_comparable(
+    windows: Mapping[K, Sequence[tuple[datetime, Decimal]]],
+) -> bool:
+    """Do the ranked names settle on one cadence.
+
+    False when two names with a measurable cadence differ by more than
+    `_CADENCE_MAX_RATIO`. A per-settlement mean cannot rank across cadences, and
+    silently normalising here would change which names a running book holds, so
+    the caller abstains and the mismatch is named instead.
+    """
+    cadences = [
+        gap
+        for settlements in windows.values()
+        if (gap := _median_gap_seconds(settlements)) is not None
+    ]
+    if len(cadences) < 2:
+        return True
+    return max(cadences) <= min(cadences) * _CADENCE_MAX_RATIO
+
+
 def _trailing_score(
     settlements: Sequence[tuple[datetime, Decimal]], *, min_settlements: int
 ) -> Decimal | None:
@@ -407,6 +461,21 @@ async def select_carry_basket(
         score = _trailing_score(settlements, min_settlements=min_settlements)
         if score is not None:
             scores[entity_id] = score
+
+    # The score is per settlement, so it is only a ranking when every scored
+    # name settles on one cadence. Refused rather than normalised: see
+    # `cadences_are_comparable`.
+    if not cadences_are_comparable(
+        {entity_id: windows[entity_id] for entity_id in scores}
+    ):
+        return BasketDecision(
+            as_of=as_of,
+            held=held_now,
+            entered=frozenset(),
+            exited=frozenset(),
+            scores=scores,
+            abstention=ABSTAIN_MIXED_CADENCE,
+        )
 
     selection = select_basket(
         scores, held=held_now, enter_rank=enter_rank, exit_rank=exit_rank

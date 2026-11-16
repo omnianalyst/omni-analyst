@@ -364,6 +364,10 @@ async def produce_basis_prediction_from_coverage(
             "window": window,
             "widening_k": widening_k,
             "anchor_venue": anchor_venue,
+            # The resolver scores this call on the ANCHOR venue's path alone.
+            # Unpinned, the other venue's very next print sits at the target by
+            # construction and resolves the call as a hit with no convergence.
+            "price_venue": anchor_venue,
             "other_venue": other_venue,
             "anchor_price": anchor_price,
             "other_price": other_price,

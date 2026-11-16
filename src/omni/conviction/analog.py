@@ -45,9 +45,12 @@ class AnalogWindow:
 
 
 # Gauge weights mirror the recession-probability composition: curve 0.3,
-# Sahm 0.4, LEI 0.3. CPI momentum is a tiebreaker worth 0.2 on top when both
-# sides are measurable, capped at 1.0 -- inflation context refines, the three
-# recession gauges decide.
+# Sahm 0.4, LEI 0.3. CPI momentum is worth 0.2 when both sides are measurable.
+# The score is the matched weight over the weight of the gauges that COULD be
+# compared, so it is the same quantity whether or not CPI was available. It
+# used to be a raw sum capped at 1.0, which made availability a vote: curve +
+# LEI + CPI with a Sahm mismatch scored 0.8 and passed, while the same state
+# with CPI unmeasured scored 0.6 and failed.
 _W_CURVE = 0.3
 _W_SAHM = 0.4
 _W_LEI = 0.3
@@ -60,6 +63,7 @@ def similarity(now: MacroState, then: MacroState) -> tuple[float, list[str], lis
     matched: list[str] = []
     missed: list[str] = []
     score = 0.0
+    available = _W_CURVE + _W_SAHM + _W_LEI
     for name, w, a, b in (
         ("yield_curve", _W_CURVE, now.yield_curve_inverted, then.yield_curve_inverted),
         ("sahm", _W_SAHM, now.sahm_triggered, then.sahm_triggered),
@@ -71,12 +75,14 @@ def similarity(now: MacroState, then: MacroState) -> tuple[float, list[str], lis
         else:
             missed.append(name)
     if now.cpi_yoy is not None and then.cpi_yoy is not None:
+        available += _W_CPI
         if abs(now.cpi_yoy - then.cpi_yoy) <= _CPI_TOLERANCE:
-            score = min(1.0, score + _W_CPI)
+            score += _W_CPI
             matched.append("cpi")
         else:
             missed.append("cpi")
-    return score, matched, missed
+    # Rounded only to shed float dust (0.3 + 0.4 + 0.3 is 1.0000000000000002).
+    return round(score / available, 12), matched, missed
 
 
 def analog_windows(

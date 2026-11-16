@@ -150,15 +150,20 @@ def _print_curve(label, curve):
         print(f"  {decile + 1:>2}    {decile / 10.0:.1f}  {n:>3}  {hits:>4}   {hr_s}")
 
 
-async def test_recovers_a_planted_monotonic_signal(db):
-    """Under a perfectly-calibrated signal p(hit)=confidence, the gate recovers
-    a monotonic curve and derives a threshold at the decile where the hit rate
-    first reaches the target."""
+async def test_a_signal_that_only_matches_its_own_geometry_is_not_an_edge(db):
+    """p(hit) = confidence is NOT a planted edge. Confidence here is the
+    driftless first-passage probability of the call's own barriers, so a hit
+    rate equal to it is exactly what a random walk produces: the curve is
+    monotone, every high decile clears the 0.6 target, and nothing has been
+    predicted. The gate must derive no threshold from it.
+
+    (This test used to assert a threshold of 0.6 on this very curve -- the
+    gate rewarding barrier geometry, pinned as the expected behaviour.)"""
     await _plant(db, p_hit=lambda c: c)
 
     buckets = await load_calibration(db.pool, claim_type=CLAIM_TYPE, method=METHOD)
     curve = _recovered_curve(buckets)
-    _print_curve("planted signal p(hit) = confidence", curve)
+    _print_curve("geometry only: p(hit) = confidence", curve)
 
     # Every decile is populated above the sample floor.
     assert all(n >= 10 for n, _, _ in curve.values())
@@ -169,22 +174,39 @@ async def test_recovers_a_planted_monotonic_signal(db):
         assert rates[d] is not None and rates[d - 1] is not None
         assert rates[d] >= rates[d - 1] - 0.05, (d, rates[d - 1], rates[d])
 
+    # Deciles 7-10 hit >= 0.6 -- and no more often than their barriers imply.
+    assert all(rates[d] >= 0.6 for d in range(6, 10))
+    assert calibrated_threshold(buckets, target_hit_rate=0.6) is None
+
+
+async def test_recovers_a_planted_edge_over_geometry(db):
+    """A signal whose upper deciles hit MORE often than their barriers imply
+    (every call at 0.6 and above resolves correctly) is a real edge, and the
+    gate derives a threshold where it starts."""
+    await _plant(db, p_hit=lambda c: 1.0 if c >= 0.6 else c)
+
+    buckets = await load_calibration(db.pool, claim_type=CLAIM_TYPE, method=METHOD)
+    curve = _recovered_curve(buckets)
+    _print_curve("planted edge: p(hit) = 1 from the 0.6 decile up", curve)
+
     threshold = calibrated_threshold(buckets, target_hit_rate=0.6)
     print(f"\nderived threshold (target=0.6): {threshold}")
-    # Deciles 7-10 (midpoints 0.65-0.95) hit >= 0.6; the lowest qualifying low
-    # is decile 7's = 0.6.
+    # The 0.6 decile (mean confidence 0.65) is the lowest whose Wilson lower
+    # bound clears both the target and its own zero-edge rate.
     assert threshold == pytest.approx(0.6)
 
-    # The gate's selection earns its existence: surfacing at the threshold
-    # concentrates hits versus surfacing everything. Read from the same resolved
-    # calibration the gate uses, not the planted record.
-    sel_hits = sum(b.hits for b in buckets if b.bucket_low >= threshold)
-    sel_n = sum(b.n for b in buckets if b.bucket_low >= threshold)
+    # The gate's selection earns its existence: surfacing the qualifying
+    # deciles concentrates hits versus surfacing everything. Read from the same
+    # resolved calibration the gate uses, not the planted record.
+    selected = [b for b in buckets if b.shows_edge(target_hit_rate=0.6)]
+    assert selected
+    sel_hits = sum(b.hits for b in selected)
+    sel_n = sum(b.n for b in selected)
     all_hits = sum(b.hits for b in buckets)
     all_n = sum(b.n for b in buckets)
     sel_rate, all_rate = sel_hits / sel_n, all_hits / all_n
     print(
-        f"\nhit-rate, threshold-selected: {sel_rate:.3f}  vs surfacing-all: "
+        f"\nhit-rate, gate-selected: {sel_rate:.3f}  vs surfacing-all: "
         f"{all_rate:.3f}"
     )
     assert sel_rate > all_rate

@@ -25,8 +25,11 @@ def _row(method, confidence, direction, hit, resolved_at):
 
 
 def test_real_monotonic_edge_holds_out_of_sample():
-    # High-confidence predictions hit 80%, low-confidence hit 20%, in BOTH
-    # halves. This is a real edge. The forward rate must clear the 0.6 target.
+    # Calls stated at 0.65 hit 80%, low-confidence hit 20%, in BOTH halves.
+    # This is a real edge: the hit rate beats what the barriers alone imply.
+    # (The fixture used to state 0.85 for an 80% hit rate -- a call that hits
+    # LESS often than a random walk reaches its own target, which is no edge
+    # at all and is exactly what the gate must not qualify.)
     rows = []
     for day in range(100):
         ts = _BASE + timedelta(days=day)
@@ -34,7 +37,7 @@ def test_real_monotonic_edge_holds_out_of_sample():
         for conf, p_hit in ((0.85, 0.8), (0.25, 0.2)):
             hit_high = (day % 5 != 0)  # 4 of 5 hit
             hit_low = (day % 5 == 0)  # 1 of 5 hit
-            rows.append(_row("real", 0.85, "up", hit_high, ts))
+            rows.append(_row("real", 0.65, "up", hit_high, ts))
             rows.append(_row("real", 0.25, "up", hit_low, ts))
 
     res = walk_forward(rows, cutoff=CUTOFF)
@@ -93,3 +96,54 @@ def test_uncalibrated_method_surfaced_rate_is_none():
     assert len(res) == 1
     assert res[0].test_hit_rate is None
     assert res[0].holds_out_of_sample is None
+
+
+def test_a_hit_rate_equal_to_its_own_confidence_is_not_an_edge():
+    # 0.85 stated, 80% realised, in both halves: barrier geometry, not skill.
+    rows = []
+    for day in range(100):
+        ts = _BASE + timedelta(days=day)
+        rows.append(_row("geometry", 0.85, "up", day % 5 != 0, ts))
+    r = walk_forward(rows, cutoff=CUTOFF)[0]
+    assert r.threshold is None
+    assert r.test_surfaced == 0
+
+
+def test_training_calls_whose_label_window_straddles_the_cutoff_are_purged():
+    # Every training call is a hit, but each one's label window runs past the
+    # cutoff: it shares its price path with the test calls, so none may train.
+    rows = []
+    for day in range(40, 50):
+        made = _BASE + timedelta(days=day)
+        rows.append(PredictionRow(
+            "straddle", 0.65, "up", "upper", made + timedelta(hours=1),
+            created_at=made, horizon_ends_at=made + timedelta(days=30),
+        ))
+    for day in range(50, 60):
+        made = _BASE + timedelta(days=day)
+        rows.append(PredictionRow(
+            "straddle", 0.65, "up", "upper", made + timedelta(hours=1),
+            created_at=made, horizon_ends_at=made + timedelta(days=1),
+        ))
+    r = walk_forward(rows, cutoff=CUTOFF)[0]
+    assert r.train_resolved == 0
+    assert r.threshold is None
+
+
+def test_the_split_is_on_the_decision_date_not_the_resolution_date():
+    # Called before the cutoff, resolved after it: under a resolved_at split
+    # this is a TEST row. It is neither -- not test (decided before the
+    # cutoff) and not training (unresolved at the cutoff).
+    made = CUTOFF - timedelta(days=1)
+    late = PredictionRow(
+        "decision", 0.65, "up", "upper", CUTOFF + timedelta(days=5),
+        created_at=made, horizon_ends_at=CUTOFF + timedelta(days=10),
+    )
+    after = PredictionRow(
+        "decision", 0.65, "up", "upper", CUTOFF + timedelta(days=6),
+        created_at=CUTOFF + timedelta(days=5),
+        horizon_ends_at=CUTOFF + timedelta(days=7),
+    )
+    r = walk_forward([late, after], cutoff=CUTOFF)[0]
+    assert r.train_resolved == 0
+    assert r.test_resolved == 1

@@ -25,9 +25,13 @@ about is *sequence* and *accounting*, so the weight sits on four things:
   every assertion that looks at only one of the two.
 
 Numbers are chosen so the sizing is exact rather than approximately right:
-entry 100, barriers 120/90 and a 0.6 calibrated hit rate give b = 2,
-f* = (0.6*2 - 0.4)/2 = 0.4, quarter Kelly 0.1, and 0.1 of a 100,000 NAV at 100
-is exactly 100 units.
+entry 100, barriers 120/90 and a 0.6 hit rate over 40 resolved predictions.
+Sizing takes the Wilson 95% lower bound of that rate (0.446), so
+f* = (0.446*2 - 0.554)/2 = 0.169 of NAV at risk, quarter Kelly 0.0422, and a
+10% stop turns that into 0.422 of NAV deployed. The baseline limits cap one
+position at 0.20 of NAV, so 0.20 of a 100,000 NAV at 100 is exactly 200 units.
+(Before sizing was corrected to treat Kelly as NAV at risk this read 100
+units: 0.1 of NAV as notional, with the stop distance ignored.)
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ import pytest_asyncio
 from omni.portfolio.orders import OrderLedgerError
 from omni.portfolio.reconcile import Divergence
 from omni.portfolio.risk import RiskLimits, RiskRefusal
+from omni.portfolio.sizing import size
 from omni.trading.bridge import BridgeRefusal
 from omni.trading.loop import CycleResult, LoopConfig, LoopRefusal, run_cycle
 from omni.trading.policy import Ineligible, TradingPhase
@@ -55,7 +60,7 @@ HORIZON = NOW + timedelta(days=30)
 METHOD = "trend.sma"
 KIND = "crypto_asset"
 NAV = Decimal(100_000)
-EXPECTED_QUANTITY = Decimal(100)
+EXPECTED_QUANTITY = Decimal(200)
 
 _PROVENANCE = json.dumps({"capability": METHOD, "input_claims": [], "assumptions": {}})
 
@@ -216,12 +221,14 @@ def _limits(**overrides) -> RiskLimits:
 def _roomy_limits(**overrides) -> RiskLimits:
     """Limits wide enough that only the thing under test can refuse."""
     return _limits(
-        max_position_pct_nav=Decimal("0.50"),
-        max_gross_exposure_pct_nav=Decimal(1),
-        max_net_exposure_pct_nav=Decimal(1),
-        max_correlated_exposure_pct_nav=Decimal(1),
-        max_positions=20,
-        **overrides,
+        **{
+            "max_position_pct_nav": Decimal("0.50"),
+            "max_gross_exposure_pct_nav": Decimal(1),
+            "max_net_exposure_pct_nav": Decimal(1),
+            "max_correlated_exposure_pct_nav": Decimal(1),
+            "max_positions": 20,
+            **overrides,
+        }
     )
 
 
@@ -1078,7 +1085,12 @@ class TestTheCeiling:
             db,
             portfolio,
             venue,
-            config=_config(max_intents_per_cycle=3, limits=_roomy_limits()),
+            # A 0.20 position cap, so three positions fit inside the gross
+            # limit and the ceiling is the only thing that can stop the fourth.
+            config=_config(
+                max_intents_per_cycle=3,
+                limits=_roomy_limits(max_position_pct_nav=Decimal("0.20")),
+            ),
         )
 
         # The venue count first: it is the property the ceiling exists for. A
@@ -1100,7 +1112,17 @@ class TestIdempotency:
         await _calibrate(db, entity_id)
         prediction_id = await _pending(db, entity_id)
         venue = _venue(symbol)
-        config = _config(limits=_roomy_limits())
+        # A position cap of all of NAV: the second cycle must reach the ledger
+        # check and be refused THERE, so the cap has to leave room for a
+        # second position of the same size. That also leaves the size
+        # unclamped, so it is the sizing formula's own number.
+        config = _config(limits=_roomy_limits(max_position_pct_nav=Decimal(1)))
+        unclamped = size(
+            nav=NAV, hit_rate=Decimal("0.6"), resolved_n=40,
+            entry=Decimal(100), stop=Decimal(90), target=Decimal(120),
+            max_position_pct_nav=Decimal(1),
+        )
+        assert Decimal(422) < unclamped < Decimal(423)
 
         first = await _cycle(db, portfolio, venue, config=config)
         second = await _cycle(db, portfolio, venue, config=config)
@@ -1114,12 +1136,12 @@ class TestIdempotency:
         orders_written = await _orders(db, portfolio)
         assert len(orders_written) == 1
         assert orders_written[0]["idempotency_key"] == f"{portfolio}:{prediction_id}"
-        assert orders_written[0]["filled_quantity"] == EXPECTED_QUANTITY
+        assert orders_written[0]["filled_quantity"] == pytest.approx(unclamped)
 
         quantity = await db.pool.fetchval(
             "SELECT quantity FROM position WHERE portfolio_id = $1", portfolio
         )
-        assert quantity == EXPECTED_QUANTITY
+        assert quantity == pytest.approx(unclamped)
 
 
 class TestAnEmptyFillIsRecordedNotImproved:
@@ -1129,7 +1151,7 @@ class TestAnEmptyFillIsRecordedNotImproved:
         entity_id, symbol = await _entity(db)
         await _calibrate(db, entity_id)
         await _pending(db, entity_id)
-        # The intent's notional is 10,000; the venue will not take it and says so.
+        # The intent's notional is 20,000; the venue will not take it and says so.
         venue = _venue(symbol, capabilities=_caps(min_notional=Decimal(50_000)))
 
         result = await _cycle(db, portfolio, venue)

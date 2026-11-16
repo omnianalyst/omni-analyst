@@ -269,3 +269,158 @@ class TestDiscrimination:
         r_perf = await run_stage_a(perfect, [snap])
         r_igno = await run_stage_a(ignorant, [snap])
         assert r_perf.brier_score < r_igno.brier_score
+
+
+# --- side selection, costs, the edge interval and the labelled sweep ---------
+
+
+def _est(p_yes: float) -> Estimation:
+    common = {"market_id": "m", "cutoff": datetime(2024, 5, 25, tzinfo=UTC)}
+    if p_yes >= 0.5:
+        return Estimation(
+            chosen_bin=p_yes, direction="up", confidence=p_yes,
+            raw_choice=f"{p_yes}", **common,
+        )
+    return Estimation(
+        chosen_bin=p_yes, direction="down", confidence=1.0 - p_yes,
+        raw_choice=f"{p_yes}", **common,
+    )
+
+
+class TestSideIsTheSideOfTheDisagreement:
+    def test_model_below_market_buys_no_even_when_model_is_above_half(self):
+        """Model 0.65 against market 0.85: YES is overpriced, so the trade is
+        NO at 0.15. Choosing the side from `est.direction` ("up") bought YES at
+        0.85 -- a trade the model's own estimate values at -0.20 a share."""
+        from omni.polymarket.pnl import side_and_entry
+
+        assert side_and_entry(model_p_yes=0.65, market_p_yes=0.85) == (
+            "NO", pytest.approx(0.15),
+        )
+
+    def test_model_above_market_buys_yes_even_when_model_is_below_half(self):
+        from omni.polymarket.pnl import side_and_entry
+
+        assert side_and_entry(model_p_yes=0.35, market_p_yes=0.15) == (
+            "YES", pytest.approx(0.15),
+        )
+
+    def test_backtest_trades_no_and_wins_when_the_market_resolves_no(self):
+        from omni.polymarket.calibrate import _backtest_pnl
+
+        pair = (_est(0.65), _snap(_market(resolved_yes=False), market_probability=0.85))
+        summary = _backtest_pnl([pair], threshold=0.05, size_usd=5.0, taker=False)
+        # NO at 0.15: $5 buys 33.33 shares paying $1 each -> +$28.33. The old
+        # side (YES at 0.85) lost the whole $5 stake on the same market.
+        assert summary.n_closed == 1
+        assert summary.net_pnl == pytest.approx(5.0 / 0.15 - 5.0)
+
+    def test_paper_position_takes_the_same_side(self):
+        from omni.polymarket.active import ActiveMarket
+        from omni.polymarket.paper import _estimation_to_position
+
+        market = ActiveMarket(
+            condition_id="0xabc", question="Will X happen?", category="Politics",
+            yes_token_id="y", no_token_id="n", yes_price=0.85, neg_risk=False,
+            slug="x", volume=5000.0, end_date=datetime(2030, 1, 1, tzinfo=UTC),
+            fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        pos = _estimation_to_position(
+            _est(0.65), market, threshold=0.05, size_usd=5.0,
+            method="m", model_name="fake", taker=False,
+        )
+        assert pos is not None
+        assert pos.direction == "NO"
+        assert pos.entry_price == pytest.approx(0.15)
+
+
+class TestTakerIsTheDefault:
+    def test_default_charges_fee_and_half_spread(self):
+        from omni.polymarket.calibrate import _backtest_pnl, sweep_thresholds
+        from omni.polymarket.pnl import DEFAULT_HALF_SPREAD
+
+        pair = (_est(0.75), _snap(_market(resolved_yes=True), market_probability=0.50))
+        default = sweep_thresholds([pair], thresholds=(0.05,)).by_threshold[0.05]
+        maker = _backtest_pnl([pair], threshold=0.05, size_usd=5.0, taker=False)
+
+        entry = 0.50 + DEFAULT_HALF_SPREAD
+        shares = 5.0 / entry
+        from omni.polymarket.news import derive_category
+        from omni.polymarket.pnl import DEFAULT_FEE_RATES
+
+        rate = DEFAULT_FEE_RATES[derive_category(pair[1].market)]
+        assert rate > 0.0
+        fee = shares * rate * entry * (1.0 - entry)
+        assert default.fee_pnl == pytest.approx(-fee)
+        assert default.net_pnl == pytest.approx(shares - 5.0 - fee)
+        # The free fill at mid is the explicit best case and is strictly better.
+        assert maker.fee_pnl == 0.0
+        assert maker.net_pnl == pytest.approx(5.0)
+        assert maker.net_pnl > default.net_pnl
+
+    async def test_run_stage_a_defaults_to_taker(self):
+        snap = _snap(_market(resolved_yes=True), market_probability=0.50)
+        model = FakeLanguageModel(
+            responses=[ScriptedResponse(fields={"probability_bin": "0.75"})]
+        )
+        report = await run_stage_a(model, [snap], pnl_threshold=0.05)
+        assert report.pnl_summary is not None
+        assert report.pnl_summary.fee_pnl < 0.0
+
+
+class TestBrierEdgeInterval:
+    def test_too_few_clusters_is_not_an_interval(self):
+        from omni.polymarket.calibrate import paired_brier_edge_interval
+
+        assert paired_brier_edge_interval(
+            [0.9] * 5, [0.5] * 5, [True] * 5, list(range(5))
+        ) is None
+
+    def test_one_event_counted_many_times_is_one_cluster(self):
+        """Forty markets from ONE event are one observation. Treated as
+        independent they would give a tight interval excluding zero."""
+        from omni.polymarket.calibrate import paired_brier_edge_interval
+
+        p_model, p_market, outcomes = [0.9] * 40, [0.5] * 40, [True] * 40
+        assert paired_brier_edge_interval(
+            p_model, p_market, outcomes, ["one-event"] * 40
+        ) is None
+        independent = paired_brier_edge_interval(
+            p_model, p_market, outcomes, list(range(40))
+        )
+        assert independent is not None
+        assert independent[1] < 0.0
+
+    def test_interval_brackets_a_noisy_edge_and_includes_zero(self):
+        from omni.polymarket.calibrate import paired_brier_edge_interval
+
+        # Model better on even clusters, equally worse on odd ones: mean edge 0.
+        p_model, p_market, outcomes, clusters = [], [], [], []
+        for c in range(20):
+            better = c % 2 == 0
+            p_model.append(0.9 if better else 0.3)
+            p_market.append(0.5)
+            outcomes.append(True)
+            clusters.append(c)
+        lo, hi = paired_brier_edge_interval(p_model, p_market, outcomes, clusters)
+        assert lo < 0.0 < hi
+
+
+class TestSweepIsLabelledInSample:
+    def test_pick_is_flagged_in_sample(self):
+        from omni.polymarket.calibrate import sweep_thresholds
+
+        win = (_est(0.75), _snap(_market(True, "0xa"), market_probability=0.50))
+        lose = (_est(0.58), _snap(_market(False, "0xb"), market_probability=0.50))
+        sweep = sweep_thresholds([win, lose], thresholds=(0.05, 0.20), taker=False)
+        assert sweep.in_sample is True
+        # 0.20 keeps only the winner; 0.05 also takes the loser.
+        assert sweep.best_in_sample == 0.20
+        assert sweep.by_threshold[0.05].n_closed == 2
+        assert sweep.by_threshold[0.20].n_closed == 1
+
+    def test_no_trades_means_no_pick(self):
+        from omni.polymarket.calibrate import sweep_thresholds
+
+        pair = (_est(0.52), _snap(_market(True), market_probability=0.50))
+        assert sweep_thresholds([pair], thresholds=(0.10,)).best_in_sample is None

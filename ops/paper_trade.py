@@ -33,11 +33,12 @@ Every parameter below has a stated default rather than an implicit one:
                           those are historical, this is forward so liquidity
                           matters
 
-The paper trader is **maker-only by default**: positions are recorded at the
-market's current mid, with fees set to zero. The `--taker` switch records
-positions with the V2 taker fee curve applied (`C × feeRate × p × (1-p)`)
-for the worst-case P&L. Both run off the same JSONL log; compare them via
-two scans with different `--method` tags.
+The paper trader is **taker by default**: positions are recorded at the
+market's current mid plus half the spread, with the V2 taker fee curve applied
+(`C × feeRate × p × (1-p)`). The `--maker` switch records the best case
+instead -- a free fill at mid. Both run off the same JSONL log; compare them
+via two scans with different `--method` tags. The side traded is the side of
+the disagreement (YES when the model is above the market price, NO when below).
 
 NO LIVE ORDERS. NO REAL MONEY. This is a forward backtest.
 """
@@ -107,7 +108,9 @@ def _parse_args() -> argparse.Namespace:
     sp_scan.add_argument("--method", default="polymarket_paper_glm_5_2")
     sp_scan.add_argument("--max-articles", type=int, default=5)
     sp_scan.add_argument("--taker", action="store_true",
-                         help="record with taker fee curve instead of maker-only")
+                         help="accepted for compatibility; taker is the default")
+    sp_scan.add_argument("--maker", action="store_true",
+                         help="record the best case: a free passive fill at mid")
     sp_scan.add_argument("--no-news", action="store_true")
     common_log(sp_scan)
 
@@ -149,6 +152,7 @@ async def _do_scan(args) -> int:
                 method=args.method,
                 min_volume=args.min_volume,
                 document_provider=document_provider,
+                taker=not args.maker,
             )
         except (httpx.HTTPError, Unavailable) as exc:
             _stderr(f"scan failed: {exc}")

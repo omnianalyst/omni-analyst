@@ -108,3 +108,54 @@ class TestCalibrationTopBucketEdgeCase:
         top = _bucket_for(result["momentum"], 0.9)
         assert top.n == 10
         assert top.hit_rate == pytest.approx(1.0)
+
+
+class TestLikeForLikeAndProperScores:
+    def test_the_benchmarked_subset_is_reported_on_its_own(self):
+        """The benchmarked ten all hit; the unbenchmarked ten all miss.
+
+        `hit_rate` over all twenty is 0.5 and the market mean is over the ten.
+        Set side by side those describe two samples. The like-for-like columns
+        describe the one the market number was taken over.
+        """
+        benchmarked = [_Pred(id=i, confidence=0.62, outcome=Outcome.UPPER) for i in range(10)]
+        unbenchmarked = [
+            _Pred(id=100 + i, confidence=0.68, outcome=Outcome.LOWER) for i in range(10)
+        ]
+        benchmarks = {str(p.id): Benchmark(market_probability=0.70) for p in benchmarked}
+        bucket = _bucket_for(
+            calibration_with_benchmark(benchmarked + unbenchmarked, benchmarks)["momentum"],
+            0.6,
+        )
+        assert bucket.hit_rate == pytest.approx(0.5)
+        assert bucket.mean_confidence == pytest.approx(0.65)
+        assert bucket.benchmarked_hit_rate == pytest.approx(1.0)
+        assert bucket.benchmarked_mean_confidence == pytest.approx(0.62)
+        assert bucket.benchmarked_brier == pytest.approx((0.62 - 1.0) ** 2)
+
+    def test_the_hit_rate_carries_a_wilson_interval(self):
+        preds = [
+            _Pred(id=i, confidence=0.65,
+                  outcome=Outcome.UPPER if i < 7 else Outcome.LOWER)
+            for i in range(10)
+        ]
+        bucket = _bucket_for(calibration_with_benchmark(preds, {})["momentum"], 0.6)
+        low, high = bucket.hit_rate_interval
+        assert low == pytest.approx(0.3968, abs=1e-4)
+        assert high == pytest.approx(0.8922, abs=1e-4)
+
+    def test_brier_is_the_mean_squared_error_of_stated_confidence(self):
+        preds = [
+            _Pred(id=i, confidence=0.65,
+                  outcome=Outcome.UPPER if i < 7 else Outcome.LOWER)
+            for i in range(10)
+        ]
+        bucket = _bucket_for(calibration_with_benchmark(preds, {})["momentum"], 0.6)
+        assert bucket.brier == pytest.approx((7 * 0.35**2 + 3 * 0.65**2) / 10)
+
+    def test_a_thin_bucket_reports_no_interval_or_score(self):
+        preds = [_Pred(id=i, confidence=0.65, outcome=Outcome.UPPER) for i in range(3)]
+        bucket = _bucket_for(calibration_with_benchmark(preds, {})["momentum"], 0.6)
+        assert bucket.hit_rate_interval is None
+        assert bucket.brier is None
+        assert bucket.benchmarked_hit_rate is None

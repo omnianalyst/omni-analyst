@@ -474,7 +474,7 @@ function BestMeasured({ data }: { data: ScannerData }) {
             type="button"
             class={rankBy === "balanced" ? "active" : ""}
             onClick={() => setRankBy("balanced")}
-            title="Weighted average of components; incomplete records reweighted"
+            title="Weighted average of components at fixed weights; thin or missing evidence counts toward the neutral 50"
           >
             Balanced
           </button>

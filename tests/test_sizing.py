@@ -88,9 +88,15 @@ def _fold(node: ast.AST) -> Decimal | None:
 
 
 # entry 100, stop 90, target 120 -> b = 20 / 10 = 2.
-# p = 0.6 -> f* = (0.6 * 2 - 0.4) / 2 = 0.4 of NAV at full Kelly.
+# p = 0.6 -> f* = (0.6 * 2 - 0.4) / 2 = 0.4 of NAV AT RISK at full Kelly.
+# The stop is 10% away, so a unit of notional risks 0.1 and the position that
+# risks 0.4 of NAV is 4x NAV; quarter Kelly risks 0.1 and deploys exactly 1x.
 LONG = {"entry": Decimal(100), "stop": Decimal(90), "target": Decimal(120)}
 SHORT = {"entry": Decimal(100), "stop": Decimal(110), "target": Decimal(80)}
+# The same b = 2 with the stop 50% away: full Kelly risks 0.4 of NAV and
+# deploys 0.8, quarter Kelly deploys 0.2. Inside a NAV cap of 1, so the
+# formula's own number is what comes back rather than the clamp.
+WIDE = {"entry": Decimal(100), "stop": Decimal(50), "target": Decimal(200)}
 NAV = Decimal(100_000)
 P = Decimal("0.6")
 
@@ -232,14 +238,43 @@ class TestSize:
         assert quantity == Decimal(0)
 
     def test_full_kelly_is_the_fraction_of_nav_the_formula_states(self):
-        # f* = 0.4 -> 40,000 notional at an entry of 100 -> 400 units.
-        assert _size(kelly_cap=Decimal(1)) == Decimal(400)
+        # Rewritten: this asserted 400 units, f* = 0.4 taken as 40,000 of
+        # NOTIONAL. f* is NAV at risk: 40,000 lost at a 50% stop is an 80,000
+        # position -> 800 units at an entry of 100.
+        assert _size(kelly_cap=Decimal(1), **WIDE) == Decimal(800)
 
     def test_quarter_kelly_is_exactly_a_quarter_of_full_kelly(self):
-        full = _size(kelly_cap=Decimal(1))
-        quarter = _size(kelly_cap=Decimal("0.25"))
-        assert quarter == Decimal(100)
+        full = _size(kelly_cap=Decimal(1), **WIDE)
+        quarter = _size(kelly_cap=Decimal("0.25"), **WIDE)
+        assert quarter == Decimal(200)
         assert quarter * Decimal(4) == full
+
+    def test_the_loss_at_the_stop_is_the_kelly_fraction_of_nav(self):
+        """The property the old formula did not have.
+
+        Whatever the stop distance, the position loses `cap * f*` of NAV when
+        the stop is hit. Under notional-Kelly a 5% stop and a 50% stop with
+        the same reward/risk got the same position and ten times different
+        dollar risk.
+        """
+        for stop, target in ((Decimal(95), Decimal(110)), (Decimal(50), Decimal(200))):
+            quantity = _size(entry=Decimal(100), stop=stop, target=target,
+                             kelly_cap=Decimal("0.1"))
+            loss_at_stop = quantity * (Decimal(100) - stop)
+            # b = 2, p = 0.6 -> f* = 0.4; a tenth of it is 0.04 of NAV.
+            assert loss_at_stop == Decimal("0.04") * NAV
+
+    def test_a_tighter_stop_takes_a_larger_position_for_the_same_edge(self):
+        tight = _size(entry=Decimal(100), stop=Decimal(95), target=Decimal(110),
+                      kelly_cap=Decimal("0.1"))
+        wide = _size(kelly_cap=Decimal("0.1"), **WIDE)
+        assert tight == Decimal(800)
+        assert wide == Decimal(80)
+
+    def test_a_tight_stop_cannot_lift_the_position_above_the_nav_cap(self):
+        # Full Kelly at a 10% stop asks for 4x NAV. The cap is a ceiling.
+        assert _size(kelly_cap=Decimal(1)) == Decimal(1000)
+        assert _size(kelly_cap=Decimal(1), max_position_pct_nav=Decimal("0.3")) == Decimal(300)
 
     def test_the_default_cap_is_quarter_kelly(self):
         assert DEFAULT_KELLY_FRACTION == Decimal("0.25")
@@ -248,9 +283,9 @@ class TestSize:
     def test_the_result_is_a_quantity_not_a_notional(self):
         # Same barriers as a ratio, twice the price: the notional is unchanged
         # and the quantity halves.
-        doubled = _size(entry=Decimal(200), stop=Decimal(180), target=Decimal(240))
-        assert doubled == Decimal(50)
-        assert doubled * Decimal(200) == _size() * Decimal(100)
+        doubled = _size(entry=Decimal(200), stop=Decimal(100), target=Decimal(400))
+        assert doubled == Decimal(100)
+        assert doubled * Decimal(200) == _size(**WIDE) * Decimal(100)
 
     def test_a_short_sizes_like_its_mirrored_long(self):
         assert _size(**SHORT) == _size(**LONG)
@@ -259,24 +294,28 @@ class TestSize:
         assert _size(nav=Decimal(200_000)) == _size(nav=NAV) * Decimal(2)
 
     def test_the_nav_cap_binds_when_kelly_would_exceed_it(self):
-        # Quarter Kelly wants 0.1 of NAV; the limit allows 0.05.
+        # Quarter Kelly risks 0.1 of NAV, which at a 10% stop is all of NAV
+        # deployed; the limit allows 0.05.
         clamped = _size(max_position_pct_nav=Decimal("0.05"))
         assert clamped == Decimal(50)
         assert clamped < _size(max_position_pct_nav=Decimal(1))
 
     def test_a_slack_cap_does_not_change_the_size(self):
-        assert _size(max_position_pct_nav=Decimal("0.5")) == _size(
-            max_position_pct_nav=Decimal(1)
+        # Quarter Kelly at the wide stop deploys 0.2 of NAV: under both caps.
+        assert _size(max_position_pct_nav=Decimal("0.5"), **WIDE) == _size(
+            max_position_pct_nav=Decimal(1), **WIDE
         )
+        assert _size(max_position_pct_nav=Decimal("0.5"), **WIDE) == Decimal(200)
 
     def test_vol_targeting_reduces_size_as_volatility_rises(self):
-        at_target = _size(volatility=Decimal("0.02"), vol_target=Decimal("0.02"))
-        doubled = _size(volatility=Decimal("0.04"), vol_target=Decimal("0.02"))
-        quadrupled = _size(volatility=Decimal("0.08"), vol_target=Decimal("0.02"))
+        at_target = _size(volatility=Decimal("0.02"), vol_target=Decimal("0.02"), **WIDE)
+        doubled = _size(volatility=Decimal("0.04"), vol_target=Decimal("0.02"), **WIDE)
+        quadrupled = _size(volatility=Decimal("0.08"), vol_target=Decimal("0.02"), **WIDE)
 
-        assert at_target == Decimal(100)
-        assert doubled == Decimal(50)
-        assert quadrupled == Decimal(25)
+        # Quarter Kelly at the wide stop deploys 0.2 of NAV = 200 units.
+        assert at_target == Decimal(200)
+        assert doubled == Decimal(100)
+        assert quadrupled == Decimal(50)
         assert at_target > doubled > quadrupled
 
     def test_vol_targeting_at_the_target_is_a_no_op(self):
@@ -284,7 +323,7 @@ class TestSize:
         assert scaled == _size()
 
     def test_the_nav_cap_is_applied_after_vol_targeting(self):
-        # Half the target volatility doubles the fraction to 0.2 of NAV; the
+        # Half the target volatility doubles the position to 2x NAV; the
         # 0.15 limit is a ceiling on the position, not one more term.
         levered = _size(
             volatility=Decimal("0.01"),
@@ -298,8 +337,10 @@ class TestSize:
             volatility=Decimal("0.01"),
             vol_target=Decimal("0.02"),
             max_position_pct_nav=Decimal("0.5"),
+            **WIDE,
         )
-        assert levered == Decimal(200)
+        # 0.2 of NAV doubled to 0.4, under the 0.5 cap.
+        assert levered == Decimal(400)
 
     @pytest.mark.parametrize("bad", [Decimal(0), Decimal("-0.01")])
     def test_non_positive_volatility_is_refused(self, bad):
@@ -363,8 +404,9 @@ class TestSize:
         monkeypatch.setattr(sizing, "kelly_fraction", substituting_kelly)
 
         # The stub is reached and really does produce a number, so a refusal
-        # below can only have come from `size` itself.
-        assert _size(kelly_cap=Decimal(1)) == Decimal(400)
+        # below can only have come from `size` itself. 0.4 of NAV at risk over
+        # a 50% stop is 0.8 of NAV -> 800 units.
+        assert _size(kelly_cap=Decimal(1), **WIDE) == Decimal(800)
 
         with pytest.raises(ValueError, match="hit_rate is required"):
             _size(hit_rate=None)
@@ -462,3 +504,52 @@ class TestNoSubstitutedProbability:
             if _fold(node) == Decimal("0.5")
         ]
         assert found, "the 0.5 scan misses a disguised one half"
+
+
+class TestTheHitRateIsAnEstimate:
+    """Sizing off the Wilson lower bound when the sample size is known."""
+
+    def test_the_wilson_lower_bound_matches_the_closed_form(self):
+        from omni.portfolio.sizing import wilson_lower_bound
+
+        # 18 of 30: the standard worked value is 0.4232.
+        assert wilson_lower_bound(
+            hit_rate=Decimal("0.6"), resolved_n=30
+        ) == pytest.approx(Decimal("0.4232"), abs=Decimal("0.0005"))
+        # 240 of 400: 0.5513.
+        assert wilson_lower_bound(
+            hit_rate=Decimal("0.6"), resolved_n=400
+        ) == pytest.approx(Decimal("0.5513"), abs=Decimal("0.0005"))
+
+    def test_a_small_sample_at_even_money_sizes_to_zero(self):
+        """0.6 from 30 has a lower bound of 0.42: at b = 1 that is no edge."""
+        even = {"entry": Decimal(100), "stop": Decimal(90), "target": Decimal(110)}
+        assert _size(resolved_n=30, **even) == Decimal(0)
+        assert _size(**even) > Decimal(0), "the point estimate alone still sizes"
+
+    def test_more_evidence_for_the_same_rate_sizes_larger(self):
+        small = _size(resolved_n=50, kelly_cap=Decimal("0.1"), **WIDE)
+        large = _size(resolved_n=5000, kelly_cap=Decimal("0.1"), **WIDE)
+        point = _size(kelly_cap=Decimal("0.1"), **WIDE)
+        assert Decimal(0) < small < large < point
+
+    def test_the_size_is_kelly_on_the_lower_bound_exactly(self):
+        from omni.portfolio.sizing import kelly_fraction, wilson_lower_bound
+
+        lower = wilson_lower_bound(hit_rate=P, resolved_n=200)
+        expected = (
+            kelly_fraction(hit_rate=lower, payoff=Decimal(2))
+            * Decimal("0.25") / Decimal("0.5") * NAV / Decimal(100)
+        )
+        assert _size(resolved_n=200, **WIDE) == expected
+        assert expected < _size(**WIDE)
+
+    @pytest.mark.parametrize("bad", [0, -5])
+    def test_a_non_positive_sample_is_refused(self, bad):
+        with pytest.raises(ValueError, match="resolved_n"):
+            _size(resolved_n=bad)
+
+    @pytest.mark.parametrize("bad", [30.0, True, "30"])
+    def test_a_sample_that_is_not_a_count_is_refused(self, bad):
+        with pytest.raises(TypeError, match="resolved_n"):
+            _size(resolved_n=bad)

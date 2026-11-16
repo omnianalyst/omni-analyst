@@ -607,7 +607,7 @@ def build_extracted_registry() -> Registry:
         _bind(
             "portfolio_risk.calculate_var",
             "Value at Risk by three methods: historical percentile, "
-            "parametric (normal) and a Monte-Carlo draw, at a chosen "
+            "parametric (normal) and a filtered-historical Monte-Carlo, at a chosen "
             "confidence level. Optional portfolio_value converts the loss "
             "to a currency amount.",
             fn=portfolio_risk.calculate_var,
@@ -616,10 +616,11 @@ def build_extracted_registry() -> Registry:
             provenance=(
                 "The historical and parametric legs are deterministic over "
                 "the supplied sample. The Monte-Carlo leg is a MODEL OUTPUT: "
-                "it draws from a normal fit to the sample moments, so it "
-                "systematically under-prices fat-tailed risk. Treat it as a "
-                "what-if under a stated distribution, not a measurement. "
-                "`seed` makes the draw reproducible."
+                "it bootstraps the sample's EWMA-standardised residuals and "
+                "rescales them to the current EWMA volatility (filtered "
+                "historical simulation), keeping the sample's own tails. "
+                "`seed` makes the draw reproducible. `periods_per_year` "
+                "annualises (252 trading days; 365 for 24/7 series)."
             ),
         ),
         _bind(
@@ -710,7 +711,8 @@ def build_extracted_registry() -> Registry:
             "attribution.market_model_attribution",
             "Single-factor (market-model) performance attribution against a "
             "benchmark: annualised alpha, beta, R-squared, total / factor / "
-            "specific return, tracking error and information ratio.",
+            "specific return, tracking error, appraisal ratio and information "
+            "ratio. Pass risk_free_rate to regress excess returns.",
             fn=attribution.market_model_attribution,
             consumes=("price_snapshot",),
             touches_byo=True,
@@ -1052,7 +1054,8 @@ def build_extracted_registry() -> Registry:
         _bind(
             "regime.volatility_regime_path",
             "Per-bar volatility regime label (quiet / transition / "
-            "volatile) banded against the rolling-vol median.",
+            "volatile; warmup before the first full window) banded "
+            "causally against the expanding rolling-vol median.",
             fn=regime.volatility_regime_path,
             consumes=("price_snapshot",),
             touches_byo=True,
@@ -1288,12 +1291,12 @@ def build_extracted_registry() -> Registry:
         ),
         _bind(
             "execution.identify_outliers",
-            "Indices whose value exceeds z_threshold standard deviations from "
-            "the mean (default |z| > 2).",
+            "Indices whose modified z-score (median / MAD based) exceeds "
+            "z_threshold in magnitude (default |z| > 2).",
             fn=execution_analytics.identify_outliers,
             touches_byo=True,
             provenance=(
-                "z-score flagging over a caller-supplied series; a constant "
+                "robust z-score flagging over a caller-supplied series; a constant "
                 "series returns [] via the exact np.ptp == 0 guard rather "
                 "than fabricating z-scores from floating-point residue."
             ),
@@ -1433,8 +1436,9 @@ def build_extracted_registry() -> Registry:
         ),
         _bind(
             "market_risk.options_skew",
-            "Average put-call skew across supplied skew observations, mapped "
-            "to a 0-100 fear/complacency score.",
+            "Average put-call skew across supplied skew observations (decimal "
+            "implied-vol differences, 0.05 = 5 vol points), mapped to a 0-100 "
+            "fear/complacency score.",
             fn=risk.analyze_options_skew,
             touches_byo=True,
             is_proxy=True,

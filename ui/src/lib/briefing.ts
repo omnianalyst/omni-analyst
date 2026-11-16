@@ -95,6 +95,8 @@ export function explainRefusal(reason: string): string {
       return "Too few calls of this kind have played out to know what its confidence is worth.";
     case "confidence_below_the_calibrated_threshold":
       return "Confidence fell short of the bar this kind of call has to clear.";
+    case "no_bucket_beats_its_own_barrier_geometry":
+      return "Calls of this kind have played out, and they hit no more often than their price targets alone would by chance.";
     case "no_disconfirming_evidence_was_gathered":
       return "The counter-case could not be checked \u2014 not enough price history.";
     case "no_disconfirming_search_exists_for_this_method":

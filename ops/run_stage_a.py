@@ -128,7 +128,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--size-usd", type=float, default=5.0,
                    help="per-trade stake for the P&L backtest (default $5)")
     p.add_argument("--taker", action="store_true",
-                   help="use taker fee curve for the P&L backtest (default maker=0)")
+                   help="accepted for compatibility; taker (fees + half-spread) is the default")
+    p.add_argument("--maker", action="store_true",
+                   help="best case for the P&L backtest: a free passive fill at mid")
     p.add_argument("--threshold-list", type=str, default=None,
                    help="comma-separated thresholds to sweep (e.g. '0.01,0.02,0.05'); "
                         "runs LLM once per market then applies each threshold offline")
@@ -187,6 +189,12 @@ def _print_human_report(report, prep_exclusions: list[Exclusion], args: argparse
     if report.brier_edge is not None:
         sign = "+" if report.brier_edge >= 0 else ""
         print(f"  edge (LLM-mkt):  {sign}{report.brier_edge:.4f}   ({'LLM WORSE' if report.brier_edge > 0 else 'LLM BETTER' if report.brier_edge < 0 else 'tie'})")
+        if report.brier_edge_interval is None:
+            print(f"  edge 95% CI:     not measured ({report.brier_edge_clusters} event clusters; too few)")
+        else:
+            lo, hi = report.brier_edge_interval
+            verdict = "excludes zero" if report.brier_edge_significant else "INCLUDES ZERO -- not distinguishable from the market"
+            print(f"  edge 95% CI:     [{lo:+.4f}, {hi:+.4f}] over {report.brier_edge_clusters} event clusters ({verdict})")
     if report.log_loss is not None:
         print(f"  log loss (LLM):  {report.log_loss:.4f}")
 
@@ -196,7 +204,7 @@ def _print_human_report(report, prep_exclusions: list[Exclusion], args: argparse
         wr_str = f"{wr * 100:.1f}%" if wr is not None else "-"
         roi = ps.avg_roi_pct if ps.avg_roi_pct is not None else 0.0
         print(f"\n  Backtest P&L (threshold={args.pnl_threshold}, size=${args.size_usd}, "
-              f"{'taker' if args.taker else 'maker'}):")
+              f"{'maker' if args.maker else 'taker'}):")
         print(f"    trades closed: {ps.n_closed} ({wr_str} win rate)")
         print(f"    gross P&L:     ${ps.gross_pnl:+.2f}")
         print(f"    fees:          ${ps.fee_pnl:+.2f}")
@@ -232,6 +240,8 @@ def _print_json_report(report, prep_exclusions: list[Exclusion]) -> None:
         "brier_score": report.brier_score,
         "market_brier_score": report.market_brier_score,
         "brier_edge": report.brier_edge,
+        "brier_edge_interval": report.brier_edge_interval,
+        "brier_edge_clusters": report.brier_edge_clusters,
         "log_loss": report.log_loss,
         "method_buckets": {
             method: [
@@ -304,13 +314,14 @@ def _print_threshold_sweep(report, args) -> None:
     if not thresholds:
         return
 
-    results = sweep_thresholds(
+    sweep = sweep_thresholds(
         report.trade_pairs,
         thresholds=thresholds,
         size_usd=args.size_usd,
-        taker=args.taker,
+        taker=not args.maker,
     )
-    fee_mode = "taker" if args.taker else "maker"
+    results = sweep.by_threshold
+    fee_mode = "maker" if args.maker else "taker"
     print(f"\nThreshold sweep — size=${args.size_usd}, {fee_mode} fees:")
     print(f"  {'thresh':>7} {'trades':>7} {'win_rate':>9} {'gross':>9} {'fees':>8} {'net':>9} {'roi/trade':>10}")
     for t in thresholds:
@@ -326,6 +337,11 @@ def _print_threshold_sweep(report, args) -> None:
         )
     cumulative_usd = sum(results[t].net_pnl for t in thresholds if results[t].n_closed)
     print(f"\n  cumulative net across all thresholds (with duplicates): ${cumulative_usd:+.2f}")
+    if sweep.best_in_sample is not None:
+        print(
+            f"  best threshold IN SAMPLE: {sweep.best_in_sample*100:.1f}% -- chosen on the "
+            f"same trades it is scored on, so its P&L is biased upward"
+        )
 
 
 async def _run_single(model, snapshots, args) -> tuple:
@@ -335,7 +351,7 @@ async def _run_single(model, snapshots, args) -> tuple:
         model, snapshots, method=args.method,
         pnl_threshold=args.pnl_threshold,
         pnl_size_usd=args.size_usd,
-        pnl_taker=args.taker,
+        pnl_taker=not args.maker,
     )
     return (report,)
     """One harness run over all snapshots. Returns (report,)."""
@@ -344,7 +360,7 @@ async def _run_single(model, snapshots, args) -> tuple:
         model, snapshots, method=args.method,
         pnl_threshold=args.pnl_threshold,
         pnl_size_usd=args.size_usd,
-        pnl_taker=args.taker,
+        pnl_taker=not args.maker,
     )
     return (report,)
 
@@ -372,7 +388,7 @@ async def _run_per_category(model, snapshots, args) -> dict[str, object]:
             model, group_snaps, method=f"{args.method}:{cat}",
             pnl_threshold=args.pnl_threshold,
             pnl_size_usd=args.size_usd,
-            pnl_taker=args.taker,
+            pnl_taker=not args.maker,
         )
         reports[cat] = report
     return reports

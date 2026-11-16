@@ -20,8 +20,15 @@ from omni.trading.carry_health import (
     JUSTIFIED_NET_PCT,
     Verdict,
     assess,
+    capital_per_notional,
     classify,
+    degraded_on_capital_pct,
+    on_capital,
 )
+
+# The leverage the short perp is margined at in these fixtures. 3x ties up
+# 1 + 1/3 = 1.3333 of capital per unit of notional.
+LEV = Decimal(3)
 
 NOW = datetime(2026, 8, 10, 5, 0, tzinfo=UTC)
 VENUE = "hyperliquid"
@@ -73,7 +80,7 @@ class TestTheAnnualisationMatchesTheVenueCadence:
 
         h = await assess(
             db.pool, assets=ids, audience_user_id=owner, funding_venue=VENUE,
-            as_of=NOW, enter_rank=2,
+            as_of=NOW, enter_rank=2, perp_leverage=LEV,
         )
 
         assert h.per_asset_pct["AAA"] == pytest.approx(Decimal("8.76"), abs=0.01)
@@ -89,7 +96,7 @@ class TestCostsAreAmortisedOverTheHold:
 
         h = await assess(
             db.pool, assets=ids, audience_user_id=owner, funding_venue=VENUE,
-            as_of=NOW, enter_rank=2, execution_cost_bps=Decimal(28), hold_days=42,
+            as_of=NOW, enter_rank=2, perp_leverage=LEV, execution_cost_bps=Decimal(28), hold_days=42,
         )
 
         # 28 bps once over 42 days = 0.28% * 365/42 = 2.43%/yr of drag
@@ -109,7 +116,7 @@ class TestTheBasketIsTheTopNames:
 
         h = await assess(
             db.pool, assets=ids, audience_user_id=owner, funding_venue=VENUE,
-            as_of=NOW, enter_rank=2,
+            as_of=NOW, enter_rank=2, perp_leverage=LEV,
         )
 
         # (26.28 + 17.52) / 2, ignoring POOR entirely
@@ -124,7 +131,7 @@ class TestItRefusesRatherThanGuessing:
 
         h = await assess(
             db.pool, assets=ids, audience_user_id=owner, funding_venue=VENUE,
-            as_of=NOW, enter_rank=2,
+            as_of=NOW, enter_rank=2, perp_leverage=LEV,
         )
 
         assert h.verdict is Verdict.UNKNOWN
@@ -138,7 +145,7 @@ class TestItRefusesRatherThanGuessing:
 
         h = await assess(
             db.pool, assets=ids, audience_user_id=owner, funding_venue=VENUE,
-            as_of=NOW, enter_rank=2, min_settlements=2,
+            as_of=NOW, enter_rank=2, perp_leverage=LEV, min_settlements=2,
         )
 
         assert "THIN" not in h.per_asset_pct
@@ -146,18 +153,101 @@ class TestItRefusesRatherThanGuessing:
 
 
 class TestTheThresholdsAreStated:
+    """Rewritten when the verdict moved onto capital: these pinned the notional
+    level against a floor that is a return on capital. Each now states the
+    level on capital at the fixture leverage."""
+
     def test_at_the_justified_level_it_is_healthy(self):
-        assert classify(JUSTIFIED_NET_PCT) is Verdict.HEALTHY
+        assert classify(on_capital(JUSTIFIED_NET_PCT, LEV), perp_leverage=LEV) is Verdict.HEALTHY
 
     def test_below_half_the_justification_it_is_degraded(self):
-        assert classify(DEGRADED_PCT - Decimal("0.01")) is Verdict.DEGRADED
+        assert (
+            classify(degraded_on_capital_pct(LEV) - Decimal("0.01"), perp_leverage=LEV)
+            is Verdict.DEGRADED
+        )
+        assert (
+            classify(degraded_on_capital_pct(LEV), perp_leverage=LEV) is Verdict.HEALTHY
+        )
 
     def test_below_idle_stablecoin_it_is_not_a_judgement_call(self):
         """Under the floor the book takes exchange, liquidation and basis risk
         to underperform doing nothing."""
-        assert classify(FLOOR_PCT - Decimal("0.01")) is Verdict.BELOW_FLOOR
+        assert (
+            classify(FLOOR_PCT - Decimal("0.01"), perp_leverage=LEV)
+            is Verdict.BELOW_FLOOR
+        )
+        assert classify(FLOOR_PCT, perp_leverage=LEV) is not Verdict.BELOW_FLOOR
 
     def test_no_reading_is_unknown_rather_than_healthy(self):
         """The permissive failure would be treating an absent measurement as a
         passing one, which is how a dead book keeps trading."""
-        assert classify(None) is Verdict.UNKNOWN
+        assert classify(None, perp_leverage=LEV) is Verdict.UNKNOWN
+
+
+class TestTheVerdictIsTakenOnCapitalNotNotional:
+    """Funding is earned on notional; idle stablecoin is a return on capital.
+    Comparing one to the other flattered the book by 1 + 1/leverage."""
+
+    def test_capital_per_notional_is_spot_cash_plus_perp_margin(self):
+        assert capital_per_notional(Decimal(3)) == pytest.approx(Decimal("1.3333"), abs=1e-4)
+        assert capital_per_notional(Decimal(5)) == Decimal("1.2")
+        assert capital_per_notional(Decimal(1)) == Decimal(2)
+        # The justified 14.58% on notional is 10.94% on capital at 3x.
+        assert on_capital(JUSTIFIED_NET_PCT, Decimal(3)) == pytest.approx(
+            Decimal("10.935"), abs=0.001
+        )
+        assert degraded_on_capital_pct(Decimal(3)) == on_capital(DEGRADED_PCT, Decimal(3))
+
+    @pytest.mark.parametrize("bad", [Decimal(0), Decimal(-3), Decimal("NaN"), Decimal("Infinity")])
+    def test_a_leverage_that_is_not_a_positive_number_is_refused(self, bad):
+        with pytest.raises(ValueError, match="perp_leverage"):
+            capital_per_notional(bad)
+
+    def test_a_float_leverage_is_refused(self):
+        with pytest.raises(TypeError, match="perp_leverage"):
+            capital_per_notional(3.0)
+
+    async def test_a_book_clear_of_the_floor_on_notional_is_below_it_on_capital(
+        self, db, owner
+    ):
+        """5.5% net on notional is 4.13% on capital at 3x: under a 4.5% floor.
+
+        Classified on notional it read DEGRADED -- "still pays" -- while
+        earning less than idle stablecoin on the money committed.
+        """
+        # 0.0000062785/h * 8760 = 5.50%/yr, no costs charged.
+        ids = {await _asset(db, owner, "AAA", hourly_rate="0.0000062785"): "AAA",
+               await _asset(db, owner, "BBB", hourly_rate="0.0000062785"): "BBB"}
+
+        h = await assess(
+            db.pool, assets=ids, audience_user_id=owner, funding_venue=VENUE,
+            as_of=NOW, enter_rank=2, perp_leverage=Decimal(3),
+        )
+
+        assert h.basket_net_pct == pytest.approx(Decimal("5.50"), abs=0.01)
+        assert h.basket_net_pct > FLOOR_PCT
+        assert h.basket_net_on_capital_pct == pytest.approx(Decimal("4.125"), abs=0.01)
+        assert h.verdict is Verdict.BELOW_FLOOR
+        assert "on capital at 3x" in h.summary()
+
+    async def test_more_leverage_ties_up_less_capital(self, db, owner):
+        ids = {await _asset(db, owner, "AAA", hourly_rate="0.0000062785"): "AAA",
+               await _asset(db, owner, "BBB", hourly_rate="0.0000062785"): "BBB"}
+        kwargs = {
+            "assets": ids, "audience_user_id": owner, "funding_venue": VENUE,
+            "as_of": NOW, "enter_rank": 2,
+        }
+        at_3x = await assess(db.pool, perp_leverage=Decimal(3), **kwargs)
+        at_10x = await assess(db.pool, perp_leverage=Decimal(10), **kwargs)
+
+        assert at_3x.basket_net_pct == at_10x.basket_net_pct
+        assert at_10x.basket_net_on_capital_pct == pytest.approx(Decimal("5.00"), abs=0.01)
+        assert at_10x.basket_net_on_capital_pct > at_3x.basket_net_on_capital_pct
+        assert at_10x.verdict is Verdict.DEGRADED
+
+    async def test_a_bad_leverage_is_a_refusal_not_an_unknown(self, db, owner):
+        with pytest.raises(ValueError, match="perp_leverage"):
+            await assess(
+                db.pool, assets={}, audience_user_id=owner, funding_venue=VENUE,
+                as_of=NOW, enter_rank=2, perp_leverage=Decimal(0),
+            )

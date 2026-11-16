@@ -11,10 +11,14 @@ testing. This module ports two v1 sources:
 - `app/services/backtesting/pit_backtester.py`: a deliberately framework-light
   backtester whose single no-look-ahead rule is stated below.
 
-The no-leakage invariant is the point. A signal known at the close of day ``t``
-may only earn the return from ``t -> t+1`` (or ``t -> t+h``). It is enforced by
-shifting the signal forward one bar before multiplying by forward returns --
-there is no code path by which a same-bar signal touches a same-bar return.
+The no-leakage invariant is the point, and it is the project-wide one: **a
+score at ``t`` executes no earlier than the following bar.** A signal observed
+at the close of bar ``t`` becomes a position at the close of ``t+lag`` and first
+earns the move ``t+lag -> t+lag+1``. It is enforced by shifting the signal
+forward before multiplying by forward returns -- there is no code path by which
+a same-bar signal touches a same-bar return. (An earlier version of this
+paragraph said the signal earns ``t -> t+1``; the code never did that, and the
+stricter behaviour is the intended one.)
 ``leakage_probe`` makes that guarantee testable; a backtest that can see the
 future is worse than none.
 
@@ -130,6 +134,10 @@ class DeflatedSharpeReport:
     skew: float
     kurtosis: float
     is_credible: bool  # DSR > 0.95
+    # False when n_trials == 1: the "deflated" figure is then exactly the PSR and
+    # no selection-bias correction was applied. A reader must be able to tell a
+    # deflated verdict from an undeflated one wearing the same field name.
+    selection_deflated: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -149,6 +157,11 @@ def evaluate_strategy_sharpe(
     If `sr_variance` (variance of per-period Sharpe across the trials you ran) is
     unknown, a conservative default of 1/n_obs is used (the sampling variance of
     the Sharpe estimator under the null), which is the common practical choice.
+
+    ``n_trials`` defaults to 1, at which the Deflated Sharpe IS the Probabilistic
+    Sharpe: nothing is deflated. The report says so in ``selection_deflated``;
+    ``is_credible`` on an undeflated report is a single-test statement and is
+    not evidence against selection bias.
     """
     r = np.asarray(returns, dtype=float)
     r = r[np.isfinite(r)]
@@ -176,6 +189,7 @@ def evaluate_strategy_sharpe(
         skew=sk,
         kurtosis=ku,
         is_credible=bool(np.isfinite(dsr) and dsr > 0.95),
+        selection_deflated=bool(n_trials > 1),
     )
 
 
@@ -225,7 +239,10 @@ class PurgedKFold:
             starts = pd.Series(indices, index=indices)
             ends = pd.Series(indices, index=indices)
 
-        embargo = int(n * self.embargo_pct)
+        # At least one bar whenever an embargo was asked for: `int(n * pct)`
+        # truncates to zero for n < 1/pct, silently dropping the embargo on
+        # exactly the short samples where leakage matters most.
+        embargo = max(1, int(n * self.embargo_pct)) if self.embargo_pct > 0 else 0
         test_bounds = [
             (b[0], b[-1] + 1) for b in np.array_split(indices, self.n_splits)
         ]
@@ -271,10 +288,30 @@ class PBOReport:
         }
 
 
+def _split_score(rows: np.ndarray, metric: str) -> np.ndarray:
+    """Per-strategy score over one split's rows: mean, or mean/std (Sharpe)."""
+    mean = rows.mean(axis=0)
+    if metric == "mean":
+        return mean
+    if rows.shape[0] < 2:
+        raise Unavailable(
+            "a split has fewer than 2 rows; a Sharpe ranking needs a dispersion"
+        )
+    sd = rows.std(axis=0, ddof=1)
+    if np.any(np.isclose(sd, 0.0, atol=_ZERO_STD_ATOL)):
+        raise Unavailable(
+            "a strategy has zero dispersion within a split; its Sharpe is "
+            "undefined and it cannot be ranked (use metric='mean' for a "
+            "matrix that is not per-period returns)"
+        )
+    return mean / sd
+
+
 def probability_of_backtest_overfitting(
     performance: np.ndarray,
     n_groups: int = 10,
     higher_is_better: bool = True,
+    metric: str = "sharpe",
 ) -> PBOReport:
     """Probability of Backtest Overfitting via Combinatorially-Symmetric CV.
 
@@ -283,7 +320,13 @@ def probability_of_backtest_overfitting(
     performance : array of shape (T, N) -- T per-slice performance observations for
         each of N candidate strategies (e.g. per-period returns of N strategies).
     n_groups : number of disjoint time groups S (must be even); IS/OOS each take
-        S/2 groups across all C(S, S/2) combinations.
+        S/2 groups across all C(S, S/2) combinations. An odd value raises: the
+        analysis is not silently run at a different granularity than asked.
+    metric : how a strategy is ranked within a split. ``"sharpe"`` (default, the
+        CSCV definition) ranks on mean/std over the split's rows, so a strategy
+        is not preferred merely for being more volatile. ``"mean"`` ranks on
+        the raw mean and is for matrices that are already a performance score
+        rather than per-period returns.
 
     Returns the PBO: the fraction of train/test splits where the strategy that was
     best in-sample lands below the median out-of-sample. PBO near 0.5+ means the
@@ -295,10 +338,17 @@ def probability_of_backtest_overfitting(
     T, N = M.shape
     if N < 2:
         raise ValueError("need at least 2 strategies")
-    if n_groups % 2 != 0:
-        n_groups -= 1
+    if metric not in ("sharpe", "mean"):
+        raise ValueError(f"metric must be 'sharpe' or 'mean', got {metric!r}")
     if n_groups < 2:
         raise ValueError("n_groups must be >= 2")
+    if n_groups % 2 != 0:
+        raise ValueError(
+            f"n_groups must be even (IS and OOS each take half), got {n_groups}; "
+            "it is not rounded down for the caller"
+        )
+    if not np.all(np.isfinite(M)):
+        raise Unavailable("performance contains non-finite values")
     if T < n_groups:
         raise Unavailable(
             f"performance has T={T} rows but n_groups={n_groups} was requested; "
@@ -318,8 +368,8 @@ def probability_of_backtest_overfitting(
         is_rows = np.concatenate([groups[g] for g in range(n_groups) if g in is_set])
         oos_rows = np.concatenate([groups[g] for g in range(n_groups) if g not in is_set])
 
-        is_perf = sign * M[is_rows].mean(axis=0)
-        oos_perf = sign * M[oos_rows].mean(axis=0)
+        is_perf = sign * _split_score(M[is_rows], metric)
+        oos_perf = sign * _split_score(M[oos_rows], metric)
 
         best_is = int(np.argmax(is_perf))
         # Out-of-sample rank of the in-sample-best strategy (1 = worst, N = best).
@@ -377,17 +427,30 @@ def backtest_signal(
         signal: desired position at the close of each bar (e.g. -1/0/+1 or a
             continuous weight).
         prices: adjusted close series (DatetimeIndex).
-        horizon: holding horizon in bars for the forward return.
-        cost_per_turn: proportional cost charged on |position change|.
+        horizon: holding horizon in bars. Each bar's signal is held for
+            ``horizon`` bars in a 1/``horizon`` sleeve, so the book is the
+            average of the last ``horizon`` lagged signals and always earns
+            ONE-bar returns. Multiplying a full position by an h-bar forward
+            return every bar and compounding the result -- what this did
+            before -- counts each bar's move ``horizon`` times: an always-long
+            book at 5bp/bar over 1,000 bars read +1,103% at horizon=5 against
+            a true +65%.
+        cost_per_turn: proportional cost charged on |position change| of the
+            held (sleeve-averaged) book.
         lag: bars between signal observation and position application (>=1).
     """
     if lag < 1:
         raise ValueError("lag must be >= 1 to avoid look-ahead (signal at t acts at t+lag)")
+    if horizon < 1:
+        raise ValueError(f"horizon must be >= 1 bar, got {horizon}")
     prices = prices.astype("float64").sort_index()
     signal = signal.reindex(prices.index).astype("float64")
 
-    position = signal.shift(lag).fillna(0.0)          # acted on strictly after observation
-    fwd = forward_returns(prices, horizon)            # return realized after the bar
+    lagged = signal.shift(lag).fillna(0.0)            # acted on strictly after observation
+    # Overlapping 1/h sleeves: unfunded sleeves during warm-up hold nothing,
+    # so the sum is divided by `horizon`, not by the count present.
+    position = lagged.rolling(horizon, min_periods=1).sum() / horizon
+    fwd = forward_returns(prices, 1)                  # one-bar return realized after the bar
     gross = position * fwd
     turns = position.diff().abs().fillna(position.abs())
     costs = turns * cost_per_turn
@@ -411,7 +474,10 @@ def leakage_probe(prices: pd.Series, *, horizon: int = 1) -> dict:
     cheat_signal = np.sign(fwd).fillna(0.0)  # knows the future at t
 
     # Naive look-ahead PnL: same-bar cheat signal * same-bar forward return.
-    naive = (cheat_signal * fwd).dropna()
+    # Same sleeve accounting as the causal path (one-bar returns, 1/h sleeves),
+    # so the two totals differ only by the lag and not by horizon double-counting.
+    naive_position = cheat_signal.rolling(horizon, min_periods=1).sum() / horizon
+    naive = (naive_position * forward_returns(prices, 1)).dropna()
     naive_total = float((1.0 + naive).prod() - 1.0)
 
     # Causal backtest of the SAME cheat signal: lag forces it to t+1, destroying

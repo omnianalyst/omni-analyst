@@ -126,7 +126,7 @@ async def main() -> int:
             "top_n": args.top_n,
             "constituent_cost_bps_per_turnover": args.cost_bps,
             "etf_spread_bps": 2.0,
-            "etf_expense_bps_annual": 10.0,
+            "etf_expense_bps_annual": 0.0,
             "hybrid_active_weight": args.hybrid_weight,
             "rebalance_sessions": 21,
             "warmup_sessions": 126,

@@ -410,8 +410,16 @@ class TestMaxDrawdown:
     def test_monotone_rise_has_zero_drawdown(self):
         assert max_drawdown([0.01, 0.02, 0.03]) == pytest.approx(0.0)
 
-    def test_empty_series_is_zero(self):
-        assert max_drawdown([]) == 0.0
+    def test_empty_series_is_refused_not_zero(self):
+        # This asserted `== 0.0`: a fabricated "no drawdown" over returns that
+        # do not exist. An empty series has no drawdown to report.
+        with pytest.raises(Unavailable, match="drawdown is undefined"):
+            max_drawdown([])
+
+    def test_losses_from_starting_equity_are_counted(self):
+        # 1.0 -> 0.9 -> 0.81 -> 0.8505: the peak is the STARTING equity, so the
+        # trough is -19%. Starting the curve at 1+r0 reported -10%.
+        assert max_drawdown([-0.10, -0.10, 0.05]) == pytest.approx(-19.0)
 
 
 class TestBlendPositionReturns:
@@ -475,10 +483,14 @@ class TestPortfolioReturns:
         assert out["annualized_return"] == pytest.approx(expected, abs=0.01)
 
     async def test_sharpe_subtracts_the_supplied_risk_free_rate(self):
-        # daily_returns with genuine variance: std([.01,-.01,.01,-.01]) == 0.01.
-        varying = [0.01, -0.01, 0.01, -0.01]
-        ann = (pow(1 + (2000.0 / 13000.0), 1 / (365 / 365.25)) - 1) * 100
-        vol = 0.01 * (252 ** 0.5) * 100
+        # daily_returns with genuine variance: std([.02,-.01,.02,-.01]) == 0.015,
+        # mean 0.005. Sharpe is built from THIS series on both sides:
+        # (mean*252*100 - rf) / (std*sqrt(252)*100). It used to put the
+        # cash-flow return (15.38% annualised) over this series' volatility --
+        # a ratio of two different books -- and the old expectation encoded that.
+        varying = [0.02, -0.01, 0.02, -0.01]
+        ann = 0.005 * 252 * 100
+        vol = 0.015 * (252 ** 0.5) * 100
         out_zero = await portfolio_returns(
             self.TRANSACTIONS, total_value=15_000, daily_returns=varying,
             period_days=365, risk_free_rate_pct=0.0,
@@ -513,7 +525,9 @@ class TestRiskMetrics:
             self.SERIES, total_value=10_000, risk_free_rate_pct=4.5
         )
         assert out["value_at_risk_95"] == pytest.approx(-100.0)
-        assert out["value_at_risk_99"] == pytest.approx(-100.0)
+        # 20 observations cannot locate a 1% quantile (needs >= 100); this
+        # asserted -100.0, which was the sample minimum under a 99% label.
+        assert out["value_at_risk_99"] is None
         assert out["conditional_var_95"] == pytest.approx(-100.0)
         # 0.01 * sqrt(252) * 100 = 15.8745..., rounded to 2 dp -> 15.87
         assert out["standard_deviation"] == 15.87
@@ -636,3 +650,139 @@ class TestBenchmarkComparison:
     async def test_non_positive_start_price_raises(self):
         with pytest.raises(Unavailable, match="non-positive benchmark start price"):
             await benchmark_comparison(10.0, [0.0, 1.0])
+
+
+# ---------------------------------------------------------------------------
+# Quant-audit regressions (2026-11)
+# ---------------------------------------------------------------------------
+
+
+class TestAuditRegressions:
+    async def test_existing_book_return_is_measured_on_the_whole_book(self):
+        # 100k book buys 10k and ends at 115k: gain 5k on 110k of capital.
+        out = await portfolio_returns(
+            [{"transaction_type": "buy", "total_amount": 10_000}],
+            total_value=115_000,
+            daily_returns=[0.01, -0.01, 0.02],
+            period_days=365,
+            risk_free_rate_pct=2.0,
+            starting_value=100_000,
+        )
+        assert out["absolute_return"] == pytest.approx(5_000.0)
+        assert out["percentage_return"] == pytest.approx(4.55, abs=0.005)
+        assert out["return_method"] == "modified_dietz"
+
+    async def test_flow_timing_weights_the_capital_base(self):
+        # Same book, but the 10k arrived three quarters through the period:
+        # base = 100k + 0.25 * 10k = 102.5k -> 5k / 102.5k = 4.878%.
+        out = await portfolio_returns(
+            [{"transaction_type": "buy", "total_amount": 10_000, "days_from_start": 300}],
+            total_value=115_000,
+            daily_returns=[0.01, -0.01, 0.02],
+            period_days=400,
+            risk_free_rate_pct=2.0,
+            starting_value=100_000,
+        )
+        assert out["percentage_return"] == pytest.approx(4.88, abs=0.005)
+
+    async def test_net_seller_is_refused_not_reported_as_zero_percent(self):
+        # Net flows <= 0 and no starting value: the old code swapped in
+        # total_value as the base and reported exactly 0.0%.
+        with pytest.raises(Unavailable, match="capital base"):
+            await portfolio_returns(
+                [{"transaction_type": "sell", "total_amount": 5_000}],
+                total_value=20_000,
+                daily_returns=[0.01, -0.01],
+                period_days=365,
+                risk_free_rate_pct=2.0,
+            )
+
+    async def test_a_week_is_not_annualised(self):
+        out = await portfolio_returns(
+            [{"transaction_type": "buy", "total_amount": 10_000}],
+            total_value=10_200,
+            daily_returns=[0.01, -0.01, 0.02],
+            period_days=7,
+            risk_free_rate_pct=2.0,
+        )
+        assert out["percentage_return"] == pytest.approx(2.0)
+        assert out["annualized_return"] is None  # was ~181%
+
+    async def test_drawdown_in_risk_metrics_starts_from_initial_equity(self):
+        # Opens with ten straight -1% days: drawdown is 1 - 0.99**10 = 9.56%.
+        # annual return = mean * 252 * 100; calmar = that / 9.56.
+        series = [-0.01] * 10 + [0.03] * 10
+        out = await risk_metrics(series, total_value=10_000, risk_free_rate_pct=0.0)
+        expected_dd = (1 - 0.99 ** 10) * 100
+        assert out["calmar_ratio"] == pytest.approx(0.01 * 252 * 100 / expected_dd, abs=0.01)
+
+    async def test_beta_and_correlation_align_shorter_series_from_the_tail(self):
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        bench = list(rng.normal(0, 0.01, 60))
+        port = bench[10:]  # same days, ten leading bars missing
+        out = await risk_metrics(
+            port, total_value=10_000, risk_free_rate_pct=0.0, benchmark_returns=bench
+        )
+        assert out["portfolio_beta"] == pytest.approx(1.0)
+        m = await correlation_matrix({"A": bench, "B": port}, ["A", "B"])
+        assert m["A"]["B"] == pytest.approx(1.0)
+
+    async def test_risk_metrics_annualisation_follows_the_calendar(self):
+        series = [-0.01] * 10 + [0.01] * 10
+        eq = await risk_metrics(series, total_value=10_000, risk_free_rate_pct=0.0)
+        cr = await risk_metrics(
+            series, total_value=10_000, risk_free_rate_pct=0.0, periods_per_year=365
+        )
+        assert cr["standard_deviation"] == pytest.approx(
+            eq["standard_deviation"] * (365 / 252) ** 0.5, abs=0.01
+        )
+
+    def test_blend_uses_the_most_recent_bars_of_each_series(self):
+        out = blend_position_returns(
+            {
+                "A": {"returns": [9.0, 0.01, 0.02], "weight": 1.0},  # one older bar
+                "B": {"returns": [0.03, 0.04], "weight": 1.0},
+            }
+        )
+        assert out == [pytest.approx(0.04), pytest.approx(0.06)]
+
+    async def test_dcf_refuses_when_discount_does_not_clear_terminal_growth(self):
+        fundamentals = {
+            "income_statement": {},
+            "balance_sheet": {"total_debt": 0.0, "shares_outstanding": 100.0},
+            "cash_flow": {"operating_cash_flow": 1200.0, "capital_expenditures": 200.0},
+        }
+        with pytest.raises(Unavailable, match="ill-posed"):
+            await dcf_valuation(
+                fundamentals, 100.0, growth_rate=0.05, discount_rate=0.03
+            )
+        with pytest.raises(Unavailable, match="ill-posed"):
+            await dcf_valuation(
+                fundamentals, 100.0, growth_rate=0.05, discount_rate=0.035
+            )
+
+    async def test_dcf_says_so_when_it_assumed_a_beta_of_one(self):
+        fundamentals = {
+            "income_statement": {},
+            "balance_sheet": {"total_debt": 0.0, "shares_outstanding": 100.0},
+            "cash_flow": {"operating_cash_flow": 1200.0, "capital_expenditures": 200.0},
+        }
+        out = await dcf_valuation(fundamentals, 100.0, growth_rate=0.05)
+        assert out["assumptions"]["beta_assumed"] is True
+        assert out["assumptions"]["beta"] == 1.0
+        assert out["assumptions"]["discount_rate"] == pytest.approx(0.04 + 1.0 * 0.08)
+        given = await dcf_valuation({**fundamentals, "beta": 1.5}, 100.0, growth_rate=0.05)
+        assert given["assumptions"]["beta_assumed"] is False
+        assert given["assumptions"]["discount_rate"] == pytest.approx(0.04 + 1.5 * 0.08)
+        # An explicit discount rate derives nothing, so claims nothing about beta.
+        explicit = await dcf_valuation(
+            fundamentals, 100.0, growth_rate=0.05, discount_rate=0.10
+        )
+        assert "beta_assumed" not in explicit["assumptions"]
+
+    async def test_benchmark_excess_return_is_named_for_what_it_is(self):
+        out = await benchmark_comparison(10.0, [100.0, 105.0])
+        assert out["excess_return"] == pytest.approx(5.0)
+        assert out["alpha"] == out["excess_return"]

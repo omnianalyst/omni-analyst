@@ -12,6 +12,8 @@ What these tests defend:
 * the current month cannot be its own analog.
 """
 
+import pytest
+
 from omni.conviction.analog import MacroState, analog_windows, similarity
 
 
@@ -115,3 +117,16 @@ def test_limit_orders_by_similarity_then_date() -> None:
     windows = analog_windows(now, history, {}, limit=2)
     assert len(windows) == 2
     assert [w.month for w in windows] == ["1987-08", "1999-12"]
+
+
+def test_similarity_does_not_depend_on_whether_cpi_was_available() -> None:
+    """Curve and LEI match, Sahm does not. With CPI measured and matching the
+    raw sum was 0.8 and cleared a 0.7 floor; with CPI unmeasured it was 0.6 and
+    did not -- the same macro state, admitted or refused by data availability.
+    Normalised over the gauges that could be compared, both fall short."""
+    with_cpi, _, missed = similarity(_state(sahm=True, cpi=3.0), _state(cpi=3.0))
+    without_cpi, _, _ = similarity(_state(sahm=True, cpi=None), _state(cpi=None))
+    assert missed == ["sahm"]
+    assert with_cpi == pytest.approx(0.8 / 1.2)
+    assert without_cpi == pytest.approx(0.6)
+    assert with_cpi < 0.7 and without_cpi < 0.7

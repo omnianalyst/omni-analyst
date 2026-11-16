@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from omni.conviction.crosssectional import (
+    ABSTAIN_MIXED_CADENCE,
     ABSTAIN_NO_COVERAGE,
     ABSTAIN_NON_FINITE_SCORE,
     ABSTAIN_UNIVERSE_TOO_SMALL,
@@ -606,3 +607,65 @@ class TestOneVenuePerRanking:
 
         assert decision.abstention is None
         assert decision.held == frozenset({ids["AAA"], ids["BBB"]})
+
+
+class TestOneCadencePerRanking:
+    """The score is a mean per settlement. A contract settling every four
+    hours pays the same annual carry as an eight-hour one at HALF the
+    per-settlement rate, so a per-settlement ranking across the two is not a
+    ranking of what pays."""
+
+    async def test_names_on_different_settlement_intervals_abstain(self, db):
+        ids = await _universe(db, {
+            "AAA": ["0.0001"] * 6, "BBB": ["0.0001"] * 6,
+            "CCC": ["0.0001"] * 6, "DDD": ["0.0001"] * 6,
+            "EEE": ["0.0002"] * 6,
+        })
+        # FAST settles every four hours at 0.00015: 0.0009/day against EEE's
+        # 0.0006/day, yet it scores below EEE per settlement.
+        fast = await _entity(db, "FAST")
+        for i in range(12):
+            await _funding(db, fast, "0.00015", NOW - timedelta(hours=4) * (12 - i))
+        ids["FAST"] = fast
+
+        decision = await select_carry_basket(
+            db.pool,
+            entity_ids=list(ids.values()),
+            audience_user_id=None,
+            as_of=NOW,
+            held=(ids["AAA"],),
+            enter_rank=1,
+            exit_rank=3,
+            funding_venue="binance",
+        )
+
+        assert decision.abstention == ABSTAIN_MIXED_CADENCE
+        # The null action: the incoming basket, untouched.
+        assert decision.held == frozenset({ids["AAA"]})
+        assert decision.entered == frozenset() and decision.exited == frozenset()
+
+    async def test_one_cadence_with_a_missed_print_still_ranks(self, db):
+        """A gap is not a second cadence: the median interval is unmoved."""
+        ids = await _universe(db, {
+            "AAA": ["0.0001"] * 6, "BBB": ["0.0001"] * 6,
+            "CCC": ["0.0001"] * 6, "DDD": ["0.0001"] * 6,
+            "EEE": ["0.0002"] * 6,
+        })
+        gappy = await _entity(db, "GAPPY")
+        for i in (1, 2, 3, 5, 6):  # the fourth print is missing
+            await _funding(db, gappy, "0.0003", NOW - SETTLEMENT * (7 - i))
+        ids["GAPPY"] = gappy
+
+        decision = await select_carry_basket(
+            db.pool,
+            entity_ids=list(ids.values()),
+            audience_user_id=None,
+            as_of=NOW,
+            held=(),
+            enter_rank=1,
+            exit_rank=3,
+            funding_venue="binance",
+        )
+
+        assert decision.abstention is None
+        assert decision.held == frozenset({ids["GAPPY"]})
