@@ -442,16 +442,31 @@ def put_call_parity_errors(
     *,
     time_to_expiry: float | None = None,
     threshold: float = 0.10,
+    dividend_yield: float = 0.0,
 ) -> list[dict[str, Any]]:
-    """Put-call parity violations across paired call/put contracts.
+    """Executable put-call parity violations across paired call/put contracts.
 
-    For each ``(strike, expiry)`` with both a call and a put, compares
-    ``C - P`` (from quoted mids) against ``S - K*exp(-rT)``. Pairs missing
-    bid or ask on either side are skipped. Raises ``Unavailable`` when no
-    pair carries a full quote set -- the chain is missing bid or ask for
-    every paired strike, which is the work order's named failure path.
+    For each ``(strike, expiry)`` with both a call and a put, the parity value
+    of ``C - P`` is ``S*exp(-qT) - K*exp(-rT)``. Ignoring the carry yield ``q``
+    reads the whole dividend as a mispricing (S=100, q=2%, T=1 is a spurious
+    1.98), so it is an argument.
+
+    A violation is measured against the quotes that can actually be traded,
+    not the mids: selling the synthetic receives ``call_bid - put_ask`` and
+    buying it pays ``call_ask - put_bid``. A mid that is off parity by less
+    than the bid/ask width is not an arbitrage. ``parity_error`` is the
+    executable excess; ``mid_error`` keeps the mid-based distance for context.
+    European parity is assumed; early-exercise premium on American options is
+    not modelled.
+
+    Pairs missing bid or ask on either side are skipped. Raises
+    ``Unavailable`` when no pair carries a full quote set -- the chain is
+    missing bid or ask for every paired strike, which is the work order's
+    named failure path.
     """
     contracts = _require(contracts)
+    if not np.isfinite(dividend_yield):
+        raise Unavailable(f"dividend_yield must be finite; got {dividend_yield}")
 
     if time_to_expiry is None:
 
@@ -487,9 +502,16 @@ def put_call_parity_errors(
         evaluated += 1
         call_mid = (call["bid"] + call["ask"]) / 2
         put_mid = (put["bid"] + put["ask"]) / 2
-        theoretical = underlying_price - strike * np.exp(-risk_free_rate * T)
+        theoretical = underlying_price * np.exp(
+            -dividend_yield * T
+        ) - strike * np.exp(-risk_free_rate * T)
         actual = call_mid - put_mid
-        parity_error = abs(actual - theoretical)
+        sell_excess = (call["bid"] - put["ask"]) - theoretical
+        buy_excess = theoretical - (call["ask"] - put["bid"])
+        if sell_excess >= buy_excess:
+            parity_error, action = sell_excess, "sell_synthetic"
+        else:
+            parity_error, action = buy_excess, "buy_synthetic"
         if parity_error > threshold:
             errors.append(
                 {
@@ -500,7 +522,8 @@ def put_call_parity_errors(
                     "theoretical_diff": theoretical,
                     "actual_diff": actual,
                     "parity_error": parity_error,
-                    "action": "buy_synthetic" if actual < theoretical else "sell_synthetic",
+                    "mid_error": abs(actual - theoretical),
+                    "action": action,
                 }
             )
 
@@ -525,16 +548,44 @@ def put_call_parity_errors(
 # struck in the same maturity. `days_to_expiry` (when present) gates the
 # short-dated skip; an expiry without it is still screened.
 #
-# `probability_of_profit` is a moneyness heuristic, not a priced model: v1
-# labelled it "simplified" / "estimate" and the census accepted it as a
-# modelled estimate. The heuristics are ported bit-for-bit, including one
-# defect -- see `_covered_call_candidates`.
+# `probability_of_profit` is the risk-neutral lognormal probability that the
+# underlying finishes beyond the position's breakeven, N(d2) at the breakeven
+# level, using the leg's own implied volatility and days to expiry. v1 used
+# moneyness heuristics that capped covered calls below 0.49 and cash-secured
+# puts below 0.55 (so the default 0.6 filter could only ever pass spreads),
+# ranked further-OTM covered calls as LESS likely to profit, and scored
+# spreads higher the larger their reward/risk. A leg with no implied
+# volatility or no days to expiry has no probability and is not a candidate.
 # ---------------------------------------------------------------------------
 
 _CC_MONEYNESS = (1.02, 1.10)      # covered call: 2-10% OTM calls
 _CSP_MONEYNESS = (0.90, 0.98)     # cash-secured put: 2-10% OTM puts
 _BCS_LONG_MONEYNESS = (0.98, 1.02)  # bull-call long leg: near ATM
 _MIN_DAYS_TO_EXPIRY = 7           # v1 skips expirations closer than this
+
+
+def _prob_finish_above(
+    spot: float,
+    level: float,
+    leg: dict[str, Any],
+    days_to_expiry: Any,
+    risk_free_rate: float,
+    dividend_yield: float,
+) -> float | None:
+    """Risk-neutral P(S_T > level), or None when the leg cannot be priced."""
+    sigma = leg.get("implied_volatility")
+    if sigma is None or days_to_expiry is None:
+        return None
+    sigma, days = float(sigma), float(days_to_expiry)
+    if not (np.isfinite(sigma) and np.isfinite(days)) or sigma <= 0.0 or days <= 0.0:
+        return None
+    if level <= 0.0:
+        return 1.0
+    T = days / 365.0
+    d2 = (
+        np.log(spot / level) + (risk_free_rate - dividend_yield - 0.5 * sigma**2) * T
+    ) / (sigma * np.sqrt(T))
+    return float(norm.cdf(d2))
 
 
 def _group_legs_by_expiry(
@@ -562,6 +613,8 @@ def _covered_call_candidates(
     expiry: Any,
     days_to_expiry: Any,
     min_probability: float,
+    risk_free_rate: float,
+    dividend_yield: float,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for strike, sides in legs.items():
@@ -576,15 +629,12 @@ def _covered_call_candidates(
             continue
         return_if_called = ((strike - spot) + premium) / spot
         return_if_not_called = premium / spot
-        # v1 heuristic, ported verbatim. NOTE: for an OTM covered call
-        # (moneyness > 1) this evaluates to < 0.5, i.e. it reports a LOWER
-        # probability of profit the FURTHER OTM the call -- the opposite of
-        # the economic truth (a further-OTM call is less likely to be
-        # assigned, so the writer is more likely to keep the premium). v1's
-        # own comment ("Higher moneyness = higher prob of profit") contradicts
-        # its formula. Ported bit-for-bit per PORTING.md; the defect is
-        # recorded, not "fixed".
-        prob_profit = 0.5 + 0.5 * (1 - moneyness)
+        # Long stock at spot, short call: profitable above spot - premium.
+        prob_profit = _prob_finish_above(
+            spot, spot - premium, call, days_to_expiry, risk_free_rate, dividend_yield
+        )
+        if prob_profit is None:
+            continue
         if prob_profit >= min_probability:
             out.append(
                 {
@@ -610,6 +660,8 @@ def _cash_secured_put_candidates(
     days_to_expiry: Any,
     min_probability: float,
     max_risk: float,
+    risk_free_rate: float,
+    dividend_yield: float,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for strike, sides in legs.items():
@@ -623,7 +675,12 @@ def _cash_secured_put_candidates(
         if premium <= 0:
             continue
         return_on_cash = premium / strike
-        prob_profit = 0.5 + 0.5 * (1 - moneyness)
+        # Short put: profitable above strike - premium.
+        prob_profit = _prob_finish_above(
+            spot, strike - premium, put, days_to_expiry, risk_free_rate, dividend_yield
+        )
+        if prob_profit is None:
+            continue
         if prob_profit >= min_probability and strike <= max_risk:
             out.append(
                 {
@@ -648,6 +705,8 @@ def _bull_call_spread_candidates(
     days_to_expiry: Any,
     min_probability: float,
     max_risk: float,
+    risk_free_rate: float,
+    dividend_yield: float,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     strikes = sorted(legs)
@@ -673,8 +732,18 @@ def _bull_call_spread_candidates(
             max_loss = net_debit
             if not (max_profit > 0 and max_loss <= max_risk):
                 continue
-            risk_reward = max_profit / max_loss if max_loss > 0 else 0.0
-            prob_profit = min(0.85, 0.4 + 0.1 * risk_reward)
+            risk_reward = max_profit / max_loss
+            # Debit spread: profitable above long strike + net debit.
+            prob_profit = _prob_finish_above(
+                spot,
+                strike + net_debit,
+                long_call,
+                days_to_expiry,
+                risk_free_rate,
+                dividend_yield,
+            )
+            if prob_profit is None:
+                continue
             if prob_profit >= min_probability:
                 out.append(
                     {
@@ -698,6 +767,8 @@ def scan_option_strategies(
     contracts: Sequence[dict[str, Any]],
     spot: float,
     *,
+    risk_free_rate: float,
+    dividend_yield: float = 0.0,
     min_probability: float = 0.6,
     max_risk: float = 1000.0,
     strategy_types: Sequence[str] = ("covered_call", "cash_secured_put", "spread"),
@@ -708,17 +779,24 @@ def scan_option_strategies(
     data (no yfinance); `spot` is required -- moneyness is undefined without
     it. Candidates are returned sorted by ``probability_of_profit`` descending.
 
-    `probability_of_profit` is a moneyness heuristic ported verbatim from v1,
-    not a priced probability; see the module notes above and the per-strategy
-    docstrings. Each candidate carries the fields its v1 counterpart did.
+    `probability_of_profit` is the risk-neutral lognormal probability of
+    finishing beyond breakeven (see the module notes above), so
+    ``risk_free_rate`` is required: there is no drift to price it with
+    otherwise. A leg without ``implied_volatility`` or ``days_to_expiry``
+    cannot be given a probability and is not a candidate.
 
-    Raises ``Unavailable`` on an empty chain or a non-positive spot. An
+    Raises ``Unavailable`` on an empty chain, a non-positive spot or a
+    non-finite rate. An
     expiration whose ``days_to_expiry`` is present and below
     ``_MIN_DAYS_TO_EXPIRY`` is skipped, matching v1.
     """
     contracts = _require(contracts)
     if spot <= 0:
         raise Unavailable(f"non-positive spot {spot}; moneyness is undefined")
+    if not np.isfinite(risk_free_rate) or not np.isfinite(dividend_yield):
+        raise Unavailable(
+            f"rates must be finite; r={risk_free_rate}, q={dividend_yield}"
+        )
 
     types = set(strategy_types)
     groups = _group_legs_by_expiry(contracts)
@@ -731,18 +809,23 @@ def scan_option_strategies(
         legs = group["legs"]
         if "covered_call" in types:
             found.extend(
-                _covered_call_candidates(legs, spot, expiry, days, min_probability)
+                _covered_call_candidates(
+                    legs, spot, expiry, days, min_probability,
+                    risk_free_rate, dividend_yield,
+                )
             )
         if "cash_secured_put" in types:
             found.extend(
                 _cash_secured_put_candidates(
-                    legs, spot, expiry, days, min_probability, max_risk
+                    legs, spot, expiry, days, min_probability, max_risk,
+                    risk_free_rate, dividend_yield,
                 )
             )
         if "spread" in types:
             found.extend(
                 _bull_call_spread_candidates(
-                    legs, spot, expiry, days, min_probability, max_risk
+                    legs, spot, expiry, days, min_probability, max_risk,
+                    risk_free_rate, dividend_yield,
                 )
             )
 

@@ -76,6 +76,8 @@ from scipy import stats
 from omni.ingest.protocol import Unavailable
 
 _TRADING_DAYS = 252
+# RiskMetrics decay for the EWMA volatility that filters the simulation leg.
+_EWMA_LAMBDA = 0.94
 # Tolerance for the zero-dispersion guard, on the standard deviation (the
 # scale-consistent quantity per AGENTS.md). Matches attribution.py:75. A
 # constant, non-exactly-representable series -- e.g. [0.05]*50 -- has a true
@@ -142,21 +144,29 @@ def calculate_var(
     portfolio_value: float | None = None,
     *,
     seed: int | None = None,
+    periods_per_year: int = _TRADING_DAYS,
 ) -> dict[str, Any]:
     """Value at Risk by historical, parametric, and Monte-Carlo methods.
 
-    Faithful to v1 `RiskCalculator._calculate_var` plus `_monte_carlo_var`.
     Percentages are signed (a loss is negative); dollar amounts are positive
     (`portfolio_value * abs(return)`), matching the service. As in v1, amounts
     are `None` when `portfolio_value` is falsy (None or 0).
 
-    The Monte-Carlo leg draws from a normal distribution fit to the supplied
-    `returns` (its mean and std). It is a MODEL OUTPUT, not a measurement:
-    empirical return distributions are fat-tailed and left-skewed relative to
-    a normal, so this figure systematically under-prices tail risk. Treat it
-    as a what-if under a stated assumption, not as ground truth. `seed` makes
-    the draw reproducible; v1 drew from a hidden global RNG and could not
-    reproduce its own MC VaR.
+    `periods_per_year` annualises: 252 for a trading-day series, 365 for a
+    24/7 crypto series (252 there understates annual risk by sqrt(365/252)).
+    Both annual figures use the same square-root-of-time scaling INCLUDING
+    drift -- `mean * N + (daily_var - mean) * sqrt(N)` -- so the historical
+    and parametric annual numbers are comparable. v1 scaled the historical
+    quantile by sqrt(N) with no drift and the parametric one with it.
+
+    The Monte-Carlo leg is a filtered historical simulation (Hull-White):
+    each return is standardised by its own EWMA volatility, and the
+    standardised residuals are bootstrapped and rescaled to the CURRENT EWMA
+    volatility. v1 drew from a normal fit to the sample mean and std, which is
+    the parametric number again plus sampling noise; this leg keeps the
+    sample's own fat tails and responds to the present volatility regime. It
+    is still a MODEL OUTPUT (EWMA decay 0.94), not a measurement. `seed` makes
+    the bootstrap reproducible.
 
     Raises `Unavailable` when `returns` is empty, when the empirical (1-c) tail
     cannot hold a whole observation (`len(returns) < 1/(1-c)`; e.g. <20 at
@@ -177,13 +187,17 @@ def calculate_var(
 
     z_score = float(stats.norm.ppf(1 - confidence_level))
     parametric_var = mean_return + z_score * std_return
-    annual_parametric_var = (
-        mean_return * _TRADING_DAYS
-        + z_score * std_return * math.sqrt(_TRADING_DAYS)
+    if periods_per_year <= 0:
+        raise ValueError(f"periods_per_year must be positive, got {periods_per_year}")
+    annual_parametric_var = _annualise_quantile(
+        parametric_var, mean_return, periods_per_year
+    )
+    annual_historical_var = _annualise_quantile(
+        historical_var, mean_return, periods_per_year
     )
 
     monte_carlo_var = _monte_carlo_var(
-        mean_return, std_return, confidence_level, seed=seed
+        returns_array, confidence_level, seed=seed
     )
 
     return {
@@ -193,9 +207,9 @@ def calculate_var(
             "daily_var_amount": (
                 portfolio_value * abs(historical_var) if portfolio_value else None
             ),
-            "annual_var_pct": historical_var * math.sqrt(_TRADING_DAYS) * 100,
+            "annual_var_pct": annual_historical_var * 100,
             "annual_var_amount": (
-                portfolio_value * abs(historical_var) * math.sqrt(_TRADING_DAYS)
+                portfolio_value * abs(annual_historical_var)
                 if portfolio_value
                 else None
             ),
@@ -213,6 +227,7 @@ def calculate_var(
             ),
         },
         "monte_carlo": {
+            "method": "filtered_historical_bootstrap",
             "daily_var_pct": monte_carlo_var * 100,
             "daily_var_amount": (
                 portfolio_value * abs(monte_carlo_var) if portfolio_value else None
@@ -221,26 +236,48 @@ def calculate_var(
     }
 
 
+def _annualise_quantile(
+    daily_quantile: float, mean_return: float, periods_per_year: int
+) -> float:
+    return mean_return * periods_per_year + (
+        daily_quantile - mean_return
+    ) * math.sqrt(periods_per_year)
+
+
+def _ewma_volatility_path(
+    returns_array: np.ndarray, mean_return: float
+) -> tuple[np.ndarray, float]:
+    """EWMA volatility known BEFORE each return, plus the next-period forecast.
+
+    Seeded with the sample variance; `sigma[t]` uses returns up to t-1 only.
+    """
+    demeaned = returns_array - mean_return
+    variance = float(np.var(returns_array))
+    sigmas = np.empty(len(returns_array))
+    for t, shock in enumerate(demeaned):
+        sigmas[t] = math.sqrt(variance)
+        variance = _EWMA_LAMBDA * variance + (1.0 - _EWMA_LAMBDA) * shock * shock
+    return sigmas, math.sqrt(variance)
+
+
 def _monte_carlo_var(
-    mean_return: float,
-    std_return: float,
+    returns_array: np.ndarray,
     confidence_level: float,
     *,
     simulations: int = 10000,
     seed: int | None = None,
 ) -> float:
-    """VaR from a normal(mean, std) draw over the supplied moments.
+    """Filtered-historical-simulation VaR (see `calculate_var`).
 
-    MODEL-DERIVED, not measured: real return distributions are fat-tailed and
-    left-skewed relative to a normal, so this figure systematically
-    under-prices tail risk. It is kept because it is a stated model over real
-    inputs (the caller's return series), never an invented series -- the line
-    the work order draws. `seed` is explicit so the draw is reproducible; v1's
-    `np.random.normal` drew from a hidden global RNG that could not reproduce
-    its own output.
+    Bootstraps the sample's own EWMA-standardised residuals and rescales them
+    to the current EWMA volatility. Unlike a normal(mean, std) draw it does not
+    reproduce the parametric leg: the tail shape is the sample's.
     """
+    mean_return = float(np.mean(returns_array))
+    sigmas, sigma_next = _ewma_volatility_path(returns_array, mean_return)
+    residuals = (returns_array - mean_return) / sigmas
     rng = np.random.default_rng(seed)
-    simulated = rng.normal(mean_return, std_return, simulations)
+    simulated = mean_return + sigma_next * rng.choice(residuals, size=simulations)
     return float(np.percentile(simulated, (1 - confidence_level) * 100))
 
 
@@ -252,8 +289,13 @@ def calculate_cvar(
     returns: Sequence[float],
     confidence_level: float = 0.95,
     portfolio_value: float | None = None,
+    *,
+    periods_per_year: int = _TRADING_DAYS,
 ) -> dict[str, Any]:
     """Conditional VaR / Expected Shortfall.
+
+    `periods_per_year` annualises (252 trading days, 365 for 24/7 series) with
+    the same drift-inclusive square-root-of-time scaling as `calculate_var`.
 
     Faithful to v1 `RiskCalculator._calculate_cvar`: the threshold is the
     `np.percentile` historical VaR, and CVaR is the mean of the returns at or
@@ -275,6 +317,11 @@ def calculate_cvar(
     )
     tail_returns = returns_array[returns_array <= var_threshold]
     cvar = float(np.mean(tail_returns)) if len(tail_returns) > 0 else var_threshold
+    if periods_per_year <= 0:
+        raise ValueError(f"periods_per_year must be positive, got {periods_per_year}")
+    annual_cvar = _annualise_quantile(
+        cvar, float(np.mean(returns_array)), periods_per_year
+    )
 
     return {
         "confidence_level": confidence_level,
@@ -282,11 +329,9 @@ def calculate_cvar(
         "daily_cvar_amount": (
             portfolio_value * abs(cvar) if portfolio_value else None
         ),
-        "annual_cvar_pct": cvar * math.sqrt(_TRADING_DAYS) * 100,
+        "annual_cvar_pct": annual_cvar * 100,
         "annual_cvar_amount": (
-            portfolio_value * abs(cvar) * math.sqrt(_TRADING_DAYS)
-            if portfolio_value
-            else None
+            portfolio_value * abs(annual_cvar) if portfolio_value else None
         ),
         "tail_risk_ratio": abs(cvar / var_threshold) if var_threshold != 0 else 1,
     }

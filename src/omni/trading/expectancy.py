@@ -136,6 +136,41 @@ class Expectancy:
     assumed_n: int
     distinct_horizons: int
     per_entity: tuple[tuple[str, int, Decimal], ...]
+    # Sample standard deviation of per-trade P&L, in bps. None with fewer than
+    # two trades: one observation has a mean and no spread.
+    pnl_std_bps: Decimal | None = None
+
+    @property
+    def standard_error_bps(self) -> Decimal | None:
+        """The standard error of `gross_bps`, on the conservative sample size.
+
+        A mean without one cannot be told from zero: +25 bps is an edge at a
+        standard error of 5 and noise at 40. The divisor is `effective_n`, not
+        `n` -- predictions resolving on one horizon date across correlated
+        assets are not independent, and dividing by the row count would shrink
+        the error on evidence that was counted many times.
+
+        None when it cannot be measured (fewer than two trades, or fewer than
+        two independent horizons). Barrier exits are booked AT the barrier, so
+        a stop that gapped through is recorded at the stop: this error bar
+        covers sampling noise only, not that understatement of losses.
+        """
+        if self.pnl_std_bps is None or self.effective_n < 2:
+            return None
+        return self.pnl_std_bps / Decimal(self.effective_n).sqrt()
+
+    @property
+    def t_stat(self) -> Decimal | None:
+        """`gross_bps` over its standard error; None when either is unmeasurable
+        or the P&L has no spread at all (every trade identical is no evidence
+        about variability, not infinite significance)."""
+        se = self.standard_error_bps
+        if se is None:
+            return None
+        scale = max(abs(self.gross_bps), Decimal(1))
+        if se <= scale * Decimal("1e-12"):
+            return None
+        return self.gross_bps / se
 
     @property
     def assumed_share(self) -> Decimal:
@@ -216,10 +251,19 @@ def compute(trades: list[ResolvedTrade]) -> Expectancy:
             reverse=True,
         )
     )
-    total = sum((t.pnl_bps for t in trades), Decimal(0))
+    pnls = [t.pnl_bps for t in trades]
+    total = sum(pnls, Decimal(0))
+    mean = total / Decimal(len(trades))
+    pnl_std: Decimal | None = None
+    if len(pnls) >= 2:
+        variance = sum(((x - mean) ** 2 for x in pnls), Decimal(0)) / Decimal(
+            len(pnls) - 1
+        )
+        pnl_std = variance.sqrt()
     return Expectancy(
         n=len(trades),
-        gross_bps=total / Decimal(len(trades)),
+        pnl_std_bps=pnl_std,
+        gross_bps=mean,
         assumed_n=sum(1 for t in trades if t.is_assumed),
         distinct_horizons=len({t.horizon_key for t in trades}),
         per_entity=per_entity,

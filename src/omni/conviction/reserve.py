@@ -84,6 +84,12 @@ _ZERO_VOL_ATOL = 1e-9
 _ZERO_FLOW_STD_ATOL = 1e-9
 _ZERO_Z_ATOL = 1e-12
 
+# The two-sided 95% critical value. The signal half's mean flow must differ
+# from the baseline half's by at least this many standard errors before a
+# call is written; below it the "abnormal" flow is inside the noise of its own
+# baseline.
+MIN_ABS_Z = 1.959963984540054
+
 
 async def _flow_window(
     pool, *, entity_id: UUID, audience: UUID | None, as_of: datetime,
@@ -328,8 +334,29 @@ async def produce_reserve_prediction_from_coverage(
 
     baseline_mean = float(np.mean(baseline))
     signal_mean = float(np.mean(signal))
-    z = (signal_mean - baseline_mean) / baseline_std
-    if not math.isfinite(z) or abs(z) <= _ZERO_Z_ATOL:
+    # Two different quantities, previously one number doing both jobs.
+    #
+    # `effect` is the shift in mean flow in units of ONE observation's spread:
+    # how abnormal the level is. It sets the invalidation distance, as before.
+    #
+    # `z` is the test statistic for "the signal half's mean differs from the
+    # baseline half's": the same shift over the standard error of a difference
+    # of two means. Dividing a mean of `half` observations by a per-observation
+    # deviation understated it by sqrt(half / 2) -- about 2.2x at the default
+    # window -- and, worse, nothing was ever tested: any non-zero difference
+    # fired a call. A shift inside the noise of its own baseline is not an
+    # abnormal flow, so it now abstains.
+    effect = (signal_mean - baseline_mean) / baseline_std
+    if not math.isfinite(effect) or abs(effect) <= _ZERO_Z_ATOL:
+        return None
+    if baseline.size < 2 or signal.size < 2:
+        return None
+    sample_std = float(np.std(baseline, ddof=1))
+    standard_error = sample_std * math.sqrt(1.0 / baseline.size + 1.0 / signal.size)
+    if not math.isfinite(standard_error) or standard_error <= _ZERO_FLOW_STD_ATOL:
+        return None
+    z = (signal_mean - baseline_mean) / standard_error
+    if not math.isfinite(z) or abs(z) < MIN_ABS_Z:
         return None
 
     closes = await _price_window(
@@ -344,7 +371,7 @@ async def produce_reserve_prediction_from_coverage(
     entry = closes[-1]
     vol = _realized_vol(closes)
 
-    call = reserve_call(entry=entry, vol=vol, z=z, target_k=target_k)
+    call = reserve_call(entry=entry, vol=vol, z=effect, target_k=target_k)
     if call is None:
         return None
     direction, upper, lower, confidence = call
@@ -367,6 +394,8 @@ async def produce_reserve_prediction_from_coverage(
             "window": window,
             "target_k": target_k,
             "z_score": z,
+            "effect_size": effect,
+            "standard_error": standard_error,
             "baseline_mean": baseline_mean,
             "baseline_std": baseline_std,
             "signal_mean": signal_mean,

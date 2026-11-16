@@ -43,6 +43,13 @@ DEFAULT_FEE_RATES: dict[str, float] = {
 
 DEFAULT_FEE_RATE = 0.05
 
+# Half the quoted spread a taker crosses, in probability points (0.01 = one
+# cent a share). A stated cost assumption, not a measurement: Gamma reports the
+# midpoint and no book, so the spread actually paid is unknown here. One cent
+# is the tick most liquid Polymarket books quote at; thin books are wider, so
+# this understates their cost. Callers holding a real quote should pass it.
+DEFAULT_HALF_SPREAD = 0.01
+
 _EPS = 1e-9
 
 
@@ -112,6 +119,40 @@ class Fill:
         if self.cost <= 0:
             return 0.0
         return self.net_pnl / self.cost * 100.0
+
+
+def side_and_entry(
+    *,
+    model_p_yes: float,
+    market_p_yes: float,
+    half_spread: float = 0.0,
+) -> tuple[str, float] | None:
+    """Which side the model's disagreement with the market buys, and at what.
+
+    YES when the model's P(yes) is above the market's, NO when below: the side
+    is decided by the estimate RELATIVE TO THE PRICE, never by which side of
+    0.5 the estimate sits on. A model at 0.65 against a market at 0.85 thinks
+    YES is overpriced and buys NO at 0.15.
+
+    The entry price is the chosen side's mid plus `half_spread` (what a taker
+    pays to cross). Returns `None` when there is no disagreement to trade or
+    the resulting price leaves (0, 1) -- there is no tradeable side.
+    """
+    if not (math.isfinite(model_p_yes) and math.isfinite(market_p_yes)):
+        raise ValueError(
+            f"non-finite probability: model={model_p_yes} market={market_p_yes}"
+        )
+    if half_spread < 0 or not math.isfinite(half_spread):
+        raise ValueError(f"half_spread must be a non-negative number: {half_spread}")
+    gap = model_p_yes - market_p_yes
+    if abs(gap) <= _EPS:
+        return None
+    direction = "YES" if gap > 0 else "NO"
+    mid = market_p_yes if direction == "YES" else 1.0 - market_p_yes
+    entry = mid + half_spread
+    if not (0.0 < entry < 1.0) or not (0.0 < mid < 1.0):
+        return None
+    return direction, entry
 
 
 def fee_for(
@@ -201,9 +242,11 @@ def summarise(fills: list[Fill]) -> PnLSummary:
 __all__ = [
     "DEFAULT_FEE_RATE",
     "DEFAULT_FEE_RATES",
+    "DEFAULT_HALF_SPREAD",
     "Fill",
     "PnLSummary",
     "fee_for",
+    "side_and_entry",
     "size_for_notional",
     "summarise",
 ]

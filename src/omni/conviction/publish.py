@@ -12,6 +12,7 @@ answer is what a reader needs before trusting the ones that got through.
 from __future__ import annotations
 
 import json
+import re
 from uuid import UUID
 
 from omni.conviction.gate import Calibration, Verdict
@@ -25,11 +26,35 @@ RETURNING id
 """
 
 _BUCKETS = """
-SELECT method, bucket_low, bucket_high, n, hits
+SELECT method, bucket_low, bucket_high, n, hits, mean_confidence
 FROM calibration_bucket
 WHERE method = $1
   AND (audience_user_id IS NULL OR audience_user_id = $2)
 """
+
+
+# A parameter sweep names its variants `<base>.w<window>`
+# (`autonomous.backfill.backfill_parameter_sweep`). Every sibling with resolved
+# predictions is a variant that was tried, and the gate surfacing "whichever
+# calibrates best" is a selection across them.
+_SWEEP_VARIANT = re.compile(r"^(?P<base>.+)\.w\d+$")
+
+_SWEEP_SIBLINGS = """
+SELECT count(DISTINCT method)
+FROM calibration_bucket
+WHERE method ~ $1
+"""
+
+
+async def sweep_trials(pool, method: str) -> int:
+    """How many variants of `method`'s sweep have a resolved record. 1 for a
+    method that is not a sweep variant."""
+    match = _SWEEP_VARIANT.match(method)
+    if match is None:
+        return 1
+    pattern = "^" + re.escape(match.group("base")) + r"\.w[0-9]+$"
+    count = await pool.fetchval(_SWEEP_SIBLINGS, pattern)
+    return max(1, int(count or 0))
 
 
 async def load_calibration(
@@ -50,16 +75,42 @@ async def load_calibration(
     never read, so it cannot move a shared finding's threshold.
     """
     rows = await pool.fetch(_BUCKETS, method, audience)
+    trials = await sweep_trials(pool, method)
+    # Pooled per decile. The query returns the shared bucket and the
+    # audience's own as two rows for one decile, and the gate needs the one
+    # record the docstring promises. `width_bucket(confidence, 0, 1, 10)` also
+    # files a confidence of exactly 1.0 in an eleventh bucket [1.0, 1.1); the
+    # Python side (`walk_forward._bucket_low`) and the gate both treat the top
+    # decile as closed at 1.0, so that overflow row is folded into [0.9, 1.0].
+    pooled: dict[int, dict] = {}
+    for r in rows:
+        index = min(round(float(r["bucket_low"]) * 10), 9)
+        slot = pooled.setdefault(
+            index, {"n": 0, "hits": 0, "conf_sum": 0.0, "conf_n": 0}
+        )
+        slot["n"] += r["n"]
+        slot["hits"] += r["hits"]
+        if r["mean_confidence"] is not None:
+            slot["conf_sum"] += float(r["mean_confidence"]) * r["n"]
+            slot["conf_n"] += r["n"]
     return [
         Calibration(
             claim_type=claim_type,
-            method=r["method"],
-            bucket_low=float(r["bucket_low"]),
-            bucket_high=float(r["bucket_high"]),
-            n=r["n"],
-            hits=r["hits"],
+            method=method,
+            bucket_low=index / 10.0,
+            bucket_high=(index + 1) / 10.0,
+            n=slot["n"],
+            hits=slot["hits"],
+            trials=trials,
+            # None unless every pooled row carried one: a mean over part of
+            # the bucket is not the bucket's zero-edge rate.
+            mean_confidence=(
+                slot["conf_sum"] / slot["conf_n"]
+                if slot["conf_n"] == slot["n"] and slot["n"] > 0
+                else None
+            ),
         )
-        for r in rows
+        for index, slot in sorted(pooled.items())
     ]
 
 

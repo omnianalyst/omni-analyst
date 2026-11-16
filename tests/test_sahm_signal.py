@@ -208,7 +208,7 @@ class TestShortSeriesAbstains:
         self, db, monkeypatch
     ):
         entity_id = await _entity(db)
-        # 8 monthly observations, short of the 12-observation floor.
+        # 8 monthly observations, short of the 15-observation floor.
         dates = _monthly_dates(8)
         await _insert_series(db, entity_id, dates, [3.5] * 8, key="UNRATE")
 
@@ -233,7 +233,7 @@ class TestShortSeriesAbstains:
         # The reason must name which argument fell short and by how much --
         # not a generic "could not compute".
         assert "unemployment" in result.reason
-        assert "8 of 12" in result.reason
+        assert "8 of 15" in result.reason
 
         # sahm_rule was never reached: the spec abstained at materialization.
         assert calls == []
@@ -333,14 +333,14 @@ class TestMonthlySpacing:
         self, db
     ):
         """``min_calendar_days`` closes the count-only limitation this test used
-        to document: 12 DAILY observations (span ~11 days) clear ``min_obs=12``
-        but fall short of ``min_calendar_days=330`` (~11 months), so the spec
+        to document: 15 DAILY observations (span ~14 days) clear ``min_obs=15``
+        but fall short of ``min_calendar_days=410`` (~14 months), so the spec
         abstains and ``sahm_rule`` is never handed a year of daily data
         masquerading as monthly. The reason names the calendar shortfall."""
         entity_id = await _entity(db)
-        # 12 DAILY observations (1-day spacing), not monthly.
-        dates = [BASE + timedelta(days=i) for i in range(12)]
-        await _insert_series(db, entity_id, dates, [3.5] * 12, key="UNRATE")
+        # 15 DAILY observations (1-day spacing), not monthly.
+        dates = [BASE + timedelta(days=i) for i in range(15)]
+        await _insert_series(db, entity_id, dates, [3.5] * 15, key="UNRATE")
 
         gap = await _demand_and_lease(db, entity_id)
 

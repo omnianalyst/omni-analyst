@@ -551,3 +551,210 @@ class TestASignalWithNoCrossSectionIsRefused:
 
         assert len(verdicts) == 1
         assert verdicts[0].gross.n > 0
+
+
+class TestTheBalancedBarTightensAsNullsAccumulate:
+    """`fdr_bar_for` returned the smallest recorded statistic that had itself
+    passed, or the 2.5 floor when none had. Against a history of nothing but
+    nulls a new test therefore only ever had to clear 2.5, however long the
+    history -- the opposite of what its docstring claimed."""
+
+    def test_five_hundred_nulls_put_the_bar_near_the_rank_one_critical_value(self):
+        from statistics import NormalDist
+
+        from omni.research.registry import fdr_bar_for
+
+        rng = np.random.default_rng(1)
+        nulls = [float(abs(x)) for x in rng.normal(0, 1, 500)]
+        bar = fdr_bar_for(stats=nulls, pending_cells=1)
+
+        # A candidate above every null ranks first of m = 501 and needs
+        # p <= q/m. Nothing weaker is a BH discovery against this history.
+        rank_one = NormalDist().inv_cdf(1.0 - (0.10 / 501) / 2.0)
+        assert bar == pytest.approx(rank_one)
+        assert 3.6 < bar < 3.8
+
+    def test_more_nulls_mean_a_higher_bar(self):
+        from omni.research.registry import fdr_bar_for
+
+        rng = np.random.default_rng(2)
+        nulls = [float(abs(x)) for x in rng.normal(0, 1, 2000)]
+        bars = [fdr_bar_for(stats=nulls[:n], pending_cells=1) for n in (50, 500, 2000)]
+        assert bars[0] < bars[1] < bars[2]
+
+    def test_a_candidate_at_the_bar_is_a_bh_discovery_and_one_below_is_not(self):
+        """The bar is checked against a plain BH procedure on the same list."""
+        from math import erfc, sqrt
+
+        from omni.research.registry import fdr_bar_for
+
+        recorded = [1.9, 1.1, 0.8, 0.5, 0.3, 0.1, 0.2, 0.4, 0.6, 0.7] * 2
+        q = 0.10
+        bar = fdr_bar_for(stats=recorded, pending_cells=1, q=q)
+
+        def direct(x: float) -> bool:
+            m = len(recorded) + 1
+            rank = 1 + sum(1 for t in recorded if t > x)
+            return erfc(x / sqrt(2.0)) <= q * rank / m
+
+        assert bar > 2.5, "this record must put the bar above the floor"
+        assert direct(bar + 1e-9)
+        assert not direct(bar - 1e-3)
+
+    def test_a_measured_loser_is_a_null_not_an_effect(self):
+        """t = -26 is a strategy that reliably LOSES. Ranked by magnitude it
+        counted as a discovery and lowered the bar for everything after it."""
+        from omni.research.registry import fdr_bar_for
+
+        nulls = [0.2, 0.4, 0.6, 0.9, 1.1, 1.3, 0.1, 0.7, 0.5, 0.3] * 5
+        with_losers = fdr_bar_for(stats=[*nulls, -26.1, -17.0], pending_cells=1)
+        as_magnitudes = fdr_bar_for(stats=[*nulls, 26.1, 17.0], pending_cells=1)
+        with_zeros = fdr_bar_for(stats=[*nulls, 0.0, 0.0], pending_cells=1)
+
+        assert with_losers == with_zeros
+        assert with_losers > as_magnitudes
+
+    def test_a_non_finite_statistic_is_refused(self):
+        from omni.research.registry import fdr_bar_for
+
+        with pytest.raises(ValueError, match="not finite"):
+            fdr_bar_for(stats=[1.0, float("nan")], pending_cells=1)
+
+
+class TestPowerIsStated:
+    def test_min_detectable_sharpe_is_bar_over_root_years(self):
+        from omni.research.harness import Leg, Verdict
+
+        v = Verdict(
+            name="x", horizon=7, bar=4.38,
+            gross=Leg(10.0, 1.0, 313), net=Leg(9.0, 0.9, 313),
+            thirds=(), recent_third=Leg(10.0, 1.0, 104),
+            null_p95=2.0, alignment_median_t=1.0, alignment_clearing=0.0,
+            ic_t=0.0, turnover=0.4, cost_bps=20.0, warnings=(),
+        )
+        # 104 weekly periods are 1.9945 years: 4.38 / sqrt(1.9945) = 3.10.
+        assert v.min_detectable_sharpe_recent == pytest.approx(
+            4.38 / np.sqrt(104 * 7 / 365.0)
+        )
+        assert v.min_detectable_sharpe_recent == pytest.approx(3.10, abs=0.01)
+        assert v.min_detectable_sharpe_full == pytest.approx(
+            4.38 / np.sqrt(313 * 7 / 365.0)
+        )
+
+    def test_an_unmeasured_leg_has_no_power_figure(self):
+        from omni.research.harness import Leg, Verdict
+
+        v = Verdict(
+            name="x", horizon=1, bar=2.5, gross=Leg(0, 0, 0), net=Leg(0, 0, 0),
+            thirds=(), recent_third=Leg(0, 0, 0), null_p95=float("nan"),
+            alignment_median_t=float("nan"), alignment_clearing=0.0,
+            ic_t=float("nan"), turnover=float("nan"), cost_bps=20.0, warnings=(),
+        )
+        assert v.min_detectable_sharpe_recent is None
+
+    def test_a_short_recent_third_is_warned_about(self, registry):
+        prices, _d, _c = _panel(days=600)
+        rng = np.random.default_rng(3)
+        score = pd.DataFrame(
+            rng.normal(0, 1, prices.shape), index=prices.index, columns=prices.columns
+        )
+        v = evaluate(
+            name="power", source="synthetic", signal=lambda _p: score, prices=prices,
+            horizons=(1,), registry=registry, permutation_draws=5, record=False,
+        )[0]
+        # ~200 daily periods are 0.55 years: 2.5 / sqrt(0.55) = 3.4 > 2.
+        assert v.min_detectable_sharpe_recent > 2.0
+        assert any("cannot pass" in w for w in v.warnings)
+
+
+class TestNoDecayPaysTheBarOnceAndAsksTheRecentThirdIfItIsStillThere:
+    @staticmethod
+    def _v(strictness="no_decay", **over):
+        from omni.research.harness import Leg, Verdict
+
+        fields = {
+            "name": "x", "horizon": 1, "bar": 3.2,
+            "gross": Leg(30.0, 4.0, 900), "net": Leg(28.0, 3.8, 900),
+            "thirds": (), "recent_third": Leg(25.0, 2.0, 300),
+            "null_p95": 2.2, "alignment_median_t": 3.9, "alignment_clearing": 0.8,
+            "ic_t": 3.0, "turnover": 0.4, "cost_bps": 20.0, "warnings": (),
+            "strictness": strictness,
+        }
+        fields.update(over)
+        return Verdict(**fields)
+
+    def test_a_full_sample_winner_still_present_passes_where_strict_cannot(self):
+        assert self._v().passed
+        # The same result fails `strict`: the recent third's t of 2.0 is not
+        # 3.2, and on 300 daily periods it would take a Sharpe of 3.5 to be.
+        assert not self._v("strict").passed
+
+    def test_each_condition_is_load_bearing(self):
+        from omni.research.harness import Leg
+
+        assert not self._v(recent_third=Leg(25.0, 1.5, 300)).passed   # decayed
+        assert not self._v(recent_third=Leg(-25.0, -2.0, 300)).passed  # reversed
+        assert not self._v(gross=Leg(30.0, 3.0, 900)).passed          # below the bar
+        assert not self._v(gross=Leg(-30.0, -4.0, 900)).passed        # a loser
+        assert not self._v(alignment_clearing=0.4).passed             # one offset
+        assert not self._v(null_p95=4.5).passed                       # inside the null
+        assert not self._v(null_p95=float("nan")).passed              # uncalibrated
+
+    def test_it_uses_the_strict_bar_not_the_fdr_bar(self, registry):
+        registry.record(name="old", source="s", cells=5000, verdict="fail")
+        prices, _d, _c = _panel()
+        rng = np.random.default_rng(4)
+        score = pd.DataFrame(
+            rng.normal(0, 1, prices.shape), index=prices.index, columns=prices.columns
+        )
+        v = evaluate(
+            name="nd", source="synthetic", signal=lambda _p: score, prices=prices,
+            horizons=(1,), registry=registry, permutation_draws=5, record=False,
+            strictness="no_decay",
+        )[0]
+        assert v.bar == pytest.approx(registry.bar(pending_cells=1))
+        assert v.bar > 4.0
+
+
+class TestAnnualisationFollowsThePanelsCalendar:
+    def test_a_business_day_panel_is_252_and_a_daily_one_is_365(self):
+        from omni.research.harness import _infer_periods_per_year
+
+        assert _infer_periods_per_year(pd.bdate_range("2021-01-01", periods=500)) == 252.0
+        assert _infer_periods_per_year(
+            pd.date_range("2021-01-01", periods=500, freq="D")
+        ) == 365.0
+        assert _infer_periods_per_year(pd.RangeIndex(500)) == 365.0
+        assert _infer_periods_per_year(
+            pd.date_range("2021-01-01", periods=500, freq="h")
+        ) == pytest.approx(365.0 * 24)
+
+    def test_the_same_returns_annualise_lower_on_an_exchange_calendar(self, registry):
+        """365/horizon on a business-day panel overstates the annual mean by
+        365/252 = 1.45x. The t-statistic is unaffected."""
+        rng = np.random.default_rng(5)
+        days, assets = 600, 30
+        cols = [f"A{i:02d}" for i in range(assets)]
+        planted = rng.normal(0, 1, size=(days, assets))
+        rets = 0.02 * rng.normal(0, 1, size=(days, assets))
+        rets[1:] += 0.004 * planted[:-1]
+        values = 100 * np.exp(np.cumsum(rets, axis=0))
+
+        def run(index):
+            prices = pd.DataFrame(values, index=index, columns=cols)
+            score = pd.DataFrame(planted, index=index, columns=cols)
+            return evaluate(
+                name="cal", source="synthetic", signal=lambda _p: score,
+                prices=prices, horizons=(1,), registry=registry,
+                permutation_draws=5, record=False, cost_bps=0.0,
+            )[0]
+
+        daily = run(pd.date_range("2021-01-01", periods=days, freq="D"))
+        business = run(pd.bdate_range("2021-01-01", periods=days))
+
+        assert business.periods_per_year == 252.0
+        assert daily.periods_per_year == 365.0
+        assert business.gross.t == pytest.approx(daily.gross.t)
+        assert business.gross.mean_ann_pct == pytest.approx(
+            daily.gross.mean_ann_pct * 252.0 / 365.0
+        )

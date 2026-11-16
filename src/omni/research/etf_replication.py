@@ -148,6 +148,7 @@ def _simulate(
     for date in dates:
         prior_dates = [decision for decision in targets if decision < date]
         decision = max(prior_dates) if prior_dates else None
+        value_before = value
         if decision is not None and (not value_dates or decision >= value_dates[-1]):
             target = targets[decision]
             turnover = _turnover(weights, target)
@@ -166,7 +167,10 @@ def _simulate(
         asset_growth = weights * (1.0 + row)
         weights = asset_growth / float(asset_growth.sum())
         values.append(value)
-        realised.append(portfolio_return)
+        # Net of the session's execution charge, so the return series and the
+        # value path are one measurement. Recording the pre-cost return left
+        # Sharpe, tracking error and information ratio gross while CAGR was net.
+        realised.append(value / value_before - 1.0)
         value_dates.append(date)
 
     target_frame = pd.DataFrame(targets).T.sort_index().fillna(0.0)
@@ -236,9 +240,17 @@ def run_experiment(
     warmup_sessions: int = 126,
     constituent_cost_bps: float = 20.0,
     etf_spread_bps: float = 2.0,
-    etf_expense_bps: float = 10.0,
+    etf_expense_bps: float = 0.0,
 ) -> Experiment:
-    """Compare ETF, equal-weight, ranked selection, and ETF/ranked hybrid."""
+    """Compare ETF, equal-weight, ranked selection, and ETF/ranked hybrid.
+
+    `etf_expense_bps` defaults to zero because the ETF leg is priced from the
+    fund's own traded closes, which already carry its expense ratio: the fee
+    accrues inside NAV every day. Subtracting it again charged the benchmark
+    twice. Pass it only for a gross-of-fee series, such as an index level.
+    """
+    if not math.isfinite(etf_expense_bps) or etf_expense_bps < 0.0:
+        raise ValueError("etf_expense_bps must be a finite non-negative number")
     if membership_mode not in ("point_in_time", "current_membership_preview"):
         raise ValueError("membership_mode must state whether membership is point-in-time")
     if not 0.0 <= hybrid_active_weight <= 1.0:
@@ -300,8 +312,9 @@ def run_experiment(
         daily, hybrid_targets, cost_bps=constituent_cost_bps,
     )
 
-    # Expense ratio is a daily drag on the ETF-containing paths. Apply it to
-    # both value and return series after execution costs have been simulated.
+    # An explicit expense ratio (gross-of-fee ETF series only; see the
+    # docstring) is a daily drag on the ETF-containing paths, applied to both
+    # value and return series after execution costs have been simulated.
     daily_expense = etf_expense_bps / 10_000.0 / TRADING_DAYS
     for name, exposure in (("etf", 1.0), ("hybrid", 1.0 - hybrid_active_weight)):
         values, returns, targets, turnover, cost = raw[name]
@@ -328,6 +341,12 @@ def run_experiment(
         "Historical result uses adjusted closes; taxes and account-specific constraints are excluded.",
         "The ranking rule is a price-only research rule, not the full Omni evidence score.",
     ]
+    if etf_expense_bps > 0.0:
+        warnings.append(
+            f"An extra {etf_expense_bps:g} bps/yr expense was deducted from the ETF "
+            "leg; this is a double charge if the ETF series is the fund's own "
+            "traded price."
+        )
     if constituent_gap_count:
         warnings.append(
             "Isolated constituent price gaps are marked at the last close for at most three ETF sessions."

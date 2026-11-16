@@ -349,6 +349,26 @@ class TestAggregation:
         assert out[0]["index"] == 5
         assert out[0]["z_score"] > 2.0
 
+    def test_identify_outliers_small_sample_can_flag(self):
+        # Four ordinary fills and one wild one. Scored against a mean and std
+        # that include the outlier, |z| is capped at sqrt(n - 1) = 2.0 for
+        # n = 5 and nothing can ever exceed the 2.0 threshold. The modified
+        # z-score is 0.6745 * (100 - 10.5) / 0.5 = 120.7.
+        out = identify_outliers([10.0, 11.0, 10.5, 10.2, 100.0])
+        assert [o["index"] for o in out] == [4]
+        assert out[0]["z_score"] == pytest.approx(0.6745 * (100.0 - 10.5) / 0.5)
+
+    def test_identify_outliers_mad_zero_falls_back_to_mean_deviation(self):
+        # More than half the values tie, so MAD is 0. The mean absolute
+        # deviation is 10; z = 100 / (1.253314 * 10).
+        out = identify_outliers([0.0] * 9 + [100.0])
+        assert [o["index"] for o in out] == [9]
+        assert out[0]["z_score"] == pytest.approx(100.0 / (1.253314 * 10.0))
+
+    def test_identify_outliers_non_finite_raises(self):
+        with pytest.raises(Unavailable, match="NaN/inf"):
+            identify_outliers([1.0, float("nan"), 2.0])
+
     def test_identify_outliers_zero_std_returns_empty(self):
         # A constant series has no outliers by definition. [5.0]*N gives std
         # exactly 0.0; a constant NON-INTEGER series gives np.std ~1e-17, which
@@ -377,15 +397,31 @@ class TestMarketImpact:
         assert perm == pytest.approx(expected_perm)
 
     def test_sqrt_impact_matches_v1_formula(self):
-        # v1: temporary = 0.314 * sqrt(order/adv) * vol * sqrt(252) * 10000 + spread*5000
-        #     permanent = 0.142 * sqrt(order/adv) * vol * 10000
+        # Both legs read DAILY volatility. v1 multiplied the temporary leg
+        # alone by sqrt(252), a units error that made it ~16x too large.
+        #   temporary = 0.314 * sqrt(order/adv) * vol * 10000 + spread*5000
+        #   permanent = 0.142 * sqrt(order/adv) * vol * 10000
         order, adv, vol, spread = 5000.0, 1_000_000.0, 0.02, 0.0002
         temp, perm = estimate_square_root_impact(order, adv, vol, spread)
         part = order / adv
-        expected_temp = 0.314 * np.sqrt(part) * vol * np.sqrt(252) * 10_000 + spread * 5_000
+        expected_temp = 0.314 * np.sqrt(part) * vol * 10_000 + spread * 5_000
         expected_perm = 0.142 * np.sqrt(part) * vol * 10_000
         assert temp == pytest.approx(expected_temp)
         assert perm == pytest.approx(expected_perm)
+
+    def test_square_root_legs_share_one_volatility_unit(self):
+        # 1% of ADV at 2% daily vol, no spread: 0.314 * 0.1 * 0.02 * 1e4 = 6.28
+        # bps temporary (v1 gave 99.7), and the leg ratio is the coefficient
+        # ratio, not that ratio times sqrt(252).
+        temp, perm = estimate_square_root_impact(10_000.0, 1_000_000.0, 0.02, 0.0)
+        assert temp == pytest.approx(6.28)
+        assert temp / perm == pytest.approx(0.314 / 0.142)
+
+    def test_square_root_negative_or_non_finite_input_raises(self):
+        with pytest.raises(Unavailable, match="negative input"):
+            estimate_square_root_impact(1000.0, 1e6, -0.02, 0.0)
+        with pytest.raises(Unavailable, match="non-finite"):
+            estimate_square_root_impact(1000.0, 1e6, float("nan"), 0.0)
 
     def test_power_law_impact_matches_v1_formula(self):
         # v1: impact = 1.0 * (order/mcap)**0.6 * vol * 10000

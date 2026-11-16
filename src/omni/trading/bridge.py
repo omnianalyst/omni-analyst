@@ -261,6 +261,13 @@ async def prediction_to_intent(
         max_position_pct_nav=limits.max_position_pct_nav,
         volatility=volatility,
         vol_target=vol_target,
+        # Sized from the Wilson lower bound of the hit rate over the sample it
+        # was actually MEASURED on (`measured_n`, not `resolved_n`, which also
+        # counts buckets too small to contribute a rate and would state a
+        # tighter interval than the evidence supports). An `Eligibility`
+        # carrying no measured count has no sample to haircut by, and the
+        # point value is used as before.
+        resolved_n=eligibility.measured_n if eligibility.measured_n > 0 else None,
     )
     if quantity <= ZERO:
         return refuse(

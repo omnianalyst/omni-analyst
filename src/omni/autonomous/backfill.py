@@ -98,6 +98,7 @@ async def backfill_trend_predictions(
     target_k: float = _DEFAULT_TARGET_K,
     method_suffix: str = "",
     audience_user_id=None,
+    sweep_variants: int | None = None,
     entity_ids: list[UUID] | None = None,
 ) -> BackfillReport:
     """Replay the trend producer across history for instant calibration.
@@ -194,6 +195,15 @@ async def backfill_trend_predictions(
                                     "run_id": run_id,
                                     "cutoff": cutoff.isoformat(),
                                     "as_of": ts.isoformat(),
+                                    # How many variants this run was one of.
+                                    # A winner picked from k is k tests; the
+                                    # count is recorded on the row so the
+                                    # selection can never be read as one.
+                                    **(
+                                        {"sweep_variants": sweep_variants}
+                                        if sweep_variants is not None
+                                        else {}
+                                    ),
                                 }
                             }),
                             pid,
@@ -245,10 +255,16 @@ async def backfill_parameter_sweep(
     """A/B test: backfill at multiple window sizes, each in its own calibration bucket.
 
     Each window size gets a distinct method name (``trend.sma.w20``,
-    ``trend.sma.w50``, etc.) so the calibration_bucket view separates them. The
-    conviction gate then surfaces whichever has the best resolved hit rate at
-    high confidence -- the system self-selects the winner. Returns the report
-    for each variant so the operator can compare.
+    ``trend.sma.w50``, etc.) so the calibration_bucket view separates them.
+    Returns the report for each variant so the operator can compare.
+
+    **Picking the best of k variants is k tests.** Each prediction is stamped
+    with the number of variants in the sweep (``backfill.sweep_variants``), and
+    the conviction gate deflates for it: ``publish.load_calibration`` counts the
+    ``<base>.w<N>`` siblings with a resolved record and a bucket's Wilson lower
+    bound is taken at ``0.05 / k`` (Bonferroni) rather than 0.05. Without that,
+    a sweep wide enough always contains a variant whose bucket clears the gate
+    by chance, and "the system self-selects the winner" selects noise.
 
     Usage::
 
@@ -263,6 +279,12 @@ async def backfill_parameter_sweep(
         FROM prediction WHERE method LIKE 'trend.sma.w%'
         GROUP BY method ORDER BY method;
     """
+    windows = tuple(windows)
+    if len(set(windows)) != len(windows):
+        raise ValueError(
+            f"duplicate window in sweep {windows}; a repeated variant would be "
+            f"counted as a separate trial"
+        )
     reports = []
     for w in windows:
         r = await backfill_trend_predictions(
@@ -273,6 +295,7 @@ async def backfill_parameter_sweep(
             window=w,
             method_suffix=f".w{w}",
             audience_user_id=audience_user_id,
+            sweep_variants=len(windows),
         )
         reports.append((w, r))
     return reports

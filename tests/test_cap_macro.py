@@ -116,8 +116,9 @@ class TestCalculateInflationTrend:
         assert out["recent_mom_changes"][0] == pytest.approx(recent)
         assert out["recent_mom_changes"][2] == pytest.approx(three_back)
         assert out["momentum"] == "accelerating"
+        # Compounded three-month change, not mean(mom) * 12.
         assert out["3m_annualized"] == pytest.approx(
-            np.mean(out["recent_mom_changes"]) * 12
+            ((166.0 / 136.0) ** 4 - 1) * 100
         )
 
     def test_decelerating_when_recent_below_older(self):
@@ -177,9 +178,15 @@ class TestTaylorRule:
         assert out == pytest.approx(0.5 + 2.0)
 
     def test_known_value_with_inflation_and_output_gap(self):
-        # 0.5 + 3.0 + 1.5*(3.0-2.0) + 0.5*(-1.0) = 0.5+3.0+1.5-0.5 = 4.5
+        # Taylor (1993): 0.5 + 3.0 + 0.5*(3.0-2.0) + 0.5*(-1.0) = 3.5. The old
+        # default bracket weight of 1.5 gave 4.5, a 2.5-for-1 inflation response.
         out = taylor_rule(3.0, -1.0)
-        assert out == pytest.approx(4.5)
+        assert out == pytest.approx(3.5)
+
+    def test_total_inflation_response_is_one_and_a_half(self):
+        assert taylor_rule(4.0, 0.0) - taylor_rule(3.0, 0.0) == pytest.approx(1.5)
+        # pi = 4, zero gap: r* 0.5 + 4 + 0.5 * 2 = 5.5, not 7.5.
+        assert taylor_rule(4.0, 0.0) == pytest.approx(5.5)
 
     def test_custom_weights_respected(self):
         out = taylor_rule(
@@ -251,25 +258,45 @@ class TestAssessPolicyImplications:
 
 class TestSahmRule:
     async def test_triggered_when_3m_avg_rose_above_12m_low(self):
-        # last 3 = [4.0, 4.5, 5.0] -> avg 4.5; last-12 low = 3.9 (the leading
-        # 3.8 is outside the trailing 12-month window) -> Sahm value 0.6 >= 0.5
-        unemployment = [3.8, 3.9, 4.0, 4.0, 4.1, 4.0, 4.0, 3.9, 4.0, 4.0, 4.0, 4.5, 5.0]
+        # 16 observations; the leading 3.0 is outside the 15-month lookback.
+        # Current 3-month average = (4.0 + 4.5 + 5.0) / 3 = 4.5. The lowest
+        # 3-month average of the previous 12 months is (4.0 + 3.9 + 4.0) / 3.
+        unemployment = [
+            3.0, 3.9, 4.0, 4.0, 4.1, 4.0, 4.0, 3.9, 4.0, 4.0, 4.0, 4.0, 4.0,
+            4.0, 4.5, 5.0,
+        ]
         out = await sahm_rule(unemployment)
-        assert out["value"] == pytest.approx(0.6)
+        low = (4.0 + 3.9 + 4.0) / 3
+        assert out["value"] == pytest.approx(4.5 - low)
         assert out["triggered"]
         assert out["current_unemployment"] == 5.0
-        assert out["12m_low"] == pytest.approx(3.9)
+        assert out["12m_low"] == pytest.approx(low)
+
+    async def test_low_is_the_minimum_of_averages_not_of_raw_months(self):
+        # One raw month dips to 3.5 inside the window. Against the raw monthly
+        # minimum the indicator would read 4.0 - 3.5 = 0.5 and trigger; against
+        # the lowest 3-month average (3.9 + 3.5 + 3.9) / 3 it reads 0.233.
+        unemployment = [3.9] * 6 + [3.5] + [3.9] * 5 + [4.0, 4.0, 4.0]
+        out = await sahm_rule(unemployment)
+        low = (3.9 + 3.5 + 3.9) / 3
+        assert out["12m_low"] == pytest.approx(low)
+        assert out["value"] == pytest.approx(4.0 - low)
+        assert not out["triggered"]
 
     async def test_not_triggered_below_threshold(self):
-        unemployment = [3.5] * 9 + [3.6, 3.6, 3.7, 3.7]
+        unemployment = [3.5] * 11 + [3.6, 3.6, 3.7, 3.7]
         out = await sahm_rule(unemployment)
         last3 = [3.6, 3.7, 3.7]
         assert out["value"] == pytest.approx(np.mean(last3) - 3.5)
         assert not out["triggered"]
 
     async def test_too_few_observations_raises(self):
-        with pytest.raises(Unavailable, match=">=12"):
-            await sahm_rule([4.0] * 11)
+        with pytest.raises(Unavailable, match=">=15"):
+            await sahm_rule([4.0] * 14)
+
+    async def test_non_finite_observation_raises(self):
+        with pytest.raises(Unavailable, match="non-finite"):
+            await sahm_rule([4.0] * 14 + [float("nan")])
 
 
 class TestYieldCurveInversion:
@@ -339,11 +366,12 @@ class TestInflationMeasures:
         current, year_ago = 307.5, 300.0
         assert out["yoy"] == pytest.approx((current - year_ago) / year_ago * 100)
         prev, three_back = 307.3, 307.0
+        # Compounded annualisation, not simple x12 / x4.
         assert out["mom_annualized"] == pytest.approx(
-            ((current - prev) / prev) * 100 * 12
+            ((current / prev) ** 12 - 1) * 100
         )
         assert out["3m_annualized"] == pytest.approx(
-            ((current - three_back) / three_back) * 100 * 4
+            ((current / three_back) ** 4 - 1) * 100
         )
         assert out["current_index"] == 307.5
         assert "trend" in out

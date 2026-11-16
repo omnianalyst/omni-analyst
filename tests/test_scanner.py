@@ -4,6 +4,7 @@ import json
 import math
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -737,3 +738,200 @@ class TestQualityScore:
         by = {e["symbol"]: e["scores"] for e in entries}
         assert by["HALF"]["quality"] is None          # unmeasured dimension
         assert by["CRASH"]["quality"] is None         # bottom-quartile downside
+
+
+class TestBalancedScoreEvidence:
+    """The balanced score keeps its 35/25/20/10/10 weights fixed.
+
+    Before 2026-11-15 a missing long-horizon component was re-weighted away,
+    so a two-year name was ranked on stability, one-year return and
+    diversification alone and could outrank a ten-year record.
+    """
+
+    def _entry(self, symbol, **kw):
+        base = {
+            "symbol": symbol,
+            "return_1y": None,
+            "cagr_3y": None,
+            "cagr_5y": None,
+            "cagr_10y": None,
+            "median_annual_return": None,
+            "positive_year_rate": None,
+            "window_volatility": None,
+            "window_max_drawdown": None,
+            "window_downside_deviation": None,
+            "correlation_to_spy": None,
+            "complete_years": 0,
+            "risk_window_coverage": 0.0,
+        }
+        base.update(kw)
+        return base
+
+    def _universe(self):
+        from omni.api.scanner import _score_assets
+
+        long_names = [
+            self._entry(
+                f"L{i}",
+                return_1y=5.0 + i, cagr_3y=4.0 + i, cagr_5y=4.0 + i,
+                cagr_10y=4.0 + i, median_annual_return=4.0 + i,
+                positive_year_rate=50.0 + 5 * i,
+                window_volatility=20.0 - i, window_max_drawdown=-30.0 + 2 * i,
+                window_downside_deviation=14.0 - i, correlation_to_spy=0.9 - 0.05 * i,
+                complete_years=10, risk_window_coverage=1.0,
+            )
+            for i in range(6)
+        ]
+        # Two calm, strong years and nothing else measurable.
+        short = self._entry(
+            "SHORT",
+            return_1y=40.0, window_volatility=5.0, window_max_drawdown=-3.0,
+            window_downside_deviation=2.0, correlation_to_spy=0.1,
+            complete_years=1, risk_window_coverage=0.67,
+        )
+        entries = [*long_names, short]
+        _score_assets(entries)
+        return {e["symbol"]: e["scores"] for e in entries}
+
+    def test_a_short_record_cannot_outrank_the_best_long_record(self):
+        by = self._universe()
+        # SHORT tops every component it has. Under re-weighting that was a
+        # balanced score of 100; the best fully measured name, L5, sat below.
+        assert by["SHORT"]["durable_growth"] is None
+        assert by["SHORT"]["consistency"] is None
+        assert by["SHORT"]["balanced"] < by["L5"]["balanced"]
+
+    def test_unmeasured_components_count_as_the_neutral_fifty(self):
+        by = self._universe()
+        # 60% of the weight is unmeasured (neutral 50), stability and
+        # diversification are top (100) at 0.67 window coverage, the
+        # one-year return is top at full evidence.
+        shrunk = 50.0 + 50.0 * 0.67
+        expected = 0.35 * 50 + 0.25 * 50 + 0.20 * shrunk + 0.10 * 100 + 0.10 * shrunk
+        assert by["SHORT"]["balanced"] == pytest.approx(expected, abs=0.05)
+        assert by["SHORT"]["long_horizon_evidence"] == 0.25
+        assert by["SHORT"]["risk_window_evidence"] == 0.67
+
+    def test_the_median_year_is_counted_in_consistency_only(self):
+        from omni.api.scanner import _score_assets
+
+        def name(symbol, cagr, median):
+            return self._entry(
+                symbol, cagr_3y=cagr, cagr_5y=cagr, cagr_10y=cagr,
+                median_annual_return=median, positive_year_rate=60.0,
+                complete_years=10, risk_window_coverage=1.0,
+            )
+
+        entries = [name("A", 10.0, 1.0), name("B", 5.0, 9.0), name("C", 1.0, 5.0)]
+        _score_assets(entries)
+        by = {e["symbol"]: e["scores"] for e in entries}
+        # Durable growth follows the CAGR ordering exactly; with the median
+        # mixed in, B (top median) scored above A on "durable growth".
+        assert by["A"]["durable_growth"] == 100.0
+        assert by["B"]["durable_growth"] == pytest.approx(66.7, abs=0.05)
+        assert by["C"]["durable_growth"] == pytest.approx(33.3, abs=0.05)
+
+    def test_an_entirely_unmeasured_name_is_not_scored_fifty(self):
+        from omni.api.scanner import _score_assets
+
+        entries = [self._entry("NONE"), self._entry("SOME", return_1y=3.0)]
+        _score_assets(entries)
+        assert entries[0]["scores"]["balanced"] is None
+
+
+def test_downside_deviation_is_the_root_mean_square_shortfall() -> None:
+    """An asset losing exactly 2% on every down day has real downside.
+
+    The standard deviation of the negative days around their own mean scored
+    this series zero.
+    """
+    index = pd.date_range("2022-01-03", periods=401, freq="B")
+    steps = [0.03 if day % 2 == 0 else -0.02 for day in range(400)]
+    prices = pd.Series(
+        100.0 * np.cumprod([1.0, *[1.0 + step for step in steps]]), index=index
+    )
+
+    metrics = _compute_metrics(prices)
+
+    expected = math.sqrt(0.5 * 0.02**2) * math.sqrt(252) * 100
+    assert metrics["downside_deviation"] == pytest.approx(expected, abs=0.01)
+    assert metrics["window_downside_deviation"] == pytest.approx(expected, abs=0.01)
+
+
+def test_trailing_returns_are_calendar_days_for_a_business_day_series() -> None:
+    index = pd.date_range("2024-01-01", "2026-08-07", freq="B")
+    days = (index - index[0]).days
+    prices = pd.Series(100.0 * np.exp(0.001 * days), index=index)
+
+    returns = _compute_metrics(prices)["returns"]
+
+    # 0.1% per CALENDAR day: 30 calendar days is ~3.05%. Thirty sessions --
+    # what a row count measured -- spans 42 calendar days and read ~4.3%.
+    assert returns["30d"] == pytest.approx((math.exp(0.030) - 1) * 100, abs=0.25)
+    assert returns["365d"] == pytest.approx((math.exp(0.365) - 1) * 100, abs=0.5)
+
+
+def test_a_trailing_return_without_a_price_near_its_anchor_is_withheld() -> None:
+    index = pd.date_range("2026-06-01", periods=45, freq="D")
+    prices = pd.Series(np.linspace(100.0, 120.0, 45), index=index)
+
+    returns = _compute_metrics(prices)["returns"]
+
+    assert returns["30d"] is not None
+    assert returns["90d"] is None
+    assert returns["365d"] is None
+
+
+def test_risk_window_metrics_cover_only_the_trailing_window() -> None:
+    """A crash five years ago is in the full-history drawdown and not in the
+    trailing-window one, so both records are compared over the same period."""
+    index = pd.date_range("2018-01-01", "2026-08-07", freq="B")
+    values = np.full(len(index), 100.0)
+    crash = (index >= "2020-03-01") & (index < "2020-06-01")
+    values[crash] = 50.0
+    wobble = np.where(np.arange(len(index)) % 2 == 0, 1.0, 1.01)
+    prices = pd.Series(values * wobble, index=index)
+
+    metrics = _compute_metrics(prices)
+
+    assert metrics["max_drawdown"] < -45.0
+    assert metrics["window_max_drawdown"] > -2.0
+    assert metrics["risk_window_coverage"] == 1.0
+    assert metrics["risk_window_years"] == 3
+
+
+def test_market_correlation_keeps_the_sessions_after_a_weekend() -> None:
+    """A coin prints on weekends and the market does not. Differencing each
+    on the shared calendar dropped every Monday; here the Monday move is the
+    ONLY shared information, so losing it destroys the correlation."""
+    days = pd.date_range("2025-01-06", periods=40 * 7, freq="D")
+    rng = np.random.default_rng(3)
+    weekday = days.dayofweek
+    monday_shock = np.where(weekday == 0, rng.normal(0.0, 0.03, len(days)), 0.0)
+    asset_steps = monday_shock + np.where(weekday == 0, 0.0, rng.normal(0, 0.002, len(days)))
+    market_steps = monday_shock + np.where(weekday == 0, 0.0, rng.normal(0, 0.002, len(days)))
+    asset = pd.Series(100 * np.exp(np.cumsum(asset_steps)), index=days)
+    market = pd.Series(100 * np.exp(np.cumsum(market_steps)), index=days)
+    market[weekday >= 5] = np.nan
+
+    correlation = _correlation_to_market(asset, market)
+
+    assert correlation is not None
+    assert correlation > 0.8
+
+
+def test_an_all_crypto_mix_is_annualised_on_its_own_calendar() -> None:
+    index = pd.date_range("2022-01-01", "2025-12-31", freq="D")
+    rng = np.random.default_rng(11)
+    steps = rng.normal(0.0, 0.03, len(index))
+    frame = pd.DataFrame({"COIN": 100 * np.exp(np.cumsum(steps))}, index=index)
+
+    history = _mix_history(frame, [("COIN", 1.0)])
+
+    assert history is not None
+    daily = frame["COIN"].pct_change().dropna()
+    assert history["volatility"] == pytest.approx(
+        float(daily.std() * math.sqrt(365.2425) * 100), rel=0.01
+    )
+    # sqrt(252) understated the same series by a sixth.
+    assert history["volatility"] > float(daily.std() * math.sqrt(252) * 100) * 1.15

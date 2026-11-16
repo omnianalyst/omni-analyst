@@ -48,6 +48,7 @@ entry points are sync leaf math.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -61,6 +62,8 @@ from scipy.spatial.distance import squareform
 from omni.ingest.protocol import Unavailable
 
 TRADING_DAYS = 252
+# Annualised-volatility floor below which a Sharpe ratio is noise over noise.
+_ZERO_VOL_ATOL = 1e-12
 
 
 # --------------------------------------------------------------------------- #
@@ -481,13 +484,38 @@ def _as_returns_df(returns) -> pd.DataFrame:
     return pd.DataFrame(arr, columns=cols)
 
 
+def _ledoit_wolf_cov(R: np.ndarray) -> tuple[np.ndarray, float]:
+    """Ledoit-Wolf (2004) covariance shrunk toward a scaled identity.
+
+    Returns ``(covariance, shrinkage_intensity)``. A mean-variance optimiser
+    loads on whichever sample-covariance entries are most wrong, so the raw
+    sample estimate is error-maximising at any realistic T/N. The intensity is
+    estimated from the data, not chosen: it tends to 0 as T grows.
+    """
+    t, p = R.shape
+    X = R - R.mean(axis=0)
+    sample = X.T @ X / t
+    mu = float(np.trace(sample)) / p
+    d2 = float(np.sum((sample - mu * np.eye(p)) ** 2)) / p
+    if d2 <= (1e-12 * max(mu, 1e-300)) ** 2:
+        return sample, 0.0
+    b2_bar = 0.0
+    for row in X:
+        b2_bar += float(np.sum((np.outer(row, row) - sample) ** 2)) / p
+    b2 = min(b2_bar / (t * t), d2)
+    delta = b2 / d2
+    return delta * mu * np.eye(p) + (1.0 - delta) * sample, float(delta)
+
+
 def _returns_moments(returns):
-    """Per-period mean vector and covariance matrix from a returns panel.
+    """Per-period mean vector and shrunk covariance from a returns panel.
 
     Rows containing any non-finite value are dropped (scatter-NaN tolerance,
     matching ``fit_factor_risk_model``). Raises ``Unavailable`` when there are
-    fewer than two assets or fewer than two usable observations -- a covariance
-    on one row is not a covariance.
+    fewer than two assets, or no more usable observations than assets: with
+    T <= N the sample covariance is singular and the sample means are noise,
+    and an optimiser run on them returns a confident portfolio of nothing.
+    The covariance is Ledoit-Wolf shrunk (see ``_ledoit_wolf_cov``).
     """
     df = _as_returns_df(returns)
     assets = list(df.columns)
@@ -496,21 +524,25 @@ def _returns_moments(returns):
     n_assets = R.shape[1]
     if n_assets < 2:
         raise Unavailable("need >= 2 assets for mean-variance optimisation")
-    if R.shape[0] < 2:
+    if R.shape[0] <= n_assets:
         raise Unavailable(
-            f"need >= 2 aligned observations for a covariance, got {R.shape[0]}"
+            f"need more aligned observations than assets for mean-variance "
+            f"optimisation, got {R.shape[0]} for {n_assets} assets"
         )
     mean_ret = np.mean(R, axis=0)
-    cov = np.atleast_2d(np.cov(R, rowvar=False))
-    if cov.shape != (n_assets, n_assets):
-        cov = cov.reshape(n_assets, n_assets)
+    cov, _ = _ledoit_wolf_cov(R)
+    _check_cov(cov)
     return mean_ret, cov, assets
 
 
 def _portfolio_stats(w, mean_ret, cov, risk_free_rate, periods_per_year):
     ret = float(np.sum(mean_ret * w) * periods_per_year)
     vol = float(np.sqrt(w @ (cov * periods_per_year) @ w))
-    sharpe = (ret - risk_free_rate) / vol if vol > 1e-12 else 0.0
+    if not math.isfinite(vol) or vol <= _ZERO_VOL_ATOL:
+        raise Unavailable(
+            "portfolio volatility is zero or non-finite; Sharpe is undefined"
+        )
+    sharpe = (ret - risk_free_rate) / vol
     return ret, vol, sharpe
 
 
@@ -543,10 +575,15 @@ def max_sharpe_weights(
         neg_sharpe, x0, method="SLSQP", bounds=bounds, constraints=constraints,
         options={"maxiter": 500, "ftol": 1e-10},
     )
+    # An unconverged SLSQP iterate, clipped and renormalised, is a portfolio
+    # nobody solved for.
+    if not result.success or not np.all(np.isfinite(result.x)):
+        raise Unavailable(f"max-Sharpe optimisation did not converge: {result.message}")
     w = np.clip(result.x, min_weight, max_weight)
     s = w.sum()
-    w = w / s if s > 0 else np.full(n, 1.0 / n)
-    return pd.Series(w, index=assets)
+    if not s > 0:
+        raise Unavailable("max-Sharpe weights sum to zero; no portfolio to report")
+    return pd.Series(w / s, index=assets)
 
 
 def efficient_frontier(
@@ -610,15 +647,28 @@ def efficient_frontier(
 # risk". (Sharpe/Sortino/max-drawdown for the same endpoint are already covered
 # by annualized_sharpe/annualized_sortino in attribution.py and max_drawdown in
 # fundamentals.py; those are not duplicated here.)
+def _require_resolvable_tail(n: int, confidence: float, what: str) -> None:
+    if not 0.0 < confidence < 1.0:
+        raise Unavailable(f"confidence must be in (0, 1), got {confidence}")
+    needed = max(2, math.ceil(1.0 / (1.0 - confidence) - 1e-9))
+    if n < needed:
+        raise Unavailable(
+            f"need >= {needed} finite returns to resolve the "
+            f"{(1 - confidence) * 100:.1f}% tail for {what}, got {n}"
+        )
+
+
 def value_at_risk(returns, *, confidence: float = 0.95) -> float:
     """Historical (non-parametric) Value-at-Risk as a decimal loss.
 
     ``confidence=0.95`` returns the 5th-percentile return (negative for a
-    typical loss). Raises ``Unavailable`` on fewer than two finite observations.
+    typical loss). Raises ``Unavailable`` unless the (1 - confidence) tail holds
+    at least one whole observation -- ``>= 1 / (1 - confidence)`` finite returns,
+    the same floor ``portfolio_risk.calculate_var`` applies. A 99% VaR from 20
+    points is an interpolation between the two worst days, not a quantile.
     """
     r = pd.Series(np.asarray(returns, dtype=float)).dropna()
-    if r.size < 2:
-        raise Unavailable(f"need >= 2 finite returns for VaR, got {r.size}")
+    _require_resolvable_tail(r.size, confidence, "VaR")
     alpha = 1.0 - confidence
     return float(np.percentile(r.to_numpy(), alpha * 100.0))
 
@@ -629,11 +679,11 @@ def expected_shortfall(returns, *, confidence: float = 0.95) -> float:
     The average of returns at or below the VaR quantile, as a decimal. Always
     ``<= value_at_risk`` (the tail mean cannot exceed the threshold); when only
     one observation falls in the tail it is that observation (the most extreme
-    loss). Raises ``Unavailable`` on fewer than two finite observations.
+    loss). Raises ``Unavailable`` under the same tail-resolution floor as
+    ``value_at_risk``.
     """
     r = pd.Series(np.asarray(returns, dtype=float)).dropna()
-    if r.size < 2:
-        raise Unavailable(f"need >= 2 finite returns for ES, got {r.size}")
+    _require_resolvable_tail(r.size, confidence, "ES")
     var = value_at_risk(r, confidence=confidence)
     arr = r.to_numpy()
     tail = arr[arr <= var]
@@ -762,11 +812,10 @@ def fit_factor_risk_model(
 
     OLS with an intercept, solved via least squares on the rows where the asset
     and all factors are jointly observed. Assets without enough overlap to
-    regress (but with >= 2 finite returns) get zero exposures and a specific
-    variance equal to their sample return variance (treated as fully
-    idiosyncratic). An asset with fewer than 2 finite returns has no estimable
-    variance at all; it raises ``Unavailable`` rather than report a floor
-    constant as an estimate.
+    regress raise ``Unavailable`` naming the asset. v1 gave such an asset zero
+    exposures and called its whole variance idiosyncratic, which understates
+    the portfolio's factor risk by exactly the exposure nobody measured; the
+    caller drops the asset or supplies more history.
 
     Empty panels, or panels too short for even one asset's regression
     (``aligned rows < max(min_obs, n_factors + 2)``), raise ``Unavailable``: a
@@ -802,16 +851,11 @@ def fit_factor_risk_model(
         y_full = asset_returns.reindex(aligned.index)[asset].to_numpy(dtype=float)
         mask = np.isfinite(y_full) & np.all(np.isfinite(F_full), axis=1)
         n = int(mask.sum())
-        if n < max(min_obs, n_factors + 2):
-            y_obs = y_full[np.isfinite(y_full)]
-            if y_obs.size < 2:
-                raise Unavailable(
-                    f"asset '{asset}' has {y_obs.size} finite observation(s); "
-                    "cannot estimate specific variance"
-                )
-            specific_var[i] = float(np.var(y_obs, ddof=1))
-            specific_var[i] = max(specific_var[i], specific_var_floor)
-            continue
+        if n < min_needed:
+            raise Unavailable(
+                f"asset '{asset}' has {n} observation(s) overlapping the "
+                f"factors; need >= {min_needed} to estimate its exposures"
+            )
 
         y = y_full[mask]
         F = F_full[mask]
@@ -832,12 +876,14 @@ def fit_factor_risk_model(
 
     F_clean = f_panel.dropna()
     if F_clean.shape[0] < 2:
-        factor_cov = np.zeros((n_factors, n_factors))
-    else:
-        factor_cov = np.cov(F_clean.to_numpy(dtype=float), rowvar=False, ddof=1)
-        factor_cov = np.atleast_2d(factor_cov)
-        if factor_cov.shape != (n_factors, n_factors):
-            factor_cov = factor_cov.reshape(n_factors, n_factors)
+        raise Unavailable(
+            f"only {F_clean.shape[0]} complete factor observation(s); "
+            "cannot estimate a factor covariance"
+        )
+    factor_cov = np.cov(F_clean.to_numpy(dtype=float), rowvar=False, ddof=1)
+    factor_cov = np.atleast_2d(factor_cov)
+    if factor_cov.shape != (n_factors, n_factors):
+        factor_cov = factor_cov.reshape(n_factors, n_factors)
 
     return FactorRiskModel(
         assets=assets,
@@ -933,6 +979,13 @@ def vol_target_weights(
     so the portfolio hits the configured annual vol target, capped at
     ``max_leverage``.
 
+    Without a ``corr_matrix`` the portfolio vol is computed at pairwise
+    correlation 1 (the sum of the weighted vols), the same conservative
+    assumption ``portfolio/risk.py`` makes. v1 assumed correlation 0, a silent
+    default standing in for data: ten 60%-vol assets targeted at 10% realised
+    27% at a true pairwise correlation of 0.7. Correlation 1 can only
+    under-lever, never overshoot the target.
+
     v1 returned a zero vector when every volatility was non-positive (no
     invertible signal) -- silently declaring "no position" rather than admitting
     the inputs were unusable. That raises ``Unavailable`` here.
@@ -955,13 +1008,13 @@ def vol_target_weights(
         cov = np.outer(vols, vols) * np.asarray(corr_matrix, dtype=float)
         port_vol = float(np.sqrt(max(w @ cov @ w, 0.0)))
     else:
-        port_vol = float(np.sqrt(np.sum((w * vols) ** 2)))
+        port_vol = float(np.sum(w * np.where(vols > 0, vols, 0.0)))
 
-    if port_vol > 0:
-        scale = target_vol / port_vol
-    else:
-        scale = 0.0
-    w = w * scale
+    if not math.isfinite(port_vol) or port_vol <= _ZERO_VOL_ATOL:
+        raise Unavailable(
+            "portfolio volatility is zero or non-finite; cannot scale to a target"
+        )
+    w = w * (target_vol / port_vol)
     gross = float(np.abs(w).sum())
     if gross > max_leverage and gross > 0:
         w = w * (max_leverage / gross)

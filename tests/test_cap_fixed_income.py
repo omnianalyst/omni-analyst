@@ -499,8 +499,13 @@ class TestCalculateCreditMetrics:
         assert m["z_spread"] == pytest.approx(zs)
         assert m["z_spread_bps"] == pytest.approx(zs * 10000)
         ttm = time_to_maturity(ISSUE, MATURITY, DayCountConvention.THIRTY_360)
-        expected_pd = zs / (1 - 0.4) * ttm
+        # Cumulative default probability from a constant hazard rate, not the
+        # linear hazard * ttm (which exceeds 1.0 at long tenors).
+        hazard = zs / (1 - 0.4)
+        expected_pd = 1 - np.exp(-hazard * ttm)
+        assert m["hazard_rate"] == pytest.approx(hazard)
         assert m["implied_default_probability"] == pytest.approx(expected_pd)
+        assert expected_pd != pytest.approx(hazard * ttm, rel=1e-3)
         assert m["expected_loss"] == pytest.approx(expected_pd * 0.6 * 100.0)
         assert m["recovery_rate"] == 0.4
 
@@ -638,6 +643,30 @@ class TestBuildYieldCurve:
         y5 = curve.interpolate(5.0)
         assert y5 == pytest.approx(0.045, abs=0.005)
 
+    def test_curve_yields_are_continuous_and_reprice_the_zero(self):
+        # A 5y zero at a 5% annual-effective yield. The curve's consumers
+        # discount with exp(-r t), so the curve must carry ln(1.05), and
+        # pricing the same zero off the curve must return its own price.
+        z2 = _zero_bond(ytm=None, price=100.0 / 1.04 ** 2, maturity=date(2022, 1, 15))
+        z5 = _zero_bond(ytm=None, price=100.0 / 1.05 ** 5)
+        curve = build_yield_curve([z2, z5], ISSUE, method="linear")
+        assert curve.tenors == pytest.approx([2.0, 5.0])
+        assert curve.yields == pytest.approx([np.log(1.04), np.log(1.05)])
+        assert calculate_price(z5, curve) == pytest.approx(z5.price)
+
+    def test_nelson_siegel_grid_does_not_extrapolate_past_inputs(self):
+        zeros = [
+            _zero_bond(
+                ytm=None,
+                price=100.0 / (1 + y) ** n,
+                maturity=date(2020 + n, 1, 15),
+            )
+            for n, y in [(1, 0.03), (2, 0.035), (3, 0.04), (4, 0.043), (5, 0.045)]
+        ]
+        curve = build_yield_curve(zeros, ISSUE, method="nelson_siegel")
+        assert min(curve.tenors) == pytest.approx(1.0)
+        assert max(curve.tenors) == pytest.approx(5.0)
+
     def test_build_no_bonds_raises(self):
         with pytest.raises(Unavailable, match="no bonds"):
             build_yield_curve([], date(2020, 1, 1))
@@ -693,6 +722,41 @@ class TestCalculateTotalReturn:
         assert out["reinvestment_income"] == pytest.approx(0.0, abs=1e-9)
         assert out["price_return"] == pytest.approx(0.0, abs=1e-9)
         assert out["total_return"] == pytest.approx(5.0, abs=1e-9)
+
+
+    def test_half_period_hold_does_not_double_count_accrued(self):
+        # 5% annual par bond, flat 5% yield, sold 178 30/360-days into the
+        # first coupon period. The full price at sale is 100 * 1.05^(178/360);
+        # the return is that minus 100 (~2.44), not that plus the accrued
+        # coupon again (~4.9).
+        bond = _par_coupon_bond(coupon_rate=0.05, ytm=0.05)
+        out = calculate_total_return(bond, holding_period_days=180, ending_yield=0.05)
+        full = 100.0 * 1.05 ** (178 / 360)
+        assert out["total_return"] == pytest.approx(full - 100.0, abs=1e-9)
+        assert out["ending_price"] == pytest.approx(full, abs=1e-9)
+        assert out["ending_clean_price"] == pytest.approx(
+            full - out["accrued_at_sale"], abs=1e-9
+        )
+        assert out["accrued_at_sale"] > 2.0
+
+    def test_non_positive_holding_period_raises(self):
+        bond = _par_coupon_bond()
+        with pytest.raises(Unavailable, match="holding_period_days"):
+            calculate_total_return(bond, holding_period_days=0)
+
+
+class TestCleanQuoteYield:
+    def test_mid_coupon_clean_quote_recovers_the_yield(self):
+        # Settle half-way through the first coupon period. The clean quote is
+        # the full PV at 5% minus accrued; the solved yield must be 5%, not the
+        # ~55bp-higher figure a dirty-PV-vs-clean-quote solve returns.
+        settle = date(2020, 7, 15)
+        priced = _par_coupon_bond(coupon_rate=0.05, ytm=0.05, settle=settle)
+        full = calculate_price(priced)
+        accrued = calculate_accrued_interest(priced, settle)
+        assert accrued > 2.0
+        quoted = replace(priced, price=full - accrued, yield_to_maturity=None)
+        assert calculate_yield(quoted) == pytest.approx(0.05, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------

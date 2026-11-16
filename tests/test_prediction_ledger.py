@@ -412,7 +412,11 @@ class TestCalibrationEndToEnd:
         method = "fundamentals.dcf_valuation"
         created = NOW - timedelta(days=20)
         horizon = NOW - timedelta(days=1)
-        for _ in range(MIN_RESOLVED_FOR_CALIBRATION + 2):
+        # Forty, not the floor plus two: the gate now requires the bucket's
+        # Wilson lower bound to beat its own mean confidence (0.82 -- what the
+        # barriers alone would give), and 12 of 12 has a lower bound of 0.76.
+        resolved = 4 * MIN_RESOLVED_FOR_CALIBRATION
+        for _ in range(resolved):
             await _seed_prediction(
                 db, e, direction="up", entry=100.0, upper=110.0, lower=90.0,
                 confidence=0.82, method=method,
@@ -422,12 +426,13 @@ class TestCalibrationEndToEnd:
         await _price_claim(db, e, 111.0, NOW - timedelta(days=5))
 
         n = await resolve_due_predictions(db.pool)
-        assert n == MIN_RESOLVED_FOR_CALIBRATION + 2
+        assert n == resolved
 
         buckets = await load_calibration(
             db.pool, claim_type="fundamental_metric", method=method
         )
-        assert sum(b.n for b in buckets) == MIN_RESOLVED_FOR_CALIBRATION + 2
+        assert sum(b.n for b in buckets) == resolved
+        assert buckets[0].mean_confidence == pytest.approx(0.82)
         calibrated = [b for b in buckets if b.hit_rate is not None]
         assert calibrated
         assert calibrated[0].n >= MIN_RESOLVED_FOR_CALIBRATION
@@ -1027,3 +1032,68 @@ class TestSchedulerPredictLoop:
                 e, concept, json.dumps({"value": val}), ev, kf,
                 json.dumps({"cik": "0000320193", "form": "10-K", "fp": "FY", "start": start}),
             )
+
+
+class TestCalibrationLoadIsWhatTheGateNeeds:
+    async def _resolved(self, db, e, *, method, confidence, n, audience=None):
+        for _ in range(n):
+            await db.pool.execute(
+                "INSERT INTO prediction (entity_id, method, direction, confidence, "
+                "entry_price, upper_barrier, lower_barrier, horizon_ends_at, "
+                "provenance, created_at, outcome, resolved_at, audience_user_id) "
+                "VALUES ($1,$2,'up',$3,100,110,90,$4,'{}'::jsonb,$5,'upper',$4,$6)",
+                e, method, confidence, NOW - timedelta(days=1),
+                NOW - timedelta(days=20), audience,
+            )
+
+    async def test_confidence_one_is_folded_into_the_top_decile(self, db):
+        """`width_bucket(1.0, 0, 1, 10)` is 11: SQL files a confidence of
+        exactly 1.0 in a bucket [1.0, 1.1) that the Python side does not
+        have. It belongs with [0.9, 1.0]."""
+        from omni.conviction.stats_refresh import refresh_statistics
+
+        e = await _entity(db)
+        method = "edge.one"
+        await self._resolved(db, e, method=method, confidence=1.0, n=6)
+        await self._resolved(db, e, method=method, confidence=0.95, n=6)
+        await refresh_statistics(db.pool)
+
+        buckets = await load_calibration(db.pool, claim_type="x", method=method)
+        assert [(b.bucket_low, b.bucket_high, b.n) for b in buckets] == [(0.9, 1.0, 12)]
+        assert buckets[0].mean_confidence == pytest.approx(0.975)
+
+    async def test_shared_and_private_rows_pool_into_one_bucket(self, db):
+        from uuid import uuid4
+
+        from omni.conviction.stats_refresh import refresh_statistics
+
+        e = await _entity(db)
+        owner = uuid4()
+        method = "pool.one"
+        await self._resolved(db, e, method=method, confidence=0.82, n=7)
+        await self._resolved(db, e, method=method, confidence=0.86, n=7, audience=owner)
+        await refresh_statistics(db.pool)
+
+        shared = await load_calibration(db.pool, claim_type="x", method=method)
+        assert [b.n for b in shared] == [7]
+        theirs = await load_calibration(
+            db.pool, claim_type="x", method=method, audience=owner
+        )
+        assert [b.n for b in theirs] == [14]
+        assert theirs[0].mean_confidence == pytest.approx(0.84)
+
+    async def test_a_sweep_variant_knows_how_many_siblings_were_tried(self, db):
+        from omni.conviction.stats_refresh import refresh_statistics
+
+        e = await _entity(db)
+        for window in (20, 50, 100):
+            await self._resolved(
+                db, e, method=f"trend.sma.w{window}", confidence=0.65, n=3
+            )
+        await self._resolved(db, e, method="trend.sma", confidence=0.65, n=3)
+        await refresh_statistics(db.pool)
+
+        swept = await load_calibration(db.pool, claim_type="x", method="trend.sma.w50")
+        assert {b.trials for b in swept} == {3}
+        plain = await load_calibration(db.pool, claim_type="x", method="trend.sma")
+        assert {b.trials for b in plain} == {1}

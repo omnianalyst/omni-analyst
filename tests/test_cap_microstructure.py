@@ -235,6 +235,41 @@ class TestEffectiveSpread:
         out = await effective_spread(trades, quotes, horizon=timedelta(seconds=5))
         assert out["realized_spread"] == pytest.approx(2.0)
 
+    async def test_realized_spread_ignores_trades_with_no_observed_future_quote(self):
+        # Quotes every second for 10s; the mid drops from 100 to 98 at t=6s.
+        # Buys at 101 at t=0.5..4.5s with a 6s horizon. Only the trades at
+        # 0.5, 1.5 and 2.5s have a quote at or after trade_time + 6s (the
+        # stream ends at 9s); their future mid is 98 -> realised 2*(101-98)=6.
+        # The trades at 3.5 and 4.5s have no observed future quote. Reusing
+        # the last quote for them is what the old code did; it happens to read
+        # 98 here too, so the count is what proves they were excluded.
+        t0 = datetime(2026, 1, 1, 9, 30, tzinfo=UTC)
+        quotes = [
+            _quote(t0 + timedelta(seconds=i), *((99.0, 101.0) if i < 6 else (97.0, 99.0)))
+            for i in range(10)
+        ]
+        trades = [
+            _trade(t0 + timedelta(seconds=i) + timedelta(milliseconds=500), 101.0, "buy")
+            for i in range(5)
+        ]
+        out = await effective_spread(trades, quotes, horizon=timedelta(seconds=6))
+        assert out["realized_n"] == 3
+        assert out["realized_spread"] == pytest.approx(6.0)
+        assert out["effective_spread"] == 2.0
+
+    async def test_realized_spread_raises_when_quotes_end_before_every_horizon(self):
+        # Every trade sits within the horizon of the last quote. The old code
+        # reused the final quote as the "future" mid, a horizon of ~zero that
+        # makes realised spread equal effective spread; that is refused.
+        t0 = datetime(2026, 1, 1, 9, 30, tzinfo=UTC)
+        quotes = [_quote(t0 + timedelta(seconds=i)) for i in range(10)]
+        trades = [
+            _trade(t0 + timedelta(seconds=i) + timedelta(milliseconds=500), 101.0, "buy")
+            for i in range(5)
+        ]
+        with pytest.raises(Unavailable, match="no realised-spread observations"):
+            await effective_spread(trades, quotes, horizon=timedelta(minutes=5))
+
     async def test_too_few_trades_raises(self):
         t0 = datetime(2026, 1, 1, 9, 30, tzinfo=UTC)
         quotes = [_quote(t0 + timedelta(seconds=i)) for i in range(10)]

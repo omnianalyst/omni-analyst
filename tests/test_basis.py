@@ -380,3 +380,40 @@ class TestProduceFromCoverage:
         if isinstance(prov, (str, bytes)):
             prov = json.loads(prov)
         assert prov["assumptions"]["anchor_venue"] == "perp"
+
+
+class TestScoredOnTheAnchorVenueAlone:
+    async def test_the_other_venues_price_cannot_resolve_the_call(self, db):
+        """The target IS the other venue's price. On a path that pools every
+        venue, that venue's own print sits at the target and resolves the call
+        as a hit the moment it is scored -- with the anchor not having moved
+        and nothing having converged."""
+        from omni.conviction.ledger import resolve_due_predictions
+
+        e = await _entity(db)
+        await _seed_series(db, e, "aaa", [100.0, 100.0, 102.0], AS_OF)
+        await _seed_series(db, e, "bbb", [99.0, 98.0, 100.0], AS_OF)
+        pid = await produce_basis_prediction_from_coverage(
+            db.pool,
+            entity_id=e,
+            audience_user_id=None,
+            horizon_ends_at=AS_OF + DAY * 5,
+            as_of=AS_OF,
+            created_at=AS_OF,
+        )
+        provenance = json.loads(
+            await db.pool.fetchval("SELECT provenance FROM prediction WHERE id=$1", pid)
+        )
+        assert provenance["assumptions"]["price_venue"] == "aaa"
+
+        # The anchor drifts a little and never reaches 100; the other venue
+        # keeps printing 100, the call's target.
+        await _venue_price(db, e, "aaa", 102.2, AS_OF + DAY)
+        await _venue_price(db, e, "bbb", 100.0, AS_OF + DAY)
+
+        assert await resolve_due_predictions(db.pool, now=AS_OF + DAY * 6) == 1
+        row = await db.pool.fetchrow(
+            "SELECT outcome, exit_price FROM prediction WHERE id=$1", pid
+        )
+        assert row["outcome"] == "expiry"
+        assert float(row["exit_price"]) == pytest.approx(102.2)

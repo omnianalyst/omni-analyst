@@ -32,7 +32,7 @@ import asyncpg
 import numpy as np
 from scipy import stats
 
-from omni.trading.carry_health import assess
+from omni.trading.carry_health import assess, capital_per_notional
 
 ASSETS = {
     UUID("3ebe40a1-c43b-4095-8ca2-998537f8cee0"): "BTC",
@@ -48,7 +48,16 @@ FUNDING_VENUE = "hyperliquid"
 # from the live quote scan (ops/quote_scan.py), not the ccxt default tier.
 ROUND_TRIP_BPS = Decimal(23)
 HOLD_DAYS = 42
-GROSS_FLOOR = Decimal("4.5") + ROUND_TRIP_BPS / Decimal(100) * (Decimal(365) / Decimal(HOLD_DAYS))
+# The floor is a return on CAPITAL; the series is gross on NOTIONAL. A pair ties
+# up 1 + 1/leverage of capital per unit notional, so the gross-on-notional level
+# at which the book nets the floor on capital is the floor scaled up by that
+# factor, plus the cost drag. 3x is the conservative end of the book's stated
+# 3x-5x range (see ops/nav_snapshot.py).
+PERP_LEVERAGE = Decimal(3)
+GROSS_FLOOR = (
+    Decimal("4.5") * capital_per_notional(PERP_LEVERAGE)
+    + ROUND_TRIP_BPS / Decimal(100) * (Decimal(365) / Decimal(HOLD_DAYS))
+)
 
 DSN = "postgresql://postgres:postgres@localhost:5434/omni_v2"
 
@@ -146,6 +155,7 @@ async def reconstruct_series(
             funding_venue=FUNDING_VENUE,
             as_of=t,
             enter_rank=2,
+            perp_leverage=PERP_LEVERAGE,
             lookback_days=lookback_days,
         )
         if h.basket_gross_pct is not None:

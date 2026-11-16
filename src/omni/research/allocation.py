@@ -294,6 +294,10 @@ def tsmom_252(
         benchmark=benchmark,
     )
 
+# Sessions of history the rule needs before its first decision; the replay
+# reads this so the rule is not asked to decide on less.
+tsmom_252.min_history_sessions = TRADING_DAYS + 1
+
 RULES = {
     "etf_equal_weight_sectors": equal_weight,
     "etf_top_measured_sectors": top_measured,

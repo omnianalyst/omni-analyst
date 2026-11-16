@@ -20,6 +20,7 @@ leaves the bug in any path that bypasses ``claim_input``.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
@@ -201,7 +202,15 @@ def compute_divergence(
         return None
 
     finding = active[0]
-    score = float(finding["divergence_score"])
+    # The score of the day the divergence was FLAGGED, not of the last row. A
+    # divergence stays active for `window` days after it is flagged; by the
+    # last row the score may have decayed to near zero or changed sign, and a
+    # direction read from it would describe a different day than the one that
+    # raised the claim.
+    flagged_at = finding["flagged_at"]
+    score = float(finding["flagged_score"])
+    if not math.isfinite(score):
+        return None
 
     # Direction follows the level convention in the work order: perception
     # below fundamentals (score < 0) is bullish -- reality has improved beyond
@@ -216,8 +225,10 @@ def compute_divergence(
     else:
         return None
 
-    perception_z = _recompute_z(perception[_COLUMN], window)
-    fact_z = _recompute_z(facts[_COLUMN], window)
+    # Evidence z-scores as of the flagged day, so their difference is the
+    # reported score.
+    perception_z = _recompute_z(perception[_COLUMN].loc[:flagged_at], window)
+    fact_z = _recompute_z(facts[_COLUMN].loc[:flagged_at], window)
 
     last_event = common[-1]
     if isinstance(last_event, pd.Timestamp):
@@ -247,6 +258,10 @@ def compute_divergence(
             "perception_z": round(perception_z, 4),
             "fact_z": round(fact_z, 4),
             "direction": direction,
+            "flagged_at": (
+                flagged_at.isoformat() if hasattr(flagged_at, "isoformat")
+                else str(flagged_at)
+            ),
             "input_claim_ids": [str(c.id) for c in all_inputs],
         },
     )

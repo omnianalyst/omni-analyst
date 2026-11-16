@@ -198,3 +198,134 @@ class TestCostAndRefusal:
         joined = " ".join(experiment.warnings)
         assert "not a capital-allocation gate" in joined
         assert "holdout" in joined
+
+
+class TestCashAndLongFlat:
+    """A rule whose weights sum below 1.0 holds the remainder in cash."""
+
+    def _half_invested(self, calls):
+        from omni.research.allocation import Allocation
+
+        def rule(history, universe, *, benchmark):
+            calls.append(len(history))
+            return Allocation(
+                book="half", rule_version="half/v1", universe=list(universe),
+                weights={"XLK": 0.5}, inputs={}, benchmark=benchmark,
+            )
+
+        return rule
+
+    def test_cash_is_held_rather_than_renormalised_away(self):
+        # Renormalising the invested names to 1.0 after the first session made
+        # this book earn nearly all of XLK's return instead of half of it.
+        panel = _panel({"XLK": 0.001, "XLE": 0.0, "XLV": 0.0})
+        calls: list[int] = []
+        experiment = run_allocation_experiment(
+            panel, {"half": self._half_invested(calls)},
+            universe=UNIVERSE, benchmark="SPY", cadences=("static",), cost_bps=0.0,
+        )
+        result = _result(experiment, "half", "static")
+        sessions = result.sessions
+        expected = 0.5 * (1.001**sessions) + 0.5 - 1.0
+        assert result.total_return_pct == pytest.approx(expected * 100.0, rel=1e-9)
+        assert 0.0 < result.cash_weight_mean < 0.5
+        assert any("cash earned 0%" in w for w in experiment.warnings)
+
+    def test_cash_earns_the_stated_rate_and_sharpe_is_measured_over_it(self):
+        panel = _panel({"XLK": 0.0, "XLE": 0.0, "XLV": 0.0}, benchmark_drift=0.0)
+        calls: list[int] = []
+        experiment = run_allocation_experiment(
+            panel, {"half": self._half_invested(calls)},
+            universe=UNIVERSE, benchmark="SPY", cadences=("static",), cost_bps=0.0,
+            cash_rate_annual=0.05,
+        )
+        result = _result(experiment, "half", "static")
+        years = result.sessions / 252
+        # Half the book compounds at 5%; the flat half stays at 0.5.
+        assert result.total_return_pct == pytest.approx(
+            (0.5 * 1.05**years + 0.5 - 1.0) * 100.0, rel=1e-6
+        )
+        assert experiment.cash_rate_annual_pct == pytest.approx(5.0)
+        assert not any("cash earned 0%" in w for w in experiment.warnings)
+
+    def test_an_all_cash_static_book_decides_once_and_stays_flat(self):
+        from omni.research.allocation import Allocation
+
+        calls: list[int] = []
+
+        def flat(history, universe, *, benchmark):
+            calls.append(len(history))
+            return Allocation(
+                book="flat", rule_version="flat/v1", universe=list(universe),
+                weights={}, inputs={}, benchmark=benchmark,
+            )
+
+        panel = _panel({"XLK": 0.001, "XLE": 0.0005, "XLV": 0.0002})
+        experiment = run_allocation_experiment(
+            panel, {"flat": flat},
+            universe=UNIVERSE, benchmark="SPY", cadences=("static",), cost_bps=0.0,
+        )
+        result = _result(experiment, "flat", "static")
+        assert len(calls) == 1
+        assert result.rebalances == 1
+        assert result.total_return_pct == pytest.approx(0.0, abs=1e-12)
+
+    def test_tsmom_252_is_replayed_instead_of_refused_on_the_short_warmup(self):
+        """It needs 253 sessions and used to be asked after 128, so it refused
+        on its first decision and the book never appeared in any result."""
+        from omni.research.allocation import tsmom_252
+
+        panel = _panel({"XLK": 0.001, "XLE": -0.0005, "XLV": 0.0002})
+        experiment = run_allocation_experiment(
+            panel, {"tsmom": tsmom_252, "equal_weight": equal_weight},
+            universe=UNIVERSE, benchmark="SPY", cadences=("static",), cost_bps=0.0,
+        )
+        assert not any("tsmom/static refused" in w for w in experiment.warnings)
+        tsmom = _result(experiment, "tsmom", "static")
+        equal = _result(experiment, "equal_weight", "static")
+        # One window for every book and the baseline.
+        assert experiment.warmup_sessions == 252
+        assert tsmom.sessions == equal.sessions == experiment.baseline.sessions
+        assert tsmom.sessions == SESSIONS - 252 - 1
+        # Long the two rising sectors, flat the falling one.
+        assert tsmom.total_return_pct > equal.total_return_pct
+
+
+class TestSharpeDifference:
+    def _noise(self, seed, mean=0.0, n=500):
+        rng = np.random.default_rng(seed)
+        return pd.Series(
+            rng.normal(mean, 0.01, n), index=pd.bdate_range("2024-01-02", periods=n)
+        )
+
+    def test_two_draws_from_one_distribution_are_not_distinguishable(self):
+        from omni.research.etf_allocation import sharpe_difference_p_value
+
+        p = sharpe_difference_p_value(self._noise(1), self._noise(2))
+        assert p is not None and p > 0.10
+
+    def test_a_series_that_beats_its_pair_every_session_is_distinguishable(self):
+        from omni.research.etf_allocation import sharpe_difference_p_value
+
+        base = self._noise(1)
+        p = sharpe_difference_p_value(base + 0.002, base)
+        assert p is not None and p < 0.01
+
+    def test_too_short_or_constant_is_untestable_not_insignificant(self):
+        from omni.research.etf_allocation import sharpe_difference_p_value
+
+        short = self._noise(1, n=30)
+        assert sharpe_difference_p_value(short, short * 0.5) is None
+        base = self._noise(1)
+        constant = pd.Series(0.001, index=base.index)
+        assert sharpe_difference_p_value(constant, base) is None
+
+    def test_every_result_carries_a_p_value_and_the_multiplicity_is_stated(self):
+        panel = _panel({"XLK": 0.001, "XLE": 0.0005, "XLV": 0.0002})
+        experiment = run_allocation_experiment(
+            panel, {"equal_weight": equal_weight},
+            universe=UNIVERSE, benchmark="SPY",
+        )
+        assert experiment.baseline.excess_sharpe_p_value is None
+        assert len(experiment.results) == 3
+        assert any("Bonferroni" in w and "0.0167" in w for w in experiment.warnings)

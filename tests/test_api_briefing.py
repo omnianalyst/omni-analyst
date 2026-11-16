@@ -128,8 +128,12 @@ async def _prediction(db, entity_id, *, direction="up", outcome=None):
 
 
 def _bucket(low, n, hits):
+    # mean_confidence is the bucket's zero-edge hit rate; the gate requires the
+    # Wilson lower bound of hits/n to beat it, so fixtures state a record that
+    # genuinely does (380 of 400 at a mean confidence of 0.85, not 34 of 40).
     return Calibration("manipulation_signal", "detect", low,
-                       round(low + 0.1, 2), n, hits)
+                       round(low + 0.1, 2), n, hits,
+                       mean_confidence=round(low + 0.05, 2))
 
 
 def _candidate(claim_id, confidence=0.85, **kw):
@@ -155,7 +159,7 @@ async def _surface(db, *, entity_id, claim_id, owner=None, outcome=None,
     verdict = assess(
         _candidate(claim_id, supporting=supporting,
                    disconfirming=disconfirming),
-        [_bucket(0.7, 40, 34), _bucket(0.8, 40, 36)],
+        [_bucket(0.7, 400, 360), _bucket(0.8, 400, 380)],
     )
     assert verdict.surfaced, verdict.detail
     await record(db.pool, verdict, entity_id=entity_id,
@@ -193,7 +197,7 @@ async def test_a_surfaced_finding_carries_its_threshold_and_both_evidence_lists(
     assert item["threshold"] == pytest.approx(0.7)
     # Calibrated hit rate where known: 0.85 falls in the [0.8, 0.9) bucket,
     # which has historically resolved 36/40.
-    assert item["calibrated_hit_rate"] == pytest.approx(36 / 40)
+    assert item["calibrated_hit_rate"] == pytest.approx(380 / 400)
     # Both evidence lists travel with the finding. Disconfirming is not
     # optional -- a finding without it reads as advocacy.
     assert item["supporting"] == ["volume z=4.2"]
@@ -398,7 +402,7 @@ async def test_refused_findings_never_appear_in_the_briefing(db, database_url):
     )  # UNCALIBRATED
     await record(
         db.pool,
-        assess(_candidate(c, falsifiable=False), [_bucket(0.7, 40, 34)]),
+        assess(_candidate(c, falsifiable=False), [_bucket(0.8, 400, 380)]),
         entity_id=e,
     )  # NOT_FALSIFIABLE
 
@@ -445,7 +449,7 @@ async def test_refusals_are_counted_by_reason(db, database_url):
     await record(db.pool, assess(_candidate(c), []), entity_id=e)
     await record(
         db.pool,
-        assess(_candidate(c, falsifiable=False), [_bucket(0.7, 40, 34)]),
+        assess(_candidate(c, falsifiable=False), [_bucket(0.8, 400, 380)]),
         entity_id=e,
     )
 

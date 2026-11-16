@@ -1423,14 +1423,15 @@ class TestTaylorRule:
         )
 
     async def test_composes_two_earned_claim_types(self, db):
-        # taylor_rule = 0.5 + inf + 1.5*(inf-2.0) + 0.5*gap
-        # inflation=2.5, output_gap=-1.0 -> 0.5 + 2.5 + 0.75 - 0.5 = 3.25.
-        # Discriminates coefficient bugs (inflation_weight 1.0 -> 3.0; missing
-        # (inf-target) term -> 2.5; output_gap_weight 1.0 -> 2.75).
+        # Taylor (1993): taylor_rule = 0.5 + inf + 0.5*(inf-2.0) + 0.5*gap
+        # inflation=2.5, output_gap=-1.0 -> 0.5 + 2.5 + 0.25 - 0.5 = 2.75.
+        # Discriminates coefficient bugs (inflation_weight 1.5, the old
+        # double-counted response -> 3.25; missing (inf-target) term -> 2.5;
+        # output_gap_weight 1.0 -> 2.25).
         entity_id, inf, og = await self._seed(db, inflation=2.5, output_gap=-1.0)
         result = await self._run(db, entity_id)
         assert not result.abstained, result.shortfalls
-        assert result.result["taylor_rate"] == pytest.approx(3.25)
+        assert result.result["taylor_rate"] == pytest.approx(2.75)
         # Evidence is the two claim ids the composite read from the store.
         assert set(result.evidence) == {str(inf), str(og)}
 

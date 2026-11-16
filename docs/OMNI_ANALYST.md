@@ -456,7 +456,7 @@ calendar-year return, and a balanced score.
 
 The balanced score is category-relative: 35% durable growth, 25% consistency,
 20% stability, 10% one-year return, 10% diversification, with components
-reweighted when history is shorter. **It is a measurement, not a recommendation.**
+shrunk toward neutral when history is shorter (weights are never redistributed). **It is a measurement, not a recommendation.**
 
 Last live signed-in audit: 11/11 sectors, 463 companies qualifying, 74/74 broad
 assets ranked, the seven ladder names ranked. The Monero omission is

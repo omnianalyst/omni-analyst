@@ -198,7 +198,11 @@ SELECT p.method,
        count(*)                                          AS total_n,
        count(*) FILTER (WHERE p.outcome <> 'pending')    AS resolved_n,
        min(p.resolved_at)                                AS first_resolved_at,
-       max(p.resolved_at)                                AS last_resolved_at
+       max(p.resolved_at)                                AS last_resolved_at,
+       min(p.created_at) FILTER (WHERE p.outcome <> 'pending')
+                                                         AS first_decided_at,
+       max(p.created_at) FILTER (WHERE p.outcome <> 'pending')
+                                                         AS last_decided_at
 FROM prediction p
 JOIN entity e ON e.id = p.entity_id
 WHERE (p.audience_user_id IS NULL OR p.audience_user_id = $1)
@@ -956,7 +960,11 @@ def build_router(app: App) -> Router:
             method = row["method"]
             entity_kind = row["entity_kind"]
 
-            first, last = row["first_resolved_at"], row["last_resolved_at"]
+            # The walk-forward splits on the DECISION date (and purges training
+            # calls whose label window is still open at the test start), so its
+            # windows are cut over the span of resolved calls' decision times,
+            # not their resolution times.
+            first, last = row["first_decided_at"], row["last_decided_at"]
             forward = None
             # A span shorter than one microsecond per slice cannot be cut into
             # distinct windows, which is a method with too little history rather

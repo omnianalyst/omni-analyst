@@ -61,17 +61,25 @@ VENUE = "paper"
 SYMBOL = "BTC/USD"
 NAV = Decimal(100_000)
 
-# entry 100 / upper 120 / lower 90.
-#   long : b = 20/10 = 2, p = 0.6 -> f* = (0.6*2 - 0.4)/2 = 0.4
-#   short: b = 10/20 = 0.5, p = 0.8 -> f* = (0.8*0.5 - 0.2)/0.5 = 0.4
-# Quarter Kelly takes both to 0.1 of a 100k NAV at a price of 100 -> 100 units,
-# a 10,000 notional that sits inside every limit below.
+# entry 100 / upper 120 / lower 90. Sizing reads the Wilson 95% lower bound of
+# the hit rate over `measured_n`, treats Kelly as NAV AT RISK, and divides by
+# the stop distance to get NAV deployed:
+#   long : b = 2, p = 0.6 over 40 -> lower bound 0.446 -> f* = 0.169, quarter
+#          Kelly 0.0422 at risk, over a 10% stop = 0.422 of NAV.
+#   short: b = 0.5, breakeven 0.667. 0.8 over 40 has a lower bound of 0.652 --
+#          no demonstrated edge, sizes to zero. Over 400 it is 0.758 ->
+#          f* = 0.274, quarter Kelly 0.0685, over a 20% stop = 0.342 of NAV.
+# Both exceed the 0.20 position cap below, so both size to 0.20 of a 100k NAV
+# at a price of 100 -> 200 units, a 20,000 notional inside every other limit.
+# (Before the correction both read 100 units: Kelly taken as notional, the
+# stop distance ignored, the hit rate taken at its point value.)
 ENTRY = Decimal(100)
 UPPER = Decimal(120)
 LOWER = Decimal(90)
 LONG_P = 0.6
 SHORT_P = 0.8
-EXPECTED_QUANTITY = Decimal(100)
+SHORT_N = 400
+EXPECTED_QUANTITY = Decimal(200)
 
 
 @dataclass(frozen=True)
@@ -204,7 +212,7 @@ class TestTheBarrierSwap:
     async def test_a_down_prediction_becomes_a_sell_stopping_at_the_upper_barrier(self):
         """The headline. Same barriers as the long, assigned the other way."""
         result = await _bridge(
-            _prediction("down"), eligibility=_eligibility(hit_rate=SHORT_P)
+            _prediction("down"), eligibility=_eligibility(hit_rate=SHORT_P, measured_n=SHORT_N)
         )
 
         assert result.refusal is None
@@ -230,7 +238,7 @@ class TestTheBarrierSwap:
 
         with pytest.raises(InvalidIntent) as excinfo:
             await _bridge(
-                _prediction("down"), eligibility=_eligibility(hit_rate=SHORT_P)
+                _prediction("down"), eligibility=_eligibility(hit_rate=SHORT_P, measured_n=SHORT_N)
             )
 
         message = str(excinfo.value)
@@ -323,14 +331,67 @@ class TestRefusals:
         assert result.intent is None
 
     async def test_the_same_barriers_at_a_real_edge_do_not_size_to_zero(self):
-        """The pair for the test above: only the hit rate differs."""
+        """The pair for the test above: only the hit rate differs.
+
+        Rewritten when sizing was corrected. It asserted 50 units: 0.6 at its
+        point value, quarter Kelly 0.05 taken as notional. 0.6 over 400 has a
+        Wilson lower bound of 0.5513, f* = 0.1026, quarter Kelly 0.02564 of
+        NAV at risk, and a 10% stop makes that 0.2564 of NAV -- above the 0.20
+        cap, so 200 units.
+        """
         flat = _prediction("up", upper=Decimal(110), lower=Decimal(90))
 
-        result = await _bridge(flat, eligibility=_eligibility(hit_rate=0.6))
+        result = await _bridge(
+            flat, eligibility=_eligibility(hit_rate=0.6, measured_n=400)
+        )
 
         assert result.refusal is None
-        # f* = (0.6*1 - 0.4)/1 = 0.2; quarter Kelly 0.05 of 100k at 100 = 50.
-        assert result.intent.quantity == Decimal(50)
+        assert result.intent.quantity == Decimal(200)
+
+    async def test_an_edge_the_sample_cannot_distinguish_from_none_sizes_to_zero(self):
+        """0.6 at even money over 40 resolved has a lower bound of 0.446.
+
+        The point estimate says edge; the evidence does not. Sized off the
+        point value this opened a position.
+        """
+        flat = _prediction("up", upper=Decimal(110), lower=Decimal(90))
+
+        result = await _bridge(
+            flat, eligibility=_eligibility(hit_rate=0.6, measured_n=40)
+        )
+
+        assert result.refusal is BridgeRefusal.SIZED_TO_ZERO
+        assert result.intent is None
+
+    async def test_a_wider_stop_takes_a_smaller_position_for_the_same_edge(self):
+        """The stop distance is what a unit of notional risks.
+
+        Same reward/risk ratio (b = 1), same hit rate, stops at 2% and 4%:
+        0.02564 of NAV at risk is 1.28 of NAV at a 2% stop and 0.64 at 4%.
+        With the cap opened to all of NAV the first clamps at 1.0 and the
+        second does not, so the wider stop is the smaller position. Under the
+        old sizing both were 0.02564 of NAV regardless of the stop.
+        """
+        wide_limits = _limits(
+            max_position_pct_nav=Decimal(1),
+            max_gross_exposure_pct_nav=Decimal(1),
+            max_net_exposure_pct_nav=Decimal(1),
+            max_correlated_exposure_pct_nav=Decimal(1),
+            max_notional=Decimal(200_000),
+        )
+        eligibility = _eligibility(hit_rate=0.6, measured_n=400)
+        tight = await _bridge(
+            _prediction("up", upper=Decimal(102), lower=Decimal(98)),
+            eligibility=eligibility, limits=wide_limits,
+        )
+        wide = await _bridge(
+            _prediction("up", upper=Decimal(104), lower=Decimal(96)),
+            eligibility=eligibility, limits=wide_limits,
+        )
+
+        assert tight.refusal is None and wide.refusal is None
+        assert tight.intent.quantity == Decimal(1000)
+        assert wide.intent.quantity == pytest.approx(Decimal("641.0"), abs=1)
 
     async def test_a_risk_refusal_carries_the_verdict_and_produces_no_intent(self):
         result = await _bridge(limits=_limits(max_notional=Decimal(5_000)))
@@ -340,12 +401,12 @@ class TestRefusals:
         assert result.risk is not None
         assert result.risk.allowed is False
         assert RiskRefusal.ABOVE_MAX_NOTIONAL in result.risk.refusals
-        assert "10000" in result.detail or "10000" in result.risk.detail
+        assert "20000" in result.detail or "20000" in result.risk.detail
 
     async def test_a_sell_on_a_spot_only_venue_with_no_holding_refuses(self):
         result = await _bridge(
             _prediction("down"),
-            eligibility=_eligibility(hit_rate=SHORT_P),
+            eligibility=_eligibility(hit_rate=SHORT_P, measured_n=SHORT_N),
             capabilities=_capabilities(shorting=False, margin=False),
         )
 
@@ -357,9 +418,9 @@ class TestRefusals:
         """The pair: a spot venue can sell what it holds, it just cannot short."""
         result = await _bridge(
             _prediction("down"),
-            eligibility=_eligibility(hit_rate=SHORT_P),
+            eligibility=_eligibility(hit_rate=SHORT_P, measured_n=SHORT_N),
             capabilities=_capabilities(shorting=False, margin=False),
-            state=FakeState(nav=NAV, positions=(_position(Decimal(100)),)),
+            state=FakeState(nav=NAV, positions=(_position(Decimal(200)),)),
         )
 
         assert result.refusal is None
@@ -370,7 +431,7 @@ class TestRefusals:
         """A long held elsewhere cannot be sold here; that sell opens a short."""
         result = await _bridge(
             _prediction("down"),
-            eligibility=_eligibility(hit_rate=SHORT_P),
+            eligibility=_eligibility(hit_rate=SHORT_P, measured_n=SHORT_N),
             capabilities=_capabilities(shorting=False, margin=False),
             state=FakeState(
                 nav=NAV, positions=(_position(Decimal(100), venue="binance"),)

@@ -17,8 +17,24 @@ default, and that fraction is an argument rather than a constant folded into
 the formula, because a "Kelly size" that is secretly a quarter of Kelly is
 exactly the kind of hidden multiplier this codebase's predecessor was full of.
 
+**The Kelly fraction is NAV at RISK, not NAV deployed.** The binary Kelly
+formula `f* = (p*b - q) / b` is the fraction of bankroll LOST when the bet
+loses. A position of notional N with a stop `d` away from entry (as a fraction
+of entry) loses `N * d` at the stop, so the notional that puts `f` of NAV at
+risk is `f * NAV / d`. An earlier version used `f * NAV` as the notional
+itself, which made the stop distance drop out: a 1% stop and a 20% stop with
+the same reward/risk ratio got the same position and twenty times different
+dollar risk, and the vol scalar was then applied to something that was not a
+risk number. Dividing by the stop distance can ask for more than NAV when the
+stop is tight; `max_position_pct_nav` is applied last and is what bounds it.
+
+**The hit rate is an estimate, and the size can say so.** With `resolved_n`
+given, the size is taken from the Wilson 95% lower bound of the hit rate rather
+than its point value: 0.60 from 30 resolved predictions has a lower bound near
+0.42, which at even money is no edge at all. A lower bound at or below
+breakeven sizes to zero, the same refusal a negative point edge gets.
+
 The return value is a *quantity*, because that is what `TradeIntent` takes.
-Everything before the final line is a fraction of NAV.
 """
 
 from __future__ import annotations
@@ -144,6 +160,51 @@ def kelly_fraction(*, hit_rate: Decimal | None, payoff: Decimal) -> Decimal:
     return edge / ratio
 
 
+# The two-sided 95% normal quantile, for the Wilson interval.
+_Z95 = Decimal("1.959963984540054")
+
+
+def wilson_lower_bound(*, hit_rate: Decimal, resolved_n: int) -> Decimal:
+    """The Wilson 95% lower confidence bound on a hit rate from `resolved_n`.
+
+    The standard haircut for sizing off an estimated probability: Kelly's
+    penalty for an overstated `p` is severe and asymmetric, and a point
+    estimate from a small sample overstates it half the time.
+    """
+    probability = _finite(hit_rate, "hit_rate")
+    if not Decimal(0) <= probability <= Decimal(1):
+        raise ValueError(f"hit_rate is a probability and is out of range: {probability}")
+    if isinstance(resolved_n, bool) or not isinstance(resolved_n, int):
+        raise TypeError(
+            f"resolved_n must be an int count, got {type(resolved_n).__name__}"
+        )
+    if resolved_n <= 0:
+        raise ValueError(
+            f"resolved_n must be a positive count, got {resolved_n}; a hit rate "
+            f"over no resolved predictions is not a hit rate"
+        )
+    n = Decimal(resolved_n)
+    z2 = _Z95 * _Z95
+    centre = probability + z2 / (2 * n)
+    spread = _Z95 * (probability * (1 - probability) / n + z2 / (4 * n * n)).sqrt()
+    return max(Decimal(0), (centre - spread) / (1 + z2 / n))
+
+
+def stop_distance(*, entry: Decimal, stop: Decimal) -> Decimal:
+    """The loss at the stop as a fraction of entry: what one unit of notional risks."""
+    entry_price = _money(entry, "entry")
+    stop_price = _money(stop, "stop")
+    if entry_price <= 0:
+        raise ValueError(f"entry must be a positive price, got {entry_price}")
+    distance = abs(entry_price - stop_price) / entry_price
+    if distance <= _TOL:
+        raise ValueError(
+            f"stop {stop_price} is indistinguishable from entry {entry_price}; "
+            f"there is no risk to size against"
+        )
+    return distance
+
+
 def size(
     *,
     nav: Decimal,
@@ -155,13 +216,21 @@ def size(
     max_position_pct_nav: Decimal,
     volatility: Decimal | None = None,
     vol_target: Decimal | None = None,
+    resolved_n: int | None = None,
 ) -> Decimal:
-    """Quantity to trade: Kelly, fractioned, vol-scaled, clamped, divided by price.
+    """Quantity to trade: Kelly at risk, fractioned, over the stop distance,
+    vol-scaled, clamped, divided by price.
 
-    The order matters. Vol targeting applies to the fractioned Kelly rather
-    than replacing it, and the NAV clamp is applied last so it is a hard
-    ceiling on the position and not one more term that a vol scalar can lift
-    the size back above.
+    The order matters. The fractioned Kelly is NAV at risk; dividing by the
+    stop distance turns it into the notional that risks exactly that. Vol
+    targeting applies to that notional rather than replacing it, and the NAV
+    clamp is applied last so it is a hard ceiling on the position and not one
+    more term that a tight stop or a vol scalar can lift the size back above.
+
+    `resolved_n`, when given, is the number of resolved predictions the hit
+    rate was measured over, and the size is taken from the Wilson 95% lower
+    bound of the hit rate instead of its point value. Omitted, the point
+    value is used -- the caller is asserting the rate needs no haircut.
     """
     if hit_rate is None:
         raise ValueError(
@@ -194,7 +263,14 @@ def size(
 
     entry_price = _money(entry, "entry")
     payoff = payoff_ratio(entry=entry_price, stop=stop, target=target)
-    fraction = kelly_fraction(hit_rate=hit_rate, payoff=payoff) * cap
+    probability = (
+        hit_rate
+        if resolved_n is None
+        else wilson_lower_bound(hit_rate=hit_rate, resolved_n=resolved_n)
+    )
+    at_risk = kelly_fraction(hit_rate=probability, payoff=payoff) * cap
+    # NAV at risk -> NAV deployed: a unit of notional loses the stop distance.
+    fraction = at_risk / stop_distance(entry=entry_price, stop=stop)
 
     if volatility is not None:
         realised = _finite(volatility, "volatility")

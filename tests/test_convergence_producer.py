@@ -264,7 +264,8 @@ class TestSilentFamiliesCannotAgree:
         ]
         assert sorted(assumptions["families_agreeing"]) == ["microstructure", "price"]
         assert assumptions["agreeing_family_count"] == 2
-        assert float(row["confidence"]) == pytest.approx(0.75)
+        # Two coin-flip families agree half the time: 1 - 2**-(2-1).
+        assert float(row["confidence"]) == pytest.approx(0.5)
 
 
 class TestBarriersAreDerived:
@@ -348,8 +349,9 @@ class TestConfidenceIsTheFamilyCount:
         assert three_conf > two_conf
         # 1 - 2**-n: the chance n independent unbiased reads all point this way,
         # complemented. No multiplier, no weight, no tuned blend.
-        assert two_conf == pytest.approx(0.75)
-        assert three_conf == pytest.approx(0.875)
+        # 1 - 2**-(n-1): agreement in EITHER direction is the null event.
+        assert two_conf == pytest.approx(0.5)
+        assert three_conf == pytest.approx(0.75)
 
 
 class TestAbstention:
@@ -421,7 +423,7 @@ class TestAudienceScoping:
 
         assert pid is not None
         row = await _row(db, pid)
-        assert float(row["confidence"]) == pytest.approx(0.875)
+        assert float(row["confidence"]) == pytest.approx(0.75)
         assumptions = json.loads(row["provenance"])["assumptions"]
         assert "flow" in assumptions["families_agreeing"]
 

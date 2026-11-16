@@ -330,3 +330,94 @@ def test_average_trade_duration_empty_raises():
     # trades that do not exist.
     with pytest.raises(Unavailable):
         average_trade_duration([])
+
+
+# --------------------------------------------------------------------------- #
+# Quant-audit regressions (2026-11): horizon double-counting, PBO ranking,
+# embargo truncation, undeflated "deflated" reports.
+# --------------------------------------------------------------------------- #
+
+def test_horizon_does_not_multiply_an_always_long_book():
+    # Always long must earn buy-and-hold at ANY horizon. The old code multiplied
+    # a full position by an h-bar forward return every bar and compounded it,
+    # turning +65% into +1,103% at horizon=5.
+    n = 1000
+    idx = pd.date_range("2020-01-01", periods=n, freq="B")
+    p = pd.Series(100.0 * np.exp(0.0005 * np.arange(n)), index=idx)
+    sig = pd.Series(1.0, index=idx)
+    one = backtest_signal(sig, p, horizon=1).total_return()
+    five = backtest_signal(sig, p, horizon=5).total_return()
+    twenty = backtest_signal(sig, p, horizon=20).total_return()
+    buy_hold = float(p.iloc[-1] / p.iloc[1] - 1.0)  # lag=1: in from bar 1
+    assert one == pytest.approx(buy_hold, rel=1e-9)
+    # Sleeves fund over the first h bars, so the longer horizons earn slightly
+    # LESS than buy-and-hold, never a multiple of it.
+    assert five <= one and twenty <= five
+    assert five == pytest.approx(buy_hold, rel=0.01)
+    assert twenty == pytest.approx(buy_hold, rel=0.03)
+
+
+def test_horizon_position_is_the_sleeve_average_on_a_hand_path():
+    p = pd.Series([100.0, 110.0, 121.0, 133.1, 146.41])  # +10% every bar
+    sig = pd.Series([1.0, 0.0, 0.0, 0.0, 0.0])           # one signal, held 2 bars
+    res = backtest_signal(sig, p, horizon=2)
+    # lagged signal = [0,1,0,0,0]; half-sleeves -> position [0,.5,.5,0,0]
+    assert list(res.returns.round(10)) == [0.0, 0.05, 0.05, 0.0]
+
+
+def test_backtest_rejects_non_positive_horizon():
+    p = _prices()
+    with pytest.raises(ValueError, match="horizon"):
+        backtest_signal(pd.Series(1.0, index=p.index), p, horizon=0)
+
+
+def test_pbo_ranks_on_sharpe_not_raw_mean():
+    # Strategy 0: small steady edge (high Sharpe). Strategy 1: bigger mean with
+    # huge variance, mean driven by the first half only. Ranking on raw mean
+    # picks the volatile one in-sample; ranking on Sharpe picks the steady one,
+    # which is also best out of sample.
+    rng = np.random.default_rng(7)
+    T = 400
+    steady = 0.5 + rng.normal(0, 0.5, T)
+    wild = rng.normal(0.6, 20.0, T)
+    others = rng.normal(0, 1, (T, 6))
+    perf = np.column_stack([steady, wild, others])
+    by_sharpe = probability_of_backtest_overfitting(perf, n_groups=8)
+    by_mean = probability_of_backtest_overfitting(perf, n_groups=8, metric="mean")
+    assert by_sharpe.pbo < 0.05
+    assert by_mean.pbo > by_sharpe.pbo
+
+
+def test_pbo_refuses_an_odd_group_count_instead_of_rounding_it():
+    perf = np.random.default_rng(0).normal(0, 1, (200, 4))
+    with pytest.raises(ValueError, match="even"):
+        probability_of_backtest_overfitting(perf, n_groups=7)
+
+
+def test_pbo_sharpe_refuses_a_zero_dispersion_strategy():
+    perf = np.random.default_rng(0).normal(0, 1, (200, 3))
+    perf[:, 0] = 0.05
+    with pytest.raises(Unavailable, match="zero dispersion"):
+        probability_of_backtest_overfitting(perf, n_groups=4)
+
+
+def test_purged_kfold_embargo_is_not_truncated_to_zero_on_short_samples():
+    # n=50 at 1% used to give int(0.5) == 0 bars of embargo.
+    cv = PurgedKFold(n_splits=5, embargo_pct=0.01)
+    train, test = next(iter(cv.split(np.zeros(50))))
+    assert test[-1] + 1 not in train          # the bar after the test block
+    assert test[-1] + 2 in train
+    no_embargo = PurgedKFold(n_splits=5, embargo_pct=0.0)
+    train0, test0 = next(iter(no_embargo.split(np.zeros(50))))
+    assert test0[-1] + 1 in train0
+
+
+def test_report_says_when_no_selection_deflation_was_applied():
+    rng = np.random.default_rng(3)
+    r = rng.normal(0.002, 0.01, 500)
+    single = evaluate_strategy_sharpe(r)
+    assert single.selection_deflated is False
+    assert single.dsr == pytest.approx(single.psr)
+    many = evaluate_strategy_sharpe(r, n_trials=50)
+    assert many.selection_deflated is True
+    assert many.dsr < single.dsr

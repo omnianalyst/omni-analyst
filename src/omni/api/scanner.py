@@ -50,6 +50,15 @@ RISK_TIER_MEDIUM_MAX = 30.0
 # Cash equivalents sit near 0.2%, where the ratio is dominated by the
 # denominator's noise rather than by any risk-adjusted skill.
 MIN_SHARPE_VOLATILITY = 1.0
+# The stability and diversification components are measured over one shared
+# trailing window so a name whose whole history is two calm years is not
+# percentile-ranked against records that contain a crash.
+RISK_WINDOW_YEARS = 3
+# Prior strength, in years, of the neutral 50 a component is shrunk toward.
+SCORE_EVIDENCE_YEARS = 3.0
+NEUTRAL_SCORE = 50.0
+# A trailing return anchored on a price older than this is not that return.
+MAX_ANCHOR_STALENESS_DAYS = 7
 
 _cache: dict[str, dict[str, Any]] = {}
 
@@ -361,6 +370,13 @@ def _mix_history(
     path = pd.Series(chained, index=series.index)
 
     daily = path.pct_change().dropna()
+    # Annualised at the path's own cadence: a crypto mix prints 365 days a
+    # year and a fund mix about 252, and a mixed panel sits on the fund
+    # calendar after dropna(). A fixed 252 understated an all-crypto mix.
+    span_years = (series.index[-1] - series.index[0]).days / 365.2425
+    if span_years <= 0:
+        return None
+    periods_per_year = len(daily) / span_years
     returns = pd.Series(year_returns)
     drawdown = float((path / path.cummax() - 1).min())
     worst = returns.idxmin()
@@ -374,7 +390,7 @@ def _mix_history(
         ],
         "window_start": series.index[0].strftime("%Y-%m"),
         "window_end": series.index[-1].strftime("%Y-%m"),
-        "volatility": round(float(daily.std() * np.sqrt(252) * 100), 1),
+        "volatility": round(float(daily.std() * np.sqrt(periods_per_year) * 100), 1),
         "median_year": round(float(returns.median()), 2),
         "worst_year": {"year": str(worst), "return": round(float(returns.loc[worst]), 1)},
         "best_year": {"year": str(best), "return": round(float(returns.loc[best]), 1)},
@@ -721,6 +737,12 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
             "max_drawdown": None,
             "downside_deviation": None,
             "underwater_pct": None,
+            "window_volatility": None,
+            "window_max_drawdown": None,
+            "window_downside_deviation": None,
+            "risk_window_years": RISK_WINDOW_YEARS,
+            "risk_window_coverage": 0.0,
+            "cagr_3y": None,
             "cagr_5y": None,
             "cagr_10y": None,
             "median_annual_return": None,
@@ -733,9 +755,15 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
     current = float(prices.iloc[-1])
 
     def trailing_return(days: int) -> float | None:
-        if len(prices) <= days:
+        # Calendar days for every asset class. Counting rows made "30d" thirty
+        # sessions (about six weeks) for a fund and thirty days for a coin.
+        target = prices.index[-1] - pd.DateOffset(days=days)
+        eligible = prices[prices.index <= target]
+        if eligible.empty:
             return None
-        start = float(prices.iloc[-days - 1])
+        if (target - eligible.index[-1]).days > MAX_ANCHOR_STALENESS_DAYS:
+            return None
+        start = float(eligible.iloc[-1])
         if start <= 0:
             return None
         return round(((current / start) - 1) * 100, 2)
@@ -772,12 +800,40 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
     # duration dimension depth alone misses: a -30% dip recovered in a month
     # and a -30% dip held for three years share a max-drawdown figure and are
     # different assets.
-    negative_ret = daily_ret[daily_ret < 0]
-    downside_dev = (
-        float(negative_ret.std() * np.sqrt(sessions) * 100)
-        if len(negative_ret) >= 20
-        else None
+    def downside_deviation(returns: pd.Series) -> float | None:
+        # Root mean square of the below-zero returns against a zero target,
+        # over ALL observations. The standard deviation of the negative days
+        # around their own mean scored an asset that loses the same amount on
+        # every down day as having no downside at all.
+        if len(returns) < 20:
+            return None
+        shortfall = np.minimum(returns.to_numpy(dtype=float), 0.0)
+        return float(np.sqrt(np.mean(shortfall**2)) * np.sqrt(sessions) * 100)
+
+    downside_dev = downside_deviation(daily_ret)
+
+    window_start = prices.index[-1] - pd.DateOffset(years=RISK_WINDOW_YEARS)
+    window_prices = prices[prices.index >= window_start]
+    window_ret = window_prices.pct_change().dropna()
+    window_days = (window_prices.index[-1] - window_prices.index[0]).days
+    full_window_days = (prices.index[-1] - window_start).days
+    window_coverage = (
+        min(1.0, window_days / full_window_days) if full_window_days > 0 else 0.0
     )
+    if len(window_ret) >= 20:
+        window_vol = round(float(window_ret.std() * np.sqrt(sessions) * 100), 1)
+        window_path = (1 + window_ret).cumprod()
+        window_path = pd.concat(
+            [pd.Series([1.0], index=[window_prices.index[0]]), window_path]
+        )
+        window_dd = round(
+            float((window_path / window_path.cummax() - 1).min()) * 100, 2
+        )
+        window_downside = downside_deviation(window_ret)
+    else:
+        window_vol = None
+        window_dd = None
+        window_downside = None
     underwater = drawdown < -1e-9
     underwater_pct = (
         round(float(underwater.mean() * 100), 1)
@@ -810,7 +866,7 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
             "7d": trailing_return(7),
             "30d": trailing_return(30),
             "90d": trailing_return(90),
-            "365d": trailing_return(sessions),
+            "365d": trailing_return(365),
         },
         "sharpe": sharpe,
         "volatility": round(ann_vol, 1),
@@ -819,6 +875,14 @@ def _compute_metrics(prices: pd.Series, asset_class: str = "stocks") -> dict[str
             round(downside_dev, 2) if downside_dev is not None else None
         ),
         "underwater_pct": underwater_pct,
+        "window_volatility": window_vol,
+        "window_max_drawdown": window_dd,
+        "window_downside_deviation": (
+            round(window_downside, 2) if window_downside is not None else None
+        ),
+        "risk_window_years": RISK_WINDOW_YEARS,
+        "risk_window_coverage": round(window_coverage, 2),
+        "cagr_3y": cagr(3),
         "cagr_5y": cagr(5),
         "cagr_10y": cagr(10),
         "median_annual_return": round(float(annual.median()), 2) if len(annual) else None,
@@ -840,15 +904,45 @@ def _percentile_scores(entries: list[dict], field: str, *, inverse: bool = False
     return {symbol: round(float(score), 1) for symbol, score in scores.items()}
 
 
+def _shrink_to_neutral(score: float | None, evidence: float) -> float:
+    """A component pulled toward the category-neutral 50 by its evidence.
+
+    `evidence` is in [0, 1]. An unmeasured component is the neutral 50 with no
+    evidence at all, which is what "we do not know" is worth in a percentile
+    scale -- not a reason to hand its weight to the components that happen to
+    be measurable on a short record.
+    """
+    if score is None:
+        return NEUTRAL_SCORE
+    return NEUTRAL_SCORE + (score - NEUTRAL_SCORE) * max(0.0, min(1.0, evidence))
+
+
 def _score_assets(entries: list[dict]) -> None:
+    """The balanced score, at fixed 35/25/20/10/10 weights.
+
+    Weights are never redistributed. Re-weighting a missing long-horizon
+    component away ranked a two-year name on stability, one-year return and
+    diversification alone -- with its volatility and drawdown measured over
+    its own short, calm window -- and it outranked ten-year records. Each
+    component is instead shrunk toward the neutral 50 by how much history
+    stands behind it, and a missing component IS the neutral 50.
+
+    The published component scores (`durable_growth`, `consistency`, ...)
+    stay unshrunk and stay None when unmeasured, because the reliability and
+    quality lists gate on evidence being present.
+    """
     components = {
         "return_1y": _percentile_scores(entries, "return_1y"),
+        "cagr_3y": _percentile_scores(entries, "cagr_3y"),
         "cagr_5y": _percentile_scores(entries, "cagr_5y"),
         "cagr_10y": _percentile_scores(entries, "cagr_10y"),
         "median": _percentile_scores(entries, "median_annual_return"),
         "positive_years": _percentile_scores(entries, "positive_year_rate"),
-        "volatility": _percentile_scores(entries, "volatility", inverse=True),
-        "drawdown": _percentile_scores(entries, "max_drawdown"),
+        "volatility": _percentile_scores(entries, "window_volatility", inverse=True),
+        "drawdown": _percentile_scores(entries, "window_max_drawdown"),
+        "downside": _percentile_scores(
+            entries, "window_downside_deviation", inverse=True
+        ),
         "diversification": _percentile_scores(entries, "correlation_to_spy", inverse=True),
     }
     for entry in entries:
@@ -862,21 +956,37 @@ def _score_assets(entries: list[dict]) -> None:
             ]
             return round(sum(values) / len(values), 1) if values else None
 
-        has_long_enough_record = entry.get("complete_years", 0) >= 3
-        durable = average(("cagr_5y", "cagr_10y", "median")) if has_long_enough_record else None
+        complete_years = float(entry.get("complete_years") or 0)
+        has_long_enough_record = complete_years >= 3
+        # The median calendar year belongs to consistency alone. Counting it
+        # in durable growth as well made it the single largest input.
+        durable = average(("cagr_3y", "cagr_5y", "cagr_10y")) if has_long_enough_record else None
         consistency = average(("median", "positive_years")) if has_long_enough_record else None
-        stability = average(("volatility", "drawdown"))
+        stability = average(("volatility", "drawdown", "downside"))
         diversification = average(("diversification",))
         recent = average(("return_1y",))
-        weighted = [(durable, 0.35), (consistency, 0.25), (stability, 0.20), (recent, 0.10), (diversification, 0.10)]
-        present = [(value, weight) for value, weight in weighted if value is not None]
-        overall = sum(value * weight for value, weight in present) / sum(weight for _, weight in present) if present else None
+
+        long_evidence = complete_years / (complete_years + SCORE_EVIDENCE_YEARS)
+        window_evidence = float(entry.get("risk_window_coverage") or 0.0)
+        measured = [durable, consistency, stability, recent, diversification]
+        if all(value is None for value in measured):
+            overall = None
+        else:
+            overall = (
+                0.35 * _shrink_to_neutral(durable, long_evidence)
+                + 0.25 * _shrink_to_neutral(consistency, long_evidence)
+                + 0.20 * _shrink_to_neutral(stability, window_evidence)
+                + 0.10 * _shrink_to_neutral(recent, 1.0)
+                + 0.10 * _shrink_to_neutral(diversification, window_evidence)
+            )
         entry["scores"] = {
             "balanced": round(overall, 1) if overall is not None else None,
             "durable_growth": durable,
             "consistency": consistency,
             "stability": stability,
             "diversification": diversification,
+            "long_horizon_evidence": round(long_evidence, 2),
+            "risk_window_evidence": round(window_evidence, 2),
         }
 
 
@@ -970,12 +1080,18 @@ def _qualitative_scores(entries: list[dict]) -> None:
         entry["scores"]["evidence_complete"] = complete
 
 
-def _correlation_to_market(asset: pd.Series, market: pd.Series) -> float | None:
-    returns = pd.concat(
-        [asset.pct_change(fill_method=None), market.pct_change(fill_method=None)],
-        axis=1,
-        join="inner",
-    ).dropna()
+def _correlation_to_market(
+    asset: pd.Series, market: pd.Series, *, window_years: int | None = None
+) -> float | None:
+    # Returns are taken between dates BOTH series printed. Differencing each
+    # on a shared calendar first left the market NaN after every weekend a
+    # coin traded through, so every Monday was dropped from the correlation.
+    paired = pd.concat([asset, market], axis=1, join="inner").dropna()
+    if window_years is not None and len(paired) > 0:
+        paired = paired[
+            paired.index >= paired.index[-1] - pd.DateOffset(years=window_years)
+        ]
+    returns = paired.pct_change(fill_method=None).dropna()
     if len(returns) < 30:
         return None
     correlation = float(returns.iloc[:, 0].corr(returns.iloc[:, 1]))
@@ -1230,11 +1346,13 @@ def _payload(
             category: _tier_census(entries) for category, entries in rankings.items()
         },
         "ranking_method": {
-            "balanced": "Within each category: 35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification; available measures are reweighted when history is shorter.",
+            "balanced": f"Within each category: 35% durable growth, 25% consistency, 20% stability, 10% one-year return, and 10% diversification. Weights are fixed: a component is shrunk toward the neutral 50 by the history behind it (complete calendar years for growth and consistency, coverage of the trailing {RISK_WINDOW_YEARS}-year window for stability and diversification), and an unmeasured component counts as 50. Durable growth is the 3-, 5- and 10-year annualised return; consistency is the median complete calendar year and the share of positive years; stability is volatility, worst drawdown and downside deviation over the trailing {RISK_WINDOW_YEARS} years.",
+            "risk_window": f"Stability and market correlation are measured over the trailing {RISK_WINDOW_YEARS} years for every asset, so records of different lengths are compared over the same period. The volatility, drawdown and risk tier shown on a row remain full-history figures.",
+            "returns": "7d, 30d, 90d and 365d returns are calendar days for every asset class, anchored on the last price at or before that date.",
             "quality": "Quality is the MEDIAN of three asset dimensions -- durable growth, consistency, downside (depth, time underwater, downside-only deviation) -- every one measured, none in the bottom quartile. Market correlation is shown but never gates: it is a portfolio-construction fact, not a defect of the business.",
             "reliability": "Reliability is the MEDIAN of four components -- durable growth, consistency, downside (depth, time underwater, downside-only deviation), diversification -- and requires every component measured: a spectacular single dimension cannot rescue a failing one, and incompletely measured names are not ranked for best overall. Backward-looking ranks within the tracked universe, not forecasts.",
             "risk_tier": f"Annualised volatility under {RISK_TIER_LOW_MAX:.0f}% is low, under {RISK_TIER_MEDIUM_MAX:.0f}% is medium, and at or above it is high. A tier showing zero means no asset in that category reached it, not that any were filtered out — diversified funds rarely clear the high threshold.",
-            "sharpe": f"Sharpe is withheld below {MIN_SHARPE_VOLATILITY:.0f}% annualised volatility, where the ratio measures the denominator's noise rather than risk-adjusted return.",
+            "sharpe": f"Sharpe here is annualised return divided by annualised volatility over the full history, with no risk-free rate subtracted. It is withheld below {MIN_SHARPE_VOLATILITY:.0f}% annualised volatility, where the ratio measures the denominator's noise rather than risk-adjusted return.",
         },
         "sectors": sectors,
         "overall_leaders": _overall_leaders(sectors) if len(sectors) == 11 else [],
@@ -1302,7 +1420,9 @@ async def _build_scanner(app: App, audience) -> dict:
                 continue
             metrics = _compute_metrics(prices[symbol], a["asset_class"])
             correlation = (
-                _correlation_to_market(prices[symbol], prices["SPY"])
+                _correlation_to_market(
+                    prices[symbol], prices["SPY"], window_years=RISK_WINDOW_YEARS
+                )
                 if "SPY" in prices.columns
                 else None
             )
@@ -1388,15 +1508,14 @@ async def _build_scanner(app: App, audience) -> dict:
             # 2 complete years and a 3-year floor would rank none of them
             # ever. The panel's own 200-session admission floor already ran;
             # the long-term/consistency components simply come back None and
-            # the scorer reweights what remains (volatility, drawdown, 1y
-            # return) -- the documented "available measures are reweighted
-            # when history is shorter" behavior. The honest cost: company
-            # scores lean on stability and recency, and the table's
-            # ranking_method line already says so.
+            # the scorer counts them as the neutral 50 at their fixed weights,
+            # so a short record cannot rank on stability and recency alone.
             if not metrics.get("returns"):
                 continue
             correlation = (
-                _correlation_to_market(company_panel[symbol], spy)
+                _correlation_to_market(
+                    company_panel[symbol], spy, window_years=RISK_WINDOW_YEARS
+                )
                 if spy is not None else None
             )
             entry = {

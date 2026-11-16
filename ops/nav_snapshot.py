@@ -10,6 +10,7 @@ never places an order, and the venue is constructed so that it could not.
 """
 
 import asyncio
+import os
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -24,6 +25,15 @@ from omni.venue.ccxt_venue import CCXTVenue, TradingMode
 from omni.venue.credentials import wallet_credentials
 
 UNIVERSE = ["BTC", "ETH", "SOL", "HYPE", "PENGU", "PURR"]
+
+# The leverage the short perp legs are margined at. It sets the capital a pair
+# ties up (1 + 1/leverage per unit notional), which is the denominator carry
+# health is judged on. Nothing in the codebase configures leverage -- it is set
+# on the venue account -- so it is stated here: 3x is the conservative end of
+# the 3x-5x range docs/OMNI_ANALYST.md quotes the book at (lower leverage means
+# more capital committed, so a lower on-capital reading). Set
+# OMNI_CARRY_PERP_LEVERAGE to the account's real setting if it differs.
+PERP_LEVERAGE = Decimal(os.environ.get("OMNI_CARRY_PERP_LEVERAGE", "3"))
 
 
 async def main() -> int:
@@ -85,6 +95,7 @@ async def main() -> int:
             as_of=datetime.now(UTC),
             enter_rank=2,
             execution_cost_bps=Decimal(30),
+            perp_leverage=PERP_LEVERAGE,
         )
         print(health.summary())
         for asset, pct in sorted(health.per_asset_pct.items(), key=lambda kv: -kv[1]):

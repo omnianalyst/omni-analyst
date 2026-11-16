@@ -144,7 +144,11 @@ class TestDetectRegimeChanges:
         high = [0.2, -0.2] * 8               # 16 bars, large variance
         returns = low + high
         path = volatility_regime_path(returns, window=3)
-        assert path[:30] == ["quiet"] * 30
+        # The first window-1 bars have no full window and carry no reading.
+        # (This asserted path[:30] == quiet, labelling two bars whose "vol" was
+        # the std of one and two returns.)
+        assert path[:2] == ["warmup"] * 2
+        assert path[2:30] == ["quiet"] * 28
         assert path[30] == "volatile"
         changes = detect_regime_changes(path)
         assert changes[0]["index"] == 30
@@ -247,3 +251,43 @@ class TestFailurePaths:
         # classify_volatility. Exercise the path function directly.
         with pytest.raises(Unavailable, match="zero variance"):
             volatility_regime_path([5.0] * 40, window=20)
+
+
+# ---------------------------------------------------------------------------
+# Quant-audit regressions (2026-11): warm-up windows and a look-ahead median
+# ---------------------------------------------------------------------------
+
+class TestAuditRegressions:
+    def test_path_label_does_not_depend_on_the_future(self):
+        # A calm stretch followed by a violent one. Banded against the
+        # WHOLE-series median, calm bars read the same either way, but early
+        # moderately-noisy bars were judged against volatility that had not
+        # happened yet. Causal labels up to bar k must be identical whatever
+        # comes after bar k.
+        rng = np.random.RandomState(0)
+        head = list(rng.normal(0, 0.01, 60))
+        calm_tail = list(rng.normal(0, 0.0001, 200))
+        wild_tail = list(rng.normal(0, 0.5, 200))
+        a = volatility_regime_path(head + calm_tail, window=10)
+        b = volatility_regime_path(head + wild_tail, window=10)
+        assert a[:60] == b[:60]
+
+    def test_last_path_label_agrees_with_classify(self):
+        rng = np.random.RandomState(4)
+        r = list(rng.normal(0, 0.01, 80)) + list(rng.normal(0, 0.05, 20))
+        assert volatility_regime_path(r, window=20)[-1] == classify_volatility(r, window=20)["regime"]
+
+    def test_median_ignores_shrinking_warmup_windows(self):
+        rng = np.random.RandomState(5)
+        r = rng.normal(0, 0.01, 45)
+        out = classify_volatility(r, window=20)
+        full = [float(np.std(r[i - 19: i + 1])) for i in range(19, 45)]
+        assert out["median_volatility"] == pytest.approx(float(np.median(full)))
+        # ...which is NOT the median including the 19 partial windows.
+        partial = [float(np.std(r[max(0, i - 19): i + 1])) for i in range(45)]
+        assert out["median_volatility"] != pytest.approx(float(np.median(partial)))
+
+    def test_leaving_warmup_is_not_a_regime_change(self):
+        assert detect_regime_changes(["warmup", "warmup", "quiet", "volatile"]) == [
+            {"index": 3, "from_regime": "quiet", "to_regime": "volatile"}
+        ]

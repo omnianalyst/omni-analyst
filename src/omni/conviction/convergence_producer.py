@@ -59,9 +59,11 @@ vol ``trend.py`` uses.
 **Confidence is the family count and nothing else.** ``detect`` deliberately has
 no scoring constants and none are added here: with ``n`` families agreeing on a
 binary direction, the chance that ``n`` independent, unbiased family reads would
-all have pointed this way is ``2**-n``, and the confidence recorded is its
-complement, ``1 - 2**-n`` -- 0.75 at two families, 0.875 at three, 0.9375 at
-four. It is monotone in the count by construction, has no free parameter, and is
+all have pointed the SAME way -- either way, since no direction is named in
+advance -- is ``2**-(n-1)``, and the confidence recorded is its complement,
+``1 - 2**-(n-1)`` -- 0.5 at two families, 0.75 at three, 0.875 at four. The
+families are not in fact independent (price and microstructure read the same
+tape), so even this overstates the corroboration. It is monotone in the count by construction, has no free parameter, and is
 a statement about the corroboration rather than a calibrated hit rate; turning
 it into one is the ledger's resolution pass, which buckets these on 0.1 widths
 and so scores each family count separately.
@@ -255,7 +257,12 @@ def _votes(by_family: dict[str, list]) -> list[_FamilyVote] | None:
 
 
 def _confidence(agreeing: int) -> float:
-    return 1.0 - 2.0 ** (-agreeing)
+    # The chance that `agreeing` independent coin-flip families all point the
+    # SAME way -- either way -- is 2 * 2**-n = 2**-(n-1), because the first
+    # family's sign is free. `1 - 2**-n` was the null for agreeing on one
+    # pre-named direction, which nothing here names in advance: it read two
+    # agreeing families as 0.75 when two coins match half the time.
+    return 1.0 - 2.0 ** (-(agreeing - 1))
 
 
 async def _constituent_claims(

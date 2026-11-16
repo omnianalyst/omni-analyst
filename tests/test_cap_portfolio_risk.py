@@ -102,10 +102,62 @@ class TestCalculateVar:
         assert math.isfinite(default["monte_carlo"]["daily_var_pct"])
 
     def test_monte_carlo_finite_and_loss_signed(self):
-        out = calculate_var(KNOWN_RETURNS, 0.95, seed=7)
+        # A realistic sample: on KNOWN_RETURNS exactly 5% of the mass is the
+        # single loss, so a bootstrapped 5% quantile sits on the boundary
+        # between that loss and a small gain and its sign is a coin flip.
+        sample = np.random.default_rng(3).normal(0.0, 0.01, 500)
+        out = calculate_var(sample, 0.95, seed=7)
         mc = out["monte_carlo"]["daily_var_pct"]
         assert math.isfinite(mc)
         assert mc < 0
+
+    def test_monte_carlo_is_not_the_parametric_normal_again(self):
+        # Student-t(3) returns: fat tails. A normal(mean, std) draw reproduces
+        # the parametric VaR to sampling noise (v1). The filtered historical
+        # simulation keeps the sample's tail, so at 99% it sits well beyond
+        # the parametric figure, alongside the historical one.
+        rng = np.random.default_rng(0)
+        sample = rng.standard_t(3, 4000) * 0.01
+        out = calculate_var(sample, 0.99, seed=1)
+        mc = out["monte_carlo"]["daily_var_pct"]
+        parametric = out["parametric"]["daily_var_pct"]
+        historical = out["historical"]["daily_var_pct"]
+        assert out["monte_carlo"]["method"] == "filtered_historical_bootstrap"
+        assert historical < parametric < 0
+        assert mc < parametric * 1.05
+
+    def test_monte_carlo_tracks_the_current_volatility_regime(self):
+        # Same returns, calm-then-wild vs wild-then-calm. A draw from the
+        # unconditional moments cannot tell them apart; the filtered leg
+        # reports more risk when the recent regime is the volatile one.
+        rng = np.random.default_rng(5)
+        calm = rng.normal(0.0, 0.005, 300)
+        wild = rng.normal(0.0, 0.03, 300)
+        ends_wild = calculate_var(np.concatenate([calm, wild]), 0.95, seed=2)
+        ends_calm = calculate_var(np.concatenate([wild, calm]), 0.95, seed=2)
+        assert ends_wild["parametric"]["daily_var_pct"] == pytest.approx(
+            ends_calm["parametric"]["daily_var_pct"]
+        )
+        assert (
+            ends_wild["monte_carlo"]["daily_var_pct"]
+            < 2 * ends_calm["monte_carlo"]["daily_var_pct"]
+        )
+
+    def test_annual_figures_share_one_scaling_and_take_periods_per_year(self):
+        arr = np.asarray(KNOWN_RETURNS, dtype=float)
+        mean = float(arr.mean())
+        out = calculate_var(KNOWN_RETURNS, 0.95)
+        # historical annual now carries drift, like the parametric one
+        assert out["historical"]["annual_var_pct"] == pytest.approx(
+            (mean * 252 + (HISTORICAL_VAR_95 - mean) * math.sqrt(252)) * 100
+        )
+        crypto = calculate_var(KNOWN_RETURNS, 0.95, periods_per_year=365)
+        assert crypto["historical"]["annual_var_pct"] == pytest.approx(
+            (mean * 365 + (HISTORICAL_VAR_95 - mean) * math.sqrt(365)) * 100
+        )
+        assert crypto["historical"]["daily_var_pct"] == out["historical"]["daily_var_pct"]
+        with pytest.raises(ValueError, match="periods_per_year"):
+            calculate_var(KNOWN_RETURNS, 0.95, periods_per_year=0)
 
     def test_confidence_level_reflected_in_output(self):
         out = calculate_var(KNOWN_RETURNS, 0.95)
@@ -193,9 +245,16 @@ class TestCalculateCvar:
         assert out["daily_cvar_amount"] is None
 
     def test_annual_scales_by_sqrt_252(self):
+        # Drift-inclusive square-root-of-time, the scaling calculate_var's
+        # annual figures use: mean * N + (cvar - mean) * sqrt(N).
+        mean = float(np.mean(KNOWN_RETURNS))
         out = calculate_cvar(KNOWN_RETURNS, 0.95)
         assert out["annual_cvar_pct"] == pytest.approx(
-            CVAR_95 * math.sqrt(252) * 100
+            (mean * 252 + (CVAR_95 - mean) * math.sqrt(252)) * 100
+        )
+        crypto = calculate_cvar(KNOWN_RETURNS, 0.95, periods_per_year=365)
+        assert crypto["annual_cvar_pct"] == pytest.approx(
+            (mean * 365 + (CVAR_95 - mean) * math.sqrt(365)) * 100
         )
 
     # --- failure paths ---

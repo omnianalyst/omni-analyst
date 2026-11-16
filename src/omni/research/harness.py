@@ -71,7 +71,28 @@ PERMUTATION_DRAWS = 200
 #                looser. This is the honest default for a genuine search.
 #   exploratory  a fixed floor at the measured crypto null. Gates nothing;
 #                surfaces candidates for a second, stricter look.
-STRICTNESS = ("strict", "balanced", "exploratory")
+#   no_decay     the multiplicity bar is paid ONCE, by the full sample, and the
+#                recent third is asked a different question: is the edge still
+#                there? `strict` asks the recent third to clear the whole bar on
+#                a third of the data, which only a very large Sharpe can do
+#                (see `Verdict.min_detectable_sharpe_recent`); an ordinary real
+#                edge fails it by construction. This mode is not looser about
+#                the search -- same bar, gross, positive, alignment sweep, and
+#                above the permuted null -- it is honest about power.
+STRICTNESS = ("strict", "balanced", "exploratory", "no_decay")
+
+# The one-sided 5% normal quantile: what "the recent third is positive and not
+# noise" means in `no_decay`. A single test, on a hypothesis the full sample
+# already selected, so no multiplicity is owed on it.
+NO_DECAY_RECENT_T = 1.645
+
+# An annual Sharpe above this is rare enough that a test unable to detect
+# anything smaller is, for practical purposes, unable to pass anything.
+POWER_WARNING_SHARPE = 2.0
+
+# Sessions per year on an exchange calendar, against 365 for a 24/7 one.
+TRADING_DAYS_PER_YEAR = 252.0
+CALENDAR_DAYS_PER_YEAR = 365.0
 
 # Portfolio weighting. Equal-weight is the default because it is the assumption
 # every prior measurement in this project used, so changing it silently would
@@ -120,6 +141,37 @@ class Verdict:
     periods_offered: int = 0
     strictness: str = "strict"
     weighting: str = "equal"
+    # Rows of the price panel per year: 365 for a daily 24/7 panel, 252 for a
+    # business-day one. It is what turns a period count into elapsed years.
+    periods_per_year: float = CALENDAR_DAYS_PER_YEAR
+
+    def _min_detectable_sharpe(self, leg: Leg) -> float | None:
+        """The annual Sharpe a leg would need to clear `bar`.
+
+        t = Sharpe x sqrt(years), so the smallest detectable Sharpe is
+        `bar / sqrt(years)` with `years = n * horizon / periods_per_year`.
+        `None` when the leg holds no periods: an unmeasured leg has no power
+        to state, and an infinite Sharpe would read as a number.
+        """
+        if leg.n <= 0 or self.horizon <= 0 or self.periods_per_year <= 0:
+            return None
+        years = leg.n * self.horizon / self.periods_per_year
+        return self.bar / math.sqrt(years)
+
+    @property
+    def min_detectable_sharpe_full(self) -> float | None:
+        """Annual Sharpe the full sample needs to clear the bar."""
+        return self._min_detectable_sharpe(self.gross)
+
+    @property
+    def min_detectable_sharpe_recent(self) -> float | None:
+        """Annual Sharpe the recent third ALONE needs to clear the bar.
+
+        This is the number that says what `strict` can and cannot pass. On a
+        two-year recent third against a bar of 4.4 it is 3.1: no strategy with
+        an ordinary real edge (Sharpe 0.5-1.5) can pass, however real it is.
+        """
+        return self._min_detectable_sharpe(self.recent_third)
 
     @property
     def passed(self) -> bool:
@@ -138,6 +190,19 @@ class Verdict:
         )
         if self.strictness == "exploratory":
             return recent_ok
+        if self.strictness == "no_decay":
+            # The full sample pays the multiplicity bar; the recent third only
+            # has to show the edge is still present. A NaN null fails the
+            # comparison, which is the safe direction: an uncalibrated result
+            # does not pass.
+            return (
+                abs(self.gross.t) > self.bar
+                and self.gross.mean_ann_pct > 0
+                and self.alignment_clearing >= 0.5
+                and abs(self.gross.t) > self.null_p95
+                and self.recent_third.mean_ann_pct > 0
+                and self.recent_third.t > NO_DECAY_RECENT_T
+            )
         if self.strictness == "balanced":
             return recent_ok and self.alignment_clearing >= 0.5
         return (
@@ -164,7 +229,33 @@ class Verdict:
         )
 
 
-def _stat(returns: np.ndarray, horizon: int) -> Leg:
+def _infer_periods_per_year(index: pd.Index) -> float:
+    """Rows per year of a price panel, read off its own index.
+
+    A daily panel with no weekend rows is an exchange calendar: 252 sessions a
+    year, and annualising it at 365 overstates every mean by 45% and every
+    elapsed-years figure the other way. A daily panel WITH weekend rows is a
+    24/7 market and stays at 365, which is what every crypto measurement here
+    used. Any other regular spacing is annualised by its median gap.
+
+    An index that carries no dates cannot be read, and keeps the historical
+    365 rather than guessing.
+    """
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 3:
+        return CALENDAR_DAYS_PER_YEAR
+    gaps = np.diff(index.asi8) / 86_400e9
+    gap_days = float(np.median(gaps))
+    if not math.isfinite(gap_days) or gap_days <= 0:
+        return CALENDAR_DAYS_PER_YEAR
+    if abs(gap_days - 1.0) <= 1e-6:
+        has_weekends = bool((index.dayofweek >= 5).any())
+        return CALENDAR_DAYS_PER_YEAR if has_weekends else TRADING_DAYS_PER_YEAR
+    return CALENDAR_DAYS_PER_YEAR / gap_days
+
+
+def _stat(
+    returns: np.ndarray, horizon: int, periods_per_year: float = CALENDAR_DAYS_PER_YEAR
+) -> Leg:
     """Mean, t and n for one series of period returns.
 
     Raises on fewer than two observations rather than returning a zero: a
@@ -186,7 +277,7 @@ def _stat(returns: np.ndarray, horizon: int) -> Leg:
         )
     mean = float(returns.mean())
     se = float(returns.std(ddof=1)) / math.sqrt(n)
-    periods = 365.0 / horizon
+    periods = periods_per_year / horizon
     scale = max(abs(mean), float(np.abs(returns).max()))
     degenerate = not math.isfinite(se) or se <= scale * 1e-12
     return Leg(
@@ -399,11 +490,17 @@ def evaluate(
     record: bool = True,
     strictness: str = "strict",
     weighting: str = "equal",
+    periods_per_year: float | None = None,
 ) -> list[Verdict]:
     """Measure one signal across horizons, with every guard applied.
 
     The bar comes from the registry and counts every test this project has ever
     run, including the ones about to happen. It is not a per-script number.
+
+    `periods_per_year` is how many rows of `prices` make a year. Left as
+    `None` it is read off the index (`_infer_periods_per_year`): 365 for a
+    daily 24/7 panel, 252 for a business-day one. It scales the annualised
+    means and the power figures; a t-statistic does not depend on it.
     """
     reg = registry if registry is not None else Registry()
     scores = signal(prices)
@@ -435,9 +532,17 @@ def evaluate(
             f"for everyone else."
         )
 
+    ppy = (
+        _infer_periods_per_year(prices.index)
+        if periods_per_year is None
+        else float(periods_per_year)
+    )
+    if not math.isfinite(ppy) or ppy <= 0:
+        raise ValueError(f"periods_per_year must be a positive number, got {ppy}")
+
     bar = (
         reg.bar(pending_cells=len(horizons))
-        if strictness == "strict"
+        if strictness in ("strict", "no_decay")
         else reg.fdr_bar(pending_cells=len(horizons))
     )
     verdicts: list[Verdict] = []
@@ -463,14 +568,14 @@ def evaluate(
                     turnover=float("nan"), cost_bps=cost_bps,
                     warnings=tuple(warnings),
                     strictness=strictness, weighting=weighting,
-                    periods_offered=offered,
+                    periods_offered=offered, periods_per_year=ppy,
                 )
             )
             continue
 
         cost = turn * cost_bps / 10_000.0
-        gross = _stat(rets, horizon)
-        net = _stat(rets - cost, horizon)
+        gross = _stat(rets, horizon, ppy)
+        net = _stat(rets - cost, horizon, ppy)
 
         # Guard 3: costs shift the mean without touching the variance, so a
         # loser gets a bigger |t| when they are subtracted.
@@ -503,7 +608,7 @@ def evaluate(
         # Guard 4: rank IC measures the median asset, the portfolio earns the mean.
         # `ics` can be shorter than the return series now that degenerate
         # periods are skipped rather than zero-filled.
-        ic = _stat(ics, horizon) if len(ics) >= 2 else Leg(0.0, 0.0, len(ics))
+        ic = _stat(ics, horizon, ppy) if len(ics) >= 2 else Leg(0.0, 0.0, len(ics))
         if abs(ic.t) > bar and abs(gross.t) <= bar:
             warnings.append(
                 f"rank IC is significant (t {ic.t:.2f}) while the portfolio is not; "
@@ -529,13 +634,28 @@ def evaluate(
         cut = len(rets) // 3
         if cut >= 2:
             for lo, hi in ((0, cut), (cut, 2 * cut), (2 * cut, len(rets))):
-                thirds.append(_stat(rets[lo:hi], horizon))
+                thirds.append(_stat(rets[lo:hi], horizon, ppy))
         recent = thirds[-1] if thirds else gross
         if abs(gross.t) > bar and abs(recent.t) <= bar:
             warnings.append(
                 "significant full-sample but not in the most recent third; every "
                 "strategy retired in this project looked exactly like this"
             )
+
+        # Power. `strict`, `balanced` and `exploratory` all ask the recent third
+        # to clear the bar by itself, on a third of the periods. Saying what
+        # Sharpe that takes is the difference between "tested and absent" and
+        # "this test could not have seen it".
+        recent_years = recent.n * horizon / ppy
+        if recent_years > 0:
+            needed = bar / math.sqrt(recent_years)
+            if needed > POWER_WARNING_SHARPE:
+                warnings.append(
+                    f"the recent third spans {recent_years:.2f} years, so clearing "
+                    f"the bar of {bar:.2f} there needs an annual Sharpe above "
+                    f"{needed:.1f}; a real edge smaller than that cannot pass, "
+                    f"and a failure here is not evidence it is absent"
+                )
 
         null_p95, null_names, real_names = _permutation_p95(
             scores, prices, horizon=horizon, quantile=quantile,
@@ -589,7 +709,7 @@ def evaluate(
                 ic_t=ic.t, turnover=float(turn.mean()), cost_bps=cost_bps,
                 warnings=tuple(warnings),
                 strictness=strictness, weighting=weighting,
-                periods_offered=offered,
+                periods_offered=offered, periods_per_year=ppy,
             )
         )
 

@@ -274,6 +274,8 @@ async def _predict(
     horizon_days=30,
     upper="103",
     lower="98",
+    created_at=None,
+    horizon_ends_at=None,
 ):
     """Entry 100, target 103, stop 98 -- 300bps up against 200bps down, the
     barrier geometry AUTOTRADE_PLAN.md section 12 prices."""
@@ -284,46 +286,78 @@ async def _predict(
         """
         INSERT INTO prediction (entity_id, method, direction, confidence,
                                 entry_price, upper_barrier, lower_barrier,
-                                horizon_ends_at, provenance, outcome, resolved_at)
+                                horizon_ends_at, provenance, outcome, resolved_at,
+                                created_at)
         VALUES ($1,$2,'up',$3,100,$8,$9,$4,$5::jsonb,
-                $6::prediction_outcome,$7)
+                $6::prediction_outcome,$7,$10)
         """,
         entity_id,
         method,
         confidence,
-        NOW + timedelta(days=horizon_days),
+        horizon_ends_at
+        if horizon_ends_at is not None
+        else NOW + timedelta(days=horizon_days),
         json.dumps(provenance),
         "pending" if resolved_at is None else ("upper" if hit else "lower"),
         resolved_at,
         Decimal(upper),
         Decimal(lower),
+        # The decision time. A resolved fixture row is decided an hour before
+        # it resolves unless the test says otherwise, so rows that resolve at
+        # one instant were also decided at one instant (the column default,
+        # now(), would spread them over the microseconds the inserts took).
+        created_at
+        if created_at is not None
+        else (NOW if resolved_at is None else resolved_at - timedelta(hours=1)),
     )
 
 
 async def _history(db, entities, *, method, n, hits, **kw):
-    """`n` resolved predictions over `n` hours and `n` horizon dates, `hits` correct.
+    """`n` resolved predictions over `n` days and `n` horizon dates, `hits` correct.
+
+    One call a day, decided at midnight, resolved six hours later, horizon one
+    day out -- all in the past. Day-scale, not hour-scale, because the
+    walk-forward now splits on the decision date and purges any training call
+    whose horizon is still open when the test window starts: a hundred calls
+    made over a hundred hours on thirty-day horizons have no closed training
+    record at all, which is the truth about them and not a fixture to test a
+    passing walk-forward with.
+
+    Stated confidence is 0.65: the gate requires a bucket to beat its own mean
+    confidence, and a call stated at 0.85 has to hit more than 85% of the time
+    to show anything.
 
     Three things are spread rather than shared, and each one is load-bearing:
 
-    - **Resolution time**, because the endpoint derives its walk-forward windows
-      from the span between the first and last outcome, and a method whose whole
-      history lands on one instant has no span to split.
+    - **Decision time**, because the endpoint derives its walk-forward windows
+      from the span between the first and last resolved call's decision, and a
+      method whose whole history lands on one instant has no span to split.
     - **Horizon date**, because the gate's sample floor applies to `effective_n`
       -- the count of distinct horizons -- and a fixture resolving everything on
       one date is one observation however many rows it has.
     - **Entity**, because the gate refuses a book carried by a single name, and
       a one-entity fixture is 100% concentrated by definition.
     """
+    kw.setdefault("confidence", 0.65)
     for i in range(n):
         await _predict(
             db,
             entities[i % len(entities)],
             method=method,
-            resolved_at=NOW + timedelta(hours=i),
             hit=i < hits,
-            horizon_days=30 + i,
+            **_daily(i),
             **kw,
         )
+
+
+def _daily(i: int) -> dict:
+    """Call `i` of a one-a-day history ending well before NOW."""
+    decided = NOW - timedelta(days=200) + timedelta(days=i)
+    return {
+        "created_at": decided,
+        "resolved_at": decided + timedelta(hours=6),
+        "horizon_ends_at": decided + timedelta(days=1),
+    }
 
 
 def _find(body, method):
@@ -559,7 +593,7 @@ class TestGateVerdicts:
     ):
         """A method calibrated and validated for paper, refused for scale.
 
-        100 backfilled outcomes, all correct, spread over 100 hours. The
+        100 backfilled outcomes, all correct, spread over 100 days. The
         calibration and the walk-forward both pass on them -- the outcomes are
         real -- and the scale phase still refuses, because a backfill risked
         nothing and thirty free outcomes are not thirty live ones.
@@ -600,7 +634,7 @@ class TestGateVerdicts:
     ):
         """In-sample 76%, forward 70%, and still refused at every phase.
 
-        100 outcomes over 100 hours: the seed slice resolves perfectly, each of
+        100 outcomes over 100 days: the seed slice resolves perfectly, each of
         the four forward slices at 70%. The pooled hit rate is above the 60%
         target, so a verdict read off the point estimate would admit this to
         paper. Its Wilson interval is [0.592, 0.789] -- the sample cannot
@@ -615,9 +649,9 @@ class TestGateVerdicts:
                 db,
                 entities[i % len(entities)],
                 method=method,
-                resolved_at=NOW + timedelta(hours=i),
                 hit=i < 20 or ((i - 20) % 20) < 14,
-                horizon_days=30 + i,
+                confidence=0.65,
+                **_daily(i),
             )
 
         app = _app(database_url)

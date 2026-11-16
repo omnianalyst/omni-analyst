@@ -219,9 +219,15 @@ def test_market_model_attribution_basic_shape_and_additivity():
     assert res.beta == pytest.approx(1.3, abs=1e-2)
     assert res.alpha == pytest.approx(alpha_daily * 252, abs=0.5)
     assert 0.95 < res.r_squared <= 1.0
-    # V5/F4: the defined-path IR value must be asserted. Without this, a
+    # V5/F4: the defined-path ratio values must be asserted. Without this, a
     # regression to v1's ``information_ratio = 0`` fabrication passes the suite.
-    assert res.information_ratio == pytest.approx(res.alpha / res.tracking_error, rel=1e-9)
+    # alpha / residual std is the APPRAISAL ratio; the information ratio is
+    # mean active return over active-return std, the sibling function's value.
+    assert res.appraisal_ratio == pytest.approx(res.alpha / res.tracking_error, rel=1e-9)
+    assert res.information_ratio == pytest.approx(
+        annualized_information_ratio(port, bench), rel=1e-9
+    )
+    assert res.information_ratio != pytest.approx(res.appraisal_ratio, rel=1e-3)
     # Annualized additivity: total = factor + specific (residuals mean-zero).
     assert res.factor_return + res.specific_return == pytest.approx(res.total_return, abs=1e-9)
     # n_observations reported.
@@ -535,6 +541,30 @@ def test_factor_regression_empty_asset_series_raises():
     fr = _make_factor_returns()
     with pytest.raises(Unavailable, match="asset_returns is empty"):
         regress_factor_exposures(pd.Series([], dtype=float), fr)
+
+
+def test_market_model_alpha_is_on_excess_returns():
+    """A beta-0.5 portfolio that earns exactly rf + 0.5 * (bench - rf) has zero
+    alpha. Regressed on raw returns it shows rf * (1 - beta) = 2.5%/yr of
+    alpha at a 5% risk-free rate."""
+    rng = np.random.default_rng(9)
+    rf = 0.05
+    rf_daily = rf / 252
+    bench = pd.Series(rng.normal(0.0006, 0.01, 750), index=idx(750))
+    port = pd.Series(
+        rf_daily + 0.5 * (bench.to_numpy() - rf_daily) + rng.normal(0, 1e-6, 750),
+        index=idx(750),
+    )
+    raw = market_model_attribution(port, bench)
+    excess = market_model_attribution(port, bench, risk_free_rate=rf)
+    assert raw.alpha == pytest.approx(rf * (1 - 0.5), abs=1e-3)
+    assert excess.alpha == pytest.approx(0.0, abs=1e-3)
+    assert excess.beta == pytest.approx(0.5, abs=1e-3)
+    assert excess.risk_free_rate == rf
+    assert excess.factor_return + excess.specific_return == pytest.approx(
+        excess.total_return, abs=1e-9
+    )
+    assert excess.total_return == pytest.approx(port.mean() * 252 - rf, abs=1e-9)
 
 
 # --------------------------------------------------------------------------- #

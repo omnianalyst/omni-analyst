@@ -43,7 +43,13 @@ from omni.ingest.protocol import Unavailable
 from omni.llm.protocol import LanguageModel
 from omni.polymarket.active import ActiveMarket, fetch_current_resolution, list_active_markets
 from omni.polymarket.news import derive_category
-from omni.polymarket.pnl import DEFAULT_FEE_RATES, Fill, summarise
+from omni.polymarket.pnl import (
+    DEFAULT_FEE_RATES,
+    DEFAULT_HALF_SPREAD,
+    Fill,
+    side_and_entry,
+    summarise,
+)
 from omni.polymarket.types import Document, Estimation, MarketAtCutoff, ResolvedMarket
 
 DEFAULT_THRESHOLD = 0.05  # 5% absolute edge required to open a paper trade
@@ -176,25 +182,37 @@ def _estimation_to_position(
     size_usd: float,
     method: str,
     model_name: str,
+    taker: bool = True,
+    half_spread: float = DEFAULT_HALF_SPREAD,
 ) -> TradeOpen | None:
     """Convert an LLM estimate into a paper position, or None if below
     threshold. Returns None rather than a zero-size position so the scan
     can simply skip None entries.
 
-    Direction mapping: estimator returns ("up"/"down", confidence). "up" =>
-    trade YES; "down" => trade NO. For a NO trade the share price is (1 - p)
-    and the share size is notional / (1 - p).
+    The side is the side of the disagreement: YES when the model's P(yes) is
+    above the market's YES price, NO when it is below (`pnl.side_and_entry`).
+    It is NOT read off the estimator's "up"/"down", which only says which side
+    of 0.5 the estimate sits on -- a model at 0.65 against a market at 0.85
+    is "up" and still believes YES is overpriced.
+
+    A taker (the default) pays the fee curve and crosses `half_spread`, so
+    the recorded entry is the side's mid plus that. `taker=False` records the
+    best case: a free fill at mid.
     """
     llm_p_yes = est.confidence if est.direction == "up" else 1.0 - est.confidence
     edge = abs(llm_p_yes - market.yes_price)
     if edge < threshold:
         return None
 
-    direction = "YES" if est.direction == "up" else "NO"
-    entry_price = market.yes_price if direction == "YES" else (1.0 - market.yes_price)
-    if entry_price <= 0.0 or entry_price >= 1.0:
-        # Edge case: market at 0 or 1 — no tradeable side.
+    side = side_and_entry(
+        model_p_yes=llm_p_yes,
+        market_p_yes=market.yes_price,
+        half_spread=half_spread if taker else 0.0,
+    )
+    if side is None:
+        # Market at 0 or 1, or no disagreement — no tradeable side.
         return None
+    direction, entry_price = side
     size_shares = size_usd / entry_price
     fee_rate = DEFAULT_FEE_RATES.get(derive_category(_active_market_to_resolved_shape(market)), 0.05)
 
@@ -211,7 +229,7 @@ def _estimation_to_position(
         llm_prob=llm_p_yes,
         market_prob=market.yes_price,
         fee_rate=fee_rate,
-        taker=False,
+        taker=taker,
         method=method,
         model=model_name,
     )
@@ -255,6 +273,8 @@ async def scan(
     method: str = "polymarket_paper_glm_5_2",
     min_volume: float = 1000.0,
     document_provider=None,
+    taker: bool = True,
+    half_spread: float = DEFAULT_HALF_SPREAD,
 ) -> tuple[int, int]:
     """One scan pass. Returns `(n_markets_seen, n_trades_opened)`.
 
@@ -296,6 +316,7 @@ async def scan(
             est, market,
             threshold=threshold, size_usd=size_usd,
             method=method, model_name=model.name,
+            taker=taker, half_spread=half_spread,
         )
         if position is None:
             continue

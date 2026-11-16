@@ -92,6 +92,8 @@ _NOT_BACKFILLED = (
 # a float.
 _RESOLVED = f"""
 SELECT p.resolved_at,
+       p.created_at,
+       p.horizon_ends_at,
        p.confidence,
        width_bucket(p.confidence, 0, 1, 10)              AS bucket,
        (width_bucket(p.confidence, 0, 1, 10) - 1) / 10.0 AS bucket_low,
@@ -107,8 +109,8 @@ WHERE p.method = $1
   AND p.outcome <> 'pending'
   AND p.resolved_at IS NOT NULL
   AND (p.audience_user_id IS NULL OR p.audience_user_id = $3)
-  AND p.resolved_at >= $4
-  AND p.resolved_at < $5
+  AND p.created_at >= $4
+  AND p.created_at < $5
 """
 
 
@@ -131,8 +133,17 @@ def wilson_interval(
         raise ValueError(f"{hits} hits out of {n} trials is not a sample")
     if n == 0:
         return None
+    return _wilson_from_rate(hits / n, float(n), z=z)
 
-    p = hits / n
+
+def _wilson_from_rate(
+    p: float, n: float, *, z: float = Z_95
+) -> tuple[float, float] | None:
+    """The Wilson interval for an observed rate over a (possibly fractional)
+    sample size -- the form the effective sample size needs, where `n` is a
+    count of independent observations rather than of rows."""
+    if not n > 0:
+        return None
     z_sq = z * z
     denominator = 1.0 + z_sq / n
     centre = (p + z_sq / (2 * n)) / denominator
@@ -143,6 +154,54 @@ def wilson_interval(
         max(0.0, centre - half_width),
         min(1.0, centre + half_width),
     )
+
+
+def effective_sample_size(
+    intervals: Sequence[tuple[datetime, datetime]],
+) -> float:
+    """How many independent observations a set of label windows amounts to.
+
+    Each prediction's outcome is decided over its label window: from the
+    decision to the moment it resolved (first barrier touch, or the horizon).
+    Two predictions whose windows overlap are scored on a shared stretch of
+    price path, so they are not two observations: a weekly call on a 90-day
+    horizon overlaps a dozen of its neighbours, and five hundred entities
+    called on one date share essentially all of it.
+
+    This is the sum of average uniqueness (Lopez de Prado, AFML ch. 4): at
+    every instant a window is alive it owns `1 / concurrency` of that instant,
+    its uniqueness is the time-average of that share over its own life, and the
+    effective sample is the sum. Windows that never overlap each count 1, so
+    the result equals `len(intervals)`; `k` identical windows count 1 between
+    them. Concurrency is counted across ALL entities, which treats names called
+    over the same period as one bet -- the same deliberately pessimistic end
+    `trading.expectancy.effective_n` stands on.
+
+    A zero-length (or inverted) window is given the smallest representable
+    life rather than dropped: it is still an observation.
+    """
+    if not intervals:
+        return 0.0
+    tick = timedelta(microseconds=1)
+    spans = [(a, b if b > a else a + tick) for a, b in intervals]
+    points = sorted({t for span in spans for t in span})
+    index = {t: i for i, t in enumerate(points)}
+    delta = [0] * (len(points) + 1)
+    for a, b in spans:
+        delta[index[a]] += 1
+        delta[index[b]] -= 1
+    # prefix[i] = integral of 1/concurrency from points[0] to points[i].
+    prefix = [0.0] * len(points)
+    live = 0
+    for i in range(len(points) - 1):
+        live += delta[i]
+        width = (points[i + 1] - points[i]).total_seconds()
+        prefix[i + 1] = prefix[i] + (width / live if live > 0 else 0.0)
+    total = 0.0
+    for a, b in spans:
+        life = (b - a).total_seconds()
+        total += (prefix[index[b]] - prefix[index[a]]) / life
+    return total
 
 
 @dataclass(frozen=True)
@@ -199,6 +258,21 @@ class WalkForwardWindow:
     live_n_test: int
     live_hits: int
     min_per_window: int
+    # The independent-observation count of the surfaced test sample (see
+    # `effective_sample_size`). Defaults to None for a caller constructing a
+    # window by hand, in which case the raw count stands in -- which is only
+    # correct for label windows that do not overlap.
+    effective_n_test: float | None = None
+    # Sum of the surfaced test calls' stated confidences. Confidence is the
+    # driftless first-passage probability of each call's own barriers, so the
+    # mean is the hit rate this sample would post with no edge at all.
+    confidence_sum: float | None = None
+
+    @property
+    def effective_n(self) -> float:
+        if self.effective_n_test is None:
+            return float(self.n_test)
+        return min(float(self.n_test), self.effective_n_test)
 
     @property
     def hit_rate(self) -> float | None:
@@ -266,8 +340,33 @@ class WalkForwardResult:
         return self.pooled_hits / self.pooled_n
 
     @property
+    def pooled_effective_n(self) -> float:
+        """Independent observations behind the pooled rate.
+
+        Overlapping label windows are one stretch of price path scored many
+        times; the raw `pooled_n` counts rows, this counts evidence. It is what
+        the interval and the verdict stand on.
+        """
+        return sum(w.effective_n for w in self.qualifying_windows)
+
+    @property
+    def zero_edge_rate(self) -> float | None:
+        """The pooled hit rate barrier geometry alone would produce.
+
+        None when any qualifying window did not carry its confidences: the
+        baseline is then unknown, and an unknown baseline cannot be beaten.
+        """
+        windows = self.qualifying_windows
+        if not windows or any(w.confidence_sum is None for w in windows):
+            return None
+        return sum(w.confidence_sum for w in windows) / self.pooled_n
+
+    @property
     def wilson_interval(self) -> tuple[float, float] | None:
-        return wilson_interval(self.pooled_hits, self.pooled_n)
+        rate = self.pooled_hit_rate
+        if rate is None:
+            return None
+        return _wilson_from_rate(rate, self.pooled_effective_n)
 
     @property
     def positive(self) -> bool | None:
@@ -281,9 +380,18 @@ class WalkForwardResult:
         venue is being considered.
         """
         interval = self.wilson_interval
-        if interval is None or self.pooled_n < MIN_POOLED_FOR_VERDICT:
+        # The floor is on INDEPENDENT observations. Two thousand rows drawn
+        # from a hundred and fifty overlapping horizons are a hundred and
+        # fifty observations, and thirty rows that are three are no verdict.
+        if interval is None or self.pooled_effective_n < MIN_POOLED_FOR_VERDICT:
             return None
-        return interval[0] > self.target_hit_rate
+        # Clearing the target is not enough: calls with a near target and a far
+        # stop hit 80% of the time on a random walk. The lower bound must also
+        # clear what the surfaced calls' own barriers imply with no edge.
+        baseline = self.zero_edge_rate
+        if baseline is None:
+            return None
+        return interval[0] > self.target_hit_rate and interval[0] > baseline
 
 
 def rolling_windows(
@@ -341,36 +449,49 @@ def _assert_test_windows_do_not_overlap(windows: Sequence[WindowSpec]) -> None:
             )
 
 
-def _threshold_from(rows: Sequence, *, method: str, entity_kind: str,
-                    target_hit_rate: float) -> float | None:
-    """The live gate's own threshold, derived from the training rows alone.
+def _training_buckets(rows: Sequence, *, method: str, entity_kind: str) -> list[Calibration]:
+    """The training rows as the gate's own calibration buckets.
 
-    Reuses `gate.calibrated_threshold` and `gate.Calibration` rather than
-    reimplementing the decile logic, so the threshold this report validates is
-    the threshold the product would actually have applied.
+    Reuses `gate.Calibration` rather than reimplementing the decile logic, so
+    the rule this report validates is the rule the product would actually have
+    applied -- including the bucket's mean confidence, which is the zero-edge
+    hit rate the gate requires a bucket to beat. `width_bucket` files a
+    confidence of exactly 1.0 in an eleventh bucket; it is folded into the top
+    decile exactly as `publish.load_calibration` folds it.
     """
     n_by_bucket: dict[int, int] = {}
     hits_by_bucket: dict[int, int] = {}
-    edges: dict[int, tuple[float, float]] = {}
+    conf_by_bucket: dict[int, float] = {}
     for row in rows:
-        bucket = int(row["bucket"])
+        bucket = min(int(row["bucket"]), 10)
         n_by_bucket[bucket] = n_by_bucket.get(bucket, 0) + 1
         if row["is_hit"]:
             hits_by_bucket[bucket] = hits_by_bucket.get(bucket, 0) + 1
-        edges[bucket] = (float(row["bucket_low"]), float(row["bucket_high"]))
+        conf_by_bucket[bucket] = conf_by_bucket.get(bucket, 0.0) + float(
+            row["confidence"]
+        )
 
-    buckets = [
+    return [
         Calibration(
             claim_type=entity_kind,
             method=method,
-            bucket_low=edges[bucket][0],
-            bucket_high=edges[bucket][1],
+            bucket_low=(bucket - 1) / 10.0,
+            bucket_high=bucket / 10.0,
             n=n,
             hits=hits_by_bucket.get(bucket, 0),
+            mean_confidence=conf_by_bucket[bucket] / n,
         )
         for bucket, n in n_by_bucket.items()
     ]
-    return calibrated_threshold(buckets, target_hit_rate=target_hit_rate)
+
+
+def _threshold_from(rows: Sequence, *, method: str, entity_kind: str,
+                    target_hit_rate: float) -> float | None:
+    """The lowest qualifying decile, derived from the training rows alone."""
+    return calibrated_threshold(
+        _training_buckets(rows, method=method, entity_kind=entity_kind),
+        target_hit_rate=target_hit_rate,
+    )
 
 
 async def walk_forward(
@@ -422,28 +543,42 @@ async def walk_forward(
 
     scored: list[WalkForwardWindow] = []
     for spec in windows:
+        # Split on the DECISION date, purged. A row trains only if it was
+        # called inside the training range and its whole label window
+        # `[created_at, horizon_ends_at]` had closed before the test window
+        # opened. Splitting on `resolved_at` instead put calls made days apart
+        # on one entity on both sides of the cut while they shared most of a
+        # price path, and admitted late training calls only when they resolved
+        # early -- a training edge made of barrier touches with the expiries
+        # missing.
         train = [
             r for r in rows
-            if spec.train_start <= r["resolved_at"] < spec.train_end
+            if spec.train_start <= r["created_at"] < spec.train_end
+            and r["horizon_ends_at"] <= spec.test_start
+            and r["resolved_at"] <= spec.test_start
         ]
+        # Known residual: the most recent test window holds only the calls
+        # that have already resolved, so calls still open (which, if they
+        # expire, are mostly misses for a directional call) are absent from it.
+        # Excluding every test call whose horizon is not yet over would remove
+        # that, at the cost of the newest window; it is not done here.
         test = [
             r for r in rows
-            if spec.test_start <= r["resolved_at"] < spec.test_end
+            if spec.test_start <= r["created_at"] < spec.test_end
         ]
-        threshold = _threshold_from(
-            train,
-            method=method,
-            entity_kind=entity_kind,
-            target_hit_rate=target_hit_rate,
-        )
-        # No threshold means the training window could not qualify any decile,
-        # so the gate would have surfaced nothing and there is nothing forward
-        # to score. An empty test sample, not a failed one.
-        surfaced = (
-            []
-            if threshold is None
-            else [r for r in test if float(r["confidence"]) >= threshold]
-        )
+        buckets = _training_buckets(train, method=method, entity_kind=entity_kind)
+        threshold = calibrated_threshold(buckets, target_hit_rate=target_hit_rate)
+        # The live gate judges a call on its OWN decile, so the forward sample
+        # is the test calls whose decile showed an edge in training -- not
+        # everything above the lowest one that did. No qualifying decile means
+        # the gate would have surfaced nothing: an empty test sample, not a
+        # failed one.
+        qualifying = {
+            round(b.bucket_high * 10)
+            for b in buckets
+            if b.shows_edge(target_hit_rate=target_hit_rate)
+        }
+        surfaced = [r for r in test if min(int(r["bucket"]), 10) in qualifying]
         scored.append(
             WalkForwardWindow(
                 train_start=spec.train_start,
@@ -457,6 +592,13 @@ async def walk_forward(
                 live_n_test=sum(1 for r in surfaced if r["is_live"]),
                 live_hits=sum(1 for r in surfaced if r["is_hit"] and r["is_live"]),
                 min_per_window=min_per_window,
+                confidence_sum=sum(float(r["confidence"]) for r in surfaced),
+                # A call's label window is the stretch of path that decided
+                # it: from the decision to the moment it resolved (the first
+                # barrier touch, or the horizon on an expiry).
+                effective_n_test=effective_sample_size(
+                    [(r["created_at"], r["resolved_at"]) for r in surfaced]
+                ),
             )
         )
 

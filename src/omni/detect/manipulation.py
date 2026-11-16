@@ -69,7 +69,10 @@ class Finding:
 
     ``confidence`` is in ``[0.0, 1.0]`` and is always derived from a
     percentile rank or ratio of the symbol's own trailing distribution -
-    never a hardcoded score.
+    never a hardcoded score. It is a RANK, not a probability of manipulation:
+    on an ordinary bar it is uniform on ``[0, 1]`` and reads 0.5 on average.
+    Only ``detected`` says a pattern fired; the composite below is built from
+    that, not from the raw ranks.
     """
 
     pattern: str
@@ -443,8 +446,17 @@ class ManipulationAnalyzer:
             "LAYERING": self._unsupported_level2("LAYERING"),
         }
         detected = [k for k, v in findings.items() if v["detected"]]
-        # Conservative composite: the strongest detector's confidence.
+        # The strongest rank among the patterns that actually FIRED, and zero
+        # when none did. It was the max of all three raw ranks -- and the max
+        # of three uniform ranks averages 0.75 on a perfectly ordinary bar, so
+        # every quiet day reported a "confidence" of manipulation above a coin
+        # flip. The unconditional max is still reported, under a name that
+        # says what it is.
         composite_confidence = max(
+            (v["confidence"] for v in findings.values() if v["detected"]),
+            default=0.0,
+        )
+        max_percentile_rank = max(
             (v["confidence"] for v in findings.values()), default=0.0
         )
         return {
@@ -452,6 +464,7 @@ class ManipulationAnalyzer:
             "unsupported": unsupported,
             "detected_patterns": detected,
             "composite_confidence": round(composite_confidence, 4),
+            "max_percentile_rank": round(max_percentile_rank, 4),
         }
 
     @staticmethod

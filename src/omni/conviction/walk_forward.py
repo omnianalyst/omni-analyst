@@ -8,8 +8,8 @@ deterministic noise will calibrate monotonically when the gate sees its own
 outcomes.
 
 This module answers the harder question. It splits predictions at a cutoff by
-``resolved_at`` (when the outcome became knowable), derives the threshold from
-the PRE-cutoff calibration only, applies that threshold to POST-cutoff
+the decision date, purging training calls whose label window straddles the
+cutoff, derives the qualifying deciles from the PRE-cutoff calibration only, applies that threshold to POST-cutoff
 predictions, and reports the forward hit-rate. If the forward rate holds near
 the in-sample rate (and above the target), the edge is real; if it collapses,
 the gate has been selecting on its own overfitting.
@@ -26,7 +26,7 @@ from datetime import datetime
 
 # Must match gate.MIN_RESOLVED_FOR_CALIBRATION: a bucket below this floor has
 # no statistically meaningful rate, so it must not move the threshold.
-from omni.conviction.gate import MIN_RESOLVED_FOR_CALIBRATION
+from omni.conviction.gate import MIN_RESOLVED_FOR_CALIBRATION, wilson_lower_bound
 
 # 0.0..1.0 in tenths, matching the live calibration_bucket scheme.
 _BUCKET_WIDTH = 0.1
@@ -40,6 +40,12 @@ class PredictionRow:
     direction: str  # "up" | "down"
     outcome: str  # "upper" | "lower" | "hit" (pending filtered upstream)
     resolved_at: datetime
+    # When the call was made and when its label window closes. Optional only
+    # for hand-built rows; `fetch_for_walk_forward` always supplies both, and
+    # with them the split is on the decision date and purged (see
+    # `walk_forward`).
+    created_at: datetime | None = None
+    horizon_ends_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -104,31 +110,61 @@ def _bucket_low(confidence: float) -> float:
     return idx * _BUCKET_WIDTH
 
 
-def _derive_threshold(
+def _qualifying_buckets(
     train: Sequence[PredictionRow], *, target_hit_rate: float
-) -> float | None:
-    """The lowest decile whose training hit-rate clears the target.
+) -> set[float]:
+    """The deciles whose training record shows an edge.
 
-    Mirrors gate.calibrated_threshold: a bucket below the sample floor is
-    treated as no-information (rate None), never as a low rate.
+    Mirrors `gate.Calibration.shows_edge`: at least the sample floor, and a
+    Wilson lower bound above both the target and the bucket's own mean
+    confidence -- the hit rate its barrier geometry gives with no edge.
     """
     n_by_bucket: dict[float, int] = {}
     hits_by_bucket: dict[float, int] = {}
+    conf_by_bucket: dict[float, float] = {}
     for row in train:
         b = _bucket_low(row.confidence)
         n_by_bucket[b] = n_by_bucket.get(b, 0) + 1
+        conf_by_bucket[b] = conf_by_bucket.get(b, 0.0) + row.confidence
         if _is_hit(row):
             hits_by_bucket[b] = hits_by_bucket.get(b, 0) + 1
 
-    qualifying = []
+    qualifying: set[float] = set()
     for b, n in n_by_bucket.items():
         if n < MIN_RESOLVED_FOR_CALIBRATION:
             continue
-        if hits_by_bucket.get(b, 0) / n >= target_hit_rate:
-            qualifying.append(b)
+        lower = wilson_lower_bound(hits_by_bucket.get(b, 0), n)
+        if lower is None:
+            continue
+        if lower > target_hit_rate and lower > conf_by_bucket[b] / n:
+            qualifying.add(b)
+    return qualifying
+
+
+def _derive_threshold(
+    train: Sequence[PredictionRow], *, target_hit_rate: float
+) -> float | None:
+    """The lowest decile whose training record shows an edge, or None."""
+    qualifying = _qualifying_buckets(train, target_hit_rate=target_hit_rate)
     if not qualifying:
         return None
     return min(qualifying)
+
+
+def _in_training(row: PredictionRow, cutoff: datetime) -> bool:
+    if row.created_at is None or row.horizon_ends_at is None:
+        return row.resolved_at < cutoff
+    return (
+        row.created_at < cutoff
+        and row.horizon_ends_at <= cutoff
+        and row.resolved_at <= cutoff
+    )
+
+
+def _in_test(row: PredictionRow, cutoff: datetime) -> bool:
+    if row.created_at is None:
+        return row.resolved_at >= cutoff
+    return row.created_at >= cutoff
 
 
 def walk_forward(
@@ -139,9 +175,13 @@ def walk_forward(
 ) -> list[WalkForwardResult]:
     """One result per method, each splitting its predictions at ``cutoff``.
 
-    Training = resolved before cutoff; test = resolved at/after. The threshold
-    is derived from training only and applied to test. Methods with no test
-    predictions are omitted (nothing forward to score).
+    Rows carrying `created_at` and `horizon_ends_at` are split on the decision
+    date and purged: training = called before the cutoff with the whole label
+    window closed by it; test = called at/after. A row missing either falls
+    back to `resolved_at`, which is only safe for label windows that do not
+    straddle the cutoff. The qualifying deciles are derived from training only
+    and a test call is surfaced when its OWN decile qualified, exactly as the
+    live gate decides. Methods with no test predictions are omitted.
     """
     rows = [r for r in predictions if r.outcome not in ("pending", None)]
     methods: dict[str, list[PredictionRow]] = {}
@@ -150,11 +190,12 @@ def walk_forward(
 
     results: list[WalkForwardResult] = []
     for method, mrows in methods.items():
-        train = [r for r in mrows if r.resolved_at < cutoff]
-        test = [r for r in mrows if r.resolved_at >= cutoff]
+        train = [r for r in mrows if _in_training(r, cutoff)]
+        test = [r for r in mrows if _in_test(r, cutoff)]
         if not test:
             continue
-        threshold = _derive_threshold(train, target_hit_rate=target_hit_rate)
+        qualifying = _qualifying_buckets(train, target_hit_rate=target_hit_rate)
+        threshold = min(qualifying) if qualifying else None
 
         if threshold is None:
             results.append(WalkForwardResult(
@@ -165,9 +206,9 @@ def walk_forward(
             ))
             continue
 
-        test_surfaced = [r for r in test if r.confidence >= threshold]
+        test_surfaced = [r for r in test if _bucket_low(r.confidence) in qualifying]
         test_hits = sum(1 for r in test_surfaced if _is_hit(r))
-        train_surfaced = [r for r in train if r.confidence >= threshold]
+        train_surfaced = [r for r in train if _bucket_low(r.confidence) in qualifying]
         train_hits = sum(1 for r in train_surfaced if _is_hit(r))
 
         results.append(WalkForwardResult(
@@ -187,7 +228,8 @@ async def fetch_for_walk_forward(pool) -> list[PredictionRow]:
     touchpoint; everything above is pure and unit-tested."""
     rows = await pool.fetch(
         """
-        SELECT method, confidence, direction, outcome, resolved_at
+        SELECT method, confidence, direction, outcome, resolved_at,
+               created_at, horizon_ends_at
         FROM prediction
         WHERE outcome IS NOT NULL AND outcome <> 'pending'
           AND resolved_at IS NOT NULL
@@ -200,6 +242,8 @@ async def fetch_for_walk_forward(pool) -> list[PredictionRow]:
             direction=r["direction"],
             outcome=r["outcome"],
             resolved_at=r["resolved_at"],
+            created_at=r["created_at"],
+            horizon_ends_at=r["horizon_ends_at"],
         )
         for r in rows
     ]

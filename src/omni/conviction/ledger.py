@@ -79,7 +79,7 @@ ORDER BY horizon_ends_at
 
 _LOCK_PREDICTION = """
 SELECT id, entity_id, direction, entry_price, upper_barrier, lower_barrier,
-       horizon_ends_at, created_at, audience_user_id
+       horizon_ends_at, created_at, audience_user_id, provenance
 FROM prediction
 WHERE id = $1 AND outcome = 'pending'
 FOR UPDATE SKIP LOCKED
@@ -110,8 +110,38 @@ WHERE c.entity_id = $1
   AND c.event_date >= $2
   AND c.event_date <= $3
   AND c.knowledge_date <= $5
+  AND ($6::text IS NULL OR COALESCE(c.value->>'venue', c.source) = $6)
 ORDER BY c.event_date
 """
+
+
+def _pinned_price_venue(provenance: object) -> str | None:
+    """The venue a call's entry was read from, when the producer recorded one.
+
+    A producer that anchors its entry on one venue's price (`basis.crossvenue`,
+    `trend.sma`) writes `assumptions.price_venue` at call time, keyed as
+    `COALESCE(value->>'venue', source)`. The resolver then scores the call on
+    that venue's path alone. Without the pin every venue's snapshots interleave
+    into one "path": a basis call's target IS the other venue's price, so that
+    venue's next print trips the barrier with no convergence having happened.
+
+    A call written without one (every row before this existed, and producers
+    with no single-venue entry) resolves on the whole visible path as before.
+    This reads a write-time attribute; it sets no outcome field.
+    """
+    raw = provenance
+    if isinstance(raw, (str, bytes)):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    assumptions = raw.get("assumptions")
+    if not isinstance(assumptions, dict):
+        return None
+    venue = assumptions.get("price_venue")
+    return venue if isinstance(venue, str) and venue else None
 
 
 def _check_straddle(entry: float, upper: float, lower: float) -> None:
@@ -375,6 +405,7 @@ async def _resolve_one(pool, prediction_id: UUID, knowledge_cutoff: datetime) ->
             row["horizon_ends_at"],
             row["audience_user_id"],
             knowledge_cutoff,
+            _pinned_price_venue(row["provenance"]),
         )
         samples = []
         for rec in prices:

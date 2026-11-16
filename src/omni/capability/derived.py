@@ -356,38 +356,36 @@ SAHM_NAME = "macro.sahm_rule_signal"
 SAHM_PRODUCES = "sahm_rule_signal"
 SAHM_KEY = "unrate"
 
-# ``sahm_rule`` reads ``unemployment_values[-3:]`` (the 3-month moving average)
-# and ``unemployment_values[-12:]`` (the 12-month low), and raises ``Unavailable``
-# below 12 observations. The crux where D10's template needed a daily-vs-monthly
+# ``sahm_rule`` compares the current 3-month average with the lowest 3-month
+# average of the previous 12 months, which needs 15 monthly observations, and
+# raises ``Unavailable`` below that. The crux where D10's template needed a daily-vs-monthly
 # adjustment: D10 sized ``window``/``min_obs`` against DAILY treasury yields
 # (252 observations ~= one trading year). UNRATE is MONTHLY, so 12 observations
 # already span ~one calendar year, and a count sized as if the series were daily
 # would be wrong in the opposite direction.
 #
 # Arithmetic (monthly):
-#   - ``min_obs = 12``: the function's hard floor. The spec abstains at 11, so
-#     ``sahm_rule``'s ``Unavailable`` branch (raises at <12) is unreachable
+#   - ``min_obs = 15``: the function's hard floor. The spec abstains at 14, so
+#     ``sahm_rule``'s ``Unavailable`` branch (raises at <15) is unreachable
 #     through the declared path -- abstention is the spec's job, not the
 #     capability's. There is one input series and no two-series intersection, so
 #     unlike YIELD_CURVE no compute-time floor check is needed: per-series
 #     ``min_obs`` sees the whole count the function sees.
-#   - ``window = 18`` = 12 (the function's trailing-12 lookback, ~one calendar
-#     year of monthly data) + 6 months margin for publication lag (a reference
+#   - ``window = 18`` = 15 (the function's lookback: 12 prior 3-month averages
+#     plus the current one) + 3 months margin for publication lag (a reference
 #     month's reading lands in the first week of the following month, so the
 #     newest available observation can lag) and a missing mid-series
 #     observation, so a single hole does not drop the materialized count below
-#     ``min_obs``. ``sahm_rule`` ignores anything older than its trailing-12
-#     slice, so the extra observations are margin only -- passing 18 to a
-#     function that reads ``[-12:]`` and ``[-3:]`` yields the same trailing-12
-#     and trailing-3 as passing exactly 12.
-SAHM_MIN_OBS = 12
+#     ``min_obs``. ``sahm_rule`` ignores anything older than its trailing-15
+#     slice, so the extra observations are margin only.
+SAHM_MIN_OBS = 15
 SAHM_WINDOW = 18
-# 12 monthly observations span ~one calendar year (~335 days at month spacing);
-# 12 DAILY observations span ~11 days. ``min_calendar_days`` rejects the latter,
+# 15 monthly observations span ~14 months (~425 days at month spacing);
+# 15 DAILY observations span ~14 days. ``min_calendar_days`` rejects the latter,
 # closing the count-only limitation D14 documented (a daily series used to
-# satisfy a monthly spec). 330 ~= 11 months, comfortably below a real trailing
-# 12-month span (~341 days at 31-day spacing) and well above any daily span.
-SAHM_MIN_CALENDAR_DAYS = 330
+# satisfy a monthly spec). 410 sits below a real 14-month span (>= 424 days)
+# and well above any daily span.
+SAHM_MIN_CALENDAR_DAYS = 410
 
 SAHM_ARGUMENTS: tuple[ArgumentSpec, ...] = (
     ArgumentSpec(
@@ -421,8 +419,8 @@ async def compute_sahm_rule_signal_declared(pool, gap, *, unemployment: Material
     whose ``evidence`` carries the supporting ``current_unemployment`` /
     ``12m_low`` (reconstructable from the inputs) and the input claim ids.
 
-    ``min_obs=12`` on the spec guarantees ``sahm_rule`` never sees fewer than
-    its 12-observation floor, so its ``Unavailable`` branch is unreachable
+    ``min_obs=15`` on the spec guarantees ``sahm_rule`` never sees fewer than
+    its 15-observation floor, so its ``Unavailable`` branch is unreachable
     through the declared path; the try/except is defense-in-depth, not the
     abstention mechanism. Unlike YIELD_CURVE there is one input series and no
     two-series intersection, so there is no compute-time floor check to add.

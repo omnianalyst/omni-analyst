@@ -152,3 +152,48 @@ def test_non_finite_returns_cannot_emit_risk_adjusted_ratios():
 
     assert metrics.sharpe is None
     assert metrics.information_ratio is None
+
+
+def test_the_return_series_is_net_of_execution_costs():
+    """Sharpe, tracking error and information ratio read the return series.
+
+    It used to hold pre-cost returns while the value path was post-cost, so
+    the risk-adjusted figures of a high-turnover strategy ignored its costs.
+    """
+    experiment = _run(constituent_cost_bps=200.0)
+    for name in ("equal_weight", "ranked_top_n", "hybrid"):
+        path = experiment.strategies[name]
+        compounded = float((1.0 + path.returns).prod())
+        assert compounded == pytest.approx(float(path.values.iloc[-1]), rel=1e-12)
+        assert path.metrics.modelled_cost_pct > 0.0
+
+    cheap = _run(constituent_cost_bps=0.0).strategies["ranked_top_n"]
+    costly = experiment.strategies["ranked_top_n"]
+    assert costly.returns.sum() < cheap.returns.sum()
+    assert costly.metrics.sharpe < cheap.metrics.sharpe
+
+
+def test_the_etf_leg_is_not_charged_its_expense_ratio_twice():
+    """The fund's traded price is already net of its fee."""
+    panel = _panel()
+    experiment = _run(panel=panel, etf_spread_bps=0.0)
+    etf = experiment.strategies["etf"]
+    first = etf.values.index[0]
+    start = panel["ETF"].loc[:first].iloc[-2]
+    assert float(etf.values.iloc[-1]) == pytest.approx(
+        float(panel["ETF"].iloc[-1] / start), rel=1e-12
+    )
+    assert not any("expense" in warning for warning in experiment.warnings)
+
+
+def test_an_explicit_expense_drag_is_applied_and_declared():
+    free = _run(etf_spread_bps=0.0).strategies["etf"]
+    charged_run = _run(etf_spread_bps=0.0, etf_expense_bps=100.0)
+    charged = charged_run.strategies["etf"]
+    years = len(free.values) / 252
+    assert float(charged.values.iloc[-1] / free.values.iloc[-1]) == pytest.approx(
+        1.0 - 0.01 * years, abs=2e-4
+    )
+    assert any("double charge" in warning for warning in charged_run.warnings)
+    with pytest.raises(ValueError, match="etf_expense_bps"):
+        _run(etf_expense_bps=float("nan"))

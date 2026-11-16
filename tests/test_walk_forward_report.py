@@ -54,10 +54,21 @@ async def _resolved(
     method,
     resolved_at,
     hit=True,
-    confidence=0.85,
+    confidence=0.65,
     audience=None,
     backfilled=False,
+    horizon=timedelta(minutes=30),
 ):
+    # `resolved_at` is the moment the call was MADE; it resolves `horizon`
+    # later, at the end of its label window. The walk-forward splits on the
+    # decision date and purges on the label window, so both are set explicitly
+    # (the column default for created_at is now(), which is outside every
+    # window here). Thirty-minute windows on hourly calls do not overlap, so
+    # the effective sample equals the row count unless a test says otherwise.
+    #
+    # Default confidence is 0.65, not 0.85: a call stated at 0.85 that hits
+    # 80% of the time hits LESS often than a random walk reaches its target,
+    # and the gate no longer mistakes that for an edge.
     provenance = {"capability": method, "input_claims": [], "assumptions": {}}
     if backfilled:
         provenance["assumptions"]["backfill"] = True
@@ -66,14 +77,14 @@ async def _resolved(
         INSERT INTO prediction (entity_id, method, direction, confidence,
                                 entry_price, upper_barrier, lower_barrier,
                                 horizon_ends_at, provenance, audience_user_id,
-                                outcome, resolved_at)
+                                outcome, resolved_at, created_at)
         VALUES ($1,$2,'up',$3,100,103,98,$4,$5::jsonb,$6,
-                $7::prediction_outcome,$8)
+                $7::prediction_outcome,$4,$8)
         """,
         entity_id,
         method,
         confidence,
-        resolved_at + timedelta(days=1),
+        resolved_at + horizon,
         json.dumps(provenance),
         audience,
         "upper" if hit else "lower",
@@ -119,7 +130,7 @@ class TestOverlappingTestWindowsAreRefused:
 
     async def test_overlapping_test_ranges_raise(self, db):
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
 
         overlapping = (
             WindowSpec(
@@ -149,7 +160,7 @@ class TestOverlappingTestWindowsAreRefused:
     async def test_the_refusal_is_not_order_dependent(self, db):
         """Passing the later window first must refuse just as loudly."""
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
 
         late = WindowSpec(
             train_start=T0,
@@ -182,7 +193,7 @@ class TestOverlappingTestWindowsAreRefused:
         `rolling_windows` produces.
         """
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         await _period(db, entity, method=method, index=1, n=15, hits=12)
         await _period(db, entity, method=method, index=2, n=15, hits=12)
 
@@ -290,7 +301,7 @@ class TestPooledResultAcrossWindows:
             upper = 0.7819484443573731 + 0.099766502413652 = 0.8817149467710251
         """
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         for i in range(1, 5):
             await _period(db, entity, method=method, index=i, n=15, hits=12)
 
@@ -306,10 +317,10 @@ class TestPooledResultAcrossWindows:
         assert len(result.windows) == 4
         assert [w.n_test for w in result.windows] == [15, 15, 15, 15]
         assert [w.hits for w in result.windows] == [12, 12, 12, 12]
-        # The training decile is 0.8-0.9 at a 0.8 hit rate, so the derived
-        # threshold is the bucket's lower edge and every forward prediction at
-        # 0.85 clears it.
-        assert [w.threshold for w in result.windows] == [0.8, 0.8, 0.8, 0.8]
+        # The training decile is 0.6-0.7 and its record (60 of 60) beats the
+        # 0.65 its barriers imply, so the derived threshold is the bucket's
+        # lower edge and every forward prediction at 0.65 is surfaced.
+        assert [w.threshold for w in result.windows] == [0.6, 0.6, 0.6, 0.6]
 
         assert result.pooled_n == 60
         assert result.pooled_hits == 48
@@ -319,7 +330,12 @@ class TestPooledResultAcrossWindows:
         assert low == pytest.approx(0.6821819419437211, abs=1e-12)
         assert high == pytest.approx(0.8817149467710251, abs=1e-12)
 
-        # The lower bound clears the 0.6 target, so the edge held.
+        # Hourly calls on thirty-minute label windows do not overlap, so every
+        # row is an independent observation.
+        assert result.pooled_effective_n == pytest.approx(60.0)
+        assert result.zero_edge_rate == pytest.approx(0.65)
+        # The lower bound clears the 0.6 target AND the 0.65 the barriers
+        # alone would give, so the edge held.
         assert result.positive is True
 
     async def test_a_thin_window_contributes_to_nothing(self, db):
@@ -330,7 +346,7 @@ class TestPooledResultAcrossWindows:
         `gate.Calibration` suppresses at the bucket level.
         """
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         await _period(db, entity, method=method, index=1, n=15, hits=12)
         await _period(db, entity, method=method, index=2, n=5, hits=0)
 
@@ -354,7 +370,7 @@ class TestPooledResultAcrossWindows:
 class TestNotEnoughDataIsNotAFailure:
     async def test_below_the_floor_hit_rate_and_positive_are_both_none(self, db):
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         for i in range(1, 5):
             await _period(db, entity, method=method, index=i, n=5, hits=4)
 
@@ -388,7 +404,7 @@ class TestNotEnoughDataIsNotAFailure:
         most persuasive thing an overfitted strategy produces.
         """
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         await _period(db, entity, method=method, index=1, n=10, hits=10)
 
         result = await walk_forward(
@@ -426,14 +442,14 @@ class TestNotEnoughDataIsNotAFailure:
 
 class TestAFailureOutOfSampleIsDistinctFromSilence:
     async def test_a_method_that_collapses_forward_reports_positive_false(self, db):
-        """In-sample 12/15; forward 6/15 in each of four windows.
+        """In-sample 60/60; forward 6/15 in each of four windows.
 
         This is the exact failure the module exists to catch: the training
-        decile calibrates at 80%, the gate would have surfaced every forward
+        decile calibrates perfectly, the gate would have surfaced every forward
         call, and the forward calls resolved at 40%.
         """
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         for i in range(1, 5):
             await _period(db, entity, method=method, index=i, n=15, hits=6)
 
@@ -464,7 +480,7 @@ class TestAFailureOutOfSampleIsDistinctFromSilence:
         this as validated; a verdict taken from the lower bound does not.
         """
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         await _period(db, entity, method=method, index=1, n=15, hits=11)
         await _period(db, entity, method=method, index=2, n=15, hits=10)
 
@@ -496,7 +512,7 @@ class TestLiveVersusBackfilledSplit:
         outcomes that risked nothing.
         """
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         # Forward windows: 10 backfilled and 5 live in each.
         for i in (1, 2):
             await _period(
@@ -548,20 +564,20 @@ class TestLiveVersusBackfilledSplit:
         """`record_prediction` builds the envelope; a marker may arrive at
         either level, and the predicate checks both."""
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         for i in range(15):
             await db.pool.execute(
                 """
                 INSERT INTO prediction (entity_id, method, direction, confidence,
                                         entry_price, upper_barrier, lower_barrier,
                                         horizon_ends_at, provenance, outcome,
-                                        resolved_at)
-                VALUES ($1,$2,'up',0.85,100,103,98,$3,
-                        '{"backfill": true}'::jsonb,'upper',$4)
+                                        resolved_at, created_at)
+                VALUES ($1,$2,'up',0.65,100,103,98,$3,
+                        '{"backfill": true}'::jsonb,'upper',$3,$4)
                 """,
                 entity,
                 method,
-                T0 + PERIOD * 3,
+                T0 + PERIOD + timedelta(hours=i, minutes=30),
                 T0 + PERIOD + timedelta(hours=i),
             )
 
@@ -583,7 +599,7 @@ class TestScoping:
     async def test_one_audiences_outcomes_do_not_validate_anothers_strategy(self, db):
         method, entity = _method(), await _entity(db)
         owner, stranger = uuid4(), uuid4()
-        await _period(db, entity, method=method, index=0, n=15, hits=12, audience=owner)
+        await _period(db, entity, method=method, index=0, n=60, hits=60, audience=owner)
         await _period(db, entity, method=method, index=1, n=15, hits=12, audience=owner)
 
         kw = {
@@ -603,7 +619,7 @@ class TestScoping:
     async def test_a_record_on_equities_does_not_validate_crypto(self, db):
         method = _method()
         equity = await _entity(db, "company")
-        await _period(db, equity, method=method, index=0, n=15, hits=12)
+        await _period(db, equity, method=method, index=0, n=60, hits=60)
         await _period(db, equity, method=method, index=1, n=15, hits=12)
 
         kw = {
@@ -626,12 +642,12 @@ class TestTheThresholdComesFromTrainingOnly:
     ):
         """The walk-forward measures the gate, not the producer.
 
-        Training calibrates the 0.8-0.9 decile; the 0.3-0.4 decile never clears
+        Training calibrates the 0.6-0.7 decile; the 0.3-0.4 decile never clears
         the target, so a forward prediction at 0.35 would not have been
         surfaced and must not be scored as though it had.
         """
         method, entity = _method(), await _entity(db)
-        await _period(db, entity, method=method, index=0, n=15, hits=12)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
         await _period(db, entity, method=method, index=0, n=15, hits=3, confidence=0.35)
         await _period(db, entity, method=method, index=1, n=15, hits=15)
         await _period(db, entity, method=method, index=1, n=20, hits=0, confidence=0.35)
@@ -645,8 +661,8 @@ class TestTheThresholdComesFromTrainingOnly:
             min_per_window=15,
         )
 
-        assert result.windows[0].threshold == 0.8
-        assert result.windows[0].n_train == 30
+        assert result.windows[0].threshold == 0.6
+        assert result.windows[0].n_train == 75
         assert result.pooled_n == 15
         assert result.pooled_hit_rate == pytest.approx(1.0)
 
@@ -848,3 +864,108 @@ class TestHitDefinitionAgreesWithTheCanonicalSql:
                     f"{direction}/{outcome}: Python says "
                     f"{_is_hit(self._row(direction, outcome))}, SQL says {expected}"
                 )
+
+
+class TestOverlappingLabelWindowsAreNotIndependent:
+    """Weekly calls on a long horizon share most of a price path."""
+
+    def test_disjoint_windows_each_count_once(self):
+        from omni.conviction.walk_forward_report import effective_sample_size
+
+        spans = [(T0 + timedelta(days=i), T0 + timedelta(days=i, hours=12))
+                 for i in range(20)]
+        assert effective_sample_size(spans) == pytest.approx(20.0)
+
+    def test_identical_windows_count_once_between_them(self):
+        """Five hundred entities called on one date for one horizon are one bet."""
+        from omni.conviction.walk_forward_report import effective_sample_size
+
+        spans = [(T0, T0 + timedelta(days=90))] * 500
+        assert effective_sample_size(spans) == pytest.approx(1.0)
+
+    def test_weekly_calls_on_a_ninety_day_horizon_shrink_about_thirteenfold(self):
+        from omni.conviction.walk_forward_report import effective_sample_size
+
+        spans = [(T0 + timedelta(days=7 * i), T0 + timedelta(days=7 * i + 90))
+                 for i in range(200)]
+        effective = effective_sample_size(spans)
+        assert 200 / 14 < effective < 200 / 10
+
+    async def test_a_record_that_passes_on_raw_n_fails_on_independent_n(self, db):
+        """60 forward rows at 80% clear the target on raw n (lower bound 0.68).
+
+        Here every row's label window spans the whole test period, so they are
+        a handful of observations, not sixty -- and no verdict is issued.
+        """
+        method, entity = _method(), await _entity(db)
+        await _period(db, entity, method=method, index=0, n=60, hits=60)
+        for i in range(1, 5):
+            await _period(
+                db, entity, method=method, index=i, n=15, hits=12,
+                horizon=timedelta(days=20),
+            )
+
+        result = await walk_forward(
+            db.pool,
+            method=method,
+            entity_kind="company",
+            audience_user_id=None,
+            windows=_windows_after_seed(4),
+            min_per_window=15,
+        )
+
+        assert result.pooled_n == 60
+        assert result.pooled_hit_rate == pytest.approx(0.8)
+        assert result.pooled_effective_n < 8
+        assert result.wilson_interval[0] < 0.6
+        assert result.positive is None
+
+
+class TestTheSplitIsOnTheDecisionAndPurged:
+    async def test_training_calls_still_open_at_the_test_start_do_not_train(self, db):
+        """Sixty perfect training calls whose label windows run into the test
+        window share their price path with it. None may fit the threshold."""
+        method, entity = _method(), await _entity(db)
+        await _period(
+            db, entity, method=method, index=0, n=60, hits=60,
+            horizon=timedelta(days=45),
+        )
+        await _period(db, entity, method=method, index=2, n=15, hits=15)
+
+        result = await walk_forward(
+            db.pool,
+            method=method,
+            entity_kind="company",
+            audience_user_id=None,
+            windows=(
+                WindowSpec(
+                    train_start=T0, train_end=T0 + PERIOD,
+                    test_start=T0 + PERIOD, test_end=T0 + PERIOD * 3,
+                ),
+            ),
+            min_per_window=10,
+        )
+
+        assert result.windows[0].n_train == 0
+        assert result.windows[0].threshold is None
+        assert result.pooled_n == 0
+
+    async def test_a_hit_rate_equal_to_its_own_confidence_validates_nothing(self, db):
+        """0.85 stated, 80% realised, in training and forward: geometry."""
+        method, entity = _method(), await _entity(db)
+        await _period(db, entity, method=method, index=0, n=60, hits=48, confidence=0.85)
+        for i in range(1, 5):
+            await _period(db, entity, method=method, index=i, n=15, hits=12,
+                          confidence=0.85)
+
+        result = await walk_forward(
+            db.pool,
+            method=method,
+            entity_kind="company",
+            audience_user_id=None,
+            windows=_windows_after_seed(4),
+            min_per_window=15,
+        )
+
+        assert [w.threshold for w in result.windows] == [None] * 4
+        assert result.positive is None

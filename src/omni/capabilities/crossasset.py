@@ -52,6 +52,10 @@ from omni.ingest.protocol import Unavailable
 # scale-squared variance), matching attribution.py:75. See AGENTS.md.
 _ZERO_STD_ATOL = 1e-12
 
+# Sector-rotation lookbacks, in BARS. An N-bar return needs N+1 closes.
+_ROTATION_LONG_BARS = 20
+_ROTATION_SHORT_BARS = 5
+
 # ---------------------------------------------------------------------------
 # Cross-asset engine
 # ---------------------------------------------------------------------------
@@ -132,7 +136,11 @@ async def cross_asset_correlations(
             f"need >=20 returns per symbol to correlate, shortest series is {min_len}"
         )
 
-    matrix = np.array([returns_data[s][:min_len] for s in symbols])
+    # Series are chronological and end on the same bar, so a shorter one (a
+    # later listing, a missing early bar) is aligned from the TAIL. Truncating
+    # from the head pairs day t with day t+k and destroys the correlation: two
+    # series correlated at 0.93 read 0.09 with ten leading bars missing.
+    matrix = np.array([returns_data[s][-min_len:] for s in symbols])
     corr_matrix = np.corrcoef(matrix)
 
     corr_dict: dict[str, dict[str, float]] = {}
@@ -148,7 +156,7 @@ async def cross_asset_correlations(
         long_min = min(len(r) for r in long_returns.values())
         if long_min >= 50:
             long_symbols = list(long_returns.keys())
-            long_matrix = np.array([long_returns[s][:long_min] for s in long_symbols])
+            long_matrix = np.array([long_returns[s][-long_min:] for s in long_symbols])
             long_corr = np.corrcoef(long_matrix)
 
             for i, sym1 in enumerate(long_symbols):
@@ -191,15 +199,25 @@ async def roro_indicator(returns: dict[str, list[float]]) -> dict[str, Any]:
     contributed a literal zero; that is gone -- a short series is treated like
     an absent one, which is mathematically identical for the composite (zero
     contributes nothing) but no longer lies in the `components` dict.
+
+    The composite is the weighted mean over the components that ARE present
+    (weights renormalised to sum to 1), and `weight_covered` reports how much
+    of the nominal weight that is. Summing un-renormalised weights made an
+    absent component indistinguishable from a neutral one: with only VIX the
+    score could never leave [-0.30, 0.30], so the STRONG bands were unreachable
+    and a score was not comparable across coverage. A reader deciding how far
+    to trust a one-component reading has `weight_covered` to go on.
     """
     components: dict[str, float] = {}
     scores: list[float] = []
+    weights: list[float] = []
 
     if "VIX" in returns and len(returns["VIX"]) >= 5:
         vix_5d_return = sum(returns["VIX"][-5:])
         vix_score = max(-1.0, min(1.0, -vix_5d_return * 10))
         components["vix_direction"] = round(vix_score, 3)
         scores.append(vix_score * 0.30)
+        weights.append(0.30)
 
     if (
         "HYG" in returns
@@ -212,12 +230,14 @@ async def roro_indicator(returns: dict[str, list[float]]) -> dict[str, Any]:
         credit_score = max(-1.0, min(1.0, (hyg_ret - tlt_ret) * 20))
         components["credit_spread"] = round(credit_score, 3)
         scores.append(credit_score * 0.25)
+        weights.append(0.25)
 
     if "UUP" in returns and len(returns["UUP"]) >= 10:
         dollar_ret = sum(returns["UUP"][-10:])
         dollar_score = max(-1.0, min(1.0, -dollar_ret * 15))
         components["dollar_strength"] = round(dollar_score, 3)
         scores.append(dollar_score * 0.20)
+        weights.append(0.20)
 
     if (
         "IWM" in returns
@@ -230,13 +250,15 @@ async def roro_indicator(returns: dict[str, list[float]]) -> dict[str, Any]:
         breadth_score = max(-1.0, min(1.0, (iwm_ret - spy_ret) * 15))
         components["breadth"] = round(breadth_score, 3)
         scores.append(breadth_score * 0.25)
+        weights.append(0.25)
 
     if not scores:
         raise Unavailable(
             "no RORO components could be computed from the supplied returns"
         )
 
-    composite = max(-1.0, min(1.0, sum(scores)))
+    weight_covered = sum(weights)
+    composite = max(-1.0, min(1.0, sum(scores) / weight_covered))
 
     if composite > 0.4:
         classification = "STRONG_RISK_ON"
@@ -253,6 +275,7 @@ async def roro_indicator(returns: dict[str, list[float]]) -> dict[str, Any]:
         "score": round(composite, 3),
         "classification": classification,
         "components": components,
+        "weight_covered": round(weight_covered, 3),
     }
 
 
@@ -262,13 +285,21 @@ async def sector_rotation(sector_prices: dict[str, Sequence[float]]) -> dict[str
     `sector_prices` maps a sector name to its daily close prices; the caller
     owns the fetch. Returns per-sector 5d/20d momentum, the top-3 / bottom-3
     ranked sectors and the inferred economic cycle phase.
+
+    An N-bar return needs N+1 closes: `return_20d` is `p[-1] / p[-21] - 1`.
+    (It was `p[-20]`, a 19-bar return under a 20-day label, and `p[-5]`, a
+    4-bar one.) A sector whose trailing 21 closes include a non-positive or
+    non-finite value is not ranked: filtering those out first, as this once
+    did, silently slides every index and measures a different window.
     """
     momentum: dict[str, dict[str, Any]] = {}
     for sector_name, prices in sector_prices.items():
-        positives = [p for p in prices if p > 0]
-        if len(positives) >= 20:
-            ret_20d = (positives[-1] - positives[-20]) / positives[-20]
-            ret_5d = (positives[-1] - positives[-5]) / positives[-5]
+        window = [float(p) for p in list(prices)[-(_ROTATION_LONG_BARS + 1):]]
+        if len(window) == _ROTATION_LONG_BARS + 1 and all(
+            np.isfinite(p) and p > 0 for p in window
+        ):
+            ret_20d = window[-1] / window[0] - 1.0
+            ret_5d = window[-1] / window[-(_ROTATION_SHORT_BARS + 1)] - 1.0
             momentum[sector_name] = {
                 "return_20d": round(ret_20d * 100, 2),
                 "return_5d": round(ret_5d * 100, 2),
@@ -277,7 +308,8 @@ async def sector_rotation(sector_prices: dict[str, Sequence[float]]) -> dict[str
 
     if not momentum:
         raise Unavailable(
-            "no sectors with >=20 positive prices; cannot rank rotation"
+            "no sectors with >=21 trailing positive prices (a 20-bar return "
+            "needs 21 closes); cannot rank rotation"
         )
 
     ranked = sorted(
@@ -425,14 +457,23 @@ def information_coefficient(
     asset_col: str = "asset",
     method: str = "spearman",
     min_cross_section: int = _MIN_CROSS_SECTION,
+    overlap: int = 1,
 ) -> ICResult:
     """Cross-sectional information coefficient.
 
     For each date, correlate the signal across assets with their forward returns,
     then summarize the per-date IC series. The IC information ratio
-    (mean_ic / std_ic) and its t-stat (`ic_ir * sqrt(n_periods)`) tell you whether
-    the predictive relationship is consistent, not just present on average.
+    (mean_ic / std_ic) and its t-stat tell you whether the predictive
+    relationship is consistent, not just present on average.
+
+    `overlap` is the forward-return horizon in periods when h-period returns are
+    sampled every period. Consecutive per-date ICs then share h-1 periods of
+    return and are not independent; the t-stat is then taken over every
+    `overlap`-th date, which share no return. At the default of 1 the statistic
+    is the plain `ic_ir * sqrt(n)`.
     """
+    if overlap < 1:
+        raise ValueError(f"overlap must be >= 1, got {overlap}")
     required = {date_col, asset_col, signal_col, forward_return_col}
     missing = required - set(panel.columns)
     if missing:
@@ -451,7 +492,7 @@ def information_coefficient(
             ics[date] = ic
 
     by_period = pd.Series(ics, dtype=float).sort_index()
-    return _summarize_ic(by_period, method)
+    return _summarize_ic(by_period, method, overlap=overlap)
 
 
 def time_series_ic(
@@ -473,7 +514,19 @@ def time_series_ic(
     period). When > 1, consecutive observations are NOT independent, so the
     significance test is corrected via an effective sample size n/overlap --
     otherwise overlapping returns make pure noise look strongly significant.
+
+    The rolling path gets the same treatment, and needs it more: adjacent
+    `rolling_window`-bar correlations share all but one observation. Scored as
+    independent, two unrelated white-noise series (n=500, window=60) were
+    "significant" 78% of the time at a nominal 5%. The rolling t-stat is
+    therefore taken over NON-OVERLAPPING windows only (every
+    `rolling_window + overlap - 1`-th value); `by_period` keeps the full
+    rolling series for inspection. Spearman
+    ranks are taken WITHIN each window; ranking the whole sample first, as this
+    once did, let every window see where its values sit in the future.
     """
+    if overlap < 1:
+        raise ValueError(f"overlap must be >= 1, got {overlap}")
     s = pd.Series(signal, dtype=float)
     r = pd.Series(forward_return, dtype=float)
     joined = pd.concat([s.rename("s"), r.rename("r")], axis=1).dropna()
@@ -482,11 +535,24 @@ def time_series_ic(
 
     if rolling_window and rolling_window >= 3 and len(joined) > rolling_window:
         if method == "spearman":
-            ranks = joined.rank()
-            by_period = ranks["s"].rolling(rolling_window).corr(ranks["r"]).dropna()
-        else:
+            a_all = joined["s"].to_numpy()
+            b_all = joined["r"].to_numpy()
+            vals = {
+                joined.index[end - 1]: _corr(
+                    a_all[end - rolling_window:end],
+                    b_all[end - rolling_window:end],
+                    "spearman",
+                )
+                for end in range(rolling_window, len(joined) + 1)
+            }
+            by_period = pd.Series(vals, dtype=float).dropna()
+        elif method == "pearson":
             by_period = joined["s"].rolling(rolling_window).corr(joined["r"]).dropna()
-        return _summarize_ic(by_period, method)
+        else:
+            raise ValueError(f"Unknown correlation method: {method!r}")
+        return _summarize_ic(
+            by_period, method, overlap=rolling_window + max(overlap, 1) - 1
+        )
 
     # Single full-sample correlation. The p-value uses an effective sample size
     # n/overlap so overlapping forward returns don't manufacture significance.
@@ -515,14 +581,41 @@ def time_series_ic(
     )
 
 
-def _summarize_ic(by_period: pd.Series, method: str) -> ICResult:
+def _summarize_ic(by_period: pd.Series, method: str, *, overlap: int = 1) -> ICResult:
+    """Summarise a per-period IC series.
+
+    `overlap` is how many consecutive entries share underlying observations
+    (1 = independent). Above 1 the t-stat and p-value come from the
+    non-overlapping subsample (every `overlap`-th entry); fewer than two of
+    those is no test at all and the significance fields are NaN. `mean_ic`,
+    `ic_std` and `ic_ir` still describe the full series.
+    """
     by_period = by_period.dropna()
     n = int(by_period.size)
     if n == 0:
         return _empty_ic(method)
     mean_ic = float(by_period.mean())
     ic_std = float(by_period.std(ddof=1)) if n > 1 else np.nan
-    if n < 2:
+    overlap = max(int(overlap), 1)
+    if overlap > 1 and n >= 2 and not (
+        not np.isfinite(ic_std) or np.isclose(ic_std, 0.0, atol=_ZERO_STD_ATOL)
+    ):
+        ic_ir = mean_ic / ic_std
+        # Every `overlap`-th entry, anchored on the most recent: those share no
+        # observations, so an ordinary t-test on them is valid. (A Newey-West
+        # error over the full series was tried first and still rejected a true
+        # null 15% of the time at window=60 -- the Bartlett kernel is biased
+        # down when the lag is a large fraction of the sample.)
+        independent = by_period.to_numpy(dtype=float)[::-overlap]
+        k = independent.size
+        sd_k = float(independent.std(ddof=1)) if k >= 2 else float("nan")
+        if k < 2 or not np.isfinite(sd_k) or np.isclose(sd_k, 0.0, atol=_ZERO_STD_ATOL):
+            t_stat = np.nan
+            p_value = np.nan
+        else:
+            t_stat = float(independent.mean()) / (sd_k / np.sqrt(k))
+            p_value = 2.0 * stats.t.sf(abs(t_stat), df=k - 1)
+    elif n < 2:
         ic_ir = np.nan
         t_stat = np.nan
         p_value = np.nan
@@ -579,6 +672,7 @@ def quantile_analysis(
     n_quantiles: int = 5,
     periods_per_year: int = 252,
     min_cross_section: int = _MIN_CROSS_SECTION,
+    horizon: int = 1,
 ) -> QuantileResult:
     """Sort assets into quantiles by signal each date and measure the spread.
 
@@ -587,7 +681,16 @@ def quantile_analysis(
     of a dollar-neutral long-top / short-bottom portfolio. Monotonicity matters:
     a real signal should be roughly monotone across quantiles, not just have a
     big top-vs-bottom gap driven by one bucket.
+
+    `horizon` is the forward-return horizon in periods. The long-short series
+    is one h-period return per date, so there are `periods_per_year / horizon`
+    independent ones in a year, not `periods_per_year`: annualising a 5-day
+    return sampled daily by 252 overstates the return 5x and the Sharpe ~sqrt(5)x.
+    `periods_per_year` must match the data's calendar (252 sessions, 365 for a
+    24/7 crypto series).
     """
+    if horizon < 1:
+        raise ValueError(f"horizon must be >= 1, got {horizon}")
     required = {date_col, asset_col, signal_col, forward_return_col}
     missing = required - set(panel.columns)
     if missing:
@@ -637,11 +740,11 @@ def quantile_analysis(
         mu = float(ls_returns.mean())
         sd = float(ls_returns.std(ddof=1))
         ls_sharpe = (
-            mu / sd * np.sqrt(periods_per_year)
+            mu / sd * np.sqrt(periods_per_year / horizon)
             if not np.isclose(sd, 0.0, atol=_ZERO_STD_ATOL)
             else np.nan
         )
-        ls_ann = mu * periods_per_year
+        ls_ann = mu * periods_per_year / horizon
     else:
         ls_sharpe = np.nan
         ls_ann = np.nan
@@ -683,6 +786,7 @@ def evaluate_signal(
     n_quantiles: int = 5,
     method: str = "spearman",
     periods_per_year: int = 252,
+    horizon: int = 1,
 ) -> SignalEvaluation:
     """Full edge report for one cross-sectional signal.
 
@@ -691,7 +795,8 @@ def evaluate_signal(
     automatically when the cross-section is too thin to bucket.
     """
     ic = information_coefficient(
-        panel, signal_col, forward_return_col, date_col, asset_col, method
+        panel, signal_col, forward_return_col, date_col, asset_col, method,
+        overlap=horizon,
     )
 
     # Only attempt quantiles if some date has enough names to bucket.
@@ -700,7 +805,7 @@ def evaluate_signal(
     if max_cs and max_cs >= max(_MIN_CROSS_SECTION, n_quantiles):
         quantiles = quantile_analysis(
             panel, signal_col, forward_return_col, date_col, asset_col,
-            n_quantiles, periods_per_year,
+            n_quantiles, periods_per_year, horizon=horizon,
         )
 
     hr = hit_rate(

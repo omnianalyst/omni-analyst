@@ -300,15 +300,17 @@ def attribute_returns(
 
 @dataclass
 class MarketModelAttribution:
-    alpha: float  # annualized intercept
+    alpha: float  # annualized intercept of the EXCESS-return regression
     beta: float
     r_squared: float
-    total_return: float  # annualized
-    factor_return: float  # = beta * benchmark annualized total
+    total_return: float  # annualized, in excess of risk_free_rate
+    factor_return: float  # = beta * benchmark annualized excess return
     specific_return: float  # = alpha (annualized); residuals mean-zero
-    tracking_error: float  # annualized std of residuals
-    information_ratio: float
+    tracking_error: float  # annualized std of regression residuals
+    appraisal_ratio: float  # alpha / residual std
+    information_ratio: float  # mean active return / std of active returns
     n_observations: int
+    risk_free_rate: float  # annualized, as supplied
 
     def to_dict(self) -> dict:
         return {
@@ -319,8 +321,10 @@ class MarketModelAttribution:
             "factor_return": self.factor_return,
             "specific_return": self.specific_return,
             "tracking_error": self.tracking_error,
+            "appraisal_ratio": self.appraisal_ratio,
             "information_ratio": self.information_ratio,
             "n_observations": int(self.n_observations),
+            "risk_free_rate": self.risk_free_rate,
         }
 
 
@@ -329,8 +333,22 @@ def market_model_attribution(
     benchmark_returns: pd.Series,
     *,
     periods_per_year: int = TRADING_DAYS_PER_YEAR,
+    risk_free_rate: float = 0.0,
 ) -> MarketModelAttribution:
     """Single-factor (market-model) performance attribution.
+
+    The regression is run on returns in EXCESS of ``risk_free_rate`` (an
+    annualized decimal; 0.0 means the caller is already supplying excess
+    returns). Regressing raw returns biases alpha by ``rf * (1 - beta)``: a
+    beta-0.5 portfolio at a 5% risk-free rate shows 2.5%/yr of alpha it did
+    not earn. ``total_return`` and ``factor_return`` are reported in excess of
+    the same rate, so ``factor + specific == total`` still holds.
+
+    Two ratios, two names. ``appraisal_ratio`` is alpha over the residual
+    standard deviation. ``information_ratio`` is the mean active return over
+    the standard deviation of active returns (portfolio minus benchmark), the
+    definition ``annualized_information_ratio`` uses. v1 reported the first
+    under the second's name.
 
     Mirrors the output shape of v1's ``GET /attribution/{portfolio_id}``
     handler (``quant_analytics.py:951``) with fabricated defaults removed:
@@ -361,11 +379,15 @@ def market_model_attribution(
     if len(common) == 0:
         raise Unavailable("no overlapping dates between portfolio_returns and benchmark_returns")
 
+    if not np.isfinite(risk_free_rate):
+        raise Unavailable(f"risk_free_rate must be finite, got {risk_free_rate}")
+    rf_period = float(risk_free_rate) / periods_per_year
+
     p_full = portfolio_returns.loc[common].to_numpy(dtype=float)
     b_full = benchmark_returns.loc[common].to_numpy(dtype=float)
     ok = ~(np.isnan(p_full) | np.isnan(b_full))
-    p = p_full[ok]
-    b = b_full[ok]
+    p = p_full[ok] - rf_period
+    b = b_full[ok] - rf_period
     n = p.shape[0]
     if n < 2:
         raise Unavailable(f"need at least 2 overlapping observations to compute variance, got {n}")
@@ -415,7 +437,15 @@ def market_model_attribution(
             "benchmark over the window); information ratio is undefined"
         )
     tracking_error = resid_std * np.sqrt(periods_per_year)
-    information_ratio = alpha_annual / tracking_error
+    appraisal_ratio = alpha_annual / tracking_error
+
+    active = p - b
+    active_std = float(active.std(ddof=1))
+    if np.isclose(active_std, 0.0, atol=_ZERO_STD_ATOL):
+        raise Unavailable(
+            "active returns have zero variance; information ratio is undefined"
+        )
+    information_ratio = float(active.mean()) / active_std * np.sqrt(periods_per_year)
 
     return MarketModelAttribution(
         alpha=alpha_annual,
@@ -425,8 +455,10 @@ def market_model_attribution(
         factor_return=factor_annual,
         specific_return=specific_annual,
         tracking_error=tracking_error,
-        information_ratio=information_ratio,
+        appraisal_ratio=float(appraisal_ratio),
+        information_ratio=float(information_ratio),
         n_observations=n,
+        risk_free_rate=float(risk_free_rate),
     )
 
 

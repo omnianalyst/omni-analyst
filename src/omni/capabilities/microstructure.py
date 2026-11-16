@@ -220,11 +220,14 @@ async def effective_spread(
     - `price_improvement`: signed difference vs mid. Positive is good for the
       trader (a buy filled below mid, a sell filled above).
     - `realised_spread`: the temporary-vs-permanent decomposition, using the
-      mid `horizon` (default 5m) after the trade. For a non-negative
-      `horizon` every trade that resolved a present quote also resolves a
-      future quote, so each trade contributes a realised observation. If no
-      realised observation can be derived at all (e.g. a negative `horizon`
-      whose future timestamp predates every quote) the call raises
+      mid `horizon` (default 5m) after the trade. A trade contributes a
+      realised observation only when the quote stream extends to at least
+      `trade_time + horizon`: a trade printed within `horizon` of the last
+      quote has no observed future mid, and reusing the stale last quote
+      gives it a horizon of about zero, collapsing realised spread toward
+      effective spread. `realized_n` reports how many trades contributed. If
+      no realised observation can be derived at all (the quotes end too
+      early, or a negative `horizon` predates every quote) the call raises
       `Unavailable` rather than fabricating a zero mean.
 
     `side` must be present on every trade and equal ``"buy"`` or ``"sell"``;
@@ -262,8 +265,11 @@ async def effective_spread(
                 f"trade has unrecognized side {side!r}; expected 'buy' or 'sell'"
             )
 
+        future_time = trade_time + horizon
+        if quotes[-1]["timestamp"] < future_time:
+            continue
         try:
-            future_quote = _find_prevailing_quote(quotes, trade_time + horizon)
+            future_quote = _find_prevailing_quote(quotes, future_time)
         except Unavailable:
             continue
         future_mid = (future_quote["bid"] + future_quote["ask"]) / 2
@@ -285,6 +291,7 @@ async def effective_spread(
         "effective_spread": float(np.mean(effective_spreads)),
         "realized_spread": float(np.mean(realized_spreads)),
         "price_improvement": float(np.mean(price_improvements)),
+        "realized_n": len(realized_spreads),
     }
 
 
