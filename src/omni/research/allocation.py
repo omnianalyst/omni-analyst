@@ -289,7 +289,9 @@ def tsmom_252(
         book=book,
         rule_version="tsmom252/v1",
         universe=list(window.columns),
-        weights={symbol: round(weight, 4) for symbol in in_trend},
+        # Exact, never rounded: six names at round(1/6, 4) sum to 1.0002, which
+        # the shadow book correctly refuses as leverage. Rounding is for display.
+        weights={symbol: weight for symbol in in_trend},
         inputs={"lookback": lookback, "in_trend": in_trend},
         benchmark=benchmark,
     )

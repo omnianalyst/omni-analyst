@@ -26,6 +26,10 @@ from omni.venue.manager import disconnect_all, reconcile_forever
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
 )
+# httpx logs every request line at INFO, query string included, and FRED takes
+# its API key as a query parameter: left at INFO the key is written to the
+# container log on every fetch.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("omni.scheduler")
 
 
